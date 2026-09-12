@@ -10,7 +10,7 @@ spawned: 2026-09-12T12:25
 finished: 2026-09-12T12:31
 tags: [spudagent]
 ---
-# Kestrel (01, writer) — SPUD-001
+a# Kestrel (01, writer) — SPUD-001
 
 ## Brief
 <!-- written by the parent before spawn -->

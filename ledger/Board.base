@@ -1,5 +1,5 @@
 formulas:
-  status_rank: 'if(status == "active", 1, if(status == "queued", 2, if(status == "done", 3, 4)))'
+  status_rank: if(status == "active", 1, if(status == "queued", 2, if(status == "done", 3, 4)))
 properties:
   file.name:
     displayName: Ticket
@@ -43,6 +43,8 @@ views:
         direction: ASC
       - property: file.name
         direction: DESC
+    columnSize:
+      note.lead: 193
   - type: table
     name: Reports
     filters:

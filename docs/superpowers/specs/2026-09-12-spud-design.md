@@ -36,7 +36,7 @@ Name, pronouns, and model live in `spud.config.json`; `CLAUDE.md` defers to it s
 
 ### Teams and spudagents
 
-A team is every spudagent spawned for one ticket. It lives in `ledger/tickets/SPUD-nnn/`, one file per member, next to the ticket file. Each spudagent has:
+A team is every spudagent spawned for one ticket. It lives in `ledger/teams/SPUD-nnn/`, one file per member, separate from the ticket note in `ledger/tickets/`. Each spudagent has:
 
 - **ID**: team-scoped lineage counter (`01`, `02`; children `01.01`). Next ID = count of files in the team folder with that parent, plus one.
 - **Name**: unique within the team, picked at random from `naming.pool` (potato cultivars) among names unused in the folder. Free to repeat on other teams. Alternative considered: Bobiverse self-naming (file named by ID, `aliases:` for links); not chosen because the parent must link the child before it returns.
@@ -58,7 +58,7 @@ Ticket proposals (out-of-scope work) are written in the spudagent's own file and
 
 ### Ledger v0 (`markdown-v0`)
 
-One writer per file. `ledger/Spud.md`; `ledger/Board.base` (a Bases table over ticket frontmatter; the status on each ticket is the board); `ledger/tickets/SPUD-nnn.md` (Spud; frontmatter id, title, priority, status, origin, lead, created; sections Brief, Size persona and model decision, Team, Handoffs, Proposals received, Outcome); `ledger/tickets/SPUD-nnn/<Name>.md` (frontmatter id, name, persona, model, parent, ticket, status `active|done|blocked|failed`, spawned, finished, all parent-owned with times from `date`; sections Brief (parent), Log, Sub-agents, Ticket proposals, Result or Blocked (spudagent), Outcome (parent)); `reports/YYYY-MM-DD.md` (Spud). No event log in v0. The native memory dir holds Eric's preferences; the ledger holds ticket state.
+One writer per file. `ledger/Spud.md`; `ledger/Board.base` (a Bases table over ticket frontmatter; the status on each ticket is the board); `ledger/tickets/SPUD-nnn.md` (Spud; frontmatter id, title, priority, status, origin, lead, created; sections Brief, Size persona and model decision, Team, Handoffs, Proposals received, Outcome); `ledger/teams/SPUD-nnn/<Name>.md` (frontmatter id, name, persona, model, parent, ticket, status `active|done|blocked|failed`, spawned, finished, all parent-owned with times from `date`; sections Brief (parent), Log, Sub-agents, Ticket proposals, Result or Blocked (spudagent), Outcome (parent)); `reports/YYYY-MM-DD.md` (Spud). No event log in v0. The native memory dir holds Eric's preferences; the ledger holds ticket state.
 
 ### Reporting and scope
 

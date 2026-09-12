@@ -3,7 +3,7 @@ tags: [home]
 ---
 # Spud's ledger
 
-Start here. [[Spud]] is the root of the tree. Every ticket is a note under `ledger/tickets/`, and every spudagent that worked on a ticket is a note inside that ticket's folder.
+Start here. [[Spud]] is the root of the tree. Every ticket is a note under `ledger/tickets/`, and every spudagent that worked on it is a note under `ledger/teams/<ticket>/`.
 
 ## Where to look
 - [[Board.base|Board]] for every ticket with its status, priority, and lead, plus a Reports tab
