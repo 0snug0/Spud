@@ -50,7 +50,7 @@ Ticket file → persona, tier, ID, name → spudagent file with frontmatter and 
 
 ### Proposals and Blocked
 
-Ticket proposals (out-of-scope work) are written in the spudagent's own file and climb the tree: absorb, decline with a reason, or escalate with `origin`. At Spud: create under `## Queued` with a P0–P3 priority and `origin: proposal:[[SPUD-nnn/Name]]`, or decline under `## Proposals received`. Blocked (a human decision needed) climbs the same way; Spud asks Eric.
+Ticket proposals (out-of-scope work) are written in the spudagent's own file and climb the tree: absorb, decline with a reason, or escalate with `origin`. At Spud: create under `## Queued` with a P0–P3 priority and `origin: proposal` plus `proposed_by: "[[SPUD-nnn/Name]]"`, or decline under `## Proposals received`. Blocked (a human decision needed) climbs the same way; Spud asks Eric.
 
 ### Limits
 

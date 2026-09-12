@@ -9,6 +9,8 @@ properties:
     displayName: Status
   origin:
     displayName: Origin
+  proposed_by:
+    displayName: Proposed by
   lead:
     displayName: Lead
   created:
@@ -32,6 +34,7 @@ views:
       - title
       - lead
       - origin
+      - proposed_by
       - created
     sort:
       - property: priority
@@ -52,6 +55,7 @@ views:
       - title
       - lead
       - origin
+      - proposed_by
       - created
     sort:
       - property: file.name

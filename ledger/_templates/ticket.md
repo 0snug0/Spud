@@ -4,6 +4,7 @@ title: ""
 priority: P2
 status: queued
 origin: eric
+proposed_by: ""
 lead: ""
 created: YYYY-MM-DD
 tags: [ticket]

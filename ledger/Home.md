@@ -18,7 +18,7 @@ Start here. [[Spud]] is the root of the tree. Every ticket is a note under `ledg
 - The **persona** says what kind of teammate it was: researcher, architect, reviewer (fable); engineer, designer (opus); writer (sonnet); scout (haiku).
 
 ## How to read a ticket note
-Brief, then Size, persona and model decision, then Team (the tree, indented), Handoffs, Proposals received, Outcome. The properties panel shows priority (P0 now, P1 next, P2 soon, P3 someday), status (queued, active, done, declined), origin (Eric, or a proposal from a spudagent), and lead.
+Brief, then Size, persona and model decision, then Team (the tree, indented), Handoffs, Proposals received, Outcome. The properties panel shows priority (P0 now, P1 next, P2 soon, P3 someday), status (queued, active, done, declined), origin (eric or proposal), proposed_by for proposals, and lead.
 
 ## How to read a spudagent note
 Brief is written by its parent before it starts. Log, Sub-agents, Ticket proposals, and Result (or Blocked) are written by the spudagent while it works. Outcome is the parent's verdict afterwards. The status property (active, done, blocked, failed) and the timestamps are the parent's.
