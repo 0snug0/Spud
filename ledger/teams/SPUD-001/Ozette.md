@@ -3,7 +3,7 @@ id: "01.01.01"
 name: Ozette
 persona: scout
 model: haiku
-parent: "[[SPD-001/Huckleberry]]"
+parent: "[[SPUD-001/Huckleberry]]"
 ticket: "[[SPD-001]]"
 status: done
 spawned: 2026-09-12T00:00
@@ -46,6 +46,6 @@ Ozette never ran. Huckleberry (01.01) is at depth-limit for this ticket (max_dep
 
 > Error: No such tool available: Agent. Agent is disabled for this session, in subagents as well as here.
 
-So the cap is enforced by removing the `Agent` tool from the child's toolset entirely, not by a runtime refusal inside a working tool call. Huckleberry looked up the fact herself instead (see [[SPD-001/Huckleberry]] `## Result`) and used it directly in `docs/toy/drafts/history.md`. This file exists only as the record of the attempted spawn; no lookup work was performed by Ozette.
+So the cap is enforced by removing the `Agent` tool from the child's toolset entirely, not by a runtime refusal inside a working tool call. Huckleberry looked up the fact herself instead (see [[SPUD-001/Huckleberry]] `## Result`) and used it directly in `docs/toy/drafts/history.md`. This file exists only as the record of the attempted spawn; no lookup work was performed by Ozette.
 
 status: done, finished: 2026-09-12T13:00.

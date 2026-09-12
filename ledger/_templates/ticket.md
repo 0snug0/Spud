@@ -18,8 +18,8 @@ What Eric asked for, in Spud's words. Done when: …
 Small (one spudagent) or large (a lead with a team). Persona and tier per member, with a reason for any tier override.
 
 ## Team
-- [[SPD-nnn/Name|Name]] (01, persona, tier)
-  - [[SPD-nnn/Child|Child]] (01.01, persona, tier)
+- [[SPUD-nnn/Name|Name]] (01, persona, tier)
+  - [[SPUD-nnn/Child|Child]] (01.01, persona, tier)
 
 ## Handoffs
 Dated lines: who handed what to whom, and where it lives.

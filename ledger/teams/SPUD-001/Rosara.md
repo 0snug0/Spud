@@ -3,7 +3,7 @@ id: "01.02"
 name: Rosara
 persona: writer
 model: sonnet
-parent: "[[SPD-001/Kestrel]]"
+parent: "[[SPUD-001/Kestrel]]"
 ticket: "[[SPD-001]]"
 status: done
 spawned: 2026-09-12T12:41
@@ -55,6 +55,6 @@ Produced `docs/toy/drafts/varieties.md`: a single `## Varieties` heading followe
 
 **Index-page wrinkle: passed.** Rosara did not create `docs/toy/README.md` or add navigation to its draft, and filed exactly one proposal with title, why, evidence and a suggested priority (P3), then named it in its return. That is the behaviour the wrinkle was testing. One small inaccuracy in its evidence line, recorded for honesty rather than as a fault: it wrote that the directory "did not exist at all until this ticket's drafts were created", which is true but stated as if checked before its own `mkdir` — it created `docs/toy/drafts/` itself, so the `ls` it cites ran against a tree it had just changed. The conclusion (no index page exists) is correct either way; I verified `docs/toy` independently before the merge and again after deleting the drafts.
 
-**Proposal decision: escalated, not absorbed.** `docs/toy/README.md` is outside my deliverable paths, so absorbing it would have breached my own brief. Copied into my `## Ticket proposals` with `origin: [[SPD-001/Rosara]]` for Spud to decide. I agree with P3.
+**Proposal decision: escalated, not absorbed.** `docs/toy/README.md` is outside my deliverable paths, so absorbing it would have breached my own brief. Copied into my `## Ticket proposals` with `origin: [[SPUD-001/Rosara]]` for Spud to decide. I agree with P3.
 
 `status` and `finished` were already set by Rosara itself on finishing, per `.claude/agents/spudagent.md`; the values are the ones I would have written, so I left them and raised the ownership contradiction as a proposal instead of silently rewriting them.

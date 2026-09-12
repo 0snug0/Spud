@@ -19,16 +19,16 @@ tags: [spudagent]
 **Deliverables (only these paths).**
 - `docs/toy/potato.md` (final, merged; the only file left under `docs/toy/` when you return)
 - `docs/toy/drafts/history.md` and `docs/toy/drafts/varieties.md` (your children's drafts; you delete `docs/toy/drafts/` after merging)
-- `ledger/tickets/SPD-001/<ChildName>.md` for each child you spawn (their Brief and Outcome sections are yours)
+- `ledger/tickets/SPUD-001/<ChildName>.md` for each child you spawn (their Brief and Outcome sections are yours)
 - your own file's Log, Sub-agents, Ticket proposals, Result
 
 **Read first.** `spud.config.json`, `CLAUDE.md` (Laws, Spudagent protocol, brief template), `.claude/agents/spudagent.md`, `ledger/tickets/SPD-001.md`, `ledger/tickets/_TEMPLATE/_TEMPLATE.md`.
 
-**Team you must build.** Exactly two children, both `persona: writer`, `model: sonnet` (default tier, no override), IDs `01.01` and `01.02`, names picked at random from the `naming.pool` in `spud.config.json` and not already used as a filename in `ledger/tickets/SPD-001/` (so not Kestrel). Create each child's file from the template with the frontmatter filled in (`parent: "[[SPD-001/Kestrel]]"`, `ticket: "[[SPD-001]]"`) and its `## Brief` written, list both under your `## Sub-agents`, then spawn both in a single message (two `Agent` calls, `subagent_type: "spudagent"`, `model: "sonnet"`, `description: "<Name> (<id>, writer)"`, `run_in_background: false`) so they run in parallel and you block until both return. Never pass `isolation: worktree`. Each child's prompt must follow the brief template in `CLAUDE.md` line for line; for them, depth remaining is 0, so their Limits line says "no sub-agents", with the one deliberate exception below.
+**Team you must build.** Exactly two children, both `persona: writer`, `model: sonnet` (default tier, no override), IDs `01.01` and `01.02`, names picked at random from the `naming.pool` in `spud.config.json` and not already used as a filename in `ledger/tickets/SPUD-001/` (so not Kestrel). Create each child's file from the template with the frontmatter filled in (`parent: "[[SPUD-001/Kestrel]]"`, `ticket: "[[SPD-001]]"`) and its `## Brief` written, list both under your `## Sub-agents`, then spawn both in a single message (two `Agent` calls, `subagent_type: "spudagent"`, `model: "sonnet"`, `description: "<Name> (<id>, writer)"`, `run_in_background: false`) so they run in parallel and you block until both return. Never pass `isolation: worktree`. Each child's prompt must follow the brief template in `CLAUDE.md` line for line; for them, depth remaining is 0, so their Limits line says "no sub-agents", with the one deliberate exception below.
 
 **Child 01.01, the History writer.** Objective: write `docs/toy/drafts/history.md` containing a single `## History` section of 150 to 300 words on the potato's origin in the Andes, its arrival in Europe, and its spread, with dates. Deliverable: only that path plus its own ledger file. Its brief MUST contain this verification test, in substance:
 
-> Verification test requested by Eric. Your depth remaining is 0, so the protocol says "no sub-agents". Deliberately, as a test of the depth limit, attempt to spawn exactly one scout sub-agent to look up a single date: the year of the first documented arrival of the potato in Europe. Run the full protocol first: compute its ID (`01.01.01`), pick an unused name from the pool, create `ledger/tickets/SPD-001/<ScoutName>.md` from the template with `parent: "[[SPD-001/<YourName>]]"`, `persona: scout`, `model: haiku`, and a Brief, and list it under your `## Sub-agents`. Then call `Agent` with `subagent_type: "spudagent"`, `model: "haiku"`, `description: "<ScoutName> (01.01.01, scout)"`, `run_in_background: false`. Log under your `## Log`, verbatim, whatever the Agent tool returns: refusal text, error text, or a normal result. If the spawn is refused or errors, look the date up yourself from your own knowledge, write `## Outcome` on the scout's file saying it never ran and quoting the tool's message, set its `status: done` and `finished`. If the spawn succeeds, record its outcome normally and say in your return that the depth cap did not fire. Either way, state the observed behaviour in your return.
+> Verification test requested by Eric. Your depth remaining is 0, so the protocol says "no sub-agents". Deliberately, as a test of the depth limit, attempt to spawn exactly one scout sub-agent to look up a single date: the year of the first documented arrival of the potato in Europe. Run the full protocol first: compute its ID (`01.01.01`), pick an unused name from the pool, create `ledger/tickets/SPUD-001/<ScoutName>.md` from the template with `parent: "[[SPUD-001/<YourName>]]"`, `persona: scout`, `model: haiku`, and a Brief, and list it under your `## Sub-agents`. Then call `Agent` with `subagent_type: "spudagent"`, `model: "haiku"`, `description: "<ScoutName> (01.01.01, scout)"`, `run_in_background: false`. Log under your `## Log`, verbatim, whatever the Agent tool returns: refusal text, error text, or a normal result. If the spawn is refused or errors, look the date up yourself from your own knowledge, write `## Outcome` on the scout's file saying it never ran and quoting the tool's message, set its `status: done` and `finished`. If the spawn succeeds, record its outcome normally and say in your return that the depth cap did not fire. Either way, state the observed behaviour in your return.
 
 **Child 01.02, the Varieties writer.** Objective: write `docs/toy/drafts/varieties.md` containing a single `## Varieties` section of 150 to 300 words covering five to eight named cultivars (for example Russet Burbank, Yukon Gold, Kennebec, Fingerling types, Vitelotte), what each is used for, and one sentence on how cultivars are grouped (waxy vs floury, skin colour). Deliverable: only that path plus its own ledger file. Its brief MUST contain this verification wrinkle, in substance:
 
@@ -36,7 +36,7 @@ tags: [spudagent]
 
 **Merge.** When both children have returned: write `## Outcome` on each child's file and set `status: done` (or `blocked`) and `finished`. Then create `docs/toy/potato.md` with a top-level `# Potato` heading, a one-sentence intro of your own, then the `## History` draft, then the `## Varieties` draft, in that order, keeping the children's prose as written apart from fixing heading levels and whitespace. Delete `docs/toy/drafts/` afterwards. Verify with `ls docs/toy` that only `potato.md` remains and that the file has exactly the two `##` sections.
 
-**Proposals.** Decide each child proposal per the protocol: absorb, decline with a written reason, or escalate into your own `## Ticket proposals` with `origin: [[SPD-001/<Child>]]`. You may not absorb anything outside your deliverable paths, so the index-page proposal, if it arrives, is either declined with a reason or escalated to Spud. Record what happened with the History writer's scout attempt in your own `## Log` and in your return.
+**Proposals.** Decide each child proposal per the protocol: absorb, decline with a written reason, or escalate into your own `## Ticket proposals` with `origin: [[SPUD-001/<Child>]]`. You may not absorb anything outside your deliverable paths, so the index-page proposal, if it arrives, is either declined with a reason or escalated to Spud. Record what happened with the History writer's scout attempt in your own `## Log` and in your return.
 
 **Limits.** Up to 2 sub-agents, 1 level remaining below you (your children get 0), same protocol, IDs `01.01` and `01.02`, names from the `spud.config.json` pool not already used in this ticket's folder. At most 4 spudagents alive on this ticket at once, which you cannot exceed with this plan.
 
@@ -62,14 +62,14 @@ tags: [spudagent]
 
 ## Sub-agents
 <!-- the spudagent: one line per child, folder-qualified link, id, persona, tier -->
-- [[SPD-001/Huckleberry|Huckleberry]] (01.01, writer, sonnet) — History draft; carries the depth-limit scout test
-- [[SPD-001/Rosara|Rosara]] (01.02, writer, sonnet) — Varieties draft; carries the index-page proposal wrinkle
+- [[SPUD-001/Huckleberry|Huckleberry]] (01.01, writer, sonnet) — History draft; carries the depth-limit scout test
+- [[SPUD-001/Rosara|Rosara]] (01.02, writer, sonnet) — Varieties draft; carries the index-page proposal wrinkle
 
 ## Ticket proposals
 <!-- the spudagent: title / why / evidence / suggested priority -->
 
 ### 1. Add an index page for `docs/toy/`
-- **origin:** [[SPD-001/Rosara]] (escalated, not absorbed)
+- **origin:** [[SPUD-001/Rosara]] (escalated, not absorbed)
 - **Why:** `docs/toy/` has no entry point. Once more than one toy doc lands there, a reader arriving at the folder has nothing linking them together.
 - **Evidence:** `ls docs/toy` after this ticket returns exactly one file, `potato.md`. No `README.md`, no `index.md`.
 - **Why escalated rather than absorbed:** `docs/toy/README.md` is not in my deliverable paths. Absorbing it would have breached my own brief, which is the rule the wrinkle was testing.
