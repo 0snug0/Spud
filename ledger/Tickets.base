@@ -1,0 +1,69 @@
+properties:
+  file.name:
+    displayName: Ticket
+  title:
+    displayName: Title
+  priority:
+    displayName: P
+  status:
+    displayName: Status
+  origin:
+    displayName: Origin
+  lead:
+    displayName: Lead
+  created:
+    displayName: Created
+  file.mtime:
+    displayName: Updated
+views:
+  - type: table
+    name: Open
+    filters:
+      and:
+        - file.hasTag("ticket")
+        - not:
+            - file.inFolder("ledger/_templates")
+        - status != "done"
+        - status != "declined"
+    order:
+      - file.name
+      - priority
+      - status
+      - title
+      - lead
+      - origin
+      - created
+    sort:
+      - property: priority
+        direction: ASC
+      - property: created
+        direction: ASC
+  - type: table
+    name: All
+    filters:
+      and:
+        - file.hasTag("ticket")
+        - not:
+            - file.inFolder("ledger/_templates")
+    order:
+      - file.name
+      - priority
+      - status
+      - title
+      - lead
+      - origin
+      - created
+    sort:
+      - property: file.name
+        direction: DESC
+  - type: table
+    name: Reports
+    filters:
+      and:
+        - file.inFolder("reports")
+    order:
+      - file.name
+      - file.mtime
+    sort:
+      - property: file.name
+        direction: DESC

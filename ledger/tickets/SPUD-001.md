@@ -4,6 +4,7 @@ title: "Toy doc docs/toy/potato.md (History + Varieties): first end-to-end proto
 priority: P1
 status: done
 origin: eric
+lead: "[[SPUD-001/Kestrel]]"
 created: 2026-09-12
 tags: [ticket, toy, protocol-test]
 ---

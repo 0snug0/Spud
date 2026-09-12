@@ -1,0 +1,26 @@
+---
+id: SPUD-005
+title: "Obsidian readability: Home note, board tables, Bases views, templates folder"
+priority: P2
+status: done
+origin: eric
+lead: ""
+created: 2026-09-12
+tags: [ticket, meta, obsidian]
+---
+# SPUD-005 — Obsidian readability
+
+## Brief
+Eric opened the vault and found the ledger hard to read: no entry point, a board made of raw lines, dense working notes, and templates showing up as notes. Fix the cheap things without pre-empting the DB spike. Done when: a Home note explains how to read names and notes, the board is tables, Bases views list every spudagent and every ticket, and the templates are out of the way.
+
+## Size, persona and model decision
+No spudagent: every deliverable is a Spud-owned file (`ledger/`, `CLAUDE.md`, `.claude/`). Done directly by Eric's session at his request, at 2026-09-12T12:57.
+
+## Team
+
+## Handoffs
+
+## Proposals received
+
+## Outcome
+Added `ledger/Home.md` (entry point and legend), rewrote `ledger/BOARD.md` as three tables, added `ledger/Fleet.base` (Active and All views over spudagent frontmatter) and `ledger/Tickets.base` (Open, All, and Reports views), moved the templates to `ledger/_templates/` and excluded that folder in the local Obsidian settings. Tickets gained a `lead` property, backfilled on SPUD-001 and SPUD-004. CLAUDE.md, the agent definition, and the spec point at the new paths. Not verified in-app by this session: Obsidian renders the `.base` files; Eric checks that on opening.

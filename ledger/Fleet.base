@@ -1,0 +1,60 @@
+filters:
+  and:
+    - file.hasTag("spudagent")
+    - not:
+        - file.inFolder("ledger/_templates")
+properties:
+  file.name:
+    displayName: Name
+  id:
+    displayName: ID
+  persona:
+    displayName: Persona
+  model:
+    displayName: Model
+  status:
+    displayName: Status
+  parent:
+    displayName: Parent
+  ticket:
+    displayName: Ticket
+  spawned:
+    displayName: Spawned
+  finished:
+    displayName: Finished
+views:
+  - type: table
+    name: Active
+    filters:
+      and:
+        - status == "active"
+    order:
+      - ticket
+      - id
+      - file.name
+      - persona
+      - model
+      - parent
+      - spawned
+    sort:
+      - property: ticket
+        direction: ASC
+      - property: id
+        direction: ASC
+  - type: table
+    name: All
+    order:
+      - ticket
+      - id
+      - file.name
+      - persona
+      - model
+      - status
+      - parent
+      - spawned
+      - finished
+    sort:
+      - property: ticket
+        direction: DESC
+      - property: id
+        direction: ASC

@@ -58,7 +58,7 @@ Ticket proposals (out-of-scope work) are written in the spudagent's own file and
 
 ### Ledger v0 (`markdown-v0`)
 
-One writer per file. `ledger/Spud.md`; `ledger/BOARD.md` (Spud); `ledger/tickets/SPUD-nnn.md` (Spud; frontmatter id, title, priority, status, origin, created; sections Brief, Size persona and model decision, Team, Handoffs, Proposals received, Outcome); `ledger/tickets/SPUD-nnn/<Name>.md` (frontmatter id, name, persona, model, parent, ticket, status `active|done|blocked|failed`, spawned, finished, all parent-owned with times from `date`; sections Brief (parent), Log, Sub-agents, Ticket proposals, Result or Blocked (spudagent), Outcome (parent)); `reports/YYYY-MM-DD.md` (Spud). No event log in v0. The native memory dir holds Eric's preferences; the ledger holds ticket state.
+One writer per file. `ledger/Spud.md`; `ledger/BOARD.md` (Spud); `ledger/tickets/SPUD-nnn.md` (Spud; frontmatter id, title, priority, status, origin, lead, created; sections Brief, Size persona and model decision, Team, Handoffs, Proposals received, Outcome); `ledger/tickets/SPUD-nnn/<Name>.md` (frontmatter id, name, persona, model, parent, ticket, status `active|done|blocked|failed`, spawned, finished, all parent-owned with times from `date`; sections Brief (parent), Log, Sub-agents, Ticket proposals, Result or Blocked (spudagent), Outcome (parent)); `reports/YYYY-MM-DD.md` (Spud). No event log in v0. The native memory dir holds Eric's preferences; the ledger holds ticket state.
 
 ### Reporting and scope
 
@@ -66,7 +66,7 @@ Status is always read from the ledger. A dated report entry follows every record
 
 ## Files
 
-`.gitignore`, `spud.config.json`, `.claude/settings.json`, `.claude/agents/spudagent.md`, `CLAUDE.md`, `ledger/Spud.md`, `ledger/BOARD.md`, `ledger/tickets/_TEMPLATE.md`, `ledger/tickets/_TEMPLATE/_TEMPLATE.md`, `reports/`, `docs/spikes/`, this spec.
+`.gitignore`, `spud.config.json`, `.claude/settings.json`, `.claude/agents/spudagent.md`, `CLAUDE.md`, `ledger/Spud.md`, `ledger/BOARD.md`, `ledger/_templates/ticket.md`, `ledger/_templates/spudagent.md`, `ledger/Home.md`, `ledger/Fleet.base`, `ledger/Tickets.base`, `reports/`, `docs/spikes/`, this spec.
 
 ## Verification
 

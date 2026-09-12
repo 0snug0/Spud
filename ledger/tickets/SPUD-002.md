@@ -4,6 +4,7 @@ title: "Add an index page for docs/toy/"
 priority: P3
 status: queued
 origin: "proposal:[[SPUD-001/Rosara]]"
+lead: ""
 created: 2026-09-12
 tags: [ticket, toy, docs]
 ---

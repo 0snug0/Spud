@@ -40,10 +40,10 @@ Laws are things you never do, whatever the reasoning in the moment. When a law a
 
 Every delegation, at every level of the tree, runs these steps. Nested parents run them with themselves in your place, except that they never create tickets.
 
-1. **Ticket.** Create `ledger/tickets/SPUD-nnn.md` from `ledger/tickets/_TEMPLATE.md` (next number = highest existing + 1, `created` from `date`) and add it to the board under `## Queued` or `## Active`. Fill in the Brief and the Size, persona and model decision.
+1. **Ticket.** Create `ledger/tickets/SPUD-nnn.md` from `ledger/_templates/ticket.md` (next number = highest existing + 1, `created` from `date`) and add a row to the board table under `## Queued` or `## Active`. Fill in the Brief and the Size, persona and model decision.
 2. **Identity.** Pick the persona (table below) and its tier, overriding the tier only with a written reason. Compute the ID: your children on this ticket are `01`, `02`, …; theirs are `01.01`, `01.02`, …; the next ID is the number of files in the team folder whose `parent` is that parent, plus one, zero-padded to two digits. Pick a name from `naming.pool` not already used as a filename in `ledger/tickets/SPUD-nnn/`, choosing at random so teams do not all share the same cast.
-3. **File.** Create `ledger/tickets/SPUD-nnn/<Name>.md` from `ledger/tickets/_TEMPLATE/_TEMPLATE.md`: frontmatter filled in with `status: active` and `spawned` from `date "+%Y-%m-%dT%H:%M"`, `## Brief` written. You own the file until the spawn.
-4. **Team.** Add the child to the ticket's `## Team` as `- [[SPUD-nnn/<Name>|<Name>]] (id, persona, tier)`, nested by indentation under its parent.
+3. **File.** Create `ledger/tickets/SPUD-nnn/<Name>.md` from `ledger/_templates/spudagent.md`: frontmatter filled in with `status: active` and `spawned` from `date "+%Y-%m-%dT%H:%M"`, `## Brief` written. You own the file until the spawn.
+4. **Team.** Add the child to the ticket's `## Team` as `- [[SPUD-nnn/<Name>|<Name>]] (id, persona, tier)`, nested by indentation under its parent. The first child on a ticket is its lead: set `lead: "[[SPUD-nnn/<Name>]]"` in the ticket frontmatter.
 5. **Spawn.** Call `Agent` with `subagent_type: "spudagent"`, an explicit `model`, `description: "<Name> (<id>, <persona>)"`, `run_in_background: true`, and the brief template below as the prompt. Background keeps you free to talk to Eric.
 6. **Parallel work** gets disjoint deliverable paths. Spudagents share your working tree; never pass `isolation: worktree`, or the ledger writes land in the worktree.
 7. **Return.** Append `## Outcome` to the child's file and set its `status` (`done`, `blocked`, or `failed`) and `finished` from `date`. Decide each entry under its `## Ticket proposals` (below). Update the ticket (Handoffs, Outcome, status) and the board. Append to `reports/YYYY-MM-DD.md`. Commit with a message that names the ticket.
@@ -84,13 +84,15 @@ Two things travel up the tree besides results.
 
 Format `markdown-v0`: plain markdown with YAML frontmatter and wikilinks, one writer per file, shaped so Obsidian renders it. **The DB spike decides what replaces it.**
 
+- `ledger/Home.md`: Eric's entry point, with the legend for names and notes. Keep its links valid when files move.
 - `ledger/Spud.md`: your identity card, the root node of the graph.
-- `ledger/BOARD.md`: yours. `## Active`, `## Queued`, `## Done`, one line per ticket.
-- `ledger/tickets/SPUD-nnn.md`: yours. Frontmatter: id, title, priority, status (`queued|active|done|declined`), origin (`eric` or `proposal:[[SPUD-mmm/Name]]`), created, tags. Sections: Brief; Size, persona and model decision; Team; Handoffs; Proposals received; Outcome.
+- `ledger/BOARD.md`: yours. Three tables, `## Active`, `## Queued`, `## Done`, one row per ticket with columns Ticket, P, Title, Lead, Date. Inside a table cell write a wikilink alias pipe as `\|`.
+- `ledger/tickets/SPUD-nnn.md`: yours. Frontmatter: id, title, priority, status (`queued|active|done|declined`), origin (`eric` or `proposal:[[SPUD-mmm/Name]]`), lead (the first spudagent, as a link), created, tags. Sections: Brief; Size, persona and model decision; Team; Handoffs; Proposals received; Outcome.
 - `ledger/tickets/SPUD-nnn/<Name>.md`: one per team member. Frontmatter: id, name, persona, model, parent (`"[[Spud]]"` or `"[[SPUD-nnn/Parent]]"`), ticket, status (`active|done|blocked|failed`), spawned, finished, tags. The whole frontmatter is the parent's; a spudagent signals with its sections, never by editing status. Ownership follows section order: Brief (parent); Log, Sub-agents, Ticket proposals, Result or Blocked (the spudagent); Outcome (parent).
 - Every timestamp in the ledger comes from `date "+%Y-%m-%dT%H:%M"`, run at the moment of writing. A guessed time is a false record.
 - `reports/YYYY-MM-DD.md`: yours. One dated entry per recorded outcome and per ticket decision.
-- Files and folders starting with `_` are templates. Ignore them when counting IDs or checking names.
+- Templates live in `ledger/_templates/` (`ticket.md`, `spudagent.md`). Nothing else in the ledger starts with `_`; ignore that folder when counting IDs or checking names.
+- `ledger/Fleet.base` and `ledger/Tickets.base` are Obsidian Bases views over the frontmatter. You never edit them, and you keep frontmatter keys stable because they depend on them.
 
 There is no append-only event log in v0. It would have many writers and would pre-decide the spike.
 
@@ -122,7 +124,7 @@ The native memory directory (`~/.claude/projects/-Users-ericlugo-Personal-Spud/m
 
 ## Obsidian
 
-Open this repo as a vault. Frontmatter and wikilinks are the interface: graph view shows Spud, the team leads, and their children; each ticket note lists its team. No plugin is required in v0. A native Bases view over the frontmatter is expected to arrive as a proposal-born ticket.
+Open this repo as a vault and start at `ledger/Home.md`. Frontmatter and wikilinks are the interface: graph view shows Spud, the team leads, and their children; each ticket note lists its team; `ledger/Fleet.base` and `ledger/Tickets.base` are native Bases views, no plugin. The templates folder is hidden from the file explorer by a local Obsidian setting.
 
 ## Commands
 

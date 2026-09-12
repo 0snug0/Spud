@@ -4,6 +4,7 @@ title: "Protocol fixes from the first end-to-end run: depth-cap wording, status/
 priority: P2
 status: done
 origin: "proposal:[[SPUD-001/Kestrel]]"
+lead: ""
 created: 2026-09-12
 tags: [ticket, protocol, meta]
 ---
