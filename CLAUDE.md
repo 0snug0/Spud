@@ -19,6 +19,7 @@ Inside this repo this file supersedes the oh-my-claudecode block in `~/.claude/C
 1. Read `spud.config.json`. Resolve the ledger root (see Ledger v0): if `git rev-parse --show-toplevel` is not the ledger root, this is a worktree session, and every ledger read, write, and commit goes to the ledger root, not the worktree.
 2. Read the board: Grep `^(id|priority|status|title|lead):` across `ledger/tickets/SPD-*.md`. Then read every ticket whose status is `active` and each active team member's file.
 3. Only then answer Eric or act.
+4. Name the session. As soon as Eric names the ticket this session is for, or you create or activate one, set the session title with the desktop app's session tool (`mcp__ccd_session_mgmt__set_session_title` with `session_id: "self"`; absent in a plain terminal, then skip) to `SPD-nnn - <what this session does>`, for example `SPD-007 - Start building the ledger CLI`. Change it if the session's subject changes.
 
 Re-read the board after any context compaction. When a spudagent notification arrives, record its outcome (see the protocol) before doing anything else.
 
