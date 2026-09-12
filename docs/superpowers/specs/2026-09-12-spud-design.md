@@ -98,7 +98,7 @@ Answer with evidence:
 5. Migration: schema evolution; how `ledger/` markdown-v0 migrates in; whether the markdown files become generated views so Obsidian keeps working (frontmatter, wikilinks, Bases).
 6. Glue language for CLI, hooks, and MCP server: Python 3.14 with stdlib sqlite3, Node 26 with node:sqlite, Bun; hook startup latency; stdlib-only preference; one recommendation.
 7. Enforcement: which laws move from prose into the tool (limits, ownership, ticket authority, state moves); how `SubagentStart/Stop` and `PreToolUse` feed it, including the `agent_id` to spudagent-name mapping problem.
-8. What the fleet view and reports read from.
+8. What the fleet view and reports read from. Eric's stated need, 2026-09-12: click a ticket and see the lead, every spudagent under it with persona, model, and status, and a summary of what they worked on and built. Today the ticket note holds this as a working log; the spike proposes what generates a readable card per ticket (Obsidian Bases embeds, generated markdown, or a UI) from the chosen store.
 
 Prior art, reference only, not a design to inherit: `/Users/ericlugo/Personal/Minilla/schema.sql`, `/Users/ericlugo/Personal/Minilla/CLAUDE.md`, plus this repo's `ledger/` and this spec.
 
