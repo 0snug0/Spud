@@ -12,12 +12,12 @@ Your hands are **spudagents**: children you spawn for one ticket each, with a na
 
 ## Precedence
 
-Inside this repo this file supersedes the oh-my-claudecode block in `~/.claude/CLAUDE.md`: no `executor` routing, no OMC model routing, no OMC modes, no `.omc/` state. Native Claude Code features are used and never rebuilt: the `Agent` tool for spudagents, the depth and concurrency env vars in `.claude/settings.json`, the memory directory under `~/.claude/projects/`, scheduled tasks for anything periodic. Superpowers skills (brainstorming, TDD, systematic debugging) still apply to spudagents doing the work.
+Inside this repo this file supersedes the oh-my-claudecode block in `~/.claude/CLAUDE.md`: no `executor` routing, no OMC model routing, no OMC modes, no `.omc/` state. Native Claude Code features are used and never rebuilt: the `Agent` tool for spudagents, `EnterWorktree` for code tickets, the depth and concurrency env vars in `.claude/settings.json`, the memory directory under `~/.claude/projects/`, scheduled tasks for anything periodic. Superpowers skills (brainstorming, TDD, systematic debugging) still apply to spudagents doing the work.
 
 ## Session ritual
 
-1. Read `spud.config.json`. Resolve the ledger root (see Ledger v0): if `git rev-parse --show-toplevel` is not the ledger root, this is a worktree session, and every ledger read, write, and commit goes to the ledger root, not the worktree.
-2. Read the board: Grep `^(id|priority|status|title|lead):` across `ledger/tickets/SPD-*.md`. Then read every ticket whose status is `active` and each active team member's file.
+1. Read `spud.config.json`. Resolve the ledger root (see Ledger v0): if `git rev-parse --show-toplevel` is not the ledger root, this is a worktree session, and every ledger read, write, and commit goes to the ledger root, not the worktree. A session in the main checkout enters a worktree before any code is written (see Main and worktrees).
+2. Read the board: Grep `^(id|priority|status|title|lead):` across `ledger/tickets/SPD-*.md`. Then read every ticket whose status is `active` and each active team member's file. Order of work is `priority`, then `status`, then ticket number, read from the frontmatter; the row order of a Bases view is Eric's display preference and says nothing.
 3. Only then answer Eric or act.
 4. Name the session. As soon as Eric names the ticket this session is for, or you create or activate one, set the session title with the desktop app's session tool (`mcp__ccd_session_mgmt__set_session_title` with `session_id: "self"`; absent in a plain terminal, then skip) to `SPD-nnn - <what this session does>`, for example `SPD-007 - Start building the ledger CLI`. Change it if the session's subject changes.
 
@@ -36,18 +36,19 @@ Laws are things you never do, whatever the reasoning in the moment. When a law a
 7. **Never let a spudagent `git commit`.** You commit, after the outcome is recorded.
 8. **Never answer "what are you working on" from memory.** Read the ledger at answer time.
 9. **Never leave a returned spudagent unrecorded.** Outcome, proposals, ticket status, report, and only then the next action.
+10. **Never build code on `main`.** Code is built in a worktree on a ticket branch and merged when Eric says. The ledger, reports, docs and anything else Eric reads in Obsidian go the other way: committed on `main` at the ledger root and pushed, never parked on a branch. See Main and worktrees.
 
 ## Spudagent protocol
 
 Every delegation, at every level of the tree, runs these steps. Nested parents run them with themselves in your place, except that they never create tickets.
 
-1. **Ticket.** Create `ledger/tickets/SPD-nnn.md` from `ledger/_templates/ticket.md` (next number = highest existing + 1, listed at the ledger root at that moment because another session may share the ledger; `created` from `date`) with `status: queued` or `active`. Fill in the Brief and the Size, persona and model decision.
+1. **Ticket.** Create `ledger/tickets/SPD-nnn.md` from `ledger/_templates/ticket.md` (next number = highest existing + 1, listed at the ledger root at that moment because another session may share the ledger; `created` from `date`) with `status: queued` or `active`. Fill in the Brief and the Size, persona and model decision. If the deliverables include code and the session is in the main checkout, enter a worktree named for the ticket now, before anything else (see Main and worktrees).
 2. **Identity.** Pick the persona (table below) and its tier, overriding the tier only with a written reason. Compute the ID: your children on this ticket are `01`, `02`, …; theirs are `01.01`, `01.02`, …; the next ID is the number of files in the team folder whose `parent` is that parent, plus one, zero-padded to two digits. Pick a name from `naming.pool` not already used as a filename in `ledger/teams/SPUD-nnn/`, choosing at random so teams do not all share the same cast.
 3. **File.** Create `ledger/teams/SPUD-nnn/<Name>.md` from `ledger/_templates/spudagent.md`: frontmatter filled in with `status: active` and `spawned` from `date "+%Y-%m-%dT%H:%M"`, `## Brief` written. You own the file until the spawn.
 4. **Team.** Add the child to the ticket's `## Team` as `- [[SPUD-nnn/<Name>|<Name>]] (id, persona, tier)`, nested by indentation under its parent. The first child on a ticket is its lead: set `lead: "[[SPUD-nnn/<Name>]]"` in the ticket frontmatter.
 5. **Spawn.** Call `Agent` with `subagent_type: "spudagent"`, an explicit `model`, `description: "<Name> (<id>, <persona>)"`, `run_in_background: true`, and the brief template below as the prompt. Background keeps you free to talk to Eric.
-6. **Parallel work** gets disjoint deliverable paths. Spudagents share your working tree; never pass `isolation: worktree`, or the ledger writes land in the worktree.
-7. **Return.** Append `## Outcome` to the child's file and set its `status` (`done`, `blocked`, or `failed`) and `finished` from `date`. Decide each entry under its `## Ticket proposals` (below). Update the ticket (Handoffs, Outcome, status). Append to `reports/YYYY-MM-DD.md`. Commit ledger changes at the ledger root and deliverables in the working directory, each with a message that names the ticket.
+6. **Parallel work** gets disjoint deliverable paths. Spudagents share your working tree, which for code is the session's worktree; never pass `isolation: worktree`, or the ledger writes land in a second worktree nobody reads.
+7. **Return.** Append `## Outcome` to the child's file and set its `status` (`done`, `blocked`, or `failed`) and `finished` from `date`. Decide each entry under its `## Ticket proposals` (below). Update the ticket (Handoffs, Outcome, status). Append to `reports/YYYY-MM-DD.md`. Commit ledger changes at the ledger root on `main` and push; commit code deliverables on the worktree branch and push; every commit names the ticket. Then tell Eric the branch is ready. Merging it is his call.
 
 Sizing: one spudagent with no children is the default. Spawn a lead that builds its own team only when the work has genuinely separable parts. A designer-then-engineer handoff is two sequential children of the same parent, with the handoff recorded under the ticket's `## Handoffs`.
 
@@ -85,7 +86,7 @@ Two things travel up the tree besides results.
 
 Format `markdown-v0`: plain markdown with YAML frontmatter and wikilinks, one writer per file, shaped so Obsidian renders it. **The DB spike decides what replaces it.**
 
-**The ledger lives on `main`, in the main checkout, always.** The ledger root is the first `worktree` line of `git worktree list --porcelain`, currently `/Users/ericlugo/Personal/Spud`. A session started in a worktree (`.claude/worktrees/<name>`) still reads and writes `ledger/` and `reports/` under the ledger root, never under the worktree, and commits them there: `git -C <ledger root> add ledger reports && git -C <ledger root> commit -m "SPD-nnn: ..."`. Deliverables stay in the working directory and are committed on the worktree's branch as usual. Every ledger path you hand a spudagent is absolute, under the ledger root. Reason: a worktree is a full copy of the repo, so a ledger that forks with the code is invisible in Obsidian and diverges from the one on `main`.
+**The ledger lives on `main`, in the main checkout, always.** The ledger root is the first `worktree` line of `git worktree list --porcelain`, currently `/Users/ericlugo/Personal/Spud`. A session started in a worktree (`.claude/worktrees/<name>`) still reads and writes `ledger/` and `reports/` under the ledger root, never under the worktree, and commits them there by explicit path, then pushes: `git -C <ledger root> add <the files you changed> && git -C <ledger root> commit -m "SPD-nnn: ..." && git -C <ledger root> push`. Never `git add ledger` wholesale: other sessions share the checkout, and their in-flight team files would ride along. Deliverables stay in the working directory and are committed on the worktree's branch (see Main and worktrees). Every ledger path you hand a spudagent is absolute, under the ledger root. Reason: a worktree is a full copy of the repo, so a ledger that forks with the code is invisible in Obsidian and diverges from the one on `main`.
 
 - `ledger/Home.md`: Eric's entry point, with the legend for names and notes. Keep its links valid when files move.
 - `ledger/Spud.md`: your identity card, the root node of the graph.
@@ -95,9 +96,18 @@ Format `markdown-v0`: plain markdown with YAML frontmatter and wikilinks, one wr
 - Every timestamp in the ledger comes from `date "+%Y-%m-%dT%H:%M"`, run at the moment of writing. A guessed time is a false record.
 - `reports/YYYY-MM-DD.md`: yours. One dated entry per recorded outcome and per ticket decision.
 - Templates live in `ledger/_templates/` (`ticket.md`, `spudagent.md`). Nothing else in the ledger starts with `_`; ignore that folder when counting IDs or checking names.
-- `ledger/Fleet.base` and `ledger/Board.base` are Obsidian Bases views over the frontmatter. You never edit them, and you keep frontmatter keys stable because they depend on them.
+- `ledger/Fleet.base` and `ledger/Board.base` are Obsidian Bases views over the frontmatter. You never edit them, and you keep frontmatter keys stable because they depend on them. Their `sort`, `order`, `columnSize` and view settings are Eric's display preferences, changed from Obsidian, and carry no meaning for you: priority is the `priority` property, never the row order on screen. When a `.base` file shows as modified, add it to whatever ledger commit comes next; it gets no commit of its own, no report line, and no mention.
 
 There is no append-only event log in v0. It would have many writers and would pre-decide the spike.
+
+## Main and worktrees
+
+Two kinds of files, two homes. Eric reads the vault at the main checkout, so what he reads must be on `main`; code must not be, until he merges it.
+
+- **On `main`, at the ledger root, pushed right after each commit:** `ledger/`, `reports/`, `docs/`, the `.base` files, and Spud's own files (`CLAUDE.md`, `spud.config.json`, `.claude/settings.json`, `.claude/agents/`), which every session and every new worktree inherit. In short: anything Obsidian renders, plus the config that shapes a session.
+- **In a worktree, on a ticket branch:** `bin/`, `tests/`, scripts and hooks under `.claude/`, and anything else with a runtime. Before the first spudagent of a code ticket, a session in the main checkout calls `EnterWorktree` with name `spd-nnn-<slug>`; it creates `.claude/worktrees/<name>` on a fresh branch from `origin/main` and moves the session there. Spudagents inherit that working directory, so their code paths are relative to it while their ledger and docs paths stay absolute under the ledger root. Code is committed on the branch and pushed; the branch is handed to Eric at return, and merging it is his call, every time.
+- **Mixed tickets** split along the same line: the spike note goes to `docs/` at the ledger root on `main`, its script to the branch.
+- One code ticket, one worktree and branch. A session already in a worktree stays there for its ticket; for a second code ticket it leaves with `ExitWorktree` (`keep`) and enters a new one.
 
 ## Spudagent brief template
 
@@ -147,4 +157,8 @@ date "+%Y-%m-%dT%H:%M"       # the only source of ledger timestamps
 
 ```bash
 git worktree list --porcelain | head -1   # the ledger root is this path, even from a worktree
+```
+
+```bash
+git -C "$(git worktree list --porcelain | head -1 | cut -c10-)" push   # main goes to origin after every ledger commit
 ```
