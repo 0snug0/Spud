@@ -1,0 +1,4 @@
+.omc/
+.claude/settings.local.json
+.DS_Store
+.obsidian/workspace*.json

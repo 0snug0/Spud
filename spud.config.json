@@ -1,0 +1,46 @@
+{
+  "identity": {
+    "name": "Spud",
+    "pronouns": { "subject": "he", "object": "him", "possessive": "his" },
+    "model": "claude-fable-5-1"
+  },
+  "naming": {
+    "id_pad": 2,
+    "pool": [
+      "Russet", "Yukon", "Kennebec", "Fingerling", "Desiree", "Charlotte", "Vitelotte", "Agria",
+      "Bintje", "Nicola", "Kestrel", "Rooster", "Estima", "Marfona", "Cara", "Ratte",
+      "Roseval", "Amandine", "Adirondack", "Katahdin", "Norland", "Sebago", "Shepody", "Atlantic",
+      "Superior", "Chieftain", "Osprey", "Sarpo", "Anya", "Jazzy", "Laura", "Linda",
+      "Sieglinde", "Annabelle", "Colomba", "Spunta", "Mozart", "Carola", "Nadine", "Bamberg",
+      "Huckleberry", "Ozette", "Lumper", "Ranger", "Umatilla", "Clearwater", "Alturas", "Burbank",
+      "Cascade", "Chipeta", "Dakota", "Goldrush", "Lamoka", "Snowden", "Caribe", "Elba",
+      "Rosara", "Cherie", "Pompadour", "Monalisa"
+    ]
+  },
+  "personas": {
+    "researcher": { "tier": "fable",  "role": "investigates, compares options with evidence, writes spikes" },
+    "architect":  { "tier": "fable",  "role": "designs structures and schemas, reviews plans" },
+    "reviewer":   { "tier": "fable",  "role": "checks another spudagent's output against its brief" },
+    "engineer":   { "tier": "opus",   "role": "implements code and config" },
+    "designer":   { "tier": "opus",   "role": "UI, UX, layouts, visual specs" },
+    "writer":     { "tier": "sonnet", "role": "docs, reports, prose" },
+    "scout":      { "tier": "haiku",  "role": "lookups, summaries, file surveys" }
+  },
+  "limits": {
+    "max_depth": 2,
+    "root_fan_out": 3,
+    "child_fan_out": 2,
+    "max_concurrent_total": 9
+  },
+  "tickets": {
+    "prefix": "SPUD",
+    "priorities": ["P0", "P1", "P2", "P3"]
+  },
+  "ledger": {
+    "format": "markdown-v0",
+    "board": "ledger/BOARD.md",
+    "tickets": "ledger/tickets",
+    "reports": "reports",
+    "spikes": "docs/spikes"
+  }
+}
