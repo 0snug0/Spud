@@ -6,9 +6,8 @@ tags: [home]
 Start here. [[Spud]] is the root of the tree. Every ticket is a note under `ledger/tickets/`, and every spudagent that worked on a ticket is a note inside that ticket's folder.
 
 ## Where to look
-- [[BOARD]] for what is active, queued, and done
+- [[Board.base|Board]] for every ticket with its status, priority, and lead, plus a Reports tab
 - [[Fleet.base|Fleet]] for every spudagent: persona, model, status, parent, ticket
-- [[Tickets.base|Tickets]] for every ticket by priority and status, plus the daily reports
 - `reports/` holds one note per day, newest at the bottom of the file
 
 ## How to read a name

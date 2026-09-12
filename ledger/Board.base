@@ -1,63 +1,46 @@
+formulas:
+  status_rank: 'if(status == "active", 1, if(status == "queued", 2, if(status == "done", 3, 4)))'
 properties:
   file.name:
     displayName: Ticket
-  title:
-    displayName: Title
-  priority:
-    displayName: P
   status:
     displayName: Status
+  priority:
+    displayName: P
+  title:
+    displayName: Title
+  lead:
+    displayName: Lead
   origin:
     displayName: Origin
   proposed_by:
     displayName: Proposed by
-  lead:
-    displayName: Lead
   created:
     displayName: Created
   file.mtime:
     displayName: Updated
 views:
   - type: table
-    name: Open
+    name: Board
     filters:
       and:
         - file.hasTag("ticket")
         - not:
             - file.inFolder("ledger/_templates")
-        - status != "done"
-        - status != "declined"
     order:
       - file.name
-      - priority
       - status
+      - priority
       - title
       - lead
       - origin
       - proposed_by
       - created
     sort:
+      - property: formula.status_rank
+        direction: ASC
       - property: priority
         direction: ASC
-      - property: created
-        direction: ASC
-  - type: table
-    name: All
-    filters:
-      and:
-        - file.hasTag("ticket")
-        - not:
-            - file.inFolder("ledger/_templates")
-    order:
-      - file.name
-      - priority
-      - status
-      - title
-      - lead
-      - origin
-      - proposed_by
-      - created
-    sort:
       - property: file.name
         direction: DESC
   - type: table
