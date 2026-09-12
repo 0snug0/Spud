@@ -5,5 +5,8 @@ One line per ticket: `- [[SPUD-nnn]] | P? | title | lead: [[SPUD-nnn/Name|Name]]
 ## Active
 
 ## Queued
+- [[SPUD-003]] | P2 | Protocol fixes from the first end-to-end run: depth-cap wording, status/finished ownership, real timestamps | lead: none yet (Spud-owned files; waits on Eric) | 2026-09-12
+- [[SPUD-002]] | P3 | Add an index page for docs/toy/ | lead: none yet (scout, haiku) | 2026-09-12
 
 ## Done
+- [[SPUD-001]] | P1 | Toy doc docs/toy/potato.md (History + Varieties): first end-to-end protocol test | lead: [[SPUD-001/Kestrel|Kestrel]] (01, writer, opus) | 2026-09-12
