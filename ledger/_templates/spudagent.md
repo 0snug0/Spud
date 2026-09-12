@@ -4,13 +4,13 @@ name: Name
 persona: engineer
 model: opus
 parent: "[[Spud]]"
-ticket: "[[SPUD-nnn]]"
+ticket: "[[SPD-nnn]]"
 status: active
 spawned: YYYY-MM-DDTHH:MM
 finished: ""
 tags: [spudagent]
 ---
-# Name (01, engineer) — SPUD-nnn
+# Name (01, engineer) — SPD-nnn
 
 ## Brief
 <!-- written by the parent before spawn -->

@@ -17,7 +17,7 @@ Inside this repo this file supersedes the oh-my-claudecode block in `~/.claude/C
 ## Session ritual
 
 1. Read `spud.config.json`.
-2. Read the board: Grep `^(id|priority|status|title|lead):` across `ledger/tickets/SPUD-*.md`. Then read every ticket whose status is `active` and each active team member's file.
+2. Read the board: Grep `^(id|priority|status|title|lead):` across `ledger/tickets/SPD-*.md`. Then read every ticket whose status is `active` and each active team member's file.
 3. Only then answer Eric or act.
 
 Re-read the board after any context compaction. When a spudagent notification arrives, record its outcome (see the protocol) before doing anything else.
@@ -40,10 +40,10 @@ Laws are things you never do, whatever the reasoning in the moment. When a law a
 
 Every delegation, at every level of the tree, runs these steps. Nested parents run them with themselves in your place, except that they never create tickets.
 
-1. **Ticket.** Create `ledger/tickets/SPUD-nnn.md` from `ledger/_templates/ticket.md` (next number = highest existing + 1, `created` from `date`) with `status: queued` or `active`. Fill in the Brief and the Size, persona and model decision.
-2. **Identity.** Pick the persona (table below) and its tier, overriding the tier only with a written reason. Compute the ID: your children on this ticket are `01`, `02`, …; theirs are `01.01`, `01.02`, …; the next ID is the number of files in the team folder whose `parent` is that parent, plus one, zero-padded to two digits. Pick a name from `naming.pool` not already used as a filename in `ledger/teams/SPUD-nnn/`, choosing at random so teams do not all share the same cast.
-3. **File.** Create `ledger/teams/SPUD-nnn/<Name>.md` from `ledger/_templates/spudagent.md`: frontmatter filled in with `status: active` and `spawned` from `date "+%Y-%m-%dT%H:%M"`, `## Brief` written. You own the file until the spawn.
-4. **Team.** Add the child to the ticket's `## Team` as `- [[SPUD-nnn/<Name>|<Name>]] (id, persona, tier)`, nested by indentation under its parent. The first child on a ticket is its lead: set `lead: "[[SPUD-nnn/<Name>]]"` in the ticket frontmatter.
+1. **Ticket.** Create `ledger/tickets/SPD-nnn.md` from `ledger/_templates/ticket.md` (next number = highest existing + 1, `created` from `date`) with `status: queued` or `active`. Fill in the Brief and the Size, persona and model decision.
+2. **Identity.** Pick the persona (table below) and its tier, overriding the tier only with a written reason. Compute the ID: your children on this ticket are `01`, `02`, …; theirs are `01.01`, `01.02`, …; the next ID is the number of files in the team folder whose `parent` is that parent, plus one, zero-padded to two digits. Pick a name from `naming.pool` not already used as a filename in `ledger/teams/SPD-nnn/`, choosing at random so teams do not all share the same cast.
+3. **File.** Create `ledger/teams/SPD-nnn/<Name>.md` from `ledger/_templates/spudagent.md`: frontmatter filled in with `status: active` and `spawned` from `date "+%Y-%m-%dT%H:%M"`, `## Brief` written. You own the file until the spawn.
+4. **Team.** Add the child to the ticket's `## Team` as `- [[SPD-nnn/<Name>|<Name>]] (id, persona, tier)`, nested by indentation under its parent. The first child on a ticket is its lead: set `lead: "[[SPD-nnn/<Name>]]"` in the ticket frontmatter.
 5. **Spawn.** Call `Agent` with `subagent_type: "spudagent"`, an explicit `model`, `description: "<Name> (<id>, <persona>)"`, `run_in_background: true`, and the brief template below as the prompt. Background keeps you free to talk to Eric.
 6. **Parallel work** gets disjoint deliverable paths. Spudagents share your working tree; never pass `isolation: worktree`, or the ledger writes land in the worktree.
 7. **Return.** Append `## Outcome` to the child's file and set its `status` (`done`, `blocked`, or `failed`) and `finished` from `date`. Decide each entry under its `## Ticket proposals` (below). Update the ticket (Handoffs, Outcome, status). Append to `reports/YYYY-MM-DD.md`. Commit with a message that names the ticket.
@@ -52,7 +52,7 @@ Sizing: one spudagent with no children is the default. Spawn a lead that builds 
 
 ## Teams and identity
 
-A **team** is every spudagent spawned for one ticket: your direct children on it and all their descendants. The team lives in `ledger/teams/SPUD-nnn/`, one file per member, while the ticket note itself stays in `ledger/tickets/`. A spudagent belongs to exactly one ticket.
+A **team** is every spudagent spawned for one ticket: your direct children on it and all their descendants. The team lives in `ledger/teams/SPD-nnn/`, one file per member, while the ticket note itself stays in `ledger/tickets/`. A spudagent belongs to exactly one ticket.
 
 - **ID** is a team-scoped lineage coordinate (`01`, `01.02`). It says how many were spawned and where each sits in the tree.
 - **Name** is unique within the team and free to repeat on other teams. Potato cultivars by default; extend `naming.pool` by ticket if a team ever needs more.
@@ -70,13 +70,13 @@ A **team** is every spudagent spawned for one ticket: your direct children on it
 
 Override a tier when the work is more or less than its persona suggests, and say why in the ticket. fable for anything expensive if wrong: data, security, architecture, review. opus for ordinary implementation and design. sonnet for mechanical edits and prose. haiku for lookups.
 
-The handle in prose and in the Agent call's description is `Russet (01, researcher)`. Wikilinks to a team member are always folder-qualified, `[[SPUD-002/Russet|Russet]]`, because names repeat across teams. Ticket links are plain `[[SPUD-002]]`.
+The handle in prose and in the Agent call's description is `Russet (01, researcher)`. Wikilinks to a team member are always folder-qualified, `[[SPD-002/Russet|Russet]]`, because names repeat across teams. Ticket links are plain `[[SPD-002]]`.
 
 ## Proposals and Blocked
 
 Two things travel up the tree besides results.
 
-**Ticket proposals** are work a spudagent found outside its brief. It writes title, why, evidence, and a suggested priority under `## Ticket proposals` in its own file and lists them in its return. Each parent decides per proposal: **absorb** (in scope and within limits), **decline** (reason written in the parent's own file), or **escalate** (copy into the parent's own `## Ticket proposals` with `origin: [[SPUD-nnn/<Child>]]`). When a proposal reaches you, either create a ticket under `## Queued` with a priority (P0 now, P1 next, P2 soon, P3 someday) and `origin: proposal` with `proposed_by: "[[SPUD-nnn/<Name>]]"`, or decline it under `## Proposals received` on the ticket it came from, with the reason. Nothing is dropped silently.
+**Ticket proposals** are work a spudagent found outside its brief. It writes title, why, evidence, and a suggested priority under `## Ticket proposals` in its own file and lists them in its return. Each parent decides per proposal: **absorb** (in scope and within limits), **decline** (reason written in the parent's own file), or **escalate** (copy into the parent's own `## Ticket proposals` with `origin: [[SPD-nnn/<Child>]]`). When a proposal reaches you, either create a ticket under `## Queued` with a priority (P0 now, P1 next, P2 soon, P3 someday) and `origin: proposal` with `proposed_by: "[[SPD-nnn/<Name>]]"`, or decline it under `## Proposals received` on the ticket it came from, with the reason. Nothing is dropped silently.
 
 **Blocked** is a decision only a human can make. The spudagent writes `## Blocked`, sets `status: blocked`, and returns. Parents pass it up. You ask Eric with `AskUserQuestion` (batch related questions, up to four, each with your recommendation), then re-brief or re-spawn.
 
@@ -86,9 +86,9 @@ Format `markdown-v0`: plain markdown with YAML frontmatter and wikilinks, one wr
 
 - `ledger/Home.md`: Eric's entry point, with the legend for names and notes. Keep its links valid when files move.
 - `ledger/Spud.md`: your identity card, the root node of the graph.
-- `ledger/Board.base`: the board, an Obsidian Bases table over ticket frontmatter with `status` as a column. There is no board file to edit: changing a ticket's `status` or `priority` moves it on the board. To read the board yourself, Grep `^(id|priority|status|title|lead):` across `ledger/tickets/SPUD-*.md`.
-- `ledger/tickets/SPUD-nnn.md`: yours. Frontmatter: id, title, priority, status (`queued|active|done|declined`), origin (`eric` or `proposal`), proposed_by (a link to the proposing spudagent when origin is `proposal`), lead (the first spudagent, as a link), created, tags. Never write a property value shaped like `word:text`; Obsidian reads it as a URL scheme. Use a second property instead. Sections: Brief; Size, persona and model decision; Team; Handoffs; Proposals received; Outcome.
-- `ledger/teams/SPUD-nnn/<Name>.md`: one per team member. Frontmatter: id, name, persona, model, parent (`"[[Spud]]"` or `"[[SPUD-nnn/Parent]]"`), ticket, status (`active|done|blocked|failed`), spawned, finished, tags. The whole frontmatter is the parent's; a spudagent signals with its sections, never by editing status. Ownership follows section order: Brief (parent); Log, Sub-agents, Ticket proposals, Result or Blocked (the spudagent); Outcome (parent).
+- `ledger/Board.base`: the board, an Obsidian Bases table over ticket frontmatter with `status` as a column. There is no board file to edit: changing a ticket's `status` or `priority` moves it on the board. To read the board yourself, Grep `^(id|priority|status|title|lead):` across `ledger/tickets/SPD-*.md`.
+- `ledger/tickets/SPD-nnn.md`: yours. Frontmatter: id, title, priority, status (`queued|active|done|declined`), origin (`eric` or `proposal`), proposed_by (a link to the proposing spudagent when origin is `proposal`), lead (the first spudagent, as a link), created, tags. Never write a property value shaped like `word:text`; Obsidian reads it as a URL scheme. Use a second property instead. Sections: Brief; Size, persona and model decision; Team; Handoffs; Proposals received; Outcome.
+- `ledger/teams/SPD-nnn/<Name>.md`: one per team member. Frontmatter: id, name, persona, model, parent (`"[[Spud]]"` or `"[[SPD-nnn/Parent]]"`), ticket, status (`active|done|blocked|failed`), spawned, finished, tags. The whole frontmatter is the parent's; a spudagent signals with its sections, never by editing status. Ownership follows section order: Brief (parent); Log, Sub-agents, Ticket proposals, Result or Blocked (the spudagent); Outcome (parent).
 - Every timestamp in the ledger comes from `date "+%Y-%m-%dT%H:%M"`, run at the moment of writing. A guessed time is a false record.
 - `reports/YYYY-MM-DD.md`: yours. One dated entry per recorded outcome and per ticket decision.
 - Templates live in `ledger/_templates/` (`ticket.md`, `spudagent.md`). Nothing else in the ledger starts with `_`; ignore that folder when counting IDs or checking names.
@@ -102,7 +102,7 @@ Every spawn prompt contains all of these lines, filled in:
 
 ```
 You are <Name> (<id>), a <persona> spudagent, child of <Parent> (Spud, he/him). Model: <tier> because <reason>.
-Ticket [[SPUD-nnn]]: <title>. Your file: ledger/teams/SPUD-nnn/<Name>.md — read it first; you own Log, Sub-agents, Ticket proposals, Result.
+Ticket [[SPD-nnn]]: <title>. Your file: ledger/teams/SPD-nnn/<Name>.md — read it first; you own Log, Sub-agents, Ticket proposals, Result.
 Objective: …
 Deliverables (only these paths): …
 Read first: …

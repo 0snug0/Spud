@@ -36,13 +36,13 @@ Name, pronouns, and model live in `spud.config.json`; `CLAUDE.md` defers to it s
 
 ### Teams and spudagents
 
-A team is every spudagent spawned for one ticket. It lives in `ledger/teams/SPUD-nnn/`, one file per member, separate from the ticket note in `ledger/tickets/`. Each spudagent has:
+A team is every spudagent spawned for one ticket. It lives in `ledger/teams/SPD-nnn/`, one file per member, separate from the ticket note in `ledger/tickets/`. Each spudagent has:
 
 - **ID**: team-scoped lineage counter (`01`, `02`; children `01.01`). Next ID = count of files in the team folder with that parent, plus one.
 - **Name**: unique within the team, picked at random from `naming.pool` (potato cultivars) among names unused in the folder. Free to repeat on other teams. Alternative considered: Bobiverse self-naming (file named by ID, `aliases:` for links); not chosen because the parent must link the child before it returns.
 - **Persona**: from the catalog, with a default tier. researcher, architect, reviewer (fable); engineer, designer (opus); writer (sonnet); scout (haiku). Overrides need a written reason.
 
-Handle: `Russet (01, researcher)`; qualified: `SPUD-002/Russet`. Team-member wikilinks are folder-qualified, `[[SPUD-002/Russet|Russet]]`; ticket links are plain.
+Handle: `Russet (01, researcher)`; qualified: `SPD-002/Russet`. Team-member wikilinks are folder-qualified, `[[SPD-002/Russet|Russet]]`; ticket links are plain.
 
 ### Protocol
 
@@ -50,7 +50,7 @@ Ticket file → persona, tier, ID, name → spudagent file with frontmatter and 
 
 ### Proposals and Blocked
 
-Ticket proposals (out-of-scope work) are written in the spudagent's own file and climb the tree: absorb, decline with a reason, or escalate with `origin`. At Spud: create under `## Queued` with a P0–P3 priority and `origin: proposal` plus `proposed_by: "[[SPUD-nnn/Name]]"`, or decline under `## Proposals received`. Blocked (a human decision needed) climbs the same way; Spud asks Eric.
+Ticket proposals (out-of-scope work) are written in the spudagent's own file and climb the tree: absorb, decline with a reason, or escalate with `origin`. At Spud: create under `## Queued` with a P0–P3 priority and `origin: proposal` plus `proposed_by: "[[SPD-nnn/Name]]"`, or decline under `## Proposals received`. Blocked (a human decision needed) climbs the same way; Spud asks Eric.
 
 ### Limits
 
@@ -58,7 +58,7 @@ Ticket proposals (out-of-scope work) are written in the spudagent's own file and
 
 ### Ledger v0 (`markdown-v0`)
 
-One writer per file. `ledger/Spud.md`; `ledger/Board.base` (a Bases table over ticket frontmatter; the status on each ticket is the board); `ledger/tickets/SPUD-nnn.md` (Spud; frontmatter id, title, priority, status, origin, lead, created; sections Brief, Size persona and model decision, Team, Handoffs, Proposals received, Outcome); `ledger/teams/SPUD-nnn/<Name>.md` (frontmatter id, name, persona, model, parent, ticket, status `active|done|blocked|failed`, spawned, finished, all parent-owned with times from `date`; sections Brief (parent), Log, Sub-agents, Ticket proposals, Result or Blocked (spudagent), Outcome (parent)); `reports/YYYY-MM-DD.md` (Spud). No event log in v0. The native memory dir holds Eric's preferences; the ledger holds ticket state.
+One writer per file. `ledger/Spud.md`; `ledger/Board.base` (a Bases table over ticket frontmatter; the status on each ticket is the board); `ledger/tickets/SPD-nnn.md` (Spud; frontmatter id, title, priority, status, origin, lead, created; sections Brief, Size persona and model decision, Team, Handoffs, Proposals received, Outcome); `ledger/teams/SPD-nnn/<Name>.md` (frontmatter id, name, persona, model, parent, ticket, status `active|done|blocked|failed`, spawned, finished, all parent-owned with times from `date`; sections Brief (parent), Log, Sub-agents, Ticket proposals, Result or Blocked (spudagent), Outcome (parent)); `reports/YYYY-MM-DD.md` (Spud). No event log in v0. The native memory dir holds Eric's preferences; the ledger holds ticket state.
 
 ### Reporting and scope
 
@@ -71,7 +71,7 @@ Status is always read from the ledger. A dated report entry follows every record
 ## Verification
 
 1. A fresh session asked "what are you working on?" reads the board and makes no Agent call.
-2. Toy ticket SPUD-001: a lead spawns two sub-agents with distinct pool names and disjoint paths; team, outcome, board, report, and one commit by Spud follow. A later ticket reuses a name without conflict.
+2. Toy ticket SPD-001: a lead spawns two sub-agents with distinct pool names and disjoint paths; team, outcome, board, report, and one commit by Spud follow. A later ticket reuses a name without conflict.
 3. A planted out-of-scope observation becomes a proposal that climbs to Spud, who creates or declines a ticket; no spudagent creates one.
 4. A sub-agent at the depth limit is refused by the Agent tool and logs it.
 5. "Write it yourself" is refused under law 1 and delegated to a scout.
@@ -93,7 +93,7 @@ Answer with evidence:
 
 1. Which store: SQLite vs alternatives (JSONL/markdown, DuckDB, local Postgres, other). Criteria: single machine, no daemon, survives compaction, human-inspectable, Obsidian-renderable views.
 2. Topology: one ledger vs per-project vs per-spudagent databases; define "project" in Spud's world (this repo vs repos Spud works on, such as BadTakes).
-3. Schema: tickets (priority, status, origin); teams and spudagents (tree per ticket: id, name unique per team, persona, model, parent, status, timestamps, tokens and duration as returned by the Agent tool); events (append-only); handoffs; proposals and their decisions; projects; the name pool. How `SPUD-002/01.01` maps to rows; how limits are checked from the table.
+3. Schema: tickets (priority, status, origin); teams and spudagents (tree per ticket: id, name unique per team, persona, model, parent, status, timestamps, tokens and duration as returned by the Agent tool); events (append-only); handoffs; proposals and their decisions; projects; the name pool. How `SPD-002/01.01` maps to rows; how limits are checked from the table.
 4. Concurrency: N in-process spudagents writing at once. WAL and busy timeouts vs single-writer through a CLI or MCP tool; recommend one.
 5. Migration: schema evolution; how `ledger/` markdown-v0 migrates in; whether the markdown files become generated views so Obsidian keeps working (frontmatter, wikilinks, Bases).
 6. Glue language for CLI, hooks, and MCP server: Python 3.14 with stdlib sqlite3, Node 26 with node:sqlite, Bun; hook startup latency; stdlib-only preference; one recommendation.

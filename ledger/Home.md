@@ -12,7 +12,7 @@ Start here. [[Spud]] is the root of the tree. Every ticket is a note under `ledg
 
 ## How to read a name
 `Kestrel (01, writer, opus)` is name, ID, persona, model tier.
-- The **name** is unique within one ticket's team and may appear again on another ticket, which is why links are written `[[SPUD-001/Kestrel|Kestrel]]`.
+- The **name** is unique within one ticket's team and may appear again on another ticket, which is why links are written `[[SPD-001/Kestrel|Kestrel]]`.
 - The **ID** is the position in that ticket's tree: `01` is Spud's first child on the ticket, `01.02` is that child's second child.
 - The **persona** says what kind of teammate it was: researcher, architect, reviewer (fable); engineer, designer (opus); writer (sonnet); scout (haiku).
 

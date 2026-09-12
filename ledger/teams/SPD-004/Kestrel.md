@@ -4,13 +4,13 @@ name: Kestrel
 persona: scout
 model: haiku
 parent: "[[Spud]]"
-ticket: "[[SPUD-004]]"
+ticket: "[[SPD-004]]"
 status: done
 spawned: 2026-09-12T12:37
 finished: 2026-09-12T12:38
 tags: [spudagent]
 ---
-# Kestrel (01, scout) — SPUD-004
+# Kestrel (01, scout) — SPD-004
 
 ## Brief
 <!-- written by the parent before spawn -->
