@@ -24,9 +24,13 @@ views:
     name: Board
     filters:
       and:
-        - file.hasTag("ticket")
         - not:
             - file.inFolder("ledger/_templates")
+        - file.inFolder("ledger/tickets")
+        - status != "done"
+    groupBy:
+      property: status
+      direction: ASC
     order:
       - file.name
       - status
@@ -37,6 +41,8 @@ views:
       - proposed_by
       - created
     sort:
+      - property: status
+        direction: DESC
       - property: file.name
         direction: ASC
       - property: formula.status_rank
