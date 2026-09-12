@@ -110,7 +110,7 @@
     "max_concurrent_total": 9
   },
   "tickets": {
-    "prefix": "SPUD",
+    "prefix": "SPD",
     "priorities": [
       "P0",
       "P1",
