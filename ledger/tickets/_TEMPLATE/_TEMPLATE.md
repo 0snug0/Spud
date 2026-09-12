@@ -26,7 +26,7 @@ Objective, deliverables (paths), read first, limits, done when.
 <!-- the spudagent: title / why / evidence / suggested priority -->
 
 ## Result
-<!-- the spudagent: what you produced, where, what you verified, what is left. Or "## Blocked" with the question and options. -->
+<!-- the spudagent: what you produced, where, what you verified, what is left. Or "## Blocked" with the question and options. Leave the frontmatter to your parent. -->
 
 ## Outcome
-<!-- written by the parent after return -->
+<!-- written by the parent after return; the parent also sets status (done | blocked | failed) and finished, both from date -->

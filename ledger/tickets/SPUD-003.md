@@ -2,7 +2,7 @@
 id: SPUD-003
 title: "Protocol fixes from the first end-to-end run: depth-cap wording, status/finished ownership, real timestamps"
 priority: P2
-status: queued
+status: done
 origin: "proposal:[[SPUD-001/Kestrel]]"
 created: 2026-09-12
 tags: [ticket, protocol, meta]
@@ -30,3 +30,8 @@ No spudagent: the deliverables are Spud's own files, which Law 1 reserves to Spu
 ## Proposals received
 
 ## Outcome
+Resolved by Eric's bootstrap session at 2026-09-12T12:36, not by a spudagent: the three defects were contradictions in files written during the bootstrap, so fixing them completed the bootstrap rather than starting new work.
+
+Decisions: item 2 → option (a), the parent owns `status`, `spawned`, and `finished`; a spudagent signals only through its `## Result` or `## Blocked` sections. A fourth status, `failed`, was added for a child that never ran or whose work the parent rejects. Item 1 → the agent definition now says the `Agent` tool is absent at the cap, quotes the real error, forbids retrying or writing a child's file when the brief says no sub-agents, and marks a child whose spawn failed as `failed`. Item 3 → CLAUDE.md, the agent definition, the brief template, and the member template all require timestamps from `date "+%Y-%m-%dT%H:%M"`; `.claude/settings.json` now allowlists `date`, `ls`, and read-only `git` so sessions do not prompt for them.
+
+Files changed: `CLAUDE.md`, `.claude/agents/spudagent.md`, `.claude/settings.json`, `ledger/tickets/_TEMPLATE/_TEMPLATE.md`, `docs/superpowers/specs/2026-09-12-spud-design.md`, `.gitignore` (`.obsidian/` ignored wholesale). Left: nothing; the next ticket's team files are the proof.

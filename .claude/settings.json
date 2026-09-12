@@ -3,5 +3,15 @@
   "env": {
     "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "2",
     "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "9"
+  },
+  "permissions": {
+    "allow": [
+      "Bash(date:*)",
+      "Bash(ls:*)",
+      "Bash(git status:*)",
+      "Bash(git log:*)",
+      "Bash(git diff:*)",
+      "Bash(git show:*)"
+    ]
   }
 }
