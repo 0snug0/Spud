@@ -36,7 +36,7 @@ Name, pronouns, and model live in `spud.config.json`; `CLAUDE.md` defers to it s
 
 ### Teams and spudagents
 
-A team is every spudagent spawned for one ticket. It lives in `ledger/teams/SPUD-nnn/`, one file per member, separate from the ticket note in `ledger/tickets/`. Each spudagent has:
+A team is every spudagent spawned for one ticket, keyed `SPUD-nnn` to match ticket `SPD-nnn`. It lives in `ledger/teams/SPUD-nnn/`, one file per member, separate from the ticket note in `ledger/tickets/`. Each spudagent has:
 
 - **ID**: team-scoped lineage counter (`01`, `02`; children `01.01`). Next ID = count of files in the team folder with that parent, plus one.
 - **Name**: unique within the team, picked at random from `naming.pool` (potato cultivars) among names unused in the folder. Free to repeat on other teams. Alternative considered: Bobiverse self-naming (file named by ID, `aliases:` for links); not chosen because the parent must link the child before it returns.

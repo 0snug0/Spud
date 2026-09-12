@@ -118,6 +118,9 @@
       "P3"
     ]
   },
+  "teams": {
+    "prefix": "SPUD"
+  },
   "ledger": {
     "format": "markdown-v0",
     "tickets": "ledger/tickets",
