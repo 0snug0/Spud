@@ -78,7 +78,7 @@ Planned for no children. The config allows up to 2 alive at once and 1 level bel
 ## Sub-agents
 
 ## Ticket proposals
-- **Spud's Stop hook should also see children that never returned** — suggested P3; created as [[SPD-018]] at P3 by Spud.
+- **Spud's Stop hook should also see children that never returned** — suggested P3; created as [[SPD-018]] at P2 by Spud.
   Why: hook_stop lists only members with a final stop and no outcome, so a planned row that was never spawned, or a child still running when Spud finished its parent, is invisible to Spud's Law 9 block while it holds a fan-out and a concurrency slot for ever. SPD-015 closed exactly that blind spot one level down (alive_children in hook_subagent_stop holds a lead for a child still alive); the ticket told me to leave hook_stop as is, so Spud's own turn still ends with those rows unseen.
   Evidence: The exploration probe of 2026-09-12 (probes/lead-hold-20260912T201448 in my session scratchpad): the child ran 35 s past its lead and the -p session ended with it active, Result recorded, no outcome, never named by Spud's Stop. In bin/spud, hook_stop requires m.stopped_at IS NOT NULL; alive_children() in the same file is the query that would cover the rest, with the same once-only shape.
 
