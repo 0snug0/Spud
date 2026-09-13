@@ -216,6 +216,203 @@ class RenderConflictTest(SpudTestCase):
         self.assertEqual(names, ["SPD-001.md"])
 
 
+class StyleOnlyRewriteTest(SpudTestCase):
+    """Obsidian rewrites the frontmatter of a note it has open in its own YAML style: event 192
+    shows ledger/tickets/SPD-015.md with `title` unquoted and `tags` a block list, nothing else
+    changed.  A note that differs from a render only in how its frontmatter is written is written
+    over and named in a render event; a changed value or body, or a frontmatter the parser cannot
+    read, is the conflict it always was."""
+
+    # What Obsidian did to SPD-015's frontmatter, applied to this test's ticket.
+    OBSIDIAN = (
+        ('title: "Obsidian rewrote me"', "title: Obsidian rewrote me"),
+        ("tags: [ticket, ledger-v1]", "tags:\n  - ticket\n  - ledger-v1"),
+    )
+    TICKET = "ledger/tickets/SPD-001.md"
+    MEMBER = "ledger/teams/SPUD-001/Russet.md"
+
+    def setUp(self):
+        super().setUp()
+        self.t = self.new_ticket("Obsidian rewrote me", brief="The brief.", tag=["ledger-v1"])
+        self.new_member(self.t["key"], name="Russet")
+        self.home.json("render")
+        self.ticket_path = self.home.path / self.TICKET
+        self.member_path = self.home.path / self.MEMBER
+
+    def rewrite(self, path, *edits):
+        """Apply each (old, new), old found exactly once, and write the file; returns the text written."""
+        text = path.read_text(encoding="utf-8")
+        for old, new in edits:
+            self.assertEqual(text.count(old), 1, old)
+            text = text.replace(old, new)
+        path.write_text(text, encoding="utf-8")
+        return text
+
+    def render_events(self, flag):
+        rows = self.home.rows("SELECT body, data FROM events WHERE kind = 'render' AND json_extract(data, '$.%s') = 1 ORDER BY id" % flag)
+        return [dict(json.loads(r["data"]), body=r["body"]) for r in rows]
+
+    def blank_recorded_content(self):
+        con = self.home.connect()
+        try:
+            with con:
+                con.execute("UPDATE renders SET content = ''")
+        finally:
+            con.close()
+
+    def test_a_ticket_restyled_by_obsidian_is_rendered_over_and_named(self):
+        rendered = self.ticket_path.read_text(encoding="utf-8")
+        restyled = self.rewrite(self.ticket_path, *self.OBSIDIAN)
+        out = self.home.json("render")
+        self.assertEqual((out["written"], out["restyled"], out["conflicts"]), ([self.TICKET], [self.TICKET], []))
+        self.assertEqual(self.ticket_path.read_text(encoding="utf-8"), rendered)
+        self.assertEqual(
+            [(e["path"], e["text"], e["body"]) for e in self.render_events("style_only")],
+            [(self.TICKET, restyled, "re-rendered %s over a style-only frontmatter rewrite" % self.TICKET)],
+        )
+        summary = json.loads(self.home.scalar("SELECT data FROM events WHERE kind = 'render' ORDER BY id DESC LIMIT 1"))
+        self.assertEqual((summary["written"], summary["restyled"], summary["conflicts"]), ([self.TICKET], [self.TICKET], []))
+        self.assertEqual(self.render_events("conflict"), [])
+        again = self.home.json("render")
+        self.assertEqual((again["written"], again["restyled"], again["conflicts"]), ([], [], []))
+
+    def test_a_member_restyled_by_obsidian_is_rendered_over_and_named(self):
+        rendered = self.member_path.read_text(encoding="utf-8")
+        restyled = self.rewrite(self.member_path, ('finished: ""', "finished:"), ("tags: [spudagent]", "tags:\n  - spudagent"))
+        proc = self.home.run("render")
+        self.assertIn(": 1 written, 1 unchanged, 1 style-only rewrite re-rendered\n", proc.stdout)
+        self.assertIn("  re-rendered %s over a style-only frontmatter rewrite\n" % self.MEMBER, proc.stdout)
+        self.assertEqual(self.member_path.read_text(encoding="utf-8"), rendered)
+        self.assertEqual([(e["path"], e["text"]) for e in self.render_events("style_only")], [(self.MEMBER, restyled)])
+
+    def test_quoting_and_property_order_are_style(self):
+        # 'x' reads as "x" does and 01 as "01" does (values compare as the strings the ledger
+        # reads); the order of the properties is the render's to put back, not an edit
+        self.home.json("ticket", "edit", self.t["key"], "--title", "Eric's ticket", actor="spud")
+        self.home.json("render")
+        ticket_rendered = self.ticket_path.read_text(encoding="utf-8")
+        member_rendered = self.member_path.read_text(encoding="utf-8")
+        self.rewrite(self.ticket_path, ('title: "Eric\'s ticket"', "title: 'Eric''s ticket'"), ("priority: P2\nstatus: queued\n", "status: queued\npriority: P2\n"))
+        self.rewrite(self.member_path, ('id: "01"', "id: 01"), ('parent: "[[Spud]]"', "parent: '[[Spud]]'"), ('spawned: ""', "spawned: ''"))
+        out = self.home.json("render")
+        self.assertEqual((out["restyled"], out["conflicts"]), ([self.TICKET, self.MEMBER], []))
+        self.assertEqual(self.ticket_path.read_text(encoding="utf-8"), ticket_rendered)
+        self.assertEqual(self.member_path.read_text(encoding="utf-8"), member_rendered)
+
+    def test_a_value_edit_in_obsidian_style_is_still_a_conflict(self):
+        cases = {
+            "priority": self.OBSIDIAN + (("priority: P2", "priority: P1"),),
+            "a list item": (self.OBSIDIAN[0], ("tags: [ticket, ledger-v1]", "tags:\n  - ticket\n  - ledger-v2")),
+        }
+        for name, edits in cases.items():
+            with self.subTest(name):
+                edited = self.rewrite(self.ticket_path, *edits)
+                proc = self.home.run("--json", "render", check=False)
+                self.assertEqual(proc.returncode, EXIT_CONFLICT)
+                self.assertIn(self.TICKET, proc.stderr)
+                self.assertEqual(json.loads(proc.stdout)["conflicts"], [self.TICKET])
+                self.assertEqual(self.ticket_path.read_text(encoding="utf-8"), edited)
+                self.assertEqual(
+                    self.render_events("conflict")[-1],
+                    {"conflict": True, "path": self.TICKET, "body": "refused to overwrite hand-edited %s" % self.TICKET},
+                )
+                self.home.json("render", "--discard", self.ticket_path, actor="spud")
+        self.assertEqual(self.render_events("style_only"), [])
+        self.assertEqual(self.home.json("ticket", "show", self.t["key"])["ticket"]["priority"], "P2")
+
+    def test_a_body_edit_under_a_restyled_frontmatter_is_still_a_conflict(self):
+        cases = {
+            "the brief": ("The brief.", "The brief, edited in Obsidian."),
+            "one more blank line at the end": ("## Outcome\n", "## Outcome\n\n"),
+        }
+        for name, edit in cases.items():
+            with self.subTest(name):
+                edited = self.rewrite(self.ticket_path, *self.OBSIDIAN, edit)
+                proc = self.home.run("render", check=False)
+                self.assertEqual(proc.returncode, EXIT_CONFLICT)
+                self.assertEqual(self.ticket_path.read_text(encoding="utf-8"), edited)
+                self.home.json("render", "--discard", self.ticket_path, actor="spud")
+        self.assertEqual(self.render_events("style_only"), [])
+
+    def test_an_unreadable_frontmatter_is_a_conflict_not_a_traceback(self):
+        rendered = self.ticket_path.read_bytes()
+        title = b'title: "Obsidian rewrote me"'
+        marker = MARKER.encode("utf-8")
+        shapes = {
+            "a folded title": rendered.replace(title, b"title: >-\n  Obsidian rewrote me"),
+            "an unterminated quote": rendered.replace(title, b'title: "Obsidian rewrote me'),
+            "a repeated property hiding an edit": rendered.replace(b"priority: P2\n", b"priority: P1\npriority: P2\n"),
+            "no closing ---": rendered.replace(b"---\n" + marker, marker),
+            "bytes that are not UTF-8": rendered.replace(title, b'title: "Obsidian rewrote \xff"'),
+        }
+        for name, data in shapes.items():
+            with self.subTest(name):
+                self.assertNotEqual(data, rendered)
+                self.ticket_path.write_bytes(data)
+                proc = self.home.run("render", check=False)
+                self.assertEqual(proc.returncode, EXIT_CONFLICT, proc.stderr)
+                self.assertNotIn("Traceback", proc.stderr)
+                self.assertEqual(self.ticket_path.read_bytes(), data)
+                self.assertIn("unreadable", self.render_events("conflict")[-1])
+        self.assertEqual(self.render_events("style_only"), [])
+
+    def test_import_file_accepts_a_restyled_note_with_only_its_real_change(self):
+        self.rewrite(self.ticket_path, *self.OBSIDIAN, ("priority: P2", "priority: P1"))
+        out = self.home.json("import", "--file", self.ticket_path, actor="spud")
+        self.assertEqual(out["changed"], ["priority"])
+        shown = self.home.json("ticket", "show", self.t["key"])["ticket"]
+        self.assertEqual((shown["priority"], shown["title"], shown["tags"]), ("P1", "Obsidian rewrote me", ["ticket", "ledger-v1"]))
+        events = self.home.json("events", "--ticket", self.t["key"], "--kind", "ticket.priority")["events"]
+        self.assertEqual([e["data"] for e in events], [{"from": "P2", "to": "P1"}])
+        # the next render puts the ledger's own style back, with the accepted priority
+        again = self.home.json("render")
+        self.assertEqual((again["written"], again["restyled"], again["conflicts"]), ([self.TICKET], [], []))
+        text = self.ticket_path.read_text(encoding="utf-8")
+        for line in ('title: "Obsidian rewrote me"', "priority: P1", "tags: [ticket, ledger-v1]"):
+            self.assertIn(line, text)
+        # a member note too: its tags as a block list and a bare stamp are no edit of the tags or the stamp
+        self.rewrite(self.member_path, ('finished: ""', "finished:"), ("tags: [spudagent]", "tags:\n  - spudagent"), ("## Outcome\n", "## Outcome\nAccepted in Obsidian.\n"))
+        out = self.home.json("import", "--file", self.member_path, actor="spud")
+        self.assertEqual(out["changed"], ["outcome"])
+
+    def test_a_restyled_note_takes_the_changes_the_cli_made_since(self):
+        # compared with the last render, not the new one: Spud's edit after Obsidian's rewrite lands
+        restyled = self.rewrite(self.ticket_path, *self.OBSIDIAN)
+        self.home.json("ticket", "edit", self.t["key"], "--priority", "P0", actor="spud")
+        out = self.home.json("render")
+        self.assertEqual((out["restyled"], out["conflicts"]), ([self.TICKET], []))
+        text = self.ticket_path.read_text(encoding="utf-8")
+        self.assertIn("priority: P0", text)
+        self.assertIn('title: "Obsidian rewrote me"', text)
+        self.assertEqual([e["text"] for e in self.render_events("style_only")], [restyled])
+
+    def test_without_the_last_render_the_new_render_is_the_baseline(self):
+        # a renders row written before the content column existed carries ''
+        rendered = self.ticket_path.read_text(encoding="utf-8")
+        self.blank_recorded_content()
+        self.rewrite(self.ticket_path, *self.OBSIDIAN)
+        out = self.home.json("render")
+        self.assertEqual((out["restyled"], out["conflicts"]), ([self.TICKET], []))
+        self.assertEqual(self.ticket_path.read_text(encoding="utf-8"), rendered)
+        # with a CLI change since, the new render is no match and there is no last one: a conflict
+        self.blank_recorded_content()
+        edited = self.rewrite(self.ticket_path, *self.OBSIDIAN)
+        self.home.json("ticket", "edit", self.t["key"], "--priority", "P0", actor="spud")
+        proc = self.home.run("render", check=False)
+        self.assertEqual(proc.returncode, EXIT_CONFLICT)
+        self.assertEqual(self.ticket_path.read_text(encoding="utf-8"), edited)
+
+    def test_a_report_keeps_the_byte_check(self):
+        # a report has no frontmatter to restyle: any change is the conflict, with today's event
+        self.home.json("report", "add", "First", "--next", "a", actor="spud")
+        day = [p for p in self.home.json("render")["written"] if p.startswith("reports/")][0]
+        edited = self.rewrite(self.home.path / day, ("- Next: a", "- Next: b"))
+        proc = self.home.run("render", check=False)
+        self.assertEqual(proc.returncode, EXIT_CONFLICT)
+        self.assertEqual((self.home.path / day).read_text(encoding="utf-8"), edited)
+        self.assertEqual(self.render_events("conflict"), [{"conflict": True, "path": day, "body": "refused to overwrite hand-edited %s" % day}])
+
+
 class HandEditAllowlistTest(SpudTestCase):
     """import --file accepts only what Spud allowed: ticket priority, tags, title,
     status through the state machine, the column prose sections (ticket Brief,

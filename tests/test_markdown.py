@@ -62,6 +62,73 @@ class FrontmatterTest(unittest.TestCase):
         self.assertEqual(parsed["title"], 'He said "no"')
         self.assertEqual(parsed["tags"], ["spudagent", "contractor"])
 
+    def test_block_lists_read_like_flow_lists_at_any_indent(self):
+        fm = spud.parse_frontmatter(
+            [
+                "tags:",
+                "  - ticket",
+                "  - ledger-v1",
+                "aliases:",
+                "- one",
+                '- "two, quoted"',
+                "",
+                "- 'three'",
+                "cssclasses: [wide, dark]",
+            ]
+        )
+        self.assertEqual(fm, {"tags": ["ticket", "ledger-v1"], "aliases": ["one", "two, quoted", "three"], "cssclasses": ["wide", "dark"]})
+
+    def test_an_empty_value_and_both_empty_quotes_read_the_same(self):
+        fm = spud.parse_frontmatter(["spawned:", 'finished: ""', "proposed_by: ''", 'id: "01"', "lineage: 01"])
+        self.assertEqual((fm["spawned"], fm["finished"], fm["proposed_by"]), ("", "", ""))
+        self.assertEqual(fm["id"], fm["lineage"])
+
+    def test_obsidians_rewrite_of_spd_015_reads_as_the_render(self):
+        # Event 192: the frontmatter Obsidian wrote over ledger/tickets/SPD-015.md, and the one
+        # render_ticket had written there.
+        obsidian = [
+            "id: SPD-015",
+            "title: Hold a lead that returns with its own children unrecorded",
+            "priority: P2",
+            "status: active",
+            "origin: proposal",
+            'proposed_by: "[[SPUD-008/Desiree]]"',
+            'lead: "[[SPUD-015/Pompadour]]"',
+            "created: 2026-09-12",
+            "tags:",
+            "  - ticket",
+            "  - ledger-v1",
+        ]
+        rendered = [
+            "id: SPD-015",
+            'title: "Hold a lead that returns with its own children unrecorded"',
+            "priority: P2",
+            "status: active",
+            "origin: proposal",
+            'proposed_by: "[[SPUD-008/Desiree]]"',
+            'lead: "[[SPUD-015/Pompadour]]"',
+            "created: 2026-09-12",
+            "tags: [ticket, ledger-v1]",
+        ]
+        self.assertEqual(spud.parse_frontmatter(obsidian), spud.parse_frontmatter(rendered))
+
+    def test_refuses_what_it_cannot_read(self):
+        cases = {
+            "a folded value": ["title: >-", "  Hold a lead"],
+            "a continuation line": ["title: Hold a lead", "  that returns"],
+            "an indented property": ["title: T", "  priority: P2"],
+            "an item with no property above it": ["title: T", "- ticket"],
+            "items at two indents": ["tags:", "  - ticket", "- ledger-v1"],
+            "a list inside a list": ["tags:", "  - [ticket, toy]"],
+            "a repeated property": ["priority: P1", "priority: P2"],
+            "an unterminated quote": ['title: "Hold a lead'],
+            "a line without a colon": ["title"],
+        }
+        for name, lines in cases.items():
+            with self.subTest(name):
+                with self.assertRaises(spud.SpudError):
+                    spud.parse_frontmatter(lines)
+
 
 class DocumentTest(unittest.TestCase):
     def test_split_document_keeps_section_order_and_ignores_fenced_headings(self):

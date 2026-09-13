@@ -590,16 +590,42 @@ def yaml_scalar(value):
     return value
 
 
+LIST_ITEM = re.compile(r"(\s*)-(?:\s+(.*))?")
+
+
 def parse_frontmatter(lines):
-    """The YAML subset the ledger uses: `key: value`, quoted strings, [a, b] lists."""
+    """The YAML subset the ledger reads: `key: value` where the value is plain, "double-" or
+    'single-quoted', or a [flow, list]; and a block list, `key:` with no value followed by `- item`
+    lines at one indent (none included), the way Obsidian writes lists.  An empty value, "" and ''
+    read the same, and every value is the string the ledger stores (01 reads as "01").  Anything
+    else is refused rather than guessed at: an indented line that is not an item of the list above
+    it (a folded or continued value), a list inside a list, a property given twice."""
     out = {}
+    open_key, indent = None, None  # the key a block list may follow, and the indent of its items
     for line in lines:
         if not line.strip() or line.lstrip().startswith("#"):
             continue
+        item = LIST_ITEM.fullmatch(line)
+        if item:
+            if open_key is None:
+                raise SpudError(EXIT_ERROR, "frontmatter list item under no `key:` of its own: %r" % line)
+            if indent is None:
+                indent, out[open_key] = item.group(1), []
+            elif item.group(1) != indent:
+                raise SpudError(EXIT_ERROR, "frontmatter list item at another indent than the items above it: %r" % line)
+            value = yaml_scalar(item.group(2) or "")
+            if isinstance(value, list):
+                raise SpudError(EXIT_ERROR, "frontmatter list inside a list: %r" % line)
+            out[open_key].append(value)
+            continue
         key, sep, value = line.partition(":")
-        if not sep or not key.strip() or key.startswith(" "):
+        if not sep or not key.strip() or key[0].isspace():
             raise SpudError(EXIT_ERROR, "frontmatter line is not `key: value`: %r" % line)
-        out[key.strip()] = yaml_scalar(value)
+        key = key.strip()
+        if key in out:
+            raise SpudError(EXIT_ERROR, "frontmatter property %r is given twice" % key)
+        out[key] = yaml_scalar(value)
+        open_key, indent = (key, None) if not value.strip() else (None, None)
     return out
 
 
@@ -649,9 +675,8 @@ def strip_trailing_blank(lines):
     return "\n".join(lines)
 
 
-def split_document(text):
-    """A ledger note: frontmatter, the H1 tail, and (name, body) sections in order.
-    `## ` headings inside fenced code are not sections."""
+def frontmatter_block(text):
+    """A note at its frontmatter: (the lines between the --- delimiters, every byte after the closing one)."""
     lines = text.split("\n")
     if not lines or lines[0] != "---":
         raise SpudError(EXIT_ERROR, "no frontmatter block at byte 0")
@@ -659,8 +684,41 @@ def split_document(text):
         end = lines.index("---", 1)
     except ValueError:
         raise SpudError(EXIT_ERROR, "unterminated frontmatter")
-    fm = parse_frontmatter(lines[1:end])
-    rest = lines[end + 1 :]
+    return lines[1:end], "\n".join(lines[end + 1 :])
+
+
+def restyled_render(raw, renders):
+    """Whether a note on disk that matches none of `renders` byte for byte is one of them with only
+    its frontmatter written in another YAML style, the way Obsidian rewrites a note it has open:
+    the same properties with the same values, in any order (the render puts the order back and
+    loses nothing) and any style parse_frontmatter reads, and the same bytes after the closing ---.
+    Returns (True, None); (False, None) when a value or the body differs; (False, why) when the
+    note cannot be read.  An empty render (a renders row from before the content column) is skipped."""
+    try:
+        lines, body = frontmatter_block(raw.decode("utf-8"))
+        note = (parse_frontmatter(lines), body)
+    except UnicodeDecodeError as e:
+        return False, str(e)
+    except SpudError as e:
+        return False, e.message
+    for content in renders:
+        if not content:
+            continue
+        try:
+            lines, body = frontmatter_block(content)
+            if (parse_frontmatter(lines), body) == note:
+                return True, None
+        except SpudError:
+            continue
+    return False, None
+
+
+def split_document(text):
+    """A ledger note: frontmatter, the H1 tail, and (name, body) sections in order.
+    `## ` headings inside fenced code are not sections."""
+    fm_lines, body = frontmatter_block(text)
+    fm = parse_frontmatter(fm_lines)
+    rest = body.split("\n")
     i = 0
     while i < len(rest) and (not rest[i].strip() or rest[i].strip() == MARKER):
         i += 1
@@ -2216,16 +2274,30 @@ def cmd_render(ctx, args):
                 write_event(con, at, actor.label, "render", "discarded the hand edit of %s" % rel, data={"discarded": True, "path": rel, "text": old_text})
         records = {r["path"]: r["sha256"] for r in con.execute("SELECT path, sha256 FROM renders").fetchall()} if not args.out else {}
         to_record = []
+        restyled, unreadable = [], {}  # [(path, the text the render went over)], {path: why it could not be read}
         for rel, content in targets:
             path = out_root / rel
             data = content.encode("utf-8")
             new_hash = sha256_bytes(data)
-            on_disk = sha256_bytes(path.read_bytes()) if path.is_file() else None
+            raw = path.read_bytes() if path.is_file() else None
+            on_disk = sha256_bytes(raw) if raw is not None else None
             if not args.out:
                 recorded = records.get(rel)
                 if recorded is not None and on_disk is not None and on_disk not in (recorded, new_hash):
-                    conflicts.append(rel)
-                    continue
+                    # Neither the last render nor the new one, byte for byte.  A note may still be one
+                    # of them with its frontmatter restyled (Obsidian rewrites the YAML of the notes it
+                    # has open): that is no hand edit, so the render goes over it and the event keeps
+                    # what it replaced.  A report has no frontmatter: any change to it is the conflict.
+                    style_only, why = False, None
+                    if content.startswith("---\n"):
+                        last = con.execute("SELECT content FROM renders WHERE path = ?", (rel,)).fetchone()["content"]
+                        style_only, why = restyled_render(raw, (last, content))
+                    if not style_only:
+                        conflicts.append(rel)
+                        if why:
+                            unreadable[rel] = why
+                        continue
+                    restyled.append((rel, raw.decode("utf-8")))
                 if on_disk == new_hash:
                     unchanged.append(rel)
                     if recorded != new_hash:
@@ -2251,15 +2323,28 @@ def cmd_render(ctx, args):
                         " rendered_at = excluded.rendered_at, through_event_id = excluded.through_event_id",
                         (rel, new_hash, content, at, through),
                     )
+                for rel, text in restyled:
+                    write_event(con, at, "spud", "render", "re-rendered %s over a style-only frontmatter rewrite" % rel,
+                                data={"style_only": True, "path": rel, "text": text})
                 for rel in conflicts:
-                    write_event(con, at, "spud", "render", "refused to overwrite hand-edited %s" % rel, data={"conflict": True, "path": rel})
+                    conflict = {"conflict": True, "path": rel}
+                    if rel in unreadable:
+                        conflict["unreadable"] = unreadable[rel]
+                    write_event(con, at, "spud", "render", "refused to overwrite hand-edited %s" % rel, data=conflict)
                 write_event(con, at, "spud", "render", "rendered %d files, %d unchanged, %d conflicts" % (len(written), len(unchanged), len(conflicts)),
-                            data={"written": written, "unchanged": len(unchanged), "conflicts": conflicts, "through_event_id": through})
+                            data={"written": written, "unchanged": len(unchanged), "conflicts": conflicts,
+                                  "restyled": [rel for rel, _ in restyled], "through_event_id": through})
     finally:
         con.close()
-    data = {"out": str(out_root), "written": written, "unchanged": unchanged, "conflicts": conflicts, "discarded": discarded}
-    lines = ["rendered into %s: %d written, %d unchanged%s" % (out_root, len(written), len(unchanged), (", %d hand edit discarded" % len(discarded)) if discarded else "")]
+    data = {"out": str(out_root), "written": written, "unchanged": unchanged, "conflicts": conflicts, "discarded": discarded,
+            "restyled": [rel for rel, _ in restyled]}
+    lines = ["rendered into %s: %d written, %d unchanged%s%s" % (
+        out_root, len(written), len(unchanged),
+        (", %d hand edit discarded" % len(discarded)) if discarded else "",
+        (", %d style-only rewrite re-rendered" % len(restyled)) if restyled else "",
+    )]
     lines += ["  discarded the hand edit of %s" % rel for rel in discarded]
+    lines += ["  re-rendered %s over a style-only frontmatter rewrite" % rel for rel, _ in restyled]
     lines += ["  wrote %s" % rel for rel in written]
     if conflicts:
         raise SpudError(
@@ -4331,7 +4416,7 @@ def build_parser():
     p.add_argument("--file", help="accept a hand edit of this rendered file: title, priority, tags, status through the state machine, Brief/Size/Outcome; a member's Brief, Outcome and status; an appended report entry")
     p.set_defaults(func=cmd_import)
 
-    p = sub.add_parser("render", help="regenerate ledger/ and reports/ from the database")
+    p = sub.add_parser("render", help="regenerate ledger/ and reports/ from the database; a hand-edited file is left alone (exit 6), a note whose frontmatter only changed YAML style (Obsidian's rewrite) is rendered over and kept in the event")
     p.add_argument("--out", help="render into this directory instead of SPUD_HOME (no hash checks)")
     p.add_argument("--discard", metavar="PATH", help="overwrite this hand-edited file with the current render, keeping the discarded text in the event (Spud only)")
     p.set_defaults(func=cmd_render)
