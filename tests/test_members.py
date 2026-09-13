@@ -106,7 +106,7 @@ class MemberBasicsTest(SpudTestCase):
         self.assertEqual(proc.returncode, EXIT_ERROR)
         proc = self.home.run("member", "log", "hello", actor="0123456789abcdef0", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
-        self.assertIn("SPD-008", proc.stderr)
+        self.assertIn("not bound", proc.stderr)
 
     def test_card_and_fleet(self):
         t = self.new_ticket("Card", status="active")
