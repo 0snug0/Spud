@@ -1288,9 +1288,10 @@ def run_cell(m, ticket_created):
 
 def token_counts(usage_json):
     """{out, in, cached} from a run's transcript sum: output_tokens; input_tokens plus
-    cache_creation_input_tokens; cache_read_input_tokens (a missing key counts 0).  None for any other
-    source (a foreground completion covers only its final request), a figure that is not a
-    non-negative integer, or JSON of another shape."""
+    cache_creation_input_tokens; cache_read_input_tokens (a missing key counts 0).  The completion kept
+    beside the sum under "completion" is never read: its figures cover only its final request
+    (SPD-021).  None for any other source (a completion alone), a figure that is not a non-negative
+    integer, or JSON of another shape."""
     if not usage_json:
         return None
     try:
@@ -4330,15 +4331,68 @@ def as_int(value):
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
+# A member's run totals (SPD-021).  A foreground spawn fires SubagentStop and then PostToolUse(Agent,
+# completed) (spike, Enforcement plan, fact 8); a background spawn's PostToolUse comes at launch with no
+# usage fields, so only its SubagentStop records the run.
+# total_tokens and the usage key token_counts reads come only from a transcript sum: the completion's
+# totalTokens and usage cover its final API request only (hooks reference, Agent tool telemetry).
+# What the completion reports is kept under "completion" in usage_json, beside the sum or alone.  Its
+# totalDurationMs and totalToolUseCount, which the reference defines over the whole run (the run's
+# wall-clock duration, the count of tool calls the subagent made), win over the transcript's
+# first-to-last timestamps and tool_use blocks.  Both hooks merge through run_totals, so either order
+# ends in the same row.
+COMPLETION_KEYS = ("status", "usage", "totalTokens", "totalDurationMs", "totalToolUseCount", "toolStats", "modelsUsed")
+
+
+def usage_parts(usage_json):
+    """A stored usage_json taken apart: (the transcript sum without its completion when the source is
+    transcript, else None; the completion kept beside the sum or alone, else None)."""
+    try:
+        usage = json.loads(usage_json) if usage_json else None
+    except ValueError:
+        return None, None
+    if not isinstance(usage, dict):
+        return None, None
+    completion = usage.get("completion") if isinstance(usage.get("completion"), dict) else None
+    if usage.get("source") != "transcript":
+        return None, completion
+    return {k: v for k, v in usage.items() if k != "completion"}, completion
+
+
+def run_totals(member, summed=None, completion=None):
+    """The usage columns once a new transcript sum (transcript_usage's result) or a new completion is
+    merged with what the member row holds; the stored sum and the stored completion stay unless a new
+    one is given.  total_tokens is the sum's or NULL; duration_ms and tool_uses are the completion's
+    whole-run figures when it has them, else the sum's."""
+    stored_sum, stored_completion = usage_parts(member["usage_json"])
+    if completion is None:
+        completion = stored_completion
+    if summed is not None:
+        tokens, duration, tools, usage = summed["total_tokens"], summed["duration_ms"], summed["tool_uses"], dict(summed["usage_json"])
+    elif stored_sum is not None:
+        tokens, duration, tools, usage = member["total_tokens"], member["duration_ms"], member["tool_uses"], stored_sum
+    else:
+        tokens, duration, tools, usage = None, None, None, {"source": "PostToolUse"}
+    if completion is not None:
+        if as_int(completion.get("totalDurationMs")) is not None:
+            duration = as_int(completion["totalDurationMs"])
+        if as_int(completion.get("totalToolUseCount")) is not None:
+            tools = as_int(completion["totalToolUseCount"])
+        usage["completion"] = completion
+    return {"total_tokens": tokens, "duration_ms": duration, "tool_uses": tools, "usage_json": json.dumps(usage)}
+
+
 def record_completion(con, member, resp):
+    """A completed foreground Agent call: the child's final text into return_text, and what the
+    completion reports merged into the run totals (run_totals)."""
     content = resp.get("content")
     text = None
     if isinstance(content, list):
         text = "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
-    usage = {"source": "PostToolUse", "status": resp.get("status"), "usage": resp.get("usage"), "toolStats": resp.get("toolStats"), "modelsUsed": resp.get("modelsUsed")}
+    totals = run_totals(member, completion={key: resp[key] for key in COMPLETION_KEYS if key in resp})
     con.execute(
         "UPDATE members SET return_text = COALESCE(?, return_text), total_tokens = ?, duration_ms = ?, tool_uses = ?, usage_json = ? WHERE id = ?",
-        (text if text else None, as_int(resp.get("totalTokens")), as_int(resp.get("totalDurationMs")), as_int(resp.get("totalToolUseCount")), json.dumps(usage), member["id"]),
+        (text if text else None, totals["total_tokens"], totals["duration_ms"], totals["tool_uses"], totals["usage_json"], member["id"]),
     )
 
 
@@ -4415,8 +4469,11 @@ def parse_timestamp(value):
 
 
 def transcript_usage(path):
-    """Sum the per-message usage of a subagent transcript (the background case, where no
-    completion totals reach a hook).  None when the file has no assistant usage."""
+    """Sum the usage of every assistant entry in a subagent transcript: a member's tokens whatever the
+    spawn shape, since a foreground completion's totals cover only its final request (run_totals keeps
+    both, SPD-021).  None when the file has no assistant usage.  Proposal 17: the harness writes one
+    entry per content block, each repeating its request's usage, so this sum counts a request once per
+    block."""
     totals = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
     messages = tool_uses = 0
     first = last = None
@@ -4613,10 +4670,11 @@ def hook_subagent_stop(ctx, payload):
             if transcript:
                 updates["transcript_path"] = transcript
             summed = None
-            if member["total_tokens"] is None and transcript and os.path.isfile(transcript):
+            if usage_parts(member["usage_json"])[0] is None and transcript and os.path.isfile(transcript):
+                # a stored transcript sum stays; a completion recorded before this stop stays beside the new sum (SPD-021)
                 summed = transcript_usage(transcript)
                 if summed:
-                    updates.update({"total_tokens": summed["total_tokens"], "duration_ms": summed["duration_ms"], "tool_uses": summed["tool_uses"], "usage_json": json.dumps(summed["usage_json"])})
+                    updates.update(run_totals(member, summed=summed))
             con.execute("UPDATE members SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), member["id"]))
             suffix = "" if recorded else " (returned unrecorded)"
             if returned_refs:
