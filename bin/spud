@@ -78,9 +78,9 @@ TICKET_COLUMN_SECTIONS = {"Brief": "brief", "Size, persona and model decision": 
 MEMBER_COLUMN_SECTIONS = {"Brief": "brief", "Result": "result", "Blocked": "blocked", "Outcome": "outcome"}
 # Derived sections render from rows; imported prose (when the rows cannot regenerate
 # it) renders first, followed by the rows added after the prose was stored.  The
-# watermark is the id in the section's backing table.
+# watermark is the id in the section's backing table.  A ticket's ## Team is not one of
+# them: it is generated from members alone and its prose is never stored (SPD-010).
 SECTION_TABLES = {
-    "Team": "members",
     "Handoffs": "handoffs",
     "Proposals received": "proposal_decisions",
     "Log": "events",
@@ -1219,9 +1219,320 @@ def join_prose(prose, rows_text):
     return "\n".join(parts)
 
 
-def render_team_rows(con, ticket, after=0):
-    rows = con.execute("SELECT * FROM members WHERE ticket_id = ? AND id > ? ORDER BY lineage", (ticket["id"], after)).fetchall()
-    return "\n".join("  " * (m["depth"] - 1) + team_line(ticket["team_key"], m) for m in rows)
+# The Team card (SPD-010; docs/design/2026-09-12-team-card.md, sections 1 to 4 and 6.3).  A ticket
+# note's ## Team is generated from `members` alone: a table of who ran as what, on which model and
+# how it went; the member tree, each line carrying what that member worked on and built; and the
+# embedded Fleet.base Team view.  The spec's reference implementation is the contract.
+
+TEAM_TABLE_HEAD = ("| Member | ID | Persona | Model | Status | Run | Tokens | Tools |", "|---|---|---|---|---|---|---|---|")
+TEAM_VIEW_EMBED = "![[Fleet.base#Team]]"
+NOT_RECORDED = "—"  # alone in a cell: planned and imported rows, runs without usage
+WORKED_ON_CAP = 400  # characters (code points), markdown included
+
+
+def humanize(n):
+    """A token count in integer arithmetic: 999, 4.4k, 161k, 2.9M, 44.3M, 1.2B."""
+    if n < 1000:
+        return str(n)
+    tenths = (n * 10 + 500) // 1000
+    if tenths < 100:
+        return "%d.%dk" % (tenths // 10, tenths % 10)
+    k = (n + 500) // 1000
+    if k < 1000:
+        return "%dk" % k
+    tenths = (n * 10 + 500_000) // 1_000_000
+    if tenths < 10_000:
+        return "%d.%dM" % (tenths // 10, tenths % 10)
+    tenths = (n * 10 + 500_000_000) // 1_000_000_000
+    return "%d.%dB" % (tenths // 10, tenths % 10)
+
+
+def run_duration(ms):
+    """duration_ms to the nearest minute: <1 min, N min, H h, H h M min; None when not recorded."""
+    if ms is None:
+        return None
+    minutes = (ms + 30_000) // 60_000
+    if minutes == 0:
+        return "<1 min"
+    if minutes < 60:
+        return "%d min" % minutes
+    hours, minutes = divmod(minutes, 60)
+    return "%d h" % hours if minutes == 0 else "%d h %d min" % (hours, minutes)
+
+
+def known_stamp(stamp):
+    """The stamp, or None when it is NULL, empty, has no time, or is an imported minute-only stamp at
+    00:00 (SPD-001's placeholder for a spawn that never ran; the hooks write seconds and an offset)."""
+    if not stamp or len(stamp) < 16 or (len(stamp) == 16 and stamp.endswith("T00:00")):
+        return None
+    return stamp
+
+
+def run_cell(m, ticket_created):
+    """The member's own run, from spawn to return (stopped_at, else finished_at: the verdict adds the
+    parent's review time), in the clock it was written in; the start is dated when its day is not the
+    ticket's, the end when its day is not the start's; then the measured duration."""
+    start = known_stamp(m["spawned_at"])
+    if start is None:
+        return NOT_RECORDED
+    text = start[11:16] if start[:10] == ticket_created[:10] else start[:10] + " " + start[11:16]
+    text += " →"
+    end = known_stamp(m["stopped_at"]) or known_stamp(m["finished_at"])
+    if end:
+        text += " " + (end[11:16] if end[:10] == start[:10] else end[:10] + " " + end[11:16])
+    duration = run_duration(m["duration_ms"])
+    if duration:
+        text += " · " + duration
+    return text
+
+
+def token_counts(usage_json):
+    """{out, in, cached} from a run's transcript sum: output_tokens; input_tokens plus
+    cache_creation_input_tokens; cache_read_input_tokens (a missing key counts 0).  None for any other
+    source (a foreground completion covers only its final request), a figure that is not a
+    non-negative integer, or JSON of another shape."""
+    if not usage_json:
+        return None
+    try:
+        usage = json.loads(usage_json)
+    except ValueError:
+        return None
+    if not isinstance(usage, dict) or usage.get("source") != "transcript" or not isinstance(usage.get("usage"), dict):
+        return None
+    figures = {}
+    for key in ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"):
+        value = usage["usage"].get(key, 0)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        figures[key] = value
+    return {"out": figures["output_tokens"], "in": figures["input_tokens"] + figures["cache_creation_input_tokens"],
+            "cached": figures["cache_read_input_tokens"]}
+
+
+def card_cell(text):
+    """A table cell built from data: a pipe would split the row."""
+    return str(text).replace("|", "\\|")
+
+
+def team_table_row(team_key, ticket_created, m):
+    marker = ("↳" * (m["depth"] - 1) + " ") if m["depth"] > 1 else ""
+    counts = token_counts(m["usage_json"])
+    cells = [
+        "%s[[%s/%s\\|%s]]" % (marker, team_key, m["name"], m["name"]),
+        m["lineage"],
+        card_cell(persona_label(m)),
+        card_cell(m["model"] + (" (%s)" % m["resolved_model"] if m["resolved_model"] else "")),
+        "**%s**" % m["status"] if m["status"] in ("blocked", "failed") else m["status"],
+        run_cell(m, ticket_created),
+        "%s out · %s in · %s cached" % (humanize(counts["out"]), humanize(counts["in"]), humanize(counts["cached"])) if counts else NOT_RECORDED,
+        str(m["tool_uses"]) if m["tool_uses"] is not None else NOT_RECORDED,
+    ]
+    return "| " + " | ".join(cells) + " |"
+
+
+def team_order(rows, lead_id):
+    """Lineage order, which sorts as a tree; the lead's subtree first when the lead is not 01."""
+    rows = sorted(rows, key=lambda m: m["lineage"])
+    lead = next((m for m in rows if m["id"] == lead_id), None)
+    if lead is None:
+        return rows
+    root = lead["lineage"].split(".")[0]
+    return [m for m in rows if m["lineage"].split(".")[0] == root] + [m for m in rows if m["lineage"].split(".")[0] != root]
+
+
+def usage_pairs(m):
+    """A member note's usage keys, each only when known: after finished, before tags."""
+    pairs = []
+    if m["duration_ms"] is not None:
+        pairs.append(("duration_ms", ("plain", m["duration_ms"])))
+    if m["tool_uses"] is not None:
+        pairs.append(("tool_uses", ("plain", m["tool_uses"])))
+    counts = token_counts(m["usage_json"])
+    if counts:
+        pairs += [("tokens_out", ("plain", counts["out"])), ("tokens_in", ("plain", counts["in"])), ("tokens_cached", ("plain", counts["cached"]))]
+    return pairs
+
+
+# Worked on / built (section 3): the first of summary, result and return_text whose text holds a
+# paragraph that reads as work, flattened to one line and cut on whole sentences.
+MD_COMMENT = re.compile(r"<!--.*?-->", re.S)
+MD_FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})")
+MD_HEADING = re.compile(r"^ {0,3}#{1,6}(\s|$)")
+MD_RULE = re.compile(r"^ {0,3}([-*_])( *\1){2,} *$")
+MD_SETEXT = re.compile(r"^ {0,3}(=+|-+) *$")
+MD_ITEM = re.compile(r"^ {0,3}([-+*]|\d{1,9}[.)])(\s|$)")
+MD_QUOTE = re.compile(r"^ {0,3}>")
+MD_TABLE = re.compile(r"^ {0,3}\|")
+MD_CODE = re.compile(r"`[^`]*`")
+MD_WIKILINK = re.compile(r"\[\[[^\]]*\]\]")
+MD_LINK = re.compile(r"\[[^\]]*\]\([^)]*\)")
+STOP_LABELS = ("verified", "verification", "tests", "test observations", "left", "next", "status", "handoff", "handoffs",
+               "team", "decisions", "open question", "open questions", "proposal", "proposals", "prose for spud",
+               "method note", "sources", "evidence", "note", "notes")
+BOLD_LABEL = re.compile(r"^(\*\*|__)(?P<label>[^*_]{1,60}?)(?P<p1>[.:])?\1(?P<p2>[.:])?(?:\s*\((?P<paren>[^()]*)\)(?P<p3>[.:]))?\s+")
+PLAIN_LABEL = re.compile(r"^(?P<label>[A-Z][A-Za-z]*(?: [A-Za-z]+){0,4}):\s+")
+STATUS_START = re.compile(r"(done|accepted|complete|completed|finished|ready|nothing (further|left|else|to do)"
+                          r"|no (proposals|open questions|blockers|changes)|all (done|green)|result recorded)\b")
+WHERE_START = re.compile(r"((produced|built|changed|written|delivered|committed|pushed)\s+)?(on|in)\s+(the\s+)?(worktree|branch)\b")
+HANDLE_START = re.compile(r"spud-\d+/\S+ \(\d+(\.\d+)*, ")
+
+
+def markdown_blocks(text):
+    """[(kind, lines)] over a CommonMark-shaped subset; a blank line ends any block."""
+    lines = text.split("\n")
+    out, i = [], 0
+    while i < len(lines):
+        line = lines[i]
+        if not line.strip():
+            i += 1
+            continue
+        fence = MD_FENCE.match(line)
+        if fence:
+            close = re.compile(r"^ {0,3}%s{%d,} *$" % (re.escape(fence.group(1)[0]), len(fence.group(1))))
+            j = i + 1
+            while j < len(lines) and not close.match(lines[j]):
+                j += 1
+            out.append(("fence", lines[i : j + 1]))
+            i = j + 1
+            continue
+        if MD_HEADING.match(line):
+            out.append(("heading", [line]))
+            i += 1
+            continue
+        if MD_RULE.match(line):  # before list items: `* * *` is a rule
+            out.append(("rule", [line]))
+            i += 1
+            continue
+        for kind, rx in (("list", MD_ITEM), ("quote", MD_QUOTE), ("table", MD_TABLE)):
+            if rx.match(line):
+                j = i + 1
+                while j < len(lines) and lines[j].strip() and (kind == "list" or rx.match(lines[j])):
+                    j += 1
+                out.append((kind, lines[i:j]))
+                i = j
+                break
+        else:
+            j, kind = i + 1, "paragraph"
+            while j < len(lines):
+                following = lines[j]
+                if not following.strip() or MD_FENCE.match(following) or MD_HEADING.match(following) or MD_QUOTE.match(following) or MD_TABLE.match(following):
+                    break
+                if MD_SETEXT.match(following):
+                    kind, j = "heading", j + 1
+                    break
+                if MD_RULE.match(following) or MD_ITEM.match(following):
+                    break
+                j += 1
+            out.append((kind, lines[i:j]))
+            i = j
+    return out
+
+
+def paragraph_label(text):
+    """(label, the rest) when a paragraph opens with a label, else (None, text).  Bold: up to 60
+    characters and 1 to 6 words, a label only when `.` or `:` ends it (inside the markers, after them,
+    or after a parenthetical); otherwise it is emphasis.  Plain: a capitalised word, up to four more, a colon."""
+    m = BOLD_LABEL.match(text)
+    if m and 1 <= len(m.group("label").split()) <= 6 and (m.group("p1") or m.group("p2") or m.group("p3")):
+        return m.group("label").strip().rstrip(".:").strip(), text[m.end():]
+    m = PLAIN_LABEL.match(text)
+    if m:
+        return m.group("label"), text[m.end():]
+    return None, text
+
+
+def is_stop_label(label):
+    low = label.lower()
+    return any(low == stop or low.startswith(stop + " ") for stop in STOP_LABELS)
+
+
+def is_status_line(text):
+    """A paragraph that says how the work went or where it sits, opens with a member handle, introduces
+    a list, or has fewer than three words of prose outside code spans and links."""
+    test = text.replace("`", "").replace("*", "").strip().lower()
+    if STATUS_START.match(test) or WHERE_START.match(test) or HANDLE_START.match(test) or test.endswith(":"):
+        return True
+    prose = MD_LINK.sub(" ", MD_WIKILINK.sub(" ", MD_CODE.sub(" ", text)))
+    return len(re.findall(r"[A-Za-z][A-Za-z'’-]*", prose)) < 3
+
+
+def protected_spans(text):
+    """[start, end) of every code span, wikilink and markdown link."""
+    return [(m.start(), m.end()) for rx in (MD_CODE, MD_WIKILINK, MD_LINK) for m in rx.finditer(text)]
+
+
+def sentence_ends(text):
+    protected = protected_spans(text)
+    ends = []
+    for m in re.finditer(r"[.!?][)\]\"'’”*_]*(?=\s|$)", text):
+        if any(a <= m.start() < b for a, b in protected):
+            continue
+        after = text[m.end():].lstrip()
+        if after and after[0].islower():  # `e.g. the`
+            continue
+        ends.append(m.end())
+    return ends
+
+
+def cut_worked_on(text):
+    """At most WORKED_ON_CAP characters: the whole sentences that fit, else a cut inside the first
+    sentence at a space outside every span, ended with an ellipsis."""
+    if len(text) <= WORKED_ON_CAP:
+        return text
+    fits = [end for end in sentence_ends(text) if end <= WORKED_ON_CAP]
+    if fits:
+        return text[: max(fits)].rstrip()
+    protected = protected_spans(text)
+    i, moved = WORKED_ON_CAP - 1, True
+    while moved:
+        moved = False
+        for a, b in protected:
+            if a < i < b:
+                i, moved = a, True
+    space = text.rfind(" ", 0, i + 1)
+    i = space if space > 0 else i
+    return text[:i].rstrip(" ,;:—–-") + "…"
+
+
+def worked_on_text(source):
+    """One source through the pipeline: its first paragraph that reads as work, as one line, or None."""
+    if not source:
+        return None
+    text = MD_COMMENT.sub("", source.replace("\r\n", "\n"))
+    for kind, lines in markdown_blocks(text):
+        if kind != "paragraph":
+            continue
+        flat = re.sub(r"\s+", " ", " ".join(line.strip() for line in lines)).strip()
+        label, rest = paragraph_label(flat)
+        if label is not None and is_stop_label(label):
+            continue
+        rest = rest.strip()
+        if not rest or is_status_line(rest):
+            continue
+        return cut_worked_on(rest.rstrip("\\").rstrip())  # a trailing backslash would be a hard break
+    return None
+
+
+def worked_on(m):
+    """What a member worked on and built, for its tree line: its summary, else its Result, else its final message."""
+    for column in ("summary", "result", "return_text"):
+        text = worked_on_text(m[column])
+        if text:
+            return text
+    return None
+
+
+def render_team_section(con, t):
+    """## Team: the table, the tree with each member's worked-on suffix, the embed; empty without members."""
+    rows = team_order(con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (t["id"],)).fetchall(), t["lead_id"])
+    if not rows:
+        return ""
+    lines = list(TEAM_TABLE_HEAD) + [team_table_row(t["team_key"], t["created_at"], m) for m in rows] + [""]
+    for m in rows:
+        text = worked_on(m)
+        lines.append("  " * (m["depth"] - 1) + team_line(t["team_key"], m) + (" — " + text if text else ""))
+    lines += ["", TEAM_VIEW_EMBED]
+    return "\n".join(lines)
 
 
 def handoff_party(con, member_id):
@@ -1319,9 +1630,9 @@ def render_proposal_rows(con, member, after=0):
 def ticket_section_text(con, t, name):
     if name in TICKET_COLUMN_SECTIONS:
         return t[TICKET_COLUMN_SECTIONS[name]] or ""
-    prose, after = prose_for(con, "ticket", t["id"], name)
     if name == "Team":
-        return join_prose(prose, render_team_rows(con, t, after))
+        return render_team_section(con, t)  # from members alone: stored Team prose is not rendered
+    prose, after = prose_for(con, "ticket", t["id"], name)
     if name == "Handoffs":
         return join_prose(prose, render_handoff_rows(con, t, after))
     if name == "Proposals received":
@@ -1389,8 +1700,9 @@ def render_member(con, m):
         ("status", ("plain", m["status"])),
         ("spawned", ("stamp", fm_minute(m["spawned_at"]))),
         ("finished", ("stamp", fm_minute(m["finished_at"]))),
-        ("tags", ("list", ["spudagent", "contractor"] if m["persona"] == "contractor" else ["spudagent"])),
     ]
+    pairs += usage_pairs(m)
+    pairs.append(("tags", ("list", ["spudagent", "contractor"] if m["persona"] == "contractor" else ["spudagent"])))
     heading = "%s (%s, %s) — %s" % (m["name"], m["lineage"], m["persona"], ticket["key"])
     names = layout.get("sections")
     if not names:
@@ -1532,6 +1844,36 @@ def import_ticket_file(ctx, con, at, path, rel):
     return {"ticket": t, "fm": fm, "sections": doc["sections"], "rel": rel, "derived": {"updated_at": "created"}}
 
 
+MEMBER_USAGE_KEYS = ("duration_ms", "tool_uses", "tokens_out", "tokens_in", "tokens_cached")
+SQLITE_INTEGER_MAX = 2**63 - 1
+
+
+def usage_columns(fm, rel):
+    """The usage keys a rendered member note carries when known (SPD-010), read back: duration_ms and
+    tool_uses into their columns; the three token keys, when all are present, as total_tokens and a
+    transcript-shaped usage_json that renders the same keys and Tokens cell again (in stands for
+    input plus cache creation, so cache creation is 0).  A present key that is not a non-negative
+    integer is refused, naming the file and the key."""
+    values = {}
+    for key in MEMBER_USAGE_KEYS:
+        if key not in fm:
+            continue
+        value = fm[key]
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9]{1,19}", value) or int(value) > SQLITE_INTEGER_MAX:
+            raise SpudError(EXIT_ERROR, "%s: %s must be a non-negative integer, not %r" % (rel, key, value))
+        values[key] = int(value)
+    columns = {key: values[key] for key in ("duration_ms", "tool_uses") if key in values}
+    if all(key in values for key in ("tokens_out", "tokens_in", "tokens_cached")):
+        total = values["tokens_out"] + values["tokens_in"] + values["tokens_cached"]
+        if total > SQLITE_INTEGER_MAX:
+            raise SpudError(EXIT_ERROR, "%s: tokens_out, tokens_in and tokens_cached sum past what an integer column holds" % rel)
+        columns["total_tokens"] = total
+        columns["usage_json"] = json.dumps({"source": "transcript", "imported": True, "usage": {
+            "input_tokens": values["tokens_in"], "output_tokens": values["tokens_out"],
+            "cache_creation_input_tokens": 0, "cache_read_input_tokens": values["tokens_cached"]}})
+    return columns
+
+
 def import_member_file(ctx, con, at, path, rel, team_key):
     doc = split_document(path.read_text(encoding="utf-8"))
     fm = doc["frontmatter"]
@@ -1566,16 +1908,18 @@ def import_member_file(ctx, con, at, path, rel, team_key):
     finished = fm["finished"] or None
     derived = {"planned_at": "spawned" if spawned else "ticket.created"}
     blocked = sections.get("Blocked") if "Blocked" in sections else None
+    usage = usage_columns(fm, rel)
     cur = con.execute(
         "INSERT INTO members (ticket_id, lineage, depth, parent_id, name, persona, agent_type, model, status, brief,"
-        " result, blocked, outcome, layout, planned_at, spawned_at, finished_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " result, blocked, outcome, layout, planned_at, spawned_at, finished_at, duration_ms, tool_uses, total_tokens, usage_json)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ticket["id"], lineage, lineage.count(".") + 1, parent["id"] if parent else None, fm["name"], fm["persona"],
          fm.get("agent_type") or "spudagent", fm["model"], fm["status"], sections.get("Brief", ""),
          sections.get("Result") if "Result" in sections else None, blocked,
          sections.get("Outcome") if "Outcome" in sections else None,
          json.dumps(member_layout(names, blocked)) if member_layout(names, blocked) else None,
-         spawned or ticket["created_at"], spawned, finished),
+         spawned or ticket["created_at"], spawned, finished,
+         usage.get("duration_ms"), usage.get("tool_uses"), usage.get("total_tokens"), usage.get("usage_json")),
     )
     member_id = cur.lastrowid
     write_event(con, at, "import", "import", "imported %s" % rel, ticket_id=ticket["id"], member_id=member_id, data={"source": rel, "derived": derived})
@@ -1606,6 +1950,29 @@ def import_handoffs(con, at, ticket, text):
         else:
             con.execute("INSERT INTO handoffs (ticket_id, at, what) VALUES (?, ?, ?)", (ticket["id"], ticket["created_at"], line))
             derived["handoffs.at"] = "created"
+    return derived
+
+
+TEAM_LINE = re.compile(r"^\s*- \[\[(?P<ref>[^\]|\\]+)(?:\\?\|[^\]]*)?\]\] \([^()]*(?:\([^()]*\)[^()]*)*\) — (?P<text>.+)$")
+
+
+def import_team_summaries(con, ticket, text):
+    """A tree line's ` — text` in a ticket's ## Team becomes that member's summary, when the member is
+    on this ticket and has none (SPD-010: the section is generated, so its prose is never stored).
+    Table rows, the embed, lines without the suffix and other teams' members are ignored.  Returns
+    the columns whose value was derived."""
+    derived = {}
+    for line in text.split("\n"):
+        m = TEAM_LINE.match(line)
+        if not m or not m.group("text").strip():
+            continue
+        team_key, _, name = m.group("ref").partition("/")
+        if team_key != ticket["team_key"]:
+            continue
+        cur = con.execute("UPDATE members SET summary = ? WHERE ticket_id = ? AND name = ? AND summary IS NULL",
+                          (m.group("text").strip(), ticket["id"], name))
+        if cur.rowcount:
+            derived["members.summary"] = "Team section"
     return derived
 
 
@@ -1700,13 +2067,15 @@ def bulk_import(ctx, con, paths):
             sections = dict(item["sections"])
             if "Handoffs" in sections:
                 item["derived"].update(import_handoffs(con, at, item["ticket"], sections["Handoffs"]))
+            if "Team" in sections:
+                item["derived"].update(import_team_summaries(con, item["ticket"], sections["Team"]))
         for item in imported_tickets:
             write_event(con, at, "import", "import", "imported %s" % item["rel"], ticket_id=item["ticket"]["id"],
                         data={"source": item["rel"], "derived": item["derived"]})
         for item in imported_tickets:
             t = get_ticket_by_id(con, item["ticket"]["id"])
             for name, text in item["sections"]:
-                if name in TICKET_COLUMN_SECTIONS:
+                if name in TICKET_COLUMN_SECTIONS or name == "Team":  # generated from members; its suffixes gave the summaries
                     continue
                 rendered = ticket_section_text(con, t, name)
                 if store_prose_if_needed(con, "ticket", t["id"], name, text, rendered):

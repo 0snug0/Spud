@@ -232,3 +232,57 @@ def normalize_markdown(text):
     while out and out[-1] == "":
         out.pop()
     return "\n".join(out) + "\n"
+
+
+# A ticket note's ## Team section is generated from the members table alone since SPD-010
+# (docs/design/2026-09-12-team-card.md): a table, the member tree carrying each member's
+# worked-on sentence, the embedded Team view.  The round trips compare it by the rule of the
+# spec's section 8.3 rather than byte for byte.
+TEAM_TABLE_HEADER = "| Member | ID | Persona | Model | Status | Run | Tokens | Tools |"
+TEAM_TABLE_DELIMITER = "|---|---|---|---|---|---|---|---|"
+TEAM_VIEW_EMBED = "![[Fleet.base#Team]]"
+WORKED_ON_SUFFIX = " — "
+
+
+def split_team_section(text):
+    """A note without the body of its `## Team` section (the heading line stays), and that body;
+    (text, None) for a note that has no such section."""
+    lines = text.split("\n")
+    if "## Team" not in lines:
+        return text, None
+    start = lines.index("## Team") + 1
+    end = start
+    while end < len(lines) and not lines[end].startswith("## "):
+        end += 1
+    return "\n".join(lines[:start] + lines[end:]), "\n".join(lines[start:end])
+
+
+def team_section_problems(source, rendered):
+    """What is wrong with a rendered `## Team` body against the body it was imported from, [] when
+    nothing: the tree lines (lines opening `- [[`), each without its ` — …` suffix, equal the
+    source's in order; every source tree line that has a suffix is rendered unchanged; a section
+    with members starts with the table header and delimiter and ends with the embed line, and a
+    section without members is empty."""
+
+    def tree(text):
+        return [line.rstrip() for line in text.split("\n") if line.lstrip().startswith("- [[")]
+
+    def bare(line):
+        return line.split(WORKED_ON_SUFFIX, 1)[0]
+
+    want, got = tree(source), tree(rendered)
+    problems = []
+    if [bare(line) for line in got] != [bare(line) for line in want]:
+        problems.append("the tree lines without their suffixes differ: source %r, rendered %r" % ([bare(l) for l in want], [bare(l) for l in got]))
+    for i, line in enumerate(want):
+        if WORKED_ON_SUFFIX in line and (i >= len(got) or got[i] != line):
+            problems.append("the source tree line %r is not rendered unchanged" % line)
+    lines = [line.rstrip() for line in rendered.strip("\n").split("\n")] if rendered.strip() else []
+    if want or got:
+        if lines[:2] != [TEAM_TABLE_HEADER, TEAM_TABLE_DELIMITER]:
+            problems.append("the section does not start with the table header and delimiter: %r" % lines[:2])
+        if lines[-1:] != [TEAM_VIEW_EMBED]:
+            problems.append("the section does not end with the embed line: %r" % lines[-1:])
+    elif lines:
+        problems.append("a ticket without members renders an empty section, not %r" % rendered)
+    return problems
