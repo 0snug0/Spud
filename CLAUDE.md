@@ -12,7 +12,7 @@ Your hands are **spudagents**: children you spawn for one ticket each, with a na
 
 ## Precedence
 
-Inside this repo this file supersedes the oh-my-claudecode block in `~/.claude/CLAUDE.md`: no `executor` routing, no OMC model routing, no OMC modes, no `.omc/` state. Native Claude Code features are used and never rebuilt: the `Agent` tool for spudagents, `EnterWorktree` for code tickets, the depth and concurrency env vars in `.claude/settings.json`, the memory directory under `~/.claude/projects/`, scheduled tasks for anything periodic. Superpowers skills (brainstorming, TDD, systematic debugging) still apply to spudagents doing the work.
+Inside this repo this file supersedes the oh-my-claudecode block in `~/.claude/CLAUDE.md`: no `executor` routing, no OMC model routing, no OMC modes, no `.omc/` state. Native Claude Code features are used and never rebuilt: the `Agent` tool for spudagents, `EnterWorktree` for code tickets, the depth and concurrency env vars in `.claude/settings.json`, the memory directory under `~/.claude/projects/`, scheduled tasks for anything periodic that needs a Claude session. The ledger's daily backup needs none, so it runs from a macOS LaunchAgent (Eric's call on SPD-012; see Ledger v1). Superpowers skills (brainstorming, TDD, systematic debugging) still apply to spudagents doing the work.
 
 ## The ledger CLI
 
@@ -92,7 +92,7 @@ Two things travel up the tree besides results.
 
 ## Ledger v1
 
-Format `sqlite-v1`: the database is `.spud/ledger.db` at the ledger root (WAL, gitignored); the markdown Eric reads is rendered from it by `spud render`, with a generated-file marker right after the frontmatter. One writer, the CLI; every write is one transaction with the ownership, limit and state-machine checks inside it; the `events` table is the append-only log of everything (`spud events`).
+Format `sqlite-v1`: the database is `.spud/ledger.db` at the ledger root (WAL, gitignored); the markdown Eric reads is rendered from it by `spud render`, with a generated-file marker right after the frontmatter. One writer, the CLI; every write is one transaction with the ownership, limit and state-machine checks inside it; the `events` table is the append-only log of everything (`spud events`). Backups are copies in `.spud/backups/`: `spud migrate` writes one before each migration, and `spud backup --daily`, run by the LaunchAgent `local.spud.backup` (`spud --as spud schedule install`) at load and daily at 03:00, writes one checked copy a day and keeps the newest 14; `spud doctor` lists them, since the hooks refuse shell commands that name `.spud/`. The committed markdown stays the disaster-recovery import source.
 
 **The database and the rendered ledger live at the ledger root, on `main`, always.** A session started in a worktree (`.claude/worktrees/<name>`) still writes the one database through the ledger root's `bin/spud`, renders there, and commits `ledger/` and `reports/` there, from the main checkout (the harness refuses git aimed at the main checkout from a worktree session, and refuses the Write tool on shared-checkout paths; see Main and worktrees). Deliverables stay in the working directory and are committed on the worktree's branch.
 
@@ -151,7 +151,7 @@ Open this repo as a vault and start at `ledger/Home.md`. Frontmatter and wikilin
 `spud` and `git` are the tools. There is no build; the test suite is `bin/spud`'s:
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests   # 294 tests, about two and a half minutes, leaves no bytecode
+python3.14 -I -S -m unittest discover -s tests -t tests   # 325 tests, about three minutes, leaves no bytecode
 ```
 
 ```bash
@@ -167,7 +167,11 @@ python3.14 -I -S bin/spud events --ticket SPD-008 --limit 50   # what happened, 
 ```
 
 ```bash
-python3.14 -I -S bin/spud doctor       # interpreter, SQLite, SPUD_HOME, database, config
+python3.14 -I -S bin/spud doctor       # interpreter, SQLite, SPUD_HOME, database, config, backups
+```
+
+```bash
+python3.14 -I -S bin/spud --as spud schedule show   # the daily backup's LaunchAgent: its plist, and whether it is loaded
 ```
 
 ```bash
