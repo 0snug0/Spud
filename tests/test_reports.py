@@ -9,7 +9,6 @@ from helpers import EXIT_OWNERSHIP, MARKER, SpudTestCase
 
 class ReportTest(SpudTestCase):
     def test_report_add_appends_an_entry_and_renders_the_day_file(self):
-        t = self.new_ticket("Reported")
         out = self.home.json("report", "add", "SPD-001 done", "--next", "commit; Eric decides SPD-002", actor="spud")
         self.assertTrue(out["ok"])
         entry = out["entry"]

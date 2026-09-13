@@ -96,12 +96,14 @@ class TicketTest(SpudTestCase):
         self.home.json("ticket", "edit", t["key"], "--priority", "P0", actor="spud")
         self.home.json("ticket", "edit", t["key"], "--title", "Renamed", "--brief", "b", actor="spud")
         events = self.home.json("events", "--ticket", t["key"])["events"]
+        # since SPD-011 a record Spud makes is followed by its report entry; an edit that changes no priority writes none
         self.assertEqual(
-            [e["kind"] for e in events], ["ticket.created", "ticket.status", "ticket.priority", "ticket.edited"]
+            [e["kind"] for e in events],
+            ["ticket.created", "report.entry", "ticket.status", "report.entry", "ticket.priority", "report.entry", "ticket.edited"],
         )
-        self.assertEqual(events[1]["data"], {"from": "queued", "to": "active"})
-        self.assertEqual(events[2]["data"], {"from": "P2", "to": "P0"})
-        self.assertEqual(sorted(events[3]["data"]["fields"]), ["brief", "title"])
+        self.assertEqual(events[2]["data"], {"from": "queued", "to": "active"})
+        self.assertEqual(events[4]["data"], {"from": "P2", "to": "P0"})
+        self.assertEqual(sorted(events[6]["data"]["fields"]), ["brief", "title"])
         self.assertTrue(all(e["actor"] == "spud" for e in events))
         self.assertTrue(all(ISO_WITH_OFFSET.match(e["at"]) for e in events))
         shown = self.home.json("ticket", "show", t["key"])["ticket"]
@@ -116,7 +118,7 @@ class TicketTest(SpudTestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             con.execute("DELETE FROM events")
         con.close()
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events"), 1)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM events"), 2)  # ticket.created and its report entry (SPD-011)
 
     def test_show_unknown_ticket(self):
         proc = self.home.run("ticket", "show", "SPD-404", check=False)

@@ -1567,6 +1567,17 @@ class SessionStartTest(HookCase):
         for source in ("resume", "compact"):
             self.assertEqual(self.home.hook("SessionStart", self.session_start(source)).code, 0)
 
+    def test_clear_injects_the_board_as_the_other_sources_do(self):
+        # SPD-011: the matcher takes clear, and a /clear gets the same context as the other three
+        self.plan(name="Kestrel")
+        board = self.home.run("board", "--brief").stdout.strip()
+        for source in ("startup", "resume", "clear", "compact"):
+            r = self.home.hook("SessionStart", self.session_start(source))
+            self.assertEqual(r.code, 0, r)
+            self.assertEqual(r.json["hookSpecificOutput"]["hookEventName"], "SessionStart", source)
+            self.assertIn("source %s)" % source, r.context)
+            self.assertIn(board, r.context)
+
     def test_missing_database_is_silent(self):
         os.remove(self.home.db)
         r = self.home.hook("SessionStart", self.session_start())

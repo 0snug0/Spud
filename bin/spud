@@ -2733,7 +2733,7 @@ HOOK_TABLE = (
     ("PostToolUse", "Agent"),
     ("SubagentStart", None),
     ("SubagentStop", None),
-    ("SessionStart", "startup|resume|compact"),
+    ("SessionStart", "startup|resume|clear|compact"),  # clear since SPD-011: a /clear gets the board too
     ("Stop", None),
 )
 HOOK_TIMEOUT = 30  # seconds; a hook is one Python start and one short transaction (busy_timeout 5 s)
@@ -3014,11 +3014,54 @@ def cmd_render(ctx, args):
     return Result(data, "\n".join(lines))
 
 
+# Report entries (SPD-011).  Spud's recording commands write their own report.entry in the transaction of
+# the record they make: ticket new, ticket move, ticket edit when --priority changes the priority, member
+# finish of a root member, and proposal decide.  The title is generated and the body is `- ` lines; Spud
+# types only the Next line, with --next.  `report add` stays for what no command records (a merge, an install).
+TICKET_MOVE_VERBS = {"active": "started", "done": "done", "queued": "queued", "declined": "declined"}
+
+
+def check_next(con, actor, args):
+    """--next on a command that writes a report entry: Spud's alone (exit 3), and never empty (exit 2).
+    Checked before anything is written; a command that turns out to write no entry refuses --next itself."""
+    if args.next is None:
+        return
+    require_spud(con, actor, "the Next line of a report entry (--next)")
+    if not args.next.strip():
+        raise SpudError(EXIT_USAGE, "--next is empty: give the Next line, or leave --next out")
+
+
+def no_entry_for_next(why):
+    """The usage error of --next given to a command that writes no report entry; raised before it writes."""
+    return SpudError(EXIT_USAGE, "--next has no report entry to go on: %s (leave --next out, or use `spud report add`)" % why)
+
+
+def write_report_entry(con, at, title, generated, ticket_id, member_id=None, lines=(), next_line=None):
+    """A generated report.entry, Spud's, in the caller's transaction: its body is `- ` lines, the Next line last."""
+    body = "\n".join(["- " + line for line in lines] + ([] if next_line is None else ["- Next: " + next_line]))
+    event_id = write_event(con, at, "spud", "report.entry", body, ticket_id=ticket_id, member_id=member_id,
+                           data={"title": title, "generated": generated})
+    return {"id": event_id, "at": at, "title": title, "body": body}
+
+
+def report_entry_line(entry):
+    """The line `report add` prints, and every command that writes an entry prints after its own."""
+    return "report entry %s — %s added to reports/%s.md" % (entry["at"][11:16], entry["title"], entry["at"][:10])
+
+
+def with_report_entry(data, text, entry):
+    """A command's Result with the report entry it wrote, if it wrote one: `report_entry` in --json, its line in the text."""
+    if entry is None:
+        return Result(data, text)
+    return Result(dict(data, report_entry=entry), text + "\n" + report_entry_line(entry))
+
+
 def cmd_ticket_new(ctx, args):
     con = connect(ctx)
     try:
         actor = resolve_actor(con, args.actor)
         require_spud(con, actor, "creating a ticket (Law 6)")
+        check_next(con, actor, args)
         project = con.execute("SELECT * FROM projects WHERE key = ?", (args.project or "spud",)).fetchone()
         if project is None:
             raise SpudError(EXIT_ERROR, "no project %r" % args.project)
@@ -3029,10 +3072,12 @@ def cmd_ticket_new(ctx, args):
                               brief=args.brief or "", sizing=args.sizing or "", outcome=args.outcome or "", tags=tags, heading=args.heading)
             write_event(con, at, actor.label, "ticket.created", "%s created: %s" % (t["key"], t["title"]), ticket_id=t["id"],
                         data={"origin": "eric", "priority": t["priority"], "status": t["status"]})
+            entry = write_report_entry(con, at, "%s created (%s, %s): %s" % (t["key"], t["status"], t["priority"], t["title"]),
+                                       "ticket new", t["id"], next_line=args.next)
         d = ticket_dict(con, t)
     finally:
         con.close()
-    return Result({"ticket": d}, "%s (%s) created: %s [%s]" % (d["key"], d["team_key"], d["title"], d["status"]))
+    return with_report_entry({"ticket": d}, "%s (%s) created: %s [%s]" % (d["key"], d["team_key"], d["title"], d["status"]), entry)
 
 
 def cmd_ticket_move(ctx, args):
@@ -3040,6 +3085,7 @@ def cmd_ticket_move(ctx, args):
     try:
         actor = resolve_actor(con, args.actor)
         require_spud(con, actor, "moving a ticket")
+        check_next(con, actor, args)
         at = now()
         with write_txn(con):
             t = get_ticket(con, args.key)
@@ -3048,11 +3094,13 @@ def cmd_ticket_move(ctx, args):
             con.execute("UPDATE tickets SET status = ?, updated_at = ?, closed_at = ? WHERE id = ?", (args.status, at, closed, t["id"]))
             write_event(con, at, actor.label, "ticket.status", "%s %s -> %s%s" % (t["key"], t["status"], args.status, (": " + args.reason) if args.reason else ""),
                         ticket_id=t["id"], data={"from": t["status"], "to": args.status})
+            entry = write_report_entry(con, at, "%s %s: %s" % (t["key"], TICKET_MOVE_VERBS[args.status], t["title"]),
+                                       "ticket move", t["id"], next_line=args.next)
             t = get_ticket_by_id(con, t["id"])
         d = ticket_dict(con, t)
     finally:
         con.close()
-    return Result({"ticket": d}, "%s is now %s" % (d["key"], d["status"]))
+    return with_report_entry({"ticket": d}, "%s is now %s" % (d["key"], d["status"]), entry)
 
 
 def cmd_ticket_edit(ctx, args):
@@ -3060,7 +3108,9 @@ def cmd_ticket_edit(ctx, args):
     try:
         actor = resolve_actor(con, args.actor)
         require_spud(con, actor, "editing a ticket")
+        check_next(con, actor, args)
         at = now()
+        entry = None
         with write_txn(con):
             t = get_ticket(con, args.key)
             updates = {}
@@ -3072,7 +3122,10 @@ def cmd_ticket_edit(ctx, args):
                 tags = ["ticket"] + [x for x in args.tag if x != "ticket"]
                 if json.dumps(tags) != t["tags"]:
                     updates["tags"] = json.dumps(tags)
-            priority_change = args.priority is not None and args.priority != t["priority"]
+            old_priority = t["priority"]
+            priority_change = args.priority is not None and args.priority != old_priority
+            if args.next is not None and not priority_change:
+                raise no_entry_for_next("ticket edit writes one only when --priority changes the priority, and %s stays %s" % (t["key"], old_priority))
             if priority_change:
                 con.execute("UPDATE tickets SET priority = ?, updated_at = ? WHERE id = ?", (args.priority, at, t["id"]))
                 write_event(con, at, actor.label, "ticket.priority", "%s %s -> %s" % (t["key"], t["priority"], args.priority),
@@ -3082,11 +3135,14 @@ def cmd_ticket_edit(ctx, args):
                 write_event(con, at, actor.label, "ticket.edited", "%s edited: %s" % (t["key"], ", ".join(sorted(updates))),
                             ticket_id=t["id"], data={"fields": sorted(updates)})
             t = get_ticket_by_id(con, t["id"])
+            if priority_change:  # the entry names the ticket as the edit leaves it
+                entry = write_report_entry(con, at, "%s priority %s to %s: %s" % (t["key"], old_priority, t["priority"], t["title"]),
+                                           "ticket edit", t["id"], next_line=args.next)
         d = ticket_dict(con, t)
         changed = sorted(updates) + (["priority"] if priority_change else [])
     finally:
         con.close()
-    return Result({"ticket": d, "changed": changed}, "%s edited: %s" % (d["key"], ", ".join(changed) or "nothing to change"))
+    return with_report_entry({"ticket": d, "changed": changed}, "%s edited: %s" % (d["key"], ", ".join(changed) or "nothing to change"), entry)
 
 
 def format_ticket(d):
@@ -3168,19 +3224,28 @@ def cmd_member_finish(ctx, args):
     con = connect(ctx)
     try:
         actor = resolve_actor(con, args.actor)
+        check_next(con, actor, args)
         at = now()
+        entry = None
         with write_txn(con):
             m = get_member(con, args.ref)
             require_ancestor(con, actor, m, "finishing a member (status, outcome, finished)")
+            if args.next is not None and m["parent_id"] is not None:
+                raise no_entry_for_next("member finish writes one only for a root member, and %s is %s's child" % (member_ref(con, m["id"]), member_ref(con, m["parent_id"])))
             extra = {"outcome": args.outcome}
             if args.summary is not None:
                 extra["summary"] = args.summary
             member_status_change(con, at, actor.label, m, args.status, extra, outcome_event=args.outcome)
             m = get_member_by_id(con, m["id"])
+            if actor.kind == "spud" and m["parent_id"] is None:  # report entries are Spud's: his own children's verdicts
+                ticket = get_ticket_by_id(con, m["ticket_id"])
+                summary = m["summary"] if m["summary"] and m["summary"].strip() else None
+                entry = write_report_entry(con, at, "%s: %s (%s, %s, %s) %s" % (ticket["key"], m["name"], m["lineage"], m["persona"], m["model"], m["status"]),
+                                           "member finish", ticket["id"], member_id=m["id"], lines=[summary] if summary else [], next_line=args.next)
         d = member_dict(con, m)
     finally:
         con.close()
-    return Result({"member": d}, "%s is %s (finished %s)" % (d["ref"], d["status"], d["finished_at"]))
+    return with_report_entry({"member": d}, "%s is %s (finished %s)" % (d["ref"], d["status"], d["finished_at"]), entry)
 
 
 def cmd_member_edit(ctx, args):
@@ -3447,8 +3512,10 @@ def cmd_proposal_decide(ctx, args):
     con = connect(ctx)
     try:
         actor = resolve_actor(con, args.actor)
+        check_next(con, actor, args)
         at = now()
         created = None
+        entry = None
         with write_txn(con):
             p = con.execute("SELECT * FROM proposals WHERE id = ?", (args.id,)).fetchone()
             if p is None:
@@ -3488,6 +3555,15 @@ def cmd_proposal_decide(ctx, args):
             write_event(con, at, actor.label, "proposal.decided", "%s: %s%s" % (args.decision, p["title"], (" (" + args.reason + ")") if args.reason else ""),
                         ticket_id=p["ticket_id"], member_id=p["origin_member_id"],
                         data={"proposal_id": p["id"], "decision": args.decision, "created_ticket": created["key"] if created else None})
+            if actor.kind == "spud":  # Spud creates or declines, and either decision is one report entry
+                proposer = member_ref(con, p["origin_member_id"])
+                if created is not None:
+                    entry = write_report_entry(con, at, "%s created from a proposal by %s (%s, %s): %s" % (created["key"], proposer, created["status"], created["priority"], created["title"]),
+                                               "proposal decide", created["id"], next_line=args.next)
+                else:
+                    reason = args.reason if args.reason and args.reason.strip() else None
+                    entry = write_report_entry(con, at, "Proposal declined: %s (from %s)" % (p["title"], proposer),
+                                               "proposal decide", p["ticket_id"], lines=["Reason: " + reason] if reason else [], next_line=args.next)
             p = con.execute("SELECT * FROM proposals WHERE id = ?", (p["id"],)).fetchone()
         d = proposal_dict(con, p)
         data = {"proposal": d}
@@ -3496,7 +3572,7 @@ def cmd_proposal_decide(ctx, args):
     finally:
         con.close()
     text = "proposal %d %s" % (d["id"], {"escalate": "escalated to %s" % (d["holder"] or "Spud"), "absorb": "absorbed", "decline": "declined", "create": "created as %s" % d["created_ticket"]}[args.decision])
-    return Result(data, text)
+    return with_report_entry(data, text, entry)
 
 
 def cmd_proposal_list(ctx, args):
@@ -3563,7 +3639,8 @@ def cmd_report_add(ctx, args):
             event_id = write_event(con, at, actor.label, "report.entry", body, data={"title": args.title})
     finally:
         con.close()
-    return Result({"entry": {"id": event_id, "at": at, "title": args.title, "body": body}}, "report entry %s — %s added to reports/%s.md" % (at[11:16], args.title, at[:10]))
+    entry = {"id": event_id, "at": at, "title": args.title, "body": body}
+    return Result({"entry": entry}, report_entry_line(entry))
 
 
 def cmd_events(ctx, args):
@@ -5411,11 +5488,13 @@ def build_parser():
     q.add_argument("--heading", help="a shorter H1 than the title")
     q.add_argument("--tag", action="append", help="extra tag (ticket is always first)")
     q.add_argument("--project", help="project key (default spud)")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes: SPD-nnn created (<status>, <priority>): <title>")
     q.set_defaults(func=cmd_ticket_new)
     q = ps.add_parser("move", help="change a ticket's status along the state machine")
     q.add_argument("key")
     q.add_argument("--status", required=True, choices=TICKET_STATUSES)
     q.add_argument("--reason", type=text_arg)
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes: SPD-nnn started|done|queued|declined: <title>")
     q.set_defaults(func=cmd_ticket_move)
     q = ps.add_parser("edit", help="edit title, heading, priority, brief, sizing, outcome, tags")
     q.add_argument("key")
@@ -5426,6 +5505,7 @@ def build_parser():
     q.add_argument("--sizing", type=text_arg)
     q.add_argument("--outcome", type=text_arg)
     q.add_argument("--tag", action="append")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry a priority change writes: SPD-nnn priority <old> to <new>: <title>; refused when the edit changes no priority")
     q.set_defaults(func=cmd_ticket_edit)
     q = ps.add_parser("show", help="print a ticket")
     q.add_argument("key")
@@ -5461,6 +5541,7 @@ def build_parser():
     q.add_argument("--status", required=True, choices=("done", "blocked", "failed"))
     q.add_argument("--outcome", required=True, type=text_arg)
     q.add_argument("--summary", type=text_arg, help="one paragraph for the card")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry a root member's finish writes: SPD-nnn: <Name> (<lineage>, <persona>, <model>) <status>, then its summary; refused for a nested member")
     q.set_defaults(func=cmd_member_finish)
     q = ps.add_parser("edit", help="edit brief, deliverables, model, summary (the parent's)")
     q.add_argument("ref")
@@ -5496,6 +5577,7 @@ def build_parser():
     q.add_argument("--reason", type=text_arg)
     q.add_argument("--priority", choices=PRIORITIES, help="priority of the created ticket")
     q.add_argument("--title", help="title of the created ticket (default: the proposal's)")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry his create or decline writes")
     q.set_defaults(func=cmd_proposal_decide)
     q = ps.add_parser("list", help="list proposals")
     q.add_argument("--ticket")
@@ -5516,7 +5598,9 @@ def build_parser():
     p = sub.add_parser("report", help="daily reports")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
-    q = ps.add_parser("add", help="append an entry with the clock time, a title and the Next line (Spud's)")
+    report_add = ("append an entry with the clock time, a title and the Next line, for what no command records, such as a merge or an install;"
+                  " ticket new, move and edit, member finish and proposal decide write their own entries and take --next (Spud's)")
+    q = ps.add_parser("add", help=report_add, description=report_add)
     q.add_argument("title")
     q.add_argument("--next", required=True, type=text_arg, help="Spud's Next line")
     q.set_defaults(func=cmd_report_add)

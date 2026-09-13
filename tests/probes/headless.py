@@ -39,7 +39,7 @@ PYTHON = sys.executable
 HOOK_TABLE = (
     ("PreToolUse", "Agent"), ("PreToolUse", "Bash"), ("PreToolUse", "Write|Edit|MultiEdit|NotebookEdit"),
     ("PostToolUse", "Agent"), ("SubagentStart", None), ("SubagentStop", None),
-    ("SessionStart", "startup|resume|compact"), ("Stop", None),
+    ("SessionStart", "startup|resume|clear|compact"), ("Stop", None),
 )
 
 # The capture hook: one JSON line per payload, with the wall-clock time it reached the hook.

@@ -20,7 +20,7 @@ EVENTS = {
     "PostToolUse": ["Agent"],
     "SubagentStart": [None],
     "SubagentStop": [None],
-    "SessionStart": ["startup|resume|compact"],
+    "SessionStart": ["startup|resume|clear|compact"],
     "Stop": [None],
 }
 
@@ -91,6 +91,12 @@ class SettingsSyncTest(SpudTestCase):
         for event in EVENTS:
             ours = [g for g in data["hooks"][event] if any("bin/spud hook" in h["command"] for h in g["hooks"])]
             self.assertEqual(len(ours), len(EVENTS[event]), event)
+
+    def test_session_start_matches_clear_too(self):
+        # SPD-011: a /clear gets the board injected as startup, resume and compact do
+        out = self.home.json("settings", "sync", "--path", self.home.path / "s.json")
+        ours = [g for g in out["settings"]["hooks"]["SessionStart"] if any("bin/spud hook" in h["command"] for h in g["hooks"])]
+        self.assertEqual([g["matcher"] for g in ours], ["startup|resume|clear|compact"])
 
     def test_allow_rules_for_the_cli(self):
         path = self.home.path / ".claude" / "settings.json"
