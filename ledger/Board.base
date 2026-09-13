@@ -50,7 +50,9 @@ views:
       - property: formula.status_rank
         direction: ASC
     columnSize:
+      note.title: 417
       note.lead: 193
+      note.proposed_by: 146
   - type: table
     name: Reports
     filters:
