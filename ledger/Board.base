@@ -62,3 +62,38 @@ views:
     sort:
       - property: file.name
         direction: DESC
+  - type: table
+    name: Closed
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+        - file.inFolder("ledger/tickets")
+        - status == "done"
+    groupBy:
+      property: status
+      direction: ASC
+    order:
+      - file.name
+      - status
+      - priority
+      - title
+      - lead
+      - origin
+      - proposed_by
+      - created
+      - file.mtime
+    sort:
+      - property: file.mtime
+        direction: DESC
+      - property: priority
+        direction: ASC
+      - property: status
+        direction: DESC
+      - property: file.name
+        direction: ASC
+      - property: formula.status_rank
+        direction: ASC
+    columnSize:
+      note.lead: 167
+      note.proposed_by: 146
