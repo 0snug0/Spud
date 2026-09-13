@@ -3997,6 +3997,90 @@ def transcript_usage(path):
             "usage_json": {"source": "transcript", "messages": messages, "usage": totals}}
 
 
+RESULT_HOLD = ("record your Result with `spud --as %s member result '<what you produced, where, what you verified, what is left>'`"
+               " (or Blocked with `spud --as %s member block '<the question and the options>'`) before returning; then return your summary")
+
+
+def unrecorded_children(con, member):
+    """A member's own direct children that have returned (a final stop) and still have no
+    verdict: the shape `hook_stop` uses for Spud's children, one level down (SPD-015)."""
+    return con.execute(
+        "SELECT m.*, t.team_key FROM members m JOIN tickets t ON t.id = m.ticket_id"
+        " WHERE m.parent_id = ? AND m.stopped_at IS NOT NULL AND (m.outcome IS NULL OR trim(m.outcome) = '')"
+        "   AND m.status = 'active'"
+        " ORDER BY m.stopped_at, m.id",
+        (member["id"],),
+    ).fetchall()
+
+
+def alive_children(con, member):
+    """A member's own direct children that are still alive at its stop: spawned and running (no
+    final stop), or planned and never spawned.  Probed 2026-09-12: a background child is not
+    killed when its parent returns, its completion notification goes to the main session and its
+    row is orphaned, so the block is the only thing that keeps the parent alive to collect it."""
+    return con.execute(
+        "SELECT m.*, t.team_key FROM members m JOIN tickets t ON t.id = m.ticket_id"
+        " WHERE m.parent_id = ? AND m.status IN ('planned','active') AND m.stopped_at IS NULL"
+        " ORDER BY COALESCE(m.spawned_at, m.planned_at), m.id",
+        (member["id"],),
+    ).fetchall()
+
+
+def finish_commands(agent_id, children):
+    return "; ".join("`spud --as %s member finish %s/%s --status done|blocked|failed --outcome '<verdict>'`" % (agent_id, c["team_key"], c["name"])
+                     for c in children)
+
+
+def children_hold_reason(agent_id, children):
+    """Law 9 one level down: the children that returned, and the exact command for each."""
+    n = len(children)
+    items = "; ".join("%s/%s (%s, %s), stopped %s" % (c["team_key"], c["name"], c["lineage"], c["persona"], (c["stopped_at"] or "")[11:16])
+                      for c in children)
+    return ("%d child%s you spawned returned and %s not recorded: %s. Record %s with %s, and decide the proposals %s filed, if any"
+            " (`spud proposal list --open`; `spud --as %s proposal decide <id> --decision absorb|decline|escalate --reason '<why>'`)."
+            % (n, "" if n == 1 else "ren", "is" if n == 1 else "are", items, "it" if n == 1 else "each",
+               finish_commands(agent_id, children), "it" if n == 1 else "they", agent_id))
+
+
+def alive_children_reason(agent_id, children):
+    """The other half of the parent's job: a child still running, or planned and never spawned."""
+    n = len(children)
+    items = "; ".join("%s/%s (%s, %s), %s" % (
+        c["team_key"], c["name"], c["lineage"], c["persona"],
+        ("running since " + (c["spawned_at"] or "")[11:16]) if c["status"] == "active" else ("planned " + (c["planned_at"] or "")[11:16] + " and never spawned"))
+        for c in children)
+    text = "%d child%s you planned %s still alive: %s." % (n, "" if n == 1 else "ren", "is" if n == 1 else "are", items)
+    running = [c for c in children if c["status"] == "active"]
+    unspawned = [c for c in children if c["status"] != "active"]
+    if running:
+        one = len(running) == 1
+        text += (" Ending your turn ends your run: a background child is not killed with you, its completion notification goes to the main"
+                 " session and its row is orphaned. Wait inside this turn (%s until the child's Result is there), then record %s with %s."
+                 " If you cannot wait, say so in your summary and return: your parent records %s."
+                 % ("; ".join("`spud member show %s/%s`" % (c["team_key"], c["name"]) for c in running),
+                    "it" if one else "each", finish_commands(agent_id, running), "it" if one else "them"))
+    if unspawned:
+        one = len(unspawned) == 1
+        text += (" The planned child%s never started: spawn %s now, or record %s with %s so the %s counting against your limits."
+                 % ("" if one else "ren", "it" if one else "them", "it" if one else "each",
+                    "; ".join("`spud --as %s member finish %s/%s --status failed --outcome '<why>'`" % (agent_id, c["team_key"], c["name"]) for c in unspawned),
+                    "row stops" if one else "rows stop"))
+    return text
+
+
+def stop_hold_reason(agent_id, recorded, returned, still_alive):
+    """One block for the whole finishing rule, children first; with no children of its own it is
+    the Result hold, word for word."""
+    clauses = []
+    if returned:
+        clauses.append(children_hold_reason(agent_id, returned))
+    if still_alive:
+        clauses.append(alive_children_reason(agent_id, still_alive))
+    if not clauses:
+        return RESULT_HOLD % (agent_id, agent_id)
+    return "Law 9: " + " ".join(clauses) + (" Then return your summary." if recorded else " Then " + RESULT_HOLD % (agent_id, agent_id))
+
+
 def hook_subagent_stop(ctx, payload):
     if not ctx.db_path.is_file():
         return SILENT
@@ -4045,13 +4129,30 @@ def hook_subagent_stop(ctx, payload):
                 return SILENT
             ref = member_ref(con, member["id"])
             recorded = bool((member["result"] or "").strip() or (member["blocked"] or "").strip())
-            if member["status"] in ALIVE and not recorded and not stop_hook_active:
-                write_event(con, at, "hook:SubagentStop", "member.stopped", "%s returned without a Result; held once" % ref,
-                            ticket_id=member["ticket_id"], member_id=member["id"], agent_id=agent_id, data=dict(base, held=True))
-                reason = ("record your Result with `spud --as %s member result '<what you produced, where, what you verified, what is left>'`"
-                          " (or Blocked with `spud --as %s member block '<the question and the options>'`) before returning; then return your summary"
-                          % (agent_id, agent_id))
-                return HookOutput({"decision": "block", "reason": reason})
+            live = member["status"] in ALIVE
+            returned = unrecorded_children(con, member) if live else []
+            still_alive = alive_children(con, member) if live else []
+            returned_refs = ["%s/%s" % (c["team_key"], c["name"]) for c in returned]
+            alive_refs = ["%s/%s" % (c["team_key"], c["name"]) for c in still_alive]
+            if live and (not recorded or returned or still_alive) and not stop_hook_active:
+                # The finishing rule has two halves: the member's own Result, and the verdict of
+                # every child it spawned (Law 9 binds every parent, not only Spud).  One block
+                # covers both, children first; `stop_hook_active` lets the second stop through.
+                what = []
+                if not recorded:
+                    what.append("without a Result")
+                if returned_refs:
+                    what.append("with %d unrecorded child%s (%s)" % (len(returned_refs), "" if len(returned_refs) == 1 else "ren", ", ".join(returned_refs)))
+                if alive_refs:
+                    what.append("with %d child%s still alive (%s)" % (len(alive_refs), "" if len(alive_refs) == 1 else "ren", ", ".join(alive_refs)))
+                data = dict(base, held=True, unrecorded=not recorded)
+                if returned_refs:
+                    data["unrecorded_children"] = returned_refs
+                if alive_refs:
+                    data["alive_children"] = alive_refs
+                write_event(con, at, "hook:SubagentStop", "member.stopped", "%s returned %s; held once" % (ref, " and ".join(what)),
+                            ticket_id=member["ticket_id"], member_id=member["id"], agent_id=agent_id, data=data)
+                return HookOutput({"decision": "block", "reason": stop_hold_reason(agent_id, recorded, returned, still_alive)})
             updates = {"stopped_at": at}
             if isinstance(last, str) and last.strip():
                 updates["return_text"] = last
@@ -4063,9 +4164,18 @@ def hook_subagent_stop(ctx, payload):
                 if summed:
                     updates.update({"total_tokens": summed["total_tokens"], "duration_ms": summed["duration_ms"], "tool_uses": summed["tool_uses"], "usage_json": json.dumps(summed["usage_json"])})
             con.execute("UPDATE members SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), member["id"]))
-            write_event(con, at, "hook:SubagentStop", "member.stopped", "%s stopped%s" % (ref, "" if recorded else " (returned unrecorded)"),
-                        ticket_id=member["ticket_id"], member_id=member["id"], agent_id=agent_id,
-                        data=dict(base, held=False, unrecorded=not recorded, transcript_usage=bool(summed)))
+            suffix = "" if recorded else " (returned unrecorded)"
+            if returned_refs:
+                suffix += " (%d unrecorded child%s: %s)" % (len(returned_refs), "" if len(returned_refs) == 1 else "ren", ", ".join(returned_refs))
+            if alive_refs:
+                suffix += " (%d child%s still alive: %s)" % (len(alive_refs), "" if len(alive_refs) == 1 else "ren", ", ".join(alive_refs))
+            data = dict(base, held=False, unrecorded=not recorded, transcript_usage=bool(summed))
+            if returned_refs:
+                data["unrecorded_children"] = returned_refs
+            if alive_refs:
+                data["alive_children"] = alive_refs
+            write_event(con, at, "hook:SubagentStop", "member.stopped", "%s stopped%s" % (ref, suffix),
+                        ticket_id=member["ticket_id"], member_id=member["id"], agent_id=agent_id, data=data)
     finally:
         con.close()
     return SILENT
