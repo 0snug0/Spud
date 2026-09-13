@@ -2314,6 +2314,11 @@ def accept_member_edit(ctx, con, at, m, ticket, base, doc, rel):
             refuse(rel, "%s is not editable by hand; timestamps come from the clock" % key)
         if key in ("id", "name", "parent", "ticket", "persona", "agent_type", "tags"):
             refuse(rel, "%s is not editable by hand" % key)
+        if key in ("duration_ms", "tool_uses"):
+            refuse(rel, "%s is not editable by hand; the hooks record it, and `spud member resum` recomputes it" % key)
+        if key in ("tokens_out", "tokens_in", "tokens_cached"):
+            refuse(rel, "%s is not editable by hand; it is derived from the transcript sum the hooks record, and "
+                        "`spud member resum` recomputes it" % key)
         if key != "status":
             refuse(rel, "property %r has no column" % key)
     if list(fm.keys()) != list(base_fm.keys()):

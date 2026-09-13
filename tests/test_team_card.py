@@ -452,7 +452,53 @@ class UsageKeysTest(TeamCardCase):
         proc = self.home.run("import", "--file", path, actor="spud", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn("tool_uses", proc.stderr)
+        self.assertIn("not editable by hand", proc.stderr)
+        self.assertIn("the hooks record it", proc.stderr)
+        self.assertIn("spud member resum", proc.stderr)
+        self.assertNotIn("has no column", proc.stderr)
         self.assertEqual(self.home.scalar("SELECT tool_uses FROM members WHERE id = ?", self.m["id"]), 105)
+
+    def test_import_file_refuses_every_edited_usage_key(self):  # SPD-022: the fallthrough lied about the column
+        self.home.json("render")
+        path = self.home.path / "ledger" / "teams" / "SPUD-001" / "Pompadour.md"
+        # (key, its rendered value, the real column its figure lives in, whether it is derived from usage_json)
+        cases = (
+            ("duration_ms", "2127776", "duration_ms", False),
+            ("tool_uses", "105", "tool_uses", False),
+            ("tokens_out", "160812", "usage_json", True),
+            ("tokens_in", "2888805", "usage_json", True),
+            ("tokens_cached", "44345065", "usage_json", True),
+        )
+        for key, original, column, derived in cases:
+            with self.subTest(key):
+                before = self.home.scalar("SELECT %s FROM members WHERE id = ?" % column, self.m["id"])
+                text = path.read_text(encoding="utf-8")
+                line = "%s: %s\n" % (key, original)
+                self.assertEqual(text.count(line), 1, key)
+                path.write_text(text.replace(line, "%s: 1\n" % key), encoding="utf-8")
+                proc = self.home.run("import", "--file", path, actor="spud", check=False)
+                self.assertEqual(proc.returncode, EXIT_ERROR, key)
+                self.assertIn(key, proc.stderr, key)
+                self.assertIn("not editable by hand", proc.stderr, key)
+                self.assertIn("spud member resum", proc.stderr, key)
+                self.assertNotIn("has no column", proc.stderr, key)
+                if derived:
+                    self.assertIn("derived from the transcript sum", proc.stderr, key)
+                else:
+                    self.assertIn("the hooks record it", proc.stderr, key)
+                self.assertEqual(self.home.scalar("SELECT %s FROM members WHERE id = ?" % column, self.m["id"]), before, key)
+                self.home.json("render", "--discard", path, actor="spud")
+
+    def test_import_file_still_refuses_an_unknown_member_property(self):
+        self.home.json("render")
+        path = self.home.path / "ledger" / "teams" / "SPUD-001" / "Pompadour.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("tags: [spudagent]", text)
+        path.write_text(text.replace("tags: [spudagent]", "tags: [spudagent]\ndue: tomorrow"), encoding="utf-8")
+        proc = self.home.run("import", "--file", path, actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("due", proc.stderr)
+        self.assertIn("has no column", proc.stderr)
 
 
 class ForegroundUsageTest(HookCase):
