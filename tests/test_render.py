@@ -54,7 +54,19 @@ class RenderShapeTest(SpudTestCase):
         self.assertEqual(section(text, "Size, persona and model decision").strip(), "Small.")
         self.assertEqual(
             section(text, "Team").strip(),
-            "- [[SPUD-001/Russet|Russet]] (01, engineer, opus)\n  - [[SPUD-001/Yukon|Yukon]] (01.01, scout, haiku)",
+            "\n".join(
+                [
+                    "| Member | ID | Persona | Model | Status | Run | Tokens | Tools |",
+                    "|---|---|---|---|---|---|---|---|",
+                    "| [[SPUD-001/Russet\\|Russet]] | 01 | engineer | opus | planned | — | — | — |",
+                    "| ↳ [[SPUD-001/Yukon\\|Yukon]] | 01.01 | scout | haiku | planned | — | — | — |",
+                    "",
+                    "- [[SPUD-001/Russet|Russet]] (01, engineer, opus)",
+                    "  - [[SPUD-001/Yukon|Yukon]] (01.01, scout, haiku)",
+                    "",
+                    "![[Fleet.base#Team]]",
+                ]
+            ),
         )
         self.assertTrue(text.endswith("\n"))
 

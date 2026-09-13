@@ -3,13 +3,17 @@ round trip through the database.
 
 git archive <ref> ledger reports  ->  spud init  ->  spud import  ->
 spud render --out <tmp>/out  ->  every generated file equals its source up to
-the marker line, trailing whitespace and runs of blank lines.
+the marker line, trailing whitespace and runs of blank lines.  One section is
+compared by its own rule: a ticket's ## Team, generated from the members table
+alone since SPD-010 (a table, the member tree with each member's worked-on
+sentence, the embedded Team view), is checked by team_section_problems in
+tests/helpers.py, the rule of docs/design/2026-09-12-team-card.md section 8.3.
 
 Two corpora, two purposes:
 
 * PinnedLedgerTest archives PINNED_REF, the ledger as it stood when the importer
   was written, and pins exactly which sections the rows cannot regenerate (the
-  32 pairs below).  A regression that pushes more of the ledger into verbatim
+  31 pairs below).  A regression that pushes more of the ledger into verbatim
   prose, or parses less of it into rows, fails here on purpose.
 * CutoverReadinessTest archives live HEAD: the ledger as it stands now, which
   grows with every commit on main.  It asserts the round trip file by file and
@@ -28,7 +32,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import REPO, MARKER, Home, normalize_markdown
+from helpers import REPO, MARKER, Home, normalize_markdown, split_team_section, team_section_problems
 
 # The last ledger commit on main before bin/spud existed (Law 10 and the Main and
 # worktrees section landed in it).  It is on main, in every worktree and on origin,
@@ -48,7 +52,7 @@ PINNED_PROSE = {
     "ledger/teams/SPUD-006/Elba.md": {"Log", "Sub-agents", "Ticket proposals"},
     "ledger/teams/SPUD-006/Vitelotte.md": {"Log", "Sub-agents", "Ticket proposals"},
     "ledger/teams/SPUD-007/Atlantic.md": {"Log", "Sub-agents", "Ticket proposals"},
-    "ledger/tickets/SPD-001.md": {"Proposals received", "Team"},
+    "ledger/tickets/SPD-001.md": {"Proposals received"},
     "ledger/tickets/SPD-004.md": {"Proposals received"},
     "ledger/tickets/SPD-006.md": {"Proposals received"},
 }
@@ -56,10 +60,13 @@ PINNED_PROSE = {
 # The kinds of section the importer may keep as prose from any markdown-v0 file:
 # the sections it derives from rows (when the file carries more than the rows
 # hold: annotations, comment lines, preambles) and the one extra section a
-# member note carries today.  A new kind must be added here deliberately.
-KNOWN_PROSE_KINDS = {"Log", "Sub-agents", "Ticket proposals", "Team", "Handoffs", "Proposals received", "Sources"}
+# member note carries today.  ## Team is none of them: its prose is never stored,
+# its tree lines' suffixes become summaries (SPD-010).  A new kind must be added
+# here deliberately.
+KNOWN_PROSE_KINDS = {"Log", "Sub-agents", "Ticket proposals", "Handoffs", "Proposals received", "Sources"}
 
 WIKILINK = re.compile(r"\[\[[^\]]*\]\]")
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def extract_corpus(ref, dest):
@@ -96,6 +103,10 @@ def split_sections(body):
             buf.append(line)
     sections.append((heading, "\n".join(buf)))
     return sections
+
+
+def is_ticket(rel):
+    return tuple(rel.parts[:2]) == ("ledger", "tickets")
 
 
 class RoundTripMixin:
@@ -172,8 +183,18 @@ class RoundTripMixin:
     def test_round_trip_differs_only_in_formatting(self):
         failures = []
         for rel in self.sources():
-            want = normalize_markdown((self.src / rel).read_text(encoding="utf-8"))
-            got = normalize_markdown((self.out / rel).read_text(encoding="utf-8"))
+            want_text = (self.src / rel).read_text(encoding="utf-8")
+            got_text = (self.out / rel).read_text(encoding="utf-8")
+            if is_ticket(rel):
+                # ## Team is generated from the members table: its own rule; the rest of the note byte for byte
+                want_text, want_team = split_team_section(want_text)
+                got_text, got_team = split_team_section(got_text)
+                if (want_team is None) != (got_team is None):
+                    failures.append("%s: ## Team is in only one of the committed and the rendered note" % rel)
+                elif want_team is not None:
+                    failures += ["%s ## Team: %s" % (rel, problem) for problem in team_section_problems(want_team, got_team)]
+            want = normalize_markdown(want_text)
+            got = normalize_markdown(got_text)
             if want != got:
                 diff = difflib.unified_diff(
                     want.splitlines(keepends=True),
@@ -198,17 +219,23 @@ class RoundTripMixin:
                 continue
             _, want_body = split_frontmatter((self.src / rel).read_text(encoding="utf-8"))
             _, got_body = split_frontmatter((self.out / rel).read_text(encoding="utf-8"))
-            want = [(h, normalize_markdown(t)) for h, t in split_sections(want_body)]
-            got = [(h, normalize_markdown(t)) for h, t in split_sections(got_body)]
+            want = split_sections(want_body)
+            got = split_sections(got_body)
             self.assertEqual([h for h, _ in want], [h for h, _ in got], rel)
             for (h, wt), (_, gt) in zip(want, got):
-                self.assertEqual(wt, gt, "%s section %s" % (rel, h))
+                if h == "## Team" and is_ticket(rel):
+                    self.assertEqual(team_section_problems(wt, gt), [], "%s section %s" % (rel, h))
+                else:
+                    self.assertEqual(normalize_markdown(wt), normalize_markdown(gt), "%s section %s" % (rel, h))
 
     def test_wikilinks_identical(self):
         for rel in self.sources():
-            want = WIKILINK.findall((self.src / rel).read_text(encoding="utf-8"))
-            got = WIKILINK.findall((self.out / rel).read_text(encoding="utf-8"))
-            self.assertEqual(want, got, rel)
+            want = (self.src / rel).read_text(encoding="utf-8")
+            got = (self.out / rel).read_text(encoding="utf-8")
+            if is_ticket(rel):
+                # ## Team links each member from the table and the tree: compared outside it
+                want, got = split_team_section(want)[0], split_team_section(got)[0]
+            self.assertEqual(WIKILINK.findall(want), WIKILINK.findall(got), rel)
 
     def test_import_events_point_at_the_source_paths(self):
         rows = self.home.rows("SELECT body, data FROM events WHERE kind = 'import'")
@@ -248,12 +275,35 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
         # NOT NULL columns take the source's nearest value and the import event says which
         self.assertEqual(self.home.scalar("SELECT updated_at FROM tickets WHERE key = 'SPD-001'"), "2026-09-12")
         data = json.loads(self.home.scalar("SELECT e.data FROM events e JOIN tickets t ON t.id = e.ticket_id WHERE e.kind = 'import' AND e.member_id IS NULL AND t.key = 'SPD-001'"))
-        self.assertEqual(data["derived"], {"updated_at": "created"})
+        # Ozette's tree line carries a suffix, so the event also names the summary it gave (SPD-010)
+        self.assertEqual(data["derived"], {"updated_at": "created", "members.summary": "Team section"})
         data = json.loads(self.home.scalar("SELECT e.data FROM events e JOIN tickets t ON t.id = e.ticket_id WHERE e.kind = 'import' AND e.member_id IS NULL AND t.key = 'SPD-002'"))
         self.assertEqual(data["derived"], {"updated_at": "created", "proposal.filed_at": "created", "proposal_decisions.at": "created"})
         self.assertEqual(self.home.scalar("SELECT planned_at FROM members WHERE name = 'Ozette'"), "2026-09-12T00:00")
         data = json.loads(self.home.scalar("SELECT e.data FROM events e JOIN members m ON m.id = e.member_id WHERE e.kind = 'import' AND m.name = 'Ozette'"))
         self.assertEqual(data["derived"], {"planned_at": "spawned"})
+
+    def test_team_line_suffix_became_the_members_summary(self):
+        # the one fact SPD-001's markdown-v0 Team prose held beyond the rows (SPD-010)
+        self.assertEqual(
+            self.home.scalar("SELECT m.summary FROM members m JOIN tickets t ON t.id = m.ticket_id WHERE t.key = 'SPD-001' AND m.name = 'Ozette'"),
+            "spawn attempted at the depth cap, never ran",
+        )
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM members WHERE summary IS NOT NULL"), 1)
+
+    def test_team_cards_match_the_spec_mocks(self):
+        # the spec's raw mocks, byte for byte, rendered from the rows this corpus imports: SPD-001 as it
+        # reads after the backfill (the corpus carries Ozette's annotation), SPD-006 as it reads before it
+        fixture = json.loads((FIXTURES / "team_card.json").read_text(encoding="utf-8"))
+        ozette = "    - [[SPUD-001/Ozette|Ozette]] (01.01.01, scout, haiku)\n"
+        self.assertEqual(fixture["mocks"]["SPD-001"].count(ozette), 1)
+        want = {
+            "SPD-001": fixture["mocks"]["SPD-001"].replace(ozette, fixture["ozette_after_backfill"] + "\n"),
+            "SPD-006": fixture["mocks"]["SPD-006"],
+        }
+        for key, section in want.items():
+            text = (self.out / "ledger" / "tickets" / ("%s.md" % key)).read_text(encoding="utf-8")
+            self.assertEqual("## Team\n" + text.split("\n## Team\n", 1)[1].split("\n\n## Handoffs\n", 1)[0], section, key)
 
     def test_proposal_links_resolve_to_members(self):
         row = self.home.rows(

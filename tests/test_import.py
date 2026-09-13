@@ -88,10 +88,16 @@ class SyntheticImportTest(SpudTestCase):
         self.home.json("import", root)
         out = self.home.path / "out"
         self.home.json("render", "--out", out)
-        from helpers import normalize_markdown
+        from helpers import normalize_markdown, split_team_section, team_section_problems
 
         for rel in ("ledger/tickets/SPD-001.md", "ledger/teams/SPUD-001/Russet.md"):
-            self.assertEqual(normalize_markdown((out / rel).read_text(encoding="utf-8")), normalize_markdown((root / rel).read_text(encoding="utf-8")), rel)
+            want, want_team = split_team_section((root / rel).read_text(encoding="utf-8"))
+            got, got_team = split_team_section((out / rel).read_text(encoding="utf-8"))
+            self.assertEqual(normalize_markdown(got), normalize_markdown(want), rel)
+            self.assertEqual(got_team is None, want_team is None, rel)
+            if want_team is not None:
+                # ## Team is generated from the members table (SPD-010): compared by the spec's rule
+                self.assertEqual(team_section_problems(want_team, got_team), [], rel)
 
 
 if __name__ == "__main__":
