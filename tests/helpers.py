@@ -129,6 +129,59 @@ class Home:
             f.write("\n")
         return p
 
+    def write_config(self, config):
+        """Rewrite the home's spud.config.json (the CLI reads it on every run)."""
+        self.config = config
+        with open(self.path / "spud.config.json", "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2)
+
+    def hook(self, event, payload):
+        """Run `spud hook <event>` with the payload (a dict, or raw text) on stdin."""
+        stdin = payload if isinstance(payload, str) else json.dumps(payload)
+        proc = self.run("hook", event, check=False, stdin=stdin)
+        return HookResult(proc.returncode, proc.stdout, proc.stderr)
+
+    @property
+    def spool(self):
+        return self.path / ".spud" / "hook-errors.jsonl"
+
+
+class HookResult:
+    """What a hook run produced: exit code, stdout (parsed as JSON when it is), stderr."""
+
+    def __init__(self, code, stdout, stderr):
+        self.code = code
+        self.stdout = stdout
+        self.stderr = stderr
+        self.json = None
+        if stdout.strip():
+            try:
+                self.json = json.loads(stdout)
+            except json.JSONDecodeError:
+                self.json = None
+
+    @property
+    def decision(self):
+        """PreToolUse: the permissionDecision, or None when the hook stayed silent."""
+        if not self.json:
+            return None
+        return self.json.get("hookSpecificOutput", {}).get("permissionDecision")
+
+    @property
+    def reason(self):
+        if not self.json:
+            return ""
+        return self.json.get("hookSpecificOutput", {}).get("permissionDecisionReason") or self.json.get("reason") or ""
+
+    @property
+    def context(self):
+        if not self.json:
+            return ""
+        return self.json.get("hookSpecificOutput", {}).get("additionalContext") or ""
+
+    def __repr__(self):
+        return "HookResult(code=%r, stdout=%r, stderr=%r)" % (self.code, self.stdout, self.stderr)
+
 
 class SpudTestCase(unittest.TestCase):
     """A test case with a fresh initialised Home per test."""

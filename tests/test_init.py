@@ -180,11 +180,12 @@ class InitTest(SpudTestCase):
         after = set(cache.glob("*")) if cache.exists() else set()
         self.assertEqual(after - before, set())
 
-    def test_help_says_as_is_trusted_by_prose_until_hooks(self):
+    def test_help_says_the_hooks_bind_and_check_as(self):
         text = self.home.run("--help").stdout
         self.assertIn("--as", text)
-        self.assertIn("trusted", text)
-        self.assertIn("SPD-008", text)
+        self.assertIn("bound to its", text)
+        self.assertIn("spud hook", text)
+        self.assertNotIn("SPD-008", text)
 
 
 class WithoutDatabaseTest(unittest.TestCase):
