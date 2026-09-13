@@ -73,6 +73,9 @@ class Home:
             json.dump(self.config, f, indent=2)
         self.env = dict(os.environ)
         self.env["SPUD_HOME"] = str(self.path)
+        # `member new` records the session its Bash runs in (SPD-018): a suite run from a Claude Code session must
+        # not stamp that live session on scratch rows, so a test that wants a session names it.
+        self.env.pop("CLAUDE_CODE_SESSION_ID", None)
         self.db = self.path / ".spud" / "ledger.db"
 
     def cleanup(self):

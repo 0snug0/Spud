@@ -1172,9 +1172,10 @@ def normalize_deliverables(globs):
     return [normalize_deliverable(g) for g in (globs or [])]
 
 
-def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_reason=None, agent_type=None, brief="", deliverables=None):
+def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_reason=None, agent_type=None, brief="", deliverables=None, session_id=None):
     """member new: the four limit checks, the lineage and the name draw, all inside
-    one BEGIN IMMEDIATE, reading the ticket and the parent inside it too."""
+    one BEGIN IMMEDIATE, reading the ticket and the parent inside it too.  session_id is
+    the Claude Code session planning it (SPD-018), None outside one."""
     limits = ctx.limits
     deliverables = normalize_deliverables(deliverables)
     if persona not in ctx.personas():
@@ -1229,16 +1230,18 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
         chosen = draw_name(con, ticket["id"], name)
         cur = con.execute(
             "INSERT INTO members (ticket_id, lineage, depth, parent_id, name, persona, agent_type, model, tier_reason,"
-            " status, brief, deliverables, planned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?)",
+            " status, brief, deliverables, planned_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)",
             (ticket["id"], lineage, depth, parent_id, chosen, persona, agent_type, model, tier_reason, brief,
-             json.dumps(list(deliverables or [])), at),
+             json.dumps(list(deliverables or [])), at, session_id),
         )
         member_id = cur.lastrowid
         if parent is None:
             con.execute("UPDATE tickets SET lead_id = ?, updated_at = ? WHERE id = ? AND lead_id IS NULL", (member_id, at, ticket["id"]))
+        data = {"lineage": lineage, "name": chosen, "persona": persona, "model": model, "agent_type": agent_type}
+        if session_id:
+            data["session_id"] = session_id
         write_event(con, at, actor.label, "member.planned", "planned %s (%s, %s, %s)" % (chosen, lineage, persona, model),
-                    ticket_id=ticket["id"], member_id=member_id,
-                    data={"lineage": lineage, "name": chosen, "persona": persona, "model": model, "agent_type": agent_type})
+                    ticket_id=ticket["id"], member_id=member_id, data=data)
     return get_member_by_id(con, member_id)
 
 
@@ -3109,12 +3112,21 @@ def cmd_ticket_show(ctx, args):
     return Result({"ticket": d}, format_ticket(d))
 
 
+def planning_session(env):
+    """The Claude Code session a command runs in: CLAUDE_CODE_SESSION_ID, which the harness sets in every Bash and
+    hook subprocess to the session_id its hook payloads carry, a subagent's Bash included (hooks and env-vars
+    references; observed 2026-09-13, SPD-018).  None outside a session."""
+    value = env.get("CLAUDE_CODE_SESSION_ID")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def cmd_member_new(ctx, args):
     con = connect(ctx)
     try:
         actor = resolve_actor(con, args.actor)
         m = plan_member(ctx, con, actor, args.ticket, args.persona, args.model, name=args.name, tier_reason=args.tier_reason,
-                        agent_type=args.agent_type, brief=args.brief or "", deliverables=args.deliverable)
+                        agent_type=args.agent_type, brief=args.brief or "", deliverables=args.deliverable,
+                        session_id=planning_session(os.environ))
         d = member_dict(con, m)
     finally:
         con.close()
@@ -3590,11 +3602,22 @@ def cmd_events(ctx, args):
     return Result({"events": events}, "\n".join(lines) or "(no events)")
 
 
+def brief_state(m, today=None):
+    """A live member's state on the brief board: its status, or `returned HH:MM, unrecorded` for a member that
+    returned and has no verdict yet (the date too when it stopped on another day).  A session holds only for its
+    own members (SPD-018), so this is how a later or parallel session sees another session's."""
+    if m["status"] == "active" and m["stopped_at"] and not (m["outcome"] or "").strip():
+        same_day = m["stopped_at"][:10] == (today or now())[:10]
+        return "returned %s, unrecorded" % (m["stopped_at"][11:16] if same_day else fm_minute(m["stopped_at"]))
+    return m["status"]
+
+
 def board_brief_text(con, rows=None):
     """Open tickets and their live members, one line each (also the SessionStart context)."""
     if rows is None:
         rows = [dict(r) for r in con.execute("SELECT * FROM v_board").fetchall()]
     lines = []
+    today = now()
     for r in rows:
         if r["status"] in ("done", "declined"):
             continue
@@ -3604,7 +3627,7 @@ def board_brief_text(con, rows=None):
                 "SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id WHERE t.key = ? AND m.status IN ('planned','active') ORDER BY m.lineage",
                 (r["key"],),
             ).fetchall():
-                lines.append("  %s (%s, %s, %s) %s" % (m["name"], m["lineage"], persona_label(m), m["model"], m["status"]))
+                lines.append("  %s (%s, %s, %s) %s" % (m["name"], m["lineage"], persona_label(m), m["model"], brief_state(m, today)))
     return "\n".join(lines) or "(no open tickets)"
 
 
@@ -5189,28 +5212,156 @@ def hook_session_start(ctx, payload):
     return HookOutput({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}})
 
 
+# Spud's Stop hook, one session at a time (SPD-018).  Eric runs tickets in parallel sessions; before SPD-018 every Stop
+# was held, ledger-wide, for any member returned unrecorded, another session's included.  A member's session is the
+# session that spawned its tree.  Every hook payload fired inside a subagent carries the main session's session_id (the
+# SPD-015 probe captures: a lead's PreToolUse(Agent) for its child and the SubagentStops of lead and child all carry
+# it), and so does CLAUDE_CODE_SESSION_ID in any Bash the harness runs, a subagent's included, which `member new`
+# records on the row it plans (planning_session).
+PLANNED_GRACE_SECONDS = 600  # a planned row no session can claim holds every session only once it has waited this long
+
+
+def member_session(con, member):
+    """The session a member belongs to: its latest allowed spawn request's, else the one its row records (bound at
+    spawn, or at `member new`), else its parent's, up to the root; None when nothing on the way records one (a row
+    from before sessions were recorded)."""
+    seen = set()
+    while member is not None and member["id"] not in seen:
+        seen.add(member["id"])
+        req = con.execute("SELECT session_id FROM spawn_requests WHERE member_id = ? AND decision = 'allow' AND session_id != ''"
+                          " ORDER BY at DESC, rowid DESC LIMIT 1", (member["id"],)).fetchone()
+        if req is not None:
+            return req["session_id"]
+        if member["session_id"]:
+            return member["session_id"]
+        member = get_member_by_id(con, member["parent_id"]) if member["parent_id"] is not None else None
+    return None
+
+
+def planned_long_ago(stamp, at):
+    """Whether a row planned at stamp has waited more than PLANNED_GRACE_SECONDS by at; a stamp that cannot be read
+    counts as old."""
+    try:
+        planned, current = datetime.fromisoformat(stamp), datetime.fromisoformat(at)
+    except (TypeError, ValueError):
+        return True
+    planned = planned if planned.tzinfo else planned.astimezone()
+    current = current if current.tzinfo else current.astimezone()
+    return (current - planned).total_seconds() > PLANNED_GRACE_SECONDS
+
+
+def told_running(con, session, ref):
+    """Whether an earlier Stop block in this session already named ref as still running: the events are the memory."""
+    return con.execute(
+        "SELECT 1 FROM events e, json_each(e.data, '$.running') j"
+        " WHERE e.kind = 'hook.denied' AND e.actor = 'hook:Stop' AND json_extract(e.data, '$.session_id') IS ? AND j.value = ? LIMIT 1",
+        (session, ref),
+    ).fetchone() is not None
+
+
+def stop_owed(con, session, at):
+    """What the stopping session owes, as (returned, planned, running) lists of member rows.  A member of another
+    session is never owed; one with no known session is every session's, as is everything when the payload names
+    no session.
+    - returned: a final stop, no outcome, status active, at the root or under a finished parent;
+    - planned: never spawned and no allowed spawn waiting to bind, at the root or under a finished parent; a row no
+      session can claim only once it has waited PLANNED_GRACE_SECONDS, so a row planned a moment ago never holds;
+    - running: active with no final stop under a finished parent, named once per session (Spud's own children at
+      work never hold: ending a turn while they run is the design)."""
+    def owes(own):
+        return own is None or session is None or own == session
+
+    returned = [r for r in con.execute(
+        "SELECT m.*, t.team_key, t.key AS ticket_key FROM members m JOIN tickets t ON t.id = m.ticket_id"
+        " LEFT JOIN members p ON p.id = m.parent_id"
+        " WHERE m.stopped_at IS NOT NULL AND (m.outcome IS NULL OR trim(m.outcome) = '') AND m.status = 'active'"
+        "   AND (m.parent_id IS NULL OR p.status NOT IN ('planned','active'))"
+        " ORDER BY m.stopped_at, m.id"
+    ).fetchall() if owes(member_session(con, r))]
+    planned = []
+    for r in con.execute(
+        "SELECT m.*, t.team_key, t.key AS ticket_key, p.status AS parent_status FROM members m JOIN tickets t ON t.id = m.ticket_id"
+        " LEFT JOIN members p ON p.id = m.parent_id"
+        " WHERE m.status = 'planned' AND (m.parent_id IS NULL OR p.status NOT IN ('planned','active'))"
+        "   AND NOT EXISTS (SELECT 1 FROM spawn_requests s WHERE s.member_id = m.id AND s.decision = 'allow' AND s.agent_id IS NULL)"
+        " ORDER BY m.planned_at, m.id"
+    ).fetchall():
+        own = member_session(con, r)
+        if (session is not None and own == session) or ((own is None or session is None) and planned_long_ago(r["planned_at"], at)):
+            planned.append(r)
+    running = [r for r in con.execute(
+        "SELECT m.*, t.team_key, t.key AS ticket_key, p.status AS parent_status FROM members m JOIN tickets t ON t.id = m.ticket_id"
+        " JOIN members p ON p.id = m.parent_id"
+        " WHERE m.status = 'active' AND m.stopped_at IS NULL AND p.status NOT IN ('planned','active')"
+        " ORDER BY COALESCE(m.spawned_at, m.planned_at), m.id"
+    ).fetchall() if owes(member_session(con, r)) and not told_running(con, session, "%s/%s" % (r["team_key"], r["name"]))]
+    return returned, planned, running
+
+
+def stop_item(r, what):
+    return "%s/%s (%s, %s) on %s, %s" % (r["team_key"], r["name"], r["lineage"], r["persona"], r["ticket_key"], what)
+
+
+def returned_clause(rows):
+    """The returned members, in the words of Spud's Stop since SPD-008, without the ending."""
+    return ("%d returned spudagent(s) are not recorded: %s. Record each with `spud --as spud member finish <SPUD-nnn/Name> --status done|blocked|failed"
+            " --outcome '<verdict>' [--summary '<one paragraph>']`, decide its proposals (spud proposal list --open; spud --as spud proposal decide ...)"
+            % (len(rows), "; ".join(stop_item(r, "stopped " + fm_minute(r["stopped_at"])) for r in rows)))
+
+
+def planned_clause(con, rows):
+    """Planned rows never spawned: Spud spawns its own or records them failed; one under a finished parent nobody can spawn."""
+    items, steps = [], []
+    for r in rows:
+        ref = "%s/%s" % (r["team_key"], r["name"])
+        fail = "`spud --as spud member finish %s --status failed --outcome '<why>'`" % ref
+        if r["parent_id"] is None:
+            items.append(stop_item(r, "planned " + fm_minute(r["planned_at"])))
+            steps.append("spawn %s now (the Agent tool with subagent_type `%s`, model `%s`, description `%s (%s, %s)`) or record it with %s"
+                         % (ref, r["agent_type"], r["model"], ref, r["lineage"], r["persona"], fail))
+        else:
+            parent = member_ref(con, r["parent_id"])
+            items.append(stop_item(r, "planned %s, under %s (%s)" % (fm_minute(r["planned_at"]), parent, r["parent_status"])))
+            steps.append("nobody can spawn %s now that %s is %s: record it with %s" % (ref, parent, r["parent_status"], fail))
+    steps_text = "; ".join(steps)
+    return ("%d planned spudagent(s) were never spawned: %s. %s. A planned row holds a slot against the limits until it is spawned or recorded"
+            % (len(rows), "; ".join(items), steps_text[:1].upper() + steps_text[1:]))
+
+
+def running_clause(con, rows):
+    """Children still at work under a finished parent: nobody else will record them, and this is said once per session."""
+    items = "; ".join(stop_item(r, "running since %s, under %s (%s)" % (fm_minute(r["spawned_at"] or r["planned_at"]), member_ref(con, r["parent_id"]), r["parent_status"]))
+                      for r in rows)
+    commands = "; ".join("`spud --as spud member finish %s/%s --status done|blocked|failed --outcome '<verdict>'`" % (r["team_key"], r["name"]) for r in rows)
+    return ("%d spudagent(s) are still running under a finished parent: %s. No parent is left to record them: each completion notification"
+            " comes to the session that spawned the tree, and when it arrives, record each with %s. This is said once; one that returns"
+            " unrecorded is named again as returned" % (len(rows), items, commands))
+
+
+def stop_reason(con, returned, planned, running):
+    """One block: returned first, then planned, then running.  With returned members alone it is the reason Spud's Stop
+    has given since SPD-008, byte for byte."""
+    if returned and not planned and not running:
+        return "Law 9: " + returned_clause(returned) + ", then end the turn."
+    clauses = ([returned_clause(returned)] if returned else []) + ([planned_clause(con, planned)] if planned else []) + ([running_clause(con, running)] if running else [])
+    return "Law 9: " + ". ".join(clauses) + ". Then end the turn."
+
+
 def hook_stop(ctx, payload):
     if payload.get("agent_id") or payload.get("stop_hook_active") or not ctx.db_path.is_file():
         return SILENT
+    session = payload.get("session_id") if isinstance(payload.get("session_id"), str) and payload.get("session_id") else None
     con = connect(ctx)
     try:
         at = now()
         with write_txn(con):
-            rows = con.execute(
-                "SELECT m.*, t.team_key, t.key AS ticket_key FROM members m JOIN tickets t ON t.id = m.ticket_id"
-                " LEFT JOIN members p ON p.id = m.parent_id"
-                " WHERE m.stopped_at IS NOT NULL AND (m.outcome IS NULL OR trim(m.outcome) = '') AND m.status = 'active'"
-                "   AND (m.parent_id IS NULL OR p.status NOT IN ('planned','active'))"
-                " ORDER BY m.stopped_at, m.id"
-            ).fetchall()
-            if not rows:
+            returned, planned, running = stop_owed(con, session, at)
+            if not (returned or planned or running):
                 return SILENT
-            refs = ["%s/%s" % (r["team_key"], r["name"]) for r in rows]
-            items = ["%s/%s (%s, %s) on %s, stopped %s" % (r["team_key"], r["name"], r["lineage"], r["persona"], r["ticket_key"], fm_minute(r["stopped_at"])) for r in rows]
-            reason = ("Law 9: %d returned spudagent(s) are not recorded: %s. Record each with `spud --as spud member finish <SPUD-nnn/Name> --status done|blocked|failed"
-                      " --outcome '<verdict>' [--summary '<one paragraph>']`, decide its proposals (spud proposal list --open; spud --as spud proposal decide ...), then end the turn."
-                      % (len(rows), "; ".join(items)))
-            write_event(con, at, "hook:Stop", "hook.denied", reason, data={"hook_event_name": "Stop", "members": refs})
+            refs = {kind: ["%s/%s" % (r["team_key"], r["name"]) for r in rows] for kind, rows in (("returned", returned), ("planned", planned), ("running", running))}
+            reason = stop_reason(con, returned, planned, running)
+            write_event(con, at, "hook:Stop", "hook.denied", reason,
+                        data=dict({"hook_event_name": "Stop", "session_id": session, "members": refs["returned"] + refs["planned"] + refs["running"]}, **refs))
     finally:
         con.close()
     return HookOutput({"decision": "block", "reason": reason})
