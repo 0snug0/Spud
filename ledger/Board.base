@@ -41,13 +41,13 @@ views:
       - proposed_by
       - created
     sort:
+      - property: priority
+        direction: ASC
       - property: status
         direction: DESC
       - property: file.name
         direction: ASC
       - property: formula.status_rank
-        direction: ASC
-      - property: priority
         direction: ASC
     columnSize:
       note.lead: 193
