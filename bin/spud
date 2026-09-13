@@ -27,6 +27,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime
+from fractions import Fraction
 from pathlib import Path
 
 VERSION = "1.0.0"
@@ -202,9 +203,14 @@ class Ctx:
         pad = self.config.get("naming", {}).get("id_pad", 2)
         return pad if isinstance(pad, int) and pad > 0 else 2
 
+    @property
+    def pricing(self):
+        """The price table spud.config.json gives (`pricing`, SPD-013), or None: what cost renders from."""
+        return price_table(self.config)[0]
+
 
 def config_problems(config):
-    """Config sanity for doctor: unique pool names, integer limits, known tiers."""
+    """Config sanity for doctor: unique pool names, integer limits, known tiers, a readable price table."""
     problems = []
     pool = config.get("naming", {}).get("pool")
     if not isinstance(pool, list) or not pool:
@@ -227,6 +233,7 @@ def config_problems(config):
         prefix = config.get(key, {}).get("prefix")
         if not isinstance(prefix, str) or not re.fullmatch(r"[A-Z][A-Z0-9]*", prefix):
             problems.append("%s.prefix must be upper-case letters and digits (%r)" % (key, prefix))
+    problems.extend(price_table(config)[1])
     return problems
 
 
@@ -1291,7 +1298,9 @@ def join_prose(prose, rows_text):
 # how it went; the member tree, each line carrying what that member worked on and built; and the
 # embedded Fleet.base Team view.  The spec's reference implementation is the contract.
 
-TEAM_TABLE_HEAD = ("| Member | ID | Persona | Model | Status | Run | Tokens | Tools |", "|---|---|---|---|---|---|---|---|")
+# Cost (list) since SPD-013: a run at the API list price in USD, never Eric's subscription bill; a Total row ends the table.
+TEAM_TABLE_HEAD = ("| Member | ID | Persona | Model | Status | Run | Tokens | Cost (list) | Tools |", "|---|---|---|---|---|---|---|---|---|")
+TEAM_TOTAL_LABEL = "**Total**"
 TEAM_VIEW_EMBED = "![[Fleet.base#Team]]"
 NOT_RECORDED = "—"  # alone in a cell: planned and imported rows, runs without usage
 WORKED_ON_CAP = 400  # characters (code points), markdown included
@@ -1384,9 +1393,10 @@ def card_cell(text):
     return str(text).replace("|", "\\|")
 
 
-def team_table_row(team_key, ticket_created, m):
+def team_table_row(team_key, ticket_created, m, pricing=None):
     marker = ("↳" * (m["depth"] - 1) + " ") if m["depth"] > 1 else ""
     counts = token_counts(m["usage_json"])
+    cost, _ = run_cost(m["usage_json"], pricing)
     cells = [
         "%s[[%s/%s\\|%s]]" % (marker, team_key, m["name"], m["name"]),
         m["lineage"],
@@ -1394,7 +1404,8 @@ def team_table_row(team_key, ticket_created, m):
         card_cell(m["model"] + (" (%s)" % m["resolved_model"] if m["resolved_model"] else "")),
         "**%s**" % m["status"] if m["status"] in ("blocked", "failed") else m["status"],
         run_cell(m, ticket_created),
-        "%s out · %s in · %s cached" % (humanize(counts["out"]), humanize(counts["in"]), humanize(counts["cached"])) if counts else NOT_RECORDED,
+        tokens_text(counts) if counts else NOT_RECORDED,
+        money(cost) if cost is not None else NOT_RECORDED,
         str(m["tool_uses"]) if m["tool_uses"] is not None else NOT_RECORDED,
     ]
     return "| " + " | ".join(cells) + " |"
@@ -1410,8 +1421,9 @@ def team_order(rows, lead_id):
     return [m for m in rows if m["lineage"].split(".")[0] == root] + [m for m in rows if m["lineage"].split(".")[0] != root]
 
 
-def usage_pairs(m):
-    """A member note's usage keys, each only when known: after finished, before tags."""
+def usage_pairs(m, pricing=None):
+    """A member note's usage keys, each only when known: after finished, before tags.  cost_usd (SPD-013) is the run at
+    the API list price, from the price table the render is given; a run without a cost has no cost_usd."""
     pairs = []
     if m["duration_ms"] is not None:
         pairs.append(("duration_ms", ("plain", m["duration_ms"])))
@@ -1420,7 +1432,248 @@ def usage_pairs(m):
     counts = token_counts(m["usage_json"])
     if counts:
         pairs += [("tokens_out", ("plain", counts["out"])), ("tokens_in", ("plain", counts["in"])), ("tokens_cached", ("plain", counts["cached"]))]
+    cost, _ = run_cost(m["usage_json"], pricing)
+    if cost is not None:
+        pairs.append(("cost_usd", ("plain", cost_number(cost))))
     return pairs
+
+
+def tokens_text(counts):
+    """{out, in, cached} as the card and the Team table show them."""
+    return "%s out · %s in · %s cached" % (humanize(counts["out"]), humanize(counts["in"]), humanize(counts["cached"]))
+
+
+# Cost at the API list price (SPD-013).  Eric decided the basis on 2026-09-13: the API list price in USD from Anthropic's
+# published per-model prices, labelled as list price so it is never read as his subscription's bill, from the dated
+# table spud.config.json gives (`pricing`), which he updates.  Cost is computed when the card and the notes render, from
+# a stored transcript sum's per-model breakdown (usage_breakdown) and that table; it is never stored, so a price change
+# only re-renders.  Arithmetic is exact (Fraction: integers over integers), rounded once, half up, to cents at display.
+# The table: models, each id as the transcripts write message.model, with its input, output, cache_read, cache_write_5m
+# and cache_write_1h prices in USD per 1M tokens and its fast-mode prices where fast mode is sold; server_tools, a fee per
+# `per` requests of a usage.server_tool_use key; multipliers on every token price for usage.service_tier and
+# usage.inference_geo values, an absent value meaning the API's default (standard, global).  Whatever a breakdown holds
+# that the table does not price (a model, a speed, a tier, a geography, a cache TTL, a server tool, a request billed per
+# attempt) leaves the run without a cost and names the reason, rather than pricing it at a guess.
+PRICE_RATES = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
+SPLIT_RATES = {"ephemeral_5m_input_tokens": "cache_write_5m", "ephemeral_1h_input_tokens": "cache_write_1h"}
+UNSPLIT_RATE = "cache_write_5m"  # cache writes a transcript does not split by TTL: the API's default cache TTL is five minutes
+PRICE_MULTIPLIERS = {"service_tier": "standard", "inference_geo": "global"}  # the usage key -> the value its absence means
+PRICE_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+COST_USD = re.compile(r"[0-9]{1,15}(?:\.[0-9]{1,2})?")  # a member note's cost_usd as the importer reads it back
+NO_TABLE = "no price table in spud.config.json"
+NO_BREAKDOWN = "no breakdown, which `spud member resum` adds"
+
+
+def price_number(value):
+    """A price or a multiplier from the config as an exact fraction: a non-negative, finite int or float, never a bool."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if isinstance(value, float) and (value != value or value in (float("inf"), float("-inf"))):
+        return None
+    number = Fraction(value) if isinstance(value, int) else Fraction(repr(value))
+    return number if number >= 0 else None
+
+
+def price_rates(block, where, problems):
+    """A model's five prices (or its fast-mode prices) as fractions, or None with the problem named."""
+    rates = {k: price_number(block.get(k)) for k in PRICE_RATES} if isinstance(block, dict) else None
+    if rates is None or None in rates.values():
+        bad = PRICE_RATES if rates is None else [k for k in PRICE_RATES if rates[k] is None]
+        problems.append("%s: %s must be a non-negative number of USD per 1M tokens" % (where, ", ".join(bad)))
+        return None
+    return rates
+
+
+def price_table(config):
+    """(the price table a config gives, its problems).  (None, []) without a `pricing` block: every cost shows a dash.
+    (None, problems) when the block is not USD per 1M tokens read on a named day.  Otherwise the table, with each model,
+    server tool or multiplier that has a problem left out, so what it would price has no cost, and the problem named."""
+    block = config.get("pricing") if isinstance(config, dict) else None
+    if block is None:
+        return None, []
+    if not isinstance(block, dict):
+        return None, ["pricing is not an object"]
+    problems = []
+    if block.get("currency") != "USD":
+        problems.append('pricing.currency must be "USD" (%r)' % (block.get("currency"),))
+    if block.get("per") != "1M tokens":
+        problems.append('pricing.per must be "1M tokens" (%r)' % (block.get("per"),))
+    if not isinstance(block.get("as_of"), str) or not PRICE_DATE.fullmatch(block["as_of"]):
+        problems.append("pricing.as_of must be the day the prices were read, YYYY-MM-DD (%r)" % (block.get("as_of"),))
+    if problems:
+        return None, problems
+    source = block.get("source")
+    if not isinstance(source, str) or not source.strip():
+        problems.append("pricing.source must name the page the prices were read from")
+        source = None
+    table = {"as_of": block["as_of"], "source": source, "currency": "USD", "models": {}, "server_tools": {}}
+    table.update((name, {}) for name in PRICE_MULTIPLIERS)
+    models = block.get("models")
+    if not isinstance(models, dict):
+        problems.append("pricing.models is not an object of model ids")
+        models = {}
+    for model, entry in models.items():
+        speeds = {"standard": price_rates(entry, "pricing.models.%s" % model, problems)}
+        if speeds["standard"] is None:
+            continue
+        if "fast" in entry:
+            speeds["fast"] = price_rates(entry["fast"], "pricing.models.%s.fast" % model, problems)
+            if speeds["fast"] is None:
+                continue
+        table["models"][model] = speeds
+    tools = block.get("server_tools", {})
+    if not isinstance(tools, dict):
+        problems.append("pricing.server_tools is not an object")
+        tools = {}
+    for key, entry in tools.items():
+        usd = price_number(entry.get("usd")) if isinstance(entry, dict) else None
+        per = entry.get("per") if isinstance(entry, dict) else None
+        if usd is None or isinstance(per, bool) or not isinstance(per, int) or per < 1:
+            problems.append('pricing.server_tools.%s must be {"usd": a non-negative number, "per": a whole number of requests}' % key)
+            continue
+        table["server_tools"][key] = usd / per
+    multipliers = block.get("multipliers", {})
+    if not isinstance(multipliers, dict):
+        problems.append("pricing.multipliers is not an object")
+        multipliers = {}
+    for name in PRICE_MULTIPLIERS:
+        values = multipliers.get(name, {})
+        if not isinstance(values, dict):
+            problems.append("pricing.multipliers.%s is not an object" % name)
+            continue
+        for value, factor in values.items():
+            number = price_number(factor)
+            if number is None:
+                problems.append("pricing.multipliers.%s.%s must be a non-negative number" % (name, value))
+                continue
+            table[name][value] = number
+    return table, problems
+
+
+def bucket_cost(bucket, table):
+    """(one breakdown entry at the table's list prices, an exact fraction of a dollar, or None; the reasons it has none)."""
+    if not isinstance(bucket, dict):
+        return None, ["a breakdown entry that is not an object"]
+    split, tools, iterations = (bucket.get(key, {}) for key in ("cache_creation", "server_tool_use", "iterations"))
+    tokens = {key: bucket.get(key, 0) for key in BREAKDOWN_TOKENS + ("cache_creation_unsplit_input_tokens",)}
+    if not all(isinstance(part, dict) for part in (split, tools, iterations)) or any(
+            isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in [*tokens.values(), *split.values(), *tools.values()]):
+        return None, ["a breakdown figure that is not a count"]
+    if not any([*tokens.values(), *split.values(), *tools.values()]) and not iterations:
+        return Fraction(0), []  # nothing billed is free whatever the model says (a synthetic entry, an empty response)
+    reasons = []
+    model = bucket.get("model")
+    speeds = table["models"].get(model) if isinstance(model, str) else None
+    rates = None
+    if speeds is None:
+        reasons.append("no price for model %s" % model if isinstance(model, str) else "no price for requests that name no model")
+    else:
+        speed = bucket.get("speed", "standard")
+        rates = speeds.get(speed) if isinstance(speed, str) else None
+        if rates is None:
+            reasons.append("no price for speed %s on %s" % (speed, model))
+    factor = Fraction(1)
+    for name, default in PRICE_MULTIPLIERS.items():
+        value = bucket.get(name, default)
+        if isinstance(value, str) and value in table[name]:
+            factor *= table[name][value]
+        else:
+            reasons.append("no price for %s %s" % (name, value))
+    reasons += ["no price for cache_creation.%s" % key for key, n in split.items() if n and key not in SPLIT_RATES]
+    fees = Fraction(0)
+    for key, n in tools.items():
+        if n and key not in table["server_tools"]:
+            reasons.append("no price for server_tool_use.%s" % key)
+        elif n:
+            fees += n * table["server_tools"][key]
+    if iterations:
+        reasons.append("billed per attempt: usage.iterations holds %s" % ", ".join(sorted(iterations)))
+    if reasons:
+        return None, reasons
+    per_million = (tokens["input_tokens"] * rates["input"] + tokens["output_tokens"] * rates["output"]
+                   + tokens["cache_read_input_tokens"] * rates["cache_read"]
+                   + tokens["cache_creation_unsplit_input_tokens"] * rates[UNSPLIT_RATE]
+                   + sum(n * rates[SPLIT_RATES[key]] for key, n in split.items() if n))
+    return per_million * factor / 1_000_000 + fees, []
+
+
+def run_cost(usage_json, table):
+    """(a member's run at the API list price in USD, an exact fraction, or None; the reasons it has none).  Only a
+    transcript sum is priced, the one token_counts reads: a completion kept beside it or alone covers a final request
+    (SPD-021) and is never priced, and a row without a sum has nothing to price and no reason.  A sum the importer read
+    back from a rendered note carries the cost the note showed; any other sum is priced from its breakdown, which one
+    stored before SPD-013 lacks until `spud member resum` adds it."""
+    if token_counts(usage_json) is None:
+        return None, []
+    stored, _ = usage_parts(usage_json)
+    if stored.get("imported") is True:
+        text = stored.get("cost_usd")
+        return (Fraction(text), []) if isinstance(text, str) and COST_USD.fullmatch(text) else (None, ["imported without a cost"])
+    if table is None:
+        return None, [NO_TABLE]
+    breakdown = stored.get("breakdown")
+    if not isinstance(breakdown, list):
+        return None, [NO_BREAKDOWN]
+    total, reasons = Fraction(0), []
+    for bucket in breakdown:
+        cost, why = bucket_cost(bucket, table)
+        if cost is None:
+            reasons += [reason for reason in why if reason not in reasons]
+        else:
+            total += cost
+    return (None, reasons) if reasons else (total, [])
+
+
+def cents_of(usd):
+    """A dollar amount rounded once, half up, to whole cents."""
+    usd = Fraction(usd)
+    return (usd.numerator * 200 + usd.denominator) // (2 * usd.denominator)
+
+
+def usd_text(usd):
+    """A dollar amount with two decimals and no sign, as --json gives it: 7.13."""
+    return "%d.%02d" % divmod(cents_of(usd), 100)
+
+
+def money(usd):
+    """A dollar amount as the card and the Team table show it: $7.13."""
+    return "$" + usd_text(usd)
+
+
+def cost_number(usd):
+    """cost_usd as a member note carries it: the amount in cents written the way JavaScript writes the number (7.1, 7,
+    0.05), which is how Obsidian writes a number back when it rewrites a note's properties; a trailing zero it drops
+    would read as a changed value, not a change of style."""
+    text = usd_text(usd)
+    return text[:-3] if text.endswith(".00") else text.rstrip("0")
+
+
+def team_totals(rows, pricing):
+    """A ticket's totals over its members' rows: tokens (out, in, cached) over every member with a transcript sum; the
+    list-price cost of those priced, kept exact until it is shown, and each member whose sum has no cost, with the
+    reasons (a completion alone is no sum and never makes the total partial); tool uses over the members that have them."""
+    totals = {"tokens": None, "cost": None, "not_priced": [], "tools": None}
+    for m in rows:
+        if m["tool_uses"] is not None:
+            totals["tools"] = (totals["tools"] or 0) + m["tool_uses"]
+        counts = token_counts(m["usage_json"])
+        if counts is None:
+            continue
+        totals["tokens"] = {k: (totals["tokens"] or {}).get(k, 0) + counts[k] for k in counts}
+        cost, reasons = run_cost(m["usage_json"], pricing)
+        if cost is None:
+            totals["not_priced"].append((m, reasons))
+        else:
+            totals["cost"] = (totals["cost"] or Fraction(0)) + cost
+    return totals
+
+
+def team_total_row(totals):
+    """The Team table's last row: the ticket's tokens, its list-price cost (partial when a member's sum has none), its tools."""
+    cost = NOT_RECORDED if totals["cost"] is None else money(totals["cost"]) + (" (partial)" if totals["not_priced"] else "")
+    cells = [TEAM_TOTAL_LABEL, "", "", "", "", "", tokens_text(totals["tokens"]) if totals["tokens"] else NOT_RECORDED, cost,
+             NOT_RECORDED if totals["tools"] is None else str(totals["tools"])]
+    return "| " + " | ".join(cells) + " |"
 
 
 # Worked on / built (section 3): the first of summary, result and return_text whose text holds a
@@ -1592,12 +1845,14 @@ def worked_on(m):
     return None
 
 
-def render_team_section(con, t):
-    """## Team: the table, the tree with each member's worked-on suffix, the embed; empty without members."""
+def render_team_section(con, t, pricing=None):
+    """## Team: the table ending in its Total row (SPD-013), the tree with each member's worked-on suffix, the embed;
+    empty without members.  Costs come from the price table given, at render time."""
     rows = team_order(con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (t["id"],)).fetchall(), t["lead_id"])
     if not rows:
         return ""
-    lines = list(TEAM_TABLE_HEAD) + [team_table_row(t["team_key"], t["created_at"], m) for m in rows] + [""]
+    lines = list(TEAM_TABLE_HEAD) + [team_table_row(t["team_key"], t["created_at"], m, pricing) for m in rows]
+    lines += [team_total_row(team_totals(rows, pricing)), ""]
     for m in rows:
         text = worked_on(m)
         lines.append("  " * (m["depth"] - 1) + team_line(t["team_key"], m) + (" — " + text if text else ""))
@@ -1697,11 +1952,11 @@ def render_proposal_rows(con, member, after=0):
     return "\n".join(lines)
 
 
-def ticket_section_text(con, t, name):
+def ticket_section_text(con, t, name, pricing=None):
     if name in TICKET_COLUMN_SECTIONS:
         return t[TICKET_COLUMN_SECTIONS[name]] or ""
     if name == "Team":
-        return render_team_section(con, t)  # from members alone: stored Team prose is not rendered
+        return render_team_section(con, t, pricing)  # from members alone: stored Team prose is not rendered
     prose, after = prose_for(con, "ticket", t["id"], name)
     if name == "Handoffs":
         return join_prose(prose, render_handoff_rows(con, t, after))
@@ -1733,7 +1988,7 @@ def body_with_sections(heading, sections):
     return "\n".join(out).rstrip("\n") + "\n"
 
 
-def render_ticket(con, t):
+def render_ticket(con, t, pricing=None):
     layout = json.loads(t["layout"]) if t["layout"] else {}
     keys = layout.get("fm_keys") or TICKET_FM_KEYS
     d = ticket_dict(con, t)
@@ -1751,11 +2006,11 @@ def render_ticket(con, t):
     pairs = [(k, values[k]) for k in keys if k in values]
     heading = "%s — %s" % (t["key"], t["heading"] or t["title"])
     names = layout.get("sections") or TICKET_SECTIONS
-    sections = [(name, ticket_section_text(con, t, name)) for name in names]
+    sections = [(name, ticket_section_text(con, t, name, pricing)) for name in names]
     return emit_frontmatter(pairs) + body_with_sections(heading, sections)
 
 
-def render_member(con, m):
+def render_member(con, m, pricing=None):
     ticket = get_ticket_by_id(con, m["ticket_id"])
     layout = json.loads(m["layout"]) if m["layout"] else {}
     parent = "[[Spud]]" if m["parent_id"] is None else "[[%s]]" % member_ref(con, m["parent_id"])
@@ -1771,7 +2026,7 @@ def render_member(con, m):
         ("spawned", ("stamp", fm_minute(m["spawned_at"]))),
         ("finished", ("stamp", fm_minute(m["finished_at"]))),
     ]
-    pairs += usage_pairs(m)
+    pairs += usage_pairs(m, pricing)
     pairs.append(("tags", ("list", ["spudagent", "contractor"] if m["persona"] == "contractor" else ["spudagent"])))
     heading = "%s (%s, %s) — %s" % (m["name"], m["lineage"], m["persona"], ticket["key"])
     names = layout.get("sections")
@@ -1792,14 +2047,14 @@ def render_report(day, entries):
     return "\n".join(out).rstrip("\n") + "\n"
 
 
-def render_targets(con):
-    """[(relative path, content)] for every generated file."""
+def render_targets(con, pricing=None):
+    """[(relative path, content)] for every generated file; costs at the given price table's list prices (SPD-013)."""
     targets = []
     for t in con.execute("SELECT * FROM tickets ORDER BY id").fetchall():
-        targets.append(("ledger/tickets/%s.md" % t["key"], render_ticket(con, t)))
+        targets.append(("ledger/tickets/%s.md" % t["key"], render_ticket(con, t, pricing)))
     for m in con.execute("SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id ORDER BY t.id, m.lineage").fetchall():
         ticket = get_ticket_by_id(con, m["ticket_id"])
-        targets.append(("ledger/teams/%s/%s.md" % (ticket["team_key"], m["name"]), render_member(con, m)))
+        targets.append(("ledger/teams/%s/%s.md" % (ticket["team_key"], m["name"]), render_member(con, m, pricing)))
     days = {}
     for e in con.execute("SELECT * FROM events WHERE kind = 'report.entry' ORDER BY id").fetchall():
         days.setdefault(e["at"][:10], []).append(e)
@@ -1941,6 +2196,13 @@ def usage_columns(fm, rel):
         columns["usage_json"] = json.dumps({"source": "transcript", "imported": True, "usage": {
             "input_tokens": values["tokens_in"], "output_tokens": values["tokens_out"],
             "cache_creation_input_tokens": 0, "cache_read_input_tokens": values["tokens_cached"]}})
+    if "cost_usd" in fm:  # SPD-013: the list-price cost the note showed, kept with the imported sum it was computed from
+        value = fm["cost_usd"]
+        if not isinstance(value, str) or not COST_USD.fullmatch(value):
+            raise SpudError(EXIT_ERROR, "%s: cost_usd must be an amount of US dollars with at most two decimals, not %r" % (rel, value))
+        if "usage_json" not in columns:
+            raise SpudError(EXIT_ERROR, "%s: cost_usd needs tokens_out, tokens_in and tokens_cached beside it" % rel)
+        columns["usage_json"] = json.dumps(dict(json.loads(columns["usage_json"]), cost_usd=usd_text(Fraction(value))))
     return columns
 
 
@@ -2319,6 +2581,9 @@ def accept_member_edit(ctx, con, at, m, ticket, base, doc, rel):
         if key in ("tokens_out", "tokens_in", "tokens_cached"):
             refuse(rel, "%s is not editable by hand; it is derived from the transcript sum the hooks record, and "
                         "`spud member resum` recomputes it" % key)
+        if key == "cost_usd":
+            refuse(rel, "cost_usd is not editable by hand; it is computed when the note renders, from the transcript sum's "
+                        "per-model breakdown and the price table in spud.config.json")
         if key != "status":
             refuse(rel, "property %r has no column" % key)
     if list(fm.keys()) != list(base_fm.keys()):
@@ -2396,7 +2661,7 @@ def accept_file(ctx, con, actor, path):
         baseline = record["content"] if record and record["content"] else None
         if kind[0] == "ticket":
             t = get_ticket(con, kind[1])
-            base = split_document(baseline or render_ticket(con, t))
+            base = split_document(baseline or render_ticket(con, t, ctx.pricing))
             doc = split_document(text)
             if doc["frontmatter"].get("id") != t["key"]:
                 raise SpudError(EXIT_ERROR, "%s: id is not editable by hand" % rel)
@@ -2404,7 +2669,7 @@ def accept_file(ctx, con, actor, path):
         elif kind[0] == "member":
             m = get_member(con, "%s/%s" % (kind[1], kind[2]))
             ticket = get_ticket_by_id(con, m["ticket_id"])
-            base = split_document(baseline or render_member(con, m))
+            base = split_document(baseline or render_member(con, m, ctx.pricing))
             doc = split_document(text)
             fm = doc["frontmatter"]
             expected_parent = "Spud" if m["parent_id"] is None else member_ref(con, m["parent_id"])
@@ -2914,7 +3179,7 @@ def cmd_render(ctx, args):
     con = connect(ctx)
     try:
         out_root = Path(args.out).expanduser().resolve() if args.out else ctx.home
-        targets = render_targets(con)
+        targets = render_targets(con, ctx.pricing)
         written, unchanged, conflicts, discarded = [], [], [], []
         if args.discard:
             if args.out:
@@ -3356,20 +3621,24 @@ def cmd_member_show(ctx, args):
 # member.edited event.  The events table's kinds are fixed by its CHECK constraint, so the re-sum is recorded
 # as the member edit it is rather than as a kind that would take a migration of the append-only table.
 RESUM_FIGURES = ("total_tokens", "tool_uses", "duration_ms")
-RESUM_KEPT = {None: "no sum", "imported": "imported", "request": "counted"}  # stored_counting -> the action: nothing to do
-RESUM_LEFT = ("not found", "ambiguous", "unreadable", "no usage")  # a sum counted per entry left as it is: exit 1
+RESUM_KEPT = {None: "no sum", "imported": "imported", "breakdown": "counted"}  # stored_counting -> the action: nothing to do
+RESUM_LEFT = ("not found", "ambiguous", "unreadable", "no usage")  # a sum without its breakdown left as it is: exit 1
 
 
 def stored_counting(usage_json):
-    """How a member's stored transcript sum was counted: "request" (since SPD-023), "imported" (read back from
-    a rendered note by the importer, with no transcript behind it) or "entry" (before SPD-023, every
-    transcript entry added); None when usage_json holds no transcript sum."""
+    """How a member's stored transcript sum was counted: "breakdown" (once per API request, with the per-model
+    breakdown, since SPD-013), "request" (once per request without it, from SPD-023 to SPD-013), "entry"
+    (before SPD-023, every transcript entry added) or "imported" (read back from a rendered note by the
+    importer, with no transcript behind it); None when usage_json holds no transcript sum.  member resum
+    re-sums "entry" and "request"."""
     stored, _ = usage_parts(usage_json)
     if stored is None:
         return None
     if stored.get("imported") is True:
         return "imported"
-    return "request" if stored.get("counting") == REQUEST_COUNTING else "entry"
+    if stored.get("counting") != REQUEST_COUNTING:
+        return "entry"
+    return "breakdown" if isinstance(stored.get("breakdown"), list) else "request"
 
 
 def find_transcript(recorded):
@@ -3406,7 +3675,7 @@ def resum_row(member, ref):
     row = {"ref": ref, "action": None, "found": None, "transcript": None, "note": None, "requests": None,
            "old": {k: member[k] for k in RESUM_FIGURES}, "new": None}
     counting = stored_counting(member["usage_json"])
-    if counting != "entry":
+    if counting in RESUM_KEPT:
         row["action"] = RESUM_KEPT[counting]
         return row, None
     path, how, note = find_transcript(member["transcript_path"])
@@ -3443,7 +3712,7 @@ def resum_table(data):
     total = len(data["members"])
     resum = sum(1 for r in data["members"] if r["action"] == "re-sum")
     left = sum(1 for r in data["members"] if r["action"] in RESUM_LEFT)
-    return text + "\n" + "%s %d of %d member%s once per API request; %d left with a sum that added every entry; %d already counted by request, imported, or without a transcript sum" % (
+    return text + "\n" + "%s %d of %d member%s once per API request, with the per-model breakdown; %d left with a sum that added every entry or lacks the breakdown; %d already counted with the breakdown, imported, or without a transcript sum" % (
         "dry run, nothing written: would re-sum" if data["dry_run"] else "re-summed", resum, total, "" if total == 1 else "s", left, total - resum - left)
 
 
@@ -3475,7 +3744,7 @@ def cmd_member_resum(ctx, args):
                         continue
                     fresh = get_member_by_id(con, member["id"])
                     counting = stored_counting(fresh["usage_json"])
-                    if counting != "entry":  # changed since it was read (a concurrent re-sum): nothing left to do
+                    if counting in RESUM_KEPT:  # changed since it was read (a concurrent re-sum): nothing left to do
                         row.update(action=RESUM_KEPT[counting], requests=None, old={k: fresh[k] for k in RESUM_FIGURES}, new=None)
                         continue
                     totals = run_totals(fresh, summed=summed)
@@ -3485,10 +3754,10 @@ def cmd_member_resum(ctx, args):
                     con.execute("UPDATE members SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in new), (*new.values(), fresh["id"]))
                     row.update(old={k: old[k] for k in RESUM_FIGURES}, new={k: new[k] for k in RESUM_FIGURES})
                     write_event(con, at, actor.label, "member.edited",
-                                "%s re-summed once per API request from its transcript: total_tokens %s -> %s, tool_uses %s -> %s, duration_ms %s -> %s"
+                                "%s re-summed once per API request, with the per-model breakdown, from its transcript: total_tokens %s -> %s, tool_uses %s -> %s, duration_ms %s -> %s"
                                 % (row["ref"], old["total_tokens"], new["total_tokens"], old["tool_uses"], new["tool_uses"], old["duration_ms"], new["duration_ms"]),
                                 ticket_id=fresh["ticket_id"], member_id=fresh["id"],
-                                data={"fields": sorted(k for k in new if new[k] != old[k]), "counting": REQUEST_COUNTING, "found": row["found"],
+                                data={"fields": sorted(k for k in new if new[k] != old[k]), "counting": REQUEST_COUNTING, "breakdown": True, "found": row["found"],
                                       "transcript": row["transcript"], "requests": row["requests"], "old": old, "new": new})
                     resummed.append(row["ref"])
     finally:
@@ -3497,7 +3766,7 @@ def cmd_member_resum(ctx, args):
     left = [r for r in rows if r["action"] in RESUM_LEFT]
     data = {"dry_run": bool(args.dry_run), "members": rows, "resummed": resummed, "left": [r["ref"] for r in left]}
     if left:
-        return Result(data, resum_table(data), exit_code=EXIT_ERROR, stderr="%d sum%s counted per entry left as %s: %s" % (
+        return Result(data, resum_table(data), exit_code=EXIT_ERROR, stderr="%d sum%s without the per-model breakdown left as %s: %s" % (
             len(left), "" if len(left) == 1 else "s", "it is" if len(left) == 1 else "they are",
             "; ".join("%s (%s)" % (r["ref"], r["action"]) for r in left)))
     return Result(data, resum_table(data))
@@ -3740,12 +4009,14 @@ def cmd_fleet(ctx, args):
     return Result({"members": rows}, table(rows, [("ticket", "ticket"), ("id", "id"), ("name", "name"), ("persona", "persona"), ("model", "model"), ("status", "status"), ("parent", "parent"), ("spawned", "spawned"), ("finished", "finished")]))
 
 
-def team_tree(con, ticket):
+def team_tree(con, ticket, pricing=None):
     rows = con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (ticket["id"],)).fetchall()
     nodes = {}
     roots = []
     for m in rows:
         node = member_dict(con, m)
+        cost, reasons = run_cost(m["usage_json"], pricing)  # SPD-013: the run's tokens and its cost at the API list price
+        node.update(tokens=token_counts(m["usage_json"]), cost_usd=usd_text(cost) if cost is not None else None, not_priced=reasons)
         node["children"] = []
         nodes[m["id"]] = node
         if m["parent_id"] in nodes:
@@ -3759,11 +4030,29 @@ def format_tree(nodes, depth=0):
     lines = []
     for n in nodes:
         run = "spawned %s, finished %s" % (fm_minute(n["spawned_at"]) or "-", fm_minute(n["finished_at"]) or "-")
-        lines.append("%s- %s (%s, %s, %s) %s; %s" % ("  " * depth, n["name"], n["lineage"], n["persona"] if n["persona"] != "contractor" else "contractor on %s" % n["agent_type"], n["model"], n["status"], run))
+        line = "%s- %s (%s, %s, %s) %s; %s" % ("  " * depth, n["name"], n["lineage"], n["persona"] if n["persona"] != "contractor" else "contractor on %s" % n["agent_type"], n["model"], n["status"], run)
+        if n.get("tokens"):
+            line += "; %s · %s" % (tokens_text(n["tokens"]), "$" + n["cost_usd"] if n.get("cost_usd") else "— (%s)" % "; ".join(n.get("not_priced") or ["not priced"]))
+        lines.append(line)
         if n["summary"]:
             lines.append("%s  %s" % ("  " * depth, n["summary"]))
         lines.extend(format_tree(n["children"], depth + 1))
     return lines
+
+
+def card_total_line(totals, not_priced, pricing):
+    """The card's last line (SPD-013): the ticket's tokens and its cost at the API list price, with the table's date,
+    partial when a member's transcript sum has no cost, naming each such member and why."""
+    if totals["tokens"] is None:
+        return "total: no tokens recorded"
+    tokens = tokens_text(totals["tokens"])
+    if pricing is None:
+        return "total: %s · — (%s)" % (tokens, NO_TABLE)
+    cost = "—" if totals["cost"] is None else money(totals["cost"]) + (" (partial)" if not_priced else "")
+    line = "total: %s · %s at API list price (USD, prices as of %s)" % (tokens, cost, pricing["as_of"])
+    if not_priced:
+        line += "; not priced: " + ", ".join("%s (%s)" % (p["ref"], "; ".join(p["reasons"])) for p in not_priced)
+    return line
 
 
 def cmd_card(ctx, args):
@@ -3771,12 +4060,20 @@ def cmd_card(ctx, args):
     try:
         t = get_ticket(con, args.key)
         d = ticket_dict(con, t)
-        tree = team_tree(con, t)
+        pricing = ctx.pricing
+        tree = team_tree(con, t, pricing)
+        totals = team_totals(con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (t["id"],)).fetchall(), pricing)
+        not_priced = [{"ref": member_ref(con, m["id"]), "reasons": reasons} for m, reasons in totals["not_priced"]]
     finally:
         con.close()
+    total = {"tokens": totals["tokens"], "cost_usd": usd_text(totals["cost"]) if totals["cost"] is not None else None,
+             "partial": totals["cost"] is not None and bool(not_priced), "not_priced": not_priced, "tool_uses": totals["tools"],
+             "pricing": {k: pricing[k] for k in ("as_of", "source", "currency")} if pricing else None}
     lines = ["%s — %s  [%s, %s]  lead: %s" % (d["key"], d["title"], d["status"], d["priority"], d["lead"] or "-")]
     lines.extend(format_tree(tree) or ["(no team yet)"])
-    return Result({"ticket": d, "team": tree}, "\n".join(lines))
+    if tree:
+        lines.append(card_total_line(totals, not_priced, pricing))
+    return Result({"ticket": d, "team": tree, "total": total}, "\n".join(lines))
 
 
 def cmd_doctor(ctx, args):
@@ -3803,6 +4100,9 @@ def cmd_doctor(ctx, args):
         cfg_problems = config_problems(config)
         problems.extend("config: " + p for p in cfg_problems)
         report["config"] = {"problems": cfg_problems, "limits": config.get("limits"), "pool": len(config.get("naming", {}).get("pool", []))}
+    pricing = price_table(config)[0] if config is not None else None  # SPD-013: the price table, and below what it cannot price
+    report["pricing"] = None if pricing is None else {"as_of": pricing["as_of"], "source": pricing["source"], "currency": "USD",
+                                                      "models": sorted(pricing["models"]), "not_priced": []}
     db = report["database"]
     if db["exists"]:
         con = open_connection(ctx.db_path)
@@ -3825,6 +4125,11 @@ def cmd_doctor(ctx, args):
                 db["live_members"] = con.execute("SELECT live FROM v_live").fetchone()[0]
                 db["tickets"] = con.execute("SELECT count(*) FROM tickets").fetchone()[0]
                 db["events"] = con.execute("SELECT count(*) FROM events").fetchone()[0]
+                if report["pricing"] is not None:
+                    for m in con.execute("SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id WHERE m.usage_json IS NOT NULL ORDER BY t.id, m.lineage").fetchall():
+                        cost, reasons = run_cost(m["usage_json"], pricing)
+                        if cost is None and reasons:
+                            report["pricing"]["not_priced"].append({"ref": member_ref(con, m["id"]), "reasons": reasons})
         finally:
             con.close()
     else:
@@ -3849,6 +4154,13 @@ def cmd_doctor(ctx, args):
         lines.append("backups     %d daily (newest %s, oldest %s), %d other" % (len(daily), daily[-1], daily[0], other))
     else:
         lines.append("backups     0 daily, %d other" % other)
+    if report["pricing"] is not None:
+        p = report["pricing"]
+        lines.append("pricing     API list price in USD as of %s from %s: %d model%s" % (
+            p["as_of"], p["source"] or "an unnamed source", len(p["models"]), "" if len(p["models"]) == 1 else "s"))
+        lines.extend("            not priced: %s (%s)" % (x["ref"], "; ".join(x["reasons"])) for x in p["not_priced"])
+    elif config is not None:
+        lines.append("pricing     %s" % ("%s: every cost shows —" % NO_TABLE if not price_table(config)[1] else "no usable price table: see problems"))
     lines.append("problems    %s" % (("\n            ".join(problems)) if problems else "none"))
     result = Result(report, "\n".join(lines))
     if problems:
@@ -5033,6 +5345,64 @@ def parse_timestamp(value):
 REQUEST_COUNTING = "request"
 TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
+# The per-model breakdown a transcript sum keeps beside its usage since SPD-013: what a run's list-price cost is computed
+# from (run_cost).  A read-only survey of the live transcripts on 2026-09-13 (1,590 requests in 46 files) found every
+# request's usage with its model (message.model), a service_tier and an inference_geo, nearly all with a speed; a
+# cache_creation split by TTL that sums to cache_creation_input_tokens (one exception, a server-side fallback's request:
+# 4,369 split beside a total of 0); server_tool_use counts; and usage.iterations holding one message iteration (the same
+# exception held a fallback_message attempt).  The API bills a compaction iteration beside the top-level figures and a
+# fallback per attempt, neither of which the top level shows whole.
+BREAKDOWN_IDENTITY = ("model", "speed", "service_tier", "inference_geo")
+BREAKDOWN_TOKENS = ("input_tokens", "output_tokens", "cache_read_input_tokens")
+
+
+def usage_count(value):
+    """A usage figure as a sum adds it: an int or a float, never a bool, as an int; anything else counts 0."""
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+
+def usage_breakdown(requests):
+    """[(message.model, usage)] of a transcript's requests, each by its last entry, grouped into buckets by model, speed,
+    service tier and inference geography as the transcript writes them (a key left out when the usage has none), sorted
+    by those four.  A bucket keeps its requests; its input, output and cache-read tokens; its cache writes by TTL under
+    cache_creation when the request's split adds up to cache_creation_input_tokens, as the API documents it, else as
+    cache_creation_unsplit_input_tokens; its usage.server_tool_use counts; and, under iterations, the iteration types of
+    any request whose usage.iterations holds more than one message iteration (a compaction, a fallback's attempts),
+    which the top-level figures do not bill whole.  Its token figures add up to the sum's usage."""
+    buckets = {}
+    for model, usage in requests:
+        identity = tuple(v if isinstance(v, str) and v else None for v in (model,) + tuple(usage.get(k) for k in BREAKDOWN_IDENTITY[1:]))
+        bucket = buckets.get(identity)
+        if bucket is None:
+            bucket = buckets[identity] = {k: v for k, v in zip(BREAKDOWN_IDENTITY, identity) if v is not None}
+            bucket.update(requests=0, **dict.fromkeys(BREAKDOWN_TOKENS, 0))
+        bucket["requests"] += 1
+        for k in BREAKDOWN_TOKENS:
+            bucket[k] += usage_count(usage.get(k))
+        writes = usage_count(usage.get("cache_creation_input_tokens"))
+        split = usage.get("cache_creation")
+        split = {k: usage_count(v) for k, v in split.items() if isinstance(v, (int, float)) and not isinstance(v, bool)} if isinstance(split, dict) else None
+        if split is not None and sum(split.values()) == writes:
+            into = bucket.setdefault("cache_creation", {})
+            for k, v in split.items():
+                into[k] = into.get(k, 0) + v
+        elif writes:
+            bucket["cache_creation_unsplit_input_tokens"] = bucket.get("cache_creation_unsplit_input_tokens", 0) + writes
+        tools = usage.get("server_tool_use")
+        if isinstance(tools, dict):
+            into = bucket.setdefault("server_tool_use", {})
+            for k, v in tools.items():
+                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                    into[k] = into.get(k, 0) + int(v)
+        iterations = usage.get("iterations")
+        if isinstance(iterations, list) and iterations and not (
+                len(iterations) == 1 and isinstance(iterations[0], dict) and iterations[0].get("type") == "message"):
+            into = bucket.setdefault("iterations", {})
+            for iteration in iterations:
+                kind = iteration.get("type") if isinstance(iteration, dict) and isinstance(iteration.get("type"), str) else "unknown"
+                into[kind] = into.get(kind, 0) + 1
+    return [buckets[identity] for identity in sorted(buckets, key=lambda identity: tuple(v or "" for v in identity))]
+
 
 def request_key(entry, index):
     """The API request a transcript's assistant entry belongs to: its message.id with its requestId (None
@@ -5052,8 +5422,9 @@ def transcript_usage(path):
     by the usage of its last entry; messages counts the requests.  tool_uses counts distinct tool_use
     block ids (a block without an id counts where it appears), the same whether a response's blocks come
     one per entry or together; duration_ms runs from the first timestamp in the file to the last.  The
-    sum is marked "counting": "request".  None when the file holds no assistant usage; OSError when it
-    cannot be read."""
+    sum is marked "counting": "request" and keeps, since SPD-013, the per-model breakdown of its requests
+    (usage_breakdown) that a list-price cost is computed from.  None when the file holds no assistant usage;
+    OSError when it cannot be read."""
     requests = {}
     tool_ids = set()
     tools_without_id = 0
@@ -5074,7 +5445,7 @@ def transcript_usage(path):
             if entry.get("type") != "assistant" or not isinstance(msg, dict):
                 continue
             if isinstance(msg.get("usage"), dict):
-                requests[request_key(entry, index)] = msg["usage"]  # a later entry of the request replaces an earlier one
+                requests[request_key(entry, index)] = (msg.get("model"), msg["usage"])  # a later entry of the request replaces an earlier one
             content = msg.get("content")
             if isinstance(content, list):
                 for block in content:
@@ -5086,14 +5457,15 @@ def transcript_usage(path):
     if not requests:
         return None
     totals = dict.fromkeys(TOKEN_KEYS, 0)
-    for usage in requests.values():
+    for _, usage in requests.values():
         for k in TOKEN_KEYS:
             v = usage.get(k)
             if isinstance(v, (int, float)) and not isinstance(v, bool):
                 totals[k] += int(v)
     duration = int((last - first).total_seconds() * 1000) if first is not None and last is not None else None
     return {"total_tokens": sum(totals.values()), "duration_ms": duration, "tool_uses": len(tool_ids) + tools_without_id,
-            "usage_json": {"source": "transcript", "counting": REQUEST_COUNTING, "messages": len(requests), "usage": totals}}
+            "usage_json": {"source": "transcript", "counting": REQUEST_COUNTING, "messages": len(requests), "usage": totals,
+                           "breakdown": usage_breakdown(requests.values())}}
 
 
 RESULT_HOLD = ("record your Result with `spud --as %s member result '<what you produced, where, what you verified, what is left>'`"
@@ -5559,12 +5931,15 @@ exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,
 """
 
 RESUM_DESCRIPTION = """\
-Re-sum members' stored transcript sums from their transcripts, once per API request (SPD-023).
+Re-sum members' stored transcript sums from their transcripts, once per API request (SPD-023), with the
+per-model breakdown a list-price cost is computed from (SPD-013).
 
 The harness writes an API response as one transcript entry per content block, each repeating the
 request's message.id, requestId and usage.  A sum stored before SPD-023 added every entry, so its
 tokens run four to five times too high.  A sum made since counts each request once, by its last
-entry, and carries "counting": "request": it is left as it is, so a second run changes nothing.
+entry, and carries "counting": "request"; one stored before SPD-013 keeps no per-model breakdown, so
+no cost can be priced from it.  Both are re-summed.  A sum with its breakdown is left as it is, so a
+second run changes nothing.
 
 The transcript read is the recorded transcript_path when that is a file; else the one file with the
 same session directory and file name (<session>/subagents/agent-<id>.jsonl) under a project directory
@@ -5576,8 +5951,8 @@ An imported sum (no transcript behind it) and a member without a transcript sum 
 """
 
 RESUM_EPILOG = """\
-exit codes: 0 every member listed is re-summed, already counted by request, imported, or holds no
-            transcript sum; 1 a sum that added every entry was left as it is, because its transcript
+exit codes: 0 every member listed is re-summed, already counted with its breakdown, imported, or holds no
+            transcript sum; 1 a sum without its breakdown was left as it is, because its transcript
             was not found, is ambiguous, cannot be read or holds no usage (the other members are
             still written, and --dry-run exits the same); 2 usage; 3 an actor other than Spud.
 """
@@ -5755,7 +6130,7 @@ def build_parser():
     q = ps.add_parser("show", help="print a member")
     q.add_argument("ref")
     q.set_defaults(func=cmd_member_show)
-    q = ps.add_parser("resum", help="re-sum stored transcript sums that added every entry (before SPD-023) once per API request, from the transcripts (Spud's)",
+    q = ps.add_parser("resum", help="re-sum stored transcript sums that added every entry (before SPD-023) or lack the per-model breakdown (before SPD-013), once per API request, from the transcripts (Spud's)",
                       description=RESUM_DESCRIPTION, epilog=RESUM_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     q.add_argument("refs", nargs="*", metavar="ref", help="a member, SPUD-nnn/<Name> or SPUD-nnn/<lineage>; several may be named")
     q.add_argument("--all", action="store_true", help="every member whose usage_json holds a transcript sum")

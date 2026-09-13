@@ -42,6 +42,11 @@ TWO_REQUESTS_SUM = {"input_tokens": 30, "output_tokens": 12, "cache_creation_inp
 # HookCase.per_block with every entry added, as transcript_usage summed before SPD-023: 994 tokens over 5 entries
 # (24 out, 370 in, 600 cached).  Counted once per request it is TWO_REQUESTS_SUM.
 PER_ENTRY_SUM = {"input_tokens": 70, "output_tokens": 24, "cache_creation_input_tokens": 300, "cache_read_input_tokens": 600}
+# The per-model breakdown a sum keeps beside its usage since SPD-013 (tests/test_cost.py).  two_requests' entries name no
+# model and split no cache write, so their 100 writes count as unsplit; per_block's carry a service tier and a TTL split.
+TWO_REQUESTS_BREAKDOWN = [{"requests": 2, "input_tokens": 30, "output_tokens": 12, "cache_read_input_tokens": 300, "cache_creation_unsplit_input_tokens": 100}]
+PER_BLOCK_BREAKDOWN = [{"service_tier": "standard", "requests": 2, "input_tokens": 30, "output_tokens": 12, "cache_read_input_tokens": 300,
+                        "cache_creation": {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 0}}]
 
 
 def common(cwd, agent_id=None, agent_type=None, session=SESSION):
@@ -699,7 +704,7 @@ class SubagentStopTest(HookCase):
         self.assertEqual(shown["tool_uses"], 3)
         self.assertEqual(shown["duration_ms"], 4500)
         usage = json.loads(self.home.scalar("SELECT usage_json FROM members WHERE id = ?", m["id"]))
-        self.assertEqual(usage, {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM})  # a background run: no completion
+        self.assertEqual(usage, {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM, "breakdown": TWO_REQUESTS_BREAKDOWN})  # a background run: no completion
 
     def test_a_stop_counts_a_transcript_written_per_block_once_per_request(self):  # SPD-023, proof 4
         m = self.plan()
@@ -710,7 +715,7 @@ class SubagentStopTest(HookCase):
         self.assertEqual((r.code, r.stdout), (0, ""), r)
         row = self.home.rows("SELECT total_tokens, duration_ms, tool_uses, usage_json FROM members WHERE id = ?", m["id"])[0]
         self.assertEqual((row["total_tokens"], row["duration_ms"], row["tool_uses"]), (442, 4500, 3))
-        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM})
+        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM, "breakdown": PER_BLOCK_BREAKDOWN})
 
     def test_a_transcript_sum_after_the_completion_fills_total_tokens_and_keeps_the_completion(self):
         """SPD-021, the reverse of the harness's foreground order: the completion alone leaves
@@ -728,7 +733,8 @@ class SubagentStopTest(HookCase):
         self.assertEqual((shown["total_tokens"], shown["duration_ms"], shown["tool_uses"]), (2, 4791, 1))
         usage = json.loads(self.home.scalar("SELECT usage_json FROM members WHERE id = ?", m["id"]))
         self.assertEqual(usage, {"source": "transcript", "counting": "request", "messages": 1, "completion": COMPLETION,
-                                 "usage": {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}})
+                                 "usage": {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+                                 "breakdown": [{"requests": 1, "input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0}]})
 
     def test_foreground_binding_through_meta_json(self):
         m = self.plan()
@@ -798,7 +804,8 @@ class RunTotalsTest(HookCase):
     def test_the_harness_order_keeps_the_transcript_sum_with_the_completion_beside_it(self):
         row = self.foreground(self.plan(), AGENT_B)
         self.assertEqual((row["total_tokens"], row["duration_ms"], row["tool_uses"]), (442, 4791, 1))
-        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})
+        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM,
+                                                          "breakdown": TWO_REQUESTS_BREAKDOWN, "completion": COMPLETION})
 
     def test_the_reverse_order_ends_in_the_same_row(self):
         harness_order = self.foreground(self.plan(), AGENT_B)
@@ -819,7 +826,8 @@ class RunTotalsTest(HookCase):
             {"type": "assistant", "timestamp": "2026-09-12T13:30:01.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}},
         ])
         kept = [
-            (summed, AGENT_B, (442, 4791, 1, {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})),
+            (summed, AGENT_B, (442, 4791, 1, {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM,
+                                              "breakdown": TWO_REQUESTS_BREAKDOWN, "completion": COMPLETION})),
             (alone, AGENT_C, (None, 4791, 1, {"source": "PostToolUse", "completion": COMPLETION})),
         ]
         for m, agent_id, want in kept:
@@ -846,7 +854,7 @@ class RunTotalsTest(HookCase):
                 row = self.foreground(self.plan(), agent_id, order=order, entries=self.per_block())
                 self.assertEqual((row["total_tokens"], row["duration_ms"], row["tool_uses"]), (442, 4791, 1))
                 self.assertEqual(json.loads(row["usage_json"]),
-                                 {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})
+                                 {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM, "breakdown": PER_BLOCK_BREAKDOWN, "completion": COMPLETION})
 
     def test_a_stop_leaves_a_sum_counted_per_entry_to_member_resum(self):  # SPD-023: a stored sum is not summed again at a stop
         m = self.plan()
@@ -891,7 +899,8 @@ class RequestCountingTest(HookCase):
         ])
         self.assertEqual(got, {"total_tokens": 150377, "duration_ms": 5000, "tool_uses": 1, "usage_json": {
             "source": "transcript", "counting": "request", "messages": 2,
-            "usage": {"input_tokens": 5, "output_tokens": 274, "cache_creation_input_tokens": 75049, "cache_read_input_tokens": 75049}}})
+            "usage": {"input_tokens": 5, "output_tokens": 274, "cache_creation_input_tokens": 75049, "cache_read_input_tokens": 75049},
+            "breakdown": [{"requests": 2, "input_tokens": 5, "output_tokens": 274, "cache_read_input_tokens": 75049, "cache_creation_unsplit_input_tokens": 75049}]}})
 
     def test_the_request_is_the_message_id_with_its_request_id(self):  # the grouping key
         usage = {"input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4}
@@ -945,7 +954,8 @@ class RequestCountingTest(HookCase):
         ])
         self.assertEqual(got, {"total_tokens": 40, "duration_ms": 3000, "tool_uses": 0, "usage_json": {
             "source": "transcript", "counting": "request", "messages": 4,
-            "usage": {"input_tokens": 4, "output_tokens": 8, "cache_creation_input_tokens": 12, "cache_read_input_tokens": 16}}})
+            "usage": {"input_tokens": 4, "output_tokens": 8, "cache_creation_input_tokens": 12, "cache_read_input_tokens": 16},
+            "breakdown": [{"requests": 4, "input_tokens": 4, "output_tokens": 8, "cache_read_input_tokens": 16, "cache_creation_unsplit_input_tokens": 12}]}})
 
 
 # =============================================================================

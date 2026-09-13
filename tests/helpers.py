@@ -241,8 +241,8 @@ def normalize_markdown(text):
 # (docs/design/2026-09-12-team-card.md): a table, the member tree carrying each member's
 # worked-on sentence, the embedded Team view.  The round trips compare it by the rule of the
 # spec's section 8.3 rather than byte for byte.
-TEAM_TABLE_HEADER = "| Member | ID | Persona | Model | Status | Run | Tokens | Tools |"
-TEAM_TABLE_DELIMITER = "|---|---|---|---|---|---|---|---|"
+TEAM_TABLE_HEADER = "| Member | ID | Persona | Model | Status | Run | Tokens | Cost (list) | Tools |"  # Cost (list) since SPD-013
+TEAM_TABLE_DELIMITER = "|---|---|---|---|---|---|---|---|---|"
 TEAM_VIEW_EMBED = "![[Fleet.base#Team]]"
 WORKED_ON_SUFFIX = " — "
 

@@ -10,7 +10,8 @@ sum is merged through run_totals, so a completion keeps its whole-run duration a
 member.edited event keeps the old figures.  A sum already counted by request, an imported sum and a
 member without a transcript sum are listed and left; a sum whose transcript is not found, ambiguous,
 unreadable or without usage is listed and left, and makes the exit 1.  Every case runs in a scratch
-SPUD_HOME over hand-built transcripts (HookCase.per_block).
+SPUD_HOME over hand-built transcripts (HookCase.per_block).  Since SPD-013 a sum counted by request without its per-model
+breakdown is re-summed the same way, to add the breakdown its list-price cost is computed from.
 """
 
 import json
@@ -18,15 +19,17 @@ import os
 import unittest
 
 from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE
-from test_hooks import AGENT_A, AGENT_B, AGENT_C, COMPLETION, PER_ENTRY_SUM, SESSION, TWO_REQUESTS_SUM, HookCase
+from test_hooks import AGENT_A, AGENT_B, AGENT_C, COMPLETION, PER_BLOCK_BREAKDOWN, PER_ENTRY_SUM, SESSION, TWO_REQUESTS_SUM, HookCase
 
 MAIN = "-Users-eric-Personal-Spud"  # the main checkout's project directory
 WORKTREE = "-Users-eric-Personal-Spud--claude-worktrees-spd-001-tokens"  # a worktree session's, emptied when the session left it
 OTHER_WORKTREE = "-Users-eric-Personal-Spud--claude-worktrees-spd-002-other"
 OTHER_SESSION = "11111111-2222-4333-8444-555555555555"
-# per_block as a SubagentStop stored it before SPD-023 (5 entries added), and as one stores it since (2 requests).
+# per_block as a SubagentStop stored it before SPD-023 (5 entries added), between SPD-023 and SPD-013 (2 requests, no
+# per-model breakdown), and as one stores it since (2 requests, with the breakdown).
 OLD_SUM = {"source": "transcript", "messages": 5, "usage": PER_ENTRY_SUM}
-REQUEST_SUM = {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM}
+COUNTED_SUM = {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM}
+REQUEST_SUM = dict(COUNTED_SUM, breakdown=PER_BLOCK_BREAKDOWN)
 
 
 class MemberResumTest(HookCase):
@@ -217,10 +220,47 @@ class MemberResumTest(HookCase):
         e = events[0]
         self.assertEqual((e["actor"], e["ticket"]), ("spud", self.t["key"]))
         self.assertEqual(e["data"], {
-            "fields": ["total_tokens", "usage_json"], "counting": "request", "found": "recorded", "transcript": str(path), "requests": 2,
+            "fields": ["total_tokens", "usage_json"], "counting": "request", "breakdown": True, "found": "recorded", "transcript": str(path), "requests": 2,
             "old": {"total_tokens": 994, "tool_uses": 1, "duration_ms": 4791, "transcript_path": str(path), "usage_json": old_text},
             "new": {"total_tokens": 442, "tool_uses": 1, "duration_ms": 4791, "transcript_path": str(path), "usage_json": new_text}})
         self.assertIn("994 -> 442", e["body"])
+
+    # -- the per-model breakdown (SPD-013) ------------------------------------------------
+    def test_a_sum_counted_by_request_without_its_breakdown_gains_it(self):  # SPD-013, proof 4
+        """A sum stored between SPD-023 and SPD-013 counts each request once but keeps no per-model breakdown, so no cost
+        can be priced from it: member resum re-sums it from its transcript, its tokens as they were and the breakdown
+        added, with the old and the new usage_json in its event; a second run finds it counted."""
+        path = self.transcript(MAIN, AGENT_A, self.per_block())
+        m = self.plan()
+        self.spawn(m, AGENT_A)
+        self.home.json("member", "result", "Built it.", actor=AGENT_A)
+        counted = json.dumps(COUNTED_SUM)
+        self.set_member(m["id"], stopped_at="2026-09-12T06:30:05-07:00", transcript_path=str(path), total_tokens=442, duration_ms=4500, tool_uses=3, usage_json=counted)
+        code, out, proc = self.resum("--all")
+        self.assertEqual(code, EXIT_OK, proc)
+        row = self.row(m)
+        self.assertEqual((row["total_tokens"], row["duration_ms"], row["tool_uses"], json.loads(row["usage_json"])), (442, 4500, 3, REQUEST_SUM))
+        figures = {"total_tokens": 442, "tool_uses": 3, "duration_ms": 4500}
+        self.assertEqual([(r["ref"], r["action"], r["old"], r["new"]) for r in out["members"]], [(m["ref"], "re-sum", figures, figures)])
+        events = self.events("member.edited", member=m["ref"])
+        self.assertEqual(len(events), 1, events)
+        data = events[0]["data"]
+        self.assertEqual((data["fields"], data["breakdown"], data["old"]["usage_json"], data["new"]["usage_json"]), (["usage_json"], True, counted, row["usage_json"]))
+        code, out, proc = self.resum("--all")
+        self.assertEqual((code, [(r["ref"], r["action"], r["new"]) for r in out["members"]]), (EXIT_OK, [(m["ref"], "counted", None)]), proc)
+
+    def test_a_sum_without_its_breakdown_or_its_transcript_is_left(self):  # SPD-013
+        m = self.plan()
+        self.spawn(m, AGENT_B)
+        self.home.json("member", "result", "Built it.", actor=AGENT_B)
+        self.set_member(m["id"], transcript_path=str(self.transcript(WORKTREE, AGENT_B)), total_tokens=442, duration_ms=4500, tool_uses=3,
+                        usage_json=json.dumps(COUNTED_SUM))
+        before = self.row(m)
+        code, out, proc = self.resum(m["ref"])
+        self.assertEqual(code, EXIT_ERROR, proc)
+        self.assertEqual((out["members"][0]["action"], out["left"]), ("not found", [m["ref"]]))
+        self.assertIn(m["ref"], proc.stderr)
+        self.assertEqual(self.row(m), before)
 
     # -- who and what -----------------------------------------------------------------
     def test_only_spud_may_re_sum(self):
