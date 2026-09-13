@@ -1704,8 +1704,8 @@ class StopSessionTest(HookCase):
         self.assertEqual(r.json["reason"], self.RETURNED_ONLY % (1, "SPUD-001/Yukon (02, scout) on SPD-001, stopped %s" % yukon["stopped_at"][:16]))
         self.assertSilent(self.stop_in(self.SESSION_C))  # a third session owes neither
         self.assertEqual([d["data"] for d in self.denied()], [
-            {"hook_event_name": "Stop", "session_id": SESSION, "members": ["SPUD-001/Kestrel"], "returned": ["SPUD-001/Kestrel"], "planned": [], "running": []},
-            {"hook_event_name": "Stop", "session_id": SESSION_B, "members": ["SPUD-001/Yukon"], "returned": ["SPUD-001/Yukon"], "planned": [], "running": []},
+            {"hook_event_name": "Stop", "session_id": SESSION, "members": ["SPUD-001/Kestrel"], "returned": ["SPUD-001/Kestrel"], "planned": [], "unbound": [], "running": []},
+            {"hook_event_name": "Stop", "session_id": SESSION_B, "members": ["SPUD-001/Yukon"], "returned": ["SPUD-001/Yukon"], "planned": [], "unbound": [], "running": []},
         ])
 
     def test_the_spawn_request_names_the_session_when_the_row_records_none(self):
@@ -1844,7 +1844,163 @@ class StopSessionTest(HookCase):
         self.assertTrue(reason.endswith(". Then end the turn."), reason)
         self.assertEqual([d["data"] for d in self.denied()], [{
             "hook_event_name": "Stop", "session_id": SESSION, "members": [returned["ref"], planned["ref"], running["ref"]],
-            "returned": [returned["ref"]], "planned": [planned["ref"]], "running": [running["ref"]]}])
+            "returned": [returned["ref"]], "planned": [planned["ref"]], "unbound": [], "running": [running["ref"]]}])
+
+    # -- allowed to spawn and never bound (SPD-025) -------------------------------------
+    # PreToolUse(Agent) allowed the spawn and reserved the row, and nothing bound it: the harness failed the spawn after the
+    # allow, or the binding hooks failed open.  Neither can be produced on demand, so these tests age the spawn request.
+    UNBOUND_ONLY = ("Law 9: 1 planned spudagent(s) were allowed to spawn and never bound: %(ref)s (%(lineage)s, %(persona)s) on SPD-001,"
+                    " spawn allowed %(at)s (tool_use_id %(tool_use_id)s), never bound. First look for its tool_use_id in"
+                    " `spud events --kind hook.error --json`: a gap there means that child may still be running, so wait for its notification."
+                    " If the harness failed the spawn, record %(ref)s with `spud --as spud member finish %(ref)s --status failed --outcome '<why>'"
+                    " [--next '<what happens next>']` and plan a new member, since the reservation refuses a second spawn of"
+                    " `%(ref)s (%(lineage)s, %(persona)s)`. A reserved row holds a slot against the limits until it is bound or recorded."
+                    " Then end the turn.")
+
+    def reserve(self, m, tool_use_id, session=SESSION, caller=None):
+        """PreToolUse(Agent) allows m's spawn in session, which reserves the row; nothing binds it."""
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=m["model"], subagent_type=m["agent_type"], agent_id=caller,
+                                                          tool_use_id=tool_use_id, session=session))
+        self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
+
+    def age_request(self, tool_use_id, minutes):
+        """The spawn request's allow moved minutes into the past; returns its new stamp."""
+        con = self.home.connect()
+        try:
+            with con:
+                con.execute("UPDATE spawn_requests SET at = ? WHERE tool_use_id = ?", (self.ago(minutes), tool_use_id))
+        finally:
+            con.close()
+        return self.home.scalar("SELECT at FROM spawn_requests WHERE tool_use_id = ?", tool_use_id)
+
+    def blocked(self, r):
+        """The reason of a Stop that blocked."""
+        self.assertEqual((r.code, (r.json or {}).get("decision")), (0, "block"), r)
+        return r.json["reason"]
+
+    def test_a_spawn_allowed_within_the_grace_holds_nobody(self):
+        m = self.plan(name="Kestrel")
+        self.set_member(m["id"], planned_at=self.ago(30))  # the grace runs from the allow, not from the plan
+        self.reserve(m, "toolu_reserved")
+        self.assertSilent(self.stop_in(SESSION))
+        self.age_request("toolu_reserved", 9)
+        for session in (SESSION, SESSION_B):
+            self.assertSilent(self.stop_in(session))  # a spawn in flight
+        self.assertEqual(self.denied(), [])
+
+    def test_a_spawn_allowed_past_the_grace_and_never_bound_holds_its_session_with_its_own_clause(self):
+        m = self.plan(name="Kestrel")
+        self.reserve(m, "toolu_reserved")
+        at = self.age_request("toolu_reserved", 11)
+        self.assertSilent(self.stop_in(SESSION_B))  # another session's spawn
+        reason = self.blocked(self.stop_in(SESSION))
+        self.assertEqual(reason, self.UNBOUND_ONLY % {"ref": m["ref"], "lineage": "01", "persona": "scout", "at": at[:16], "tool_use_id": "toolu_reserved"})
+        self.assertEqual(self.denied()[-1]["data"], {"hook_event_name": "Stop", "session_id": SESSION, "members": [m["ref"]],
+                                                     "returned": [], "planned": [], "unbound": [m["ref"]], "running": []})
+        self.blocked(self.stop_in(SESSION))  # every fresh stop, until it is bound or recorded
+
+    def test_the_session_that_asked_for_the_spawn_owes_it_not_the_one_that_planned_it(self):
+        m = self.plan(name="Kestrel")  # planned in SESSION
+        self.reserve(m, "toolu_reserved", session=SESSION_B)  # spawned from SESSION_B, after a /clear say
+        self.age_request("toolu_reserved", 11)
+        self.assertSilent(self.stop_in(SESSION))
+        self.assertIn(": SPUD-001/Kestrel (01, scout) on SPD-001, spawn allowed ", self.blocked(self.stop_in(SESSION_B)))
+
+    def test_binding_the_spawn_or_recording_the_row_failed_clears_it(self):
+        kestrel, yukon = self.plan(name="Kestrel"), self.plan(name="Yukon")
+        for m, tool_use_id in ((kestrel, "toolu_kestrel"), (yukon, "toolu_yukon")):
+            self.reserve(m, tool_use_id)
+            self.age_request(tool_use_id, 11)
+        reason = self.blocked(self.stop_in(SESSION))
+        self.assertTrue(reason.startswith("Law 9: 2 planned spudagent(s) were allowed to spawn and never bound: SPUD-001/Kestrel (01, scout) on SPD-001, "), reason)
+        self.assertIn(" never bound. First look for each tool_use_id in `spud events --kind hook.error --json`: ", reason)
+        self.assertIn(" If the harness failed a spawn, record SPUD-001/Kestrel with ", reason)
+        self.assertEqual(self.denied()[-1]["data"]["unbound"], ["SPUD-001/Kestrel", "SPUD-001/Yukon"])
+        # Kestrel's binding lands after all: Spud's own child at work, which never holds
+        post = self.home.hook("PostToolUse", self.post_agent_launched("toolu_kestrel", AGENT_A, self.description(kestrel)))
+        self.assertEqual((post.code, post.stdout), (0, ""), post)
+        self.assertEqual(self.home.json("member", "show", kestrel["ref"])["member"]["status"], "active")
+        self.blocked(self.stop_in(SESSION))
+        self.assertEqual(self.denied()[-1]["data"]["unbound"], ["SPUD-001/Yukon"])
+        # the harness failed Yukon's spawn: the printed command, --next and all, records a planned row that holds a reservation
+        out = self.home.json("member", "finish", yukon["ref"], "--status", "failed", "--outcome", "The harness failed the spawn.",
+                             "--next", "Plan a new member for the work.", actor="spud")
+        self.assertEqual((out["member"]["status"], bool(out["member"]["finished_at"])), ("failed", True))
+        self.assertSilent(self.stop_in(SESSION))
+        self.assertEqual(self.home.hook("PreToolUse", self.pre_agent(self.description(yukon), tool_use_id="toolu_again")).decision, "deny")
+        self.spawn(self.plan(name="Russet"), AGENT_B)  # the new member takes the work
+        self.assertSilent(self.stop_in(SESSION))
+
+    def test_a_nested_spawn_never_bound_under_a_finished_parent_holds_with_the_nested_way_out(self):
+        lead = self.spawn(self.plan(persona="engineer", model="opus", name="Yukon"), AGENT_A)
+        child = self.plan(actor=lead["ref"], name="Russet")
+        self.reserve(child, "toolu_russet", caller=AGENT_A)
+        at = self.age_request("toolu_russet", 11)
+        self.assertSilent(self.stop_in(SESSION))  # its living lead answers for it (SubagentStop, alive_children)
+        self.home.json("member", "finish", lead["ref"], "--status", "failed", "--outcome", "Died.", actor="spud")
+        self.assertSilent(self.stop_in(SESSION_B))
+        reason = self.blocked(self.stop_in(SESSION))
+        self.assertTrue(reason.startswith("Law 9: 1 planned spudagent(s) were allowed to spawn and never bound: SPUD-001/Russet (01.01, scout) on SPD-001,"
+                                          " spawn allowed %s (tool_use_id toolu_russet), never bound, under SPUD-001/Yukon (failed). " % at[:16]), reason)
+        self.assertIn(" If the harness failed the spawn, record SPUD-001/Russet with `spud --as spud member finish SPUD-001/Russet --status failed"
+                      " --outcome '<why>'`: nobody can spawn it again now that SPUD-001/Yukon is failed. ", reason)
+        self.assertNotIn("--next", reason)
+        self.assertNotIn("plan a new member", reason)
+        self.assertEqual(self.denied()[-1]["data"]["unbound"], ["SPUD-001/Russet"])
+        refused = self.home.run("member", "finish", child["ref"], "--status", "failed", "--outcome", "x", "--next", "y", actor="spud", check=False)
+        self.assertEqual(refused.returncode, EXIT_USAGE, refused.stderr)  # a nested row's finish refuses --next
+        out = self.home.json("member", "finish", child["ref"], "--status", "failed", "--outcome", "Its spawn never bound; its lead died.", actor="spud")
+        self.assertEqual(out["member"]["status"], "failed")
+        self.assertSilent(self.stop_in(SESSION))
+
+    def test_stop_hook_active_lets_an_unbound_spawn_through(self):
+        m = self.plan(name="Kestrel")
+        self.reserve(m, "toolu_reserved")
+        self.age_request("toolu_reserved", 11)
+        self.assertSilent(self.stop_in(SESSION, stop_hook_active=True))
+        self.assertEqual(self.denied(), [])
+        self.assertIn(m["ref"], self.blocked(self.stop_in(SESSION)))
+
+    def test_one_block_names_the_four_kinds_in_order(self):
+        _, running = self.orphan(AGENT_A, AGENT_B)
+        returned = self.returned(AGENT_C)
+        planned = self.plan()
+        denied = self.home.hook("PreToolUse", self.pre_agent(self.description(planned), model="opus", tool_use_id="toolu_denied"))
+        self.assertEqual(denied.decision, "deny", denied)  # a denied spawn reserves nothing: the row is still never spawned
+        unbound = self.plan()
+        self.reserve(unbound, "toolu_unbound")
+        self.age_request("toolu_unbound", 11)
+        reason = self.blocked(self.stop_in(SESSION))
+        heads = ["Law 9: 1 returned spudagent(s) are not recorded: %s (" % returned["ref"],
+                 "1 planned spudagent(s) were never spawned: %s (" % planned["ref"],
+                 "1 planned spudagent(s) were allowed to spawn and never bound: %s (" % unbound["ref"],
+                 "1 spudagent(s) are still running under a finished parent: %s (" % running["ref"]]
+        at = [reason.find(h) for h in heads]
+        self.assertEqual(at[0], 0, reason)
+        self.assertTrue(0 < at[1] < at[2] < at[3], (at, reason))
+        self.assertTrue(reason.endswith(". Then end the turn."), reason)
+        self.assertEqual([d["data"] for d in self.denied()], [{
+            "hook_event_name": "Stop", "session_id": SESSION, "members": [returned["ref"], planned["ref"], unbound["ref"], running["ref"]],
+            "returned": [returned["ref"]], "planned": [planned["ref"]], "unbound": [unbound["ref"]], "running": [running["ref"]]}])
+
+    def test_the_returned_only_reason_is_unchanged_beside_a_spawn_in_flight_and_another_sessions_unbound_one(self):
+        kestrel = self.returned(AGENT_A, SESSION, name="Kestrel")
+        self.reserve(self.plan(name="Yukon"), "toolu_in_flight")  # SESSION's own, allowed a moment ago
+        self.in_session(SESSION_B)
+        self.reserve(self.plan(name="Russet"), "toolu_other", session=SESSION_B)
+        self.age_request("toolu_other", 11)
+        reason = self.blocked(self.stop_in(SESSION))
+        self.assertEqual(reason, self.RETURNED_ONLY % (1, "SPUD-001/Kestrel (01, scout) on SPD-001, stopped %s" % kestrel["stopped_at"][:16]))
+        self.assertEqual(self.denied()[-1]["data"], {"hook_event_name": "Stop", "session_id": SESSION, "members": ["SPUD-001/Kestrel"],
+                                                     "returned": ["SPUD-001/Kestrel"], "planned": [], "unbound": [], "running": []})
+        # once SESSION's own spawn has waited past the grace it joins the block, and the returned clause loses its own ending
+        at = self.age_request("toolu_in_flight", 11)
+        reason = self.blocked(self.stop_in(SESSION))
+        self.assertTrue(reason.startswith("Law 9: 1 returned spudagent(s) are not recorded: SPUD-001/Kestrel (01, scout) on SPD-001, stopped "), reason)
+        self.assertIn(". 1 planned spudagent(s) were allowed to spawn and never bound: SPUD-001/Yukon (02, scout) on SPD-001, spawn allowed %s"
+                      " (tool_use_id toolu_in_flight), never bound. " % at[:16], reason)
+        self.assertTrue(reason.endswith(". Then end the turn."), reason)
+        self.assertEqual(self.denied()[-1]["data"]["unbound"], ["SPUD-001/Yukon"])
 
 
 # =============================================================================
