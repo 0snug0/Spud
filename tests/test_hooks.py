@@ -660,6 +660,232 @@ class SubagentStopTest(HookCase):
 
 
 # =============================================================================
+# SubagentStop / the lead hold (SPD-015)
+# =============================================================================
+
+
+class LeadHoldTest(HookCase):
+    """Law 9 below Spud: a member that returns while a child it spawned has returned
+    unrecorded (a final stop, no outcome) is held once, in the same block as the Result hold."""
+
+    RESULT_ONLY = ("record your Result with `spud --as %s member result '<what you produced, where, what you verified, what is left>'`"
+                   " (or Blocked with `spud --as %s member block '<the question and the options>'`) before returning; then return your summary")
+
+    def lead(self, agent_id=AGENT_A, result="Built the thing."):
+        """A root member, spawned and bound, with its own Result recorded unless result is None."""
+        m = self.spawn(self.plan(persona="engineer", model="opus"), agent_id)
+        if result is not None:
+            self.home.json("member", "result", result, actor=agent_id)
+        return m
+
+    def child_of(self, lead, agent_id, returned=True):
+        """A child planned and spawned by the lead; by default it records its Result and stops."""
+        child = self.spawn(self.plan(actor=lead["ref"]), agent_id, caller=lead["agent_id"])
+        if returned:
+            self.home.json("member", "result", "Child done.", actor=agent_id)
+            r = self.home.hook("SubagentStop", self.sub_stop(agent_id))
+            self.assertEqual((r.code, r.stdout), (0, ""), r)
+        return self.home.json("member", "show", child["ref"])["member"]
+
+    def finish_command(self, agent_id, ref):
+        return "`spud --as %s member finish %s --status done|blocked|failed --outcome '<verdict>'`" % (agent_id, ref)
+
+    def stopped_events(self, ref):
+        return self.events("member.stopped", member=ref)
+
+    def test_a_lead_with_its_result_recorded_is_held_once_for_a_returned_unrecorded_child(self):
+        lead = self.lead()
+        child = self.child_of(lead, AGENT_B)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, last="All done."))
+        self.assertEqual(r.code, 0, r)
+        self.assertEqual(r.json["decision"], "block", r)
+        reason = r.json["reason"]
+        self.assertTrue(reason.startswith("Law 9: 1 child you spawned returned and is not recorded: "), reason)
+        self.assertIn("%s (01.01, scout), stopped %s" % (child["ref"], child["stopped_at"][11:16]), reason)
+        self.assertIn(self.finish_command(AGENT_A, child["ref"]), reason)
+        self.assertIn("`spud proposal list --open`", reason)
+        self.assertIn("`spud --as %s proposal decide " % AGENT_A, reason)
+        self.assertNotIn("member result", reason)  # its own Result is recorded
+        self.assertTrue(reason.endswith(" Then return your summary."), reason)
+        # held, so nothing is stamped: stopped_at belongs to the final stop
+        shown = self.home.json("member", "show", lead["ref"])["member"]
+        self.assertIsNone(shown["stopped_at"])
+        self.assertEqual(shown["status"], "active")
+        held = self.stopped_events(lead["ref"])[-1]
+        self.assertEqual((held["data"]["held"], held["data"]["unrecorded"], held["data"]["unrecorded_children"]), (True, False, [child["ref"]]))
+
+    def test_stop_hook_active_lets_the_lead_go_and_records_the_unrecorded_children(self):
+        lead = self.lead()
+        child = self.child_of(lead, AGENT_B)
+        self.assertEqual(self.home.hook("SubagentStop", self.sub_stop(AGENT_A)).json["decision"], "block")
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, stop_hook_active=True))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        shown = self.home.json("member", "show", lead["ref"])["member"]
+        self.assertIsNotNone(shown["stopped_at"])
+        self.assertEqual(shown["status"], "active")  # the parent's verdict, never the hook's
+        final = self.stopped_events(lead["ref"])[-1]
+        self.assertEqual((final["data"]["held"], final["data"]["unrecorded"], final["data"]["unrecorded_children"]), (False, False, [child["ref"]]))
+        self.assertIn(child["ref"], final["body"])
+
+    def test_after_the_lead_finishes_the_child_it_is_not_held(self):
+        lead = self.lead()
+        child = self.child_of(lead, AGENT_B)
+        self.assertEqual(self.home.hook("SubagentStop", self.sub_stop(AGENT_A)).json["decision"], "block")
+        out = self.home.json("member", "finish", child["ref"], "--status", "done", "--outcome", "Accepted.", actor=AGENT_A)
+        self.assertEqual(out["member"]["status"], "done")
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))  # a fresh stop, not the let-go continuation
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        final = self.stopped_events(lead["ref"])[-1]
+        self.assertEqual((final["data"]["held"], final["data"]["unrecorded"]), (False, False))
+        self.assertNotIn("unrecorded_children", final["data"])
+
+    def test_one_block_names_the_child_first_and_then_the_missing_result(self):
+        lead = self.lead(result=None)
+        child = self.child_of(lead, AGENT_B)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual(r.json["decision"], "block", r)
+        reason = r.json["reason"]
+        self.assertTrue(reason.startswith("Law 9: 1 child you spawned returned and is not recorded: "), reason)
+        self.assertLess(reason.index(self.finish_command(AGENT_A, child["ref"])), reason.index("member result"), reason)
+        self.assertTrue(reason.endswith(" Then " + self.RESULT_ONLY % (AGENT_A, AGENT_A)), reason)
+        held = [e for e in self.stopped_events(lead["ref"]) if e["data"]["held"]]
+        self.assertEqual(len(held), 1)
+        self.assertEqual((held[0]["data"]["unrecorded"], held[0]["data"]["unrecorded_children"]), (True, [child["ref"]]))
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, stop_hook_active=True))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+
+    def test_a_lead_that_recorded_blocked_is_still_held_for_its_child(self):
+        lead = self.lead(result=None)
+        self.home.json("member", "block", "Need Eric.", actor=AGENT_A)
+        child = self.child_of(lead, AGENT_B)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual(r.json["decision"], "block", r)
+        self.assertIn(self.finish_command(AGENT_A, child["ref"]), r.json["reason"])
+        self.assertNotIn("member result", r.json["reason"])
+
+    def test_every_unrecorded_child_is_listed_with_its_own_command(self):
+        lead = self.lead()
+        first = self.child_of(lead, AGENT_B)
+        second = self.child_of(lead, AGENT_C)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        reason = r.json["reason"]
+        self.assertTrue(reason.startswith("Law 9: 2 children you spawned returned and are not recorded: "), reason)
+        self.assertLess(reason.index(first["ref"]), reason.index(second["ref"]), reason)  # oldest stop first
+        for m in (first, second):
+            self.assertIn("%s (%s, scout), stopped %s" % (m["ref"], m["lineage"], m["stopped_at"][11:16]), reason)
+            self.assertIn(self.finish_command(AGENT_A, m["ref"]), reason)
+        held = self.stopped_events(lead["ref"])[-1]
+        self.assertEqual(held["data"]["unrecorded_children"], [first["ref"], second["ref"]])
+
+    def test_finished_children_and_a_siblings_children_are_not_listed(self):
+        lead = self.lead()
+        sibling = self.lead(agent_id=AGENT_C)
+        recorded = self.child_of(lead, AGENT_B)
+        self.home.json("member", "finish", recorded["ref"], "--status", "done", "--outcome", "Accepted.", actor=AGENT_A)
+        nephew = self.child_of(sibling, AGENT_D)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)  # nothing of the lead's is unrecorded
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_C))
+        self.assertEqual(r.json["decision"], "block", r)
+        self.assertIn(nephew["ref"], r.json["reason"])
+        self.assertNotIn(recorded["ref"], r.json["reason"])
+
+    def test_the_result_only_reason_is_unchanged(self):
+        self.lead(result=None)  # no children at all
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual(r.json["reason"], self.RESULT_ONLY % (AGENT_A, AGENT_A))
+        other = self.lead(agent_id=AGENT_C, result=None)  # every child recorded
+        child = self.child_of(other, AGENT_D)
+        self.home.json("member", "finish", child["ref"], "--status", "done", "--outcome", "Accepted.", actor=AGENT_C)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_C))
+        self.assertEqual(r.json["reason"], self.RESULT_ONLY % (AGENT_C, AGENT_C))
+
+    def test_a_lead_is_held_once_for_a_child_that_is_still_running(self):
+        """The probe of 2026-09-12: a background child is not killed when its lead returns, its
+        completion notification goes to the main session, and its row is orphaned.  The block is
+        the only thing that keeps the lead alive long enough to collect it."""
+        lead = self.lead()
+        child = self.child_of(lead, AGENT_B, returned=False)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual(r.json["decision"], "block", r)
+        reason = r.json["reason"]
+        self.assertTrue(reason.startswith("Law 9: 1 child you planned is still alive: "), reason)
+        self.assertIn("%s (01.01, scout), running since %s" % (child["ref"], child["spawned_at"][11:16]), reason)
+        self.assertIn(self.finish_command(AGENT_A, child["ref"]), reason)
+        self.assertIn("Wait inside this turn", reason)
+        self.assertIn("`spud member show %s`" % child["ref"], reason)
+        held = self.stopped_events(lead["ref"])[-1]
+        self.assertEqual(held["data"]["alive_children"], [child["ref"]])
+        self.assertNotIn("unrecorded_children", held["data"])
+        self.assertIsNone(self.home.json("member", "show", lead["ref"])["member"]["stopped_at"])
+        # it waited; the child returns, and the let-go stop records it as unrecorded instead
+        self.home.json("member", "result", "Child done.", actor=AGENT_B)
+        self.home.hook("SubagentStop", self.sub_stop(AGENT_B))
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, stop_hook_active=True))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        final = self.stopped_events(lead["ref"])[-1]
+        self.assertEqual(final["data"]["unrecorded_children"], [child["ref"]])
+        self.assertNotIn("alive_children", final["data"])
+
+    def test_a_planned_child_that_was_never_spawned_holds_the_lead_once(self):
+        lead = self.lead()
+        child = self.plan(actor=lead["ref"])
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual(r.json["decision"], "block", r)
+        reason = r.json["reason"]
+        self.assertIn("%s (01.01, scout), planned %s and never spawned" % (child["ref"], child["planned_at"][11:16]), reason)
+        self.assertIn("`spud --as %s member finish %s --status failed --outcome '<why>'`" % (AGENT_A, child["ref"]), reason)
+        self.assertNotIn("Wait inside this turn", reason)  # nothing to wait for: it never started
+        self.assertEqual(self.stopped_events(lead["ref"])[-1]["data"]["alive_children"], [child["ref"]])
+        out = self.home.json("member", "finish", child["ref"], "--status", "failed", "--outcome", "Never spawned.", actor=AGENT_A)
+        self.assertEqual(out["member"]["status"], "failed")
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+
+    def test_a_reserved_spawn_that_never_bound_is_still_alive(self):
+        lead = self.lead()
+        child = self.plan(actor=lead["ref"])
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(child), agent_id=AGENT_A, tool_use_id="toolu_reserved"))
+        self.assertEqual(pre.decision, "allow", pre)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual(r.json["decision"], "block", r)
+        self.assertIn(child["ref"], r.json["reason"])
+        self.assertEqual(self.stopped_events(lead["ref"])[-1]["data"]["alive_children"], [child["ref"]])
+
+    def test_one_block_covers_a_returned_child_and_a_running_one(self):
+        lead = self.lead()
+        returned = self.child_of(lead, AGENT_B)
+        running = self.child_of(lead, AGENT_C, returned=False)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        reason = r.json["reason"]
+        self.assertTrue(reason.startswith("Law 9: 1 child you spawned returned and is not recorded: "), reason)
+        self.assertIn("1 child you planned is still alive: ", reason)
+        self.assertLess(reason.index(returned["ref"]), reason.index("is still alive"), reason)
+        self.assertIn(self.finish_command(AGENT_A, running["ref"]), reason)
+        held = self.stopped_events(lead["ref"])[-1]
+        self.assertEqual((held["data"]["unrecorded_children"], held["data"]["alive_children"]), ([returned["ref"]], [running["ref"]]))
+
+    def test_spud_records_an_orphaned_grandchild_once_its_lead_is_finished(self):
+        lead = self.lead()
+        child = self.child_of(lead, AGENT_B)
+        self.assertEqual(self.home.hook("SubagentStop", self.sub_stop(AGENT_A)).json["decision"], "block")
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, stop_hook_active=True))  # ignored the hold
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        r = self.home.hook("Stop", self.stop())
+        self.assertEqual(r.json["decision"], "block", r)
+        self.assertIn(lead["ref"], r.json["reason"])
+        self.assertNotIn(child["ref"], r.json["reason"])  # a grandchild is its living lead's business
+        self.home.json("member", "finish", lead["ref"], "--status", "done", "--outcome", "Accepted; its child is not recorded.", actor="spud")
+        r = self.home.hook("Stop", self.stop())
+        self.assertEqual(r.json["decision"], "block", r)
+        self.assertIn(child["ref"], r.json["reason"])
+        out = self.home.json("member", "finish", child["ref"], "--status", "done", "--outcome", "Recorded by Spud: orphaned.", actor="spud")
+        self.assertEqual((out["member"]["status"], out["member"]["outcome"]), ("done", "Recorded by Spud: orphaned."))
+        r = self.home.hook("Stop", self.stop())
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+
+
+# =============================================================================
 # PreToolUse / Bash
 # =============================================================================
 
