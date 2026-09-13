@@ -1288,10 +1288,12 @@ def run_cell(m, ticket_created):
 
 def token_counts(usage_json):
     """{out, in, cached} from a run's transcript sum: output_tokens; input_tokens plus
-    cache_creation_input_tokens; cache_read_input_tokens (a missing key counts 0).  The completion kept
-    beside the sum under "completion" is never read: its figures cover only its final request
-    (SPD-021).  None for any other source (a completion alone), a figure that is not a non-negative
-    integer, or JSON of another shape."""
+    cache_creation_input_tokens; cache_read_input_tokens (a missing key counts 0).  A sum counts each API
+    request once since SPD-023 ("counting": "request"); one stored before added every transcript entry,
+    reads the same way, and runs four to five times too high until `spud member resum` re-sums it.  The
+    completion kept beside the sum under "completion" is never read: its figures cover only its final
+    request (SPD-021).  None for any other source (a completion alone), a figure that is not a
+    non-negative integer, or JSON of another shape."""
     if not usage_json:
         return None
     try:
@@ -2355,7 +2357,8 @@ def accept_file(ctx, con, actor, path):
 
 class Result:
     """A command's answer.  `raw` (hooks) is printed verbatim on stdout with the given
-    exit code, whatever --json says; everything else prints `text` or `data` as JSON."""
+    exit code, whatever --json says; everything else prints `text` or `data` as JSON, then
+    `stderr` as a `spud:` line, and exits with `exit_code` (member resum: 1 with its table)."""
 
     def __init__(self, data, text="", raw=None, exit_code=EXIT_OK, stderr=""):
         self.data = data
@@ -2980,6 +2983,158 @@ def cmd_member_show(ctx, args):
     return Result({"member": d}, format_member(d))
 
 
+# member resum (SPD-023): a transcript sum stored before SPD-023 added every transcript entry; it is re-summed
+# once per API request from the member's transcript, merged through run_totals, its old figures kept in a
+# member.edited event.  The events table's kinds are fixed by its CHECK constraint, so the re-sum is recorded
+# as the member edit it is rather than as a kind that would take a migration of the append-only table.
+RESUM_FIGURES = ("total_tokens", "tool_uses", "duration_ms")
+RESUM_KEPT = {None: "no sum", "imported": "imported", "request": "counted"}  # stored_counting -> the action: nothing to do
+RESUM_LEFT = ("not found", "ambiguous", "unreadable", "no usage")  # a sum counted per entry left as it is: exit 1
+
+
+def stored_counting(usage_json):
+    """How a member's stored transcript sum was counted: "request" (since SPD-023), "imported" (read back from
+    a rendered note by the importer, with no transcript behind it) or "entry" (before SPD-023, every
+    transcript entry added); None when usage_json holds no transcript sum."""
+    stored, _ = usage_parts(usage_json)
+    if stored is None:
+        return None
+    if stored.get("imported") is True:
+        return "imported"
+    return "request" if stored.get("counting") == REQUEST_COUNTING else "entry"
+
+
+def find_transcript(recorded):
+    """(path, how, note) for a member's transcript: the recorded transcript_path when it is a file ("recorded");
+    else the one file with the same session directory and file name, <session>/subagents/agent-<id>.jsonl,
+    under any project directory beside the recorded one ("moved": the harness moves a worktree session's
+    transcripts into another project directory when the session leaves the worktree); else None with
+    "not found" or "ambiguous" and a note saying where it looked."""
+    if not recorded:
+        return None, "not found", "no transcript path recorded"
+    path = Path(recorded)
+    if path.is_file():
+        return path, "recorded", None
+    if path.parent.name != "subagents" or len(path.parts) < 5:
+        return None, "not found", "no file at %s" % path
+    project = path.parents[2]
+    tail = Path(path.parents[1].name, "subagents", path.name)
+    try:
+        siblings = sorted(project.parent.iterdir())
+    except OSError:
+        siblings = []
+    matches = [d / tail for d in siblings if (d / tail).is_file()]
+    if len(matches) == 1:
+        return matches[0], "moved", None
+    if not matches:
+        return None, "not found", "no file at %s, nor at <project>/%s under %s" % (path, tail, project.parent)
+    return None, "ambiguous", "%d files: %s" % (len(matches), ", ".join(str(m) for m in matches))
+
+
+def resum_row(member, ref):
+    """What `member resum` does with one member: (its row for the table and --json, the new transcript sum
+    when there is one to write).  The row's action is "re-sum", "counted" (already by request), "imported"
+    or "no sum" (left, nothing to do), or one of RESUM_LEFT."""
+    row = {"ref": ref, "action": None, "found": None, "transcript": None, "note": None, "requests": None,
+           "old": {k: member[k] for k in RESUM_FIGURES}, "new": None}
+    counting = stored_counting(member["usage_json"])
+    if counting != "entry":
+        row["action"] = RESUM_KEPT[counting]
+        return row, None
+    path, how, note = find_transcript(member["transcript_path"])
+    if path is None:
+        row.update(action=how, transcript=member["transcript_path"], note=note)
+        return row, None
+    row.update(found=how, transcript=str(path))
+    try:
+        summed = transcript_usage(path)
+    except OSError as e:
+        row.update(action="unreadable", note="%s: %s" % (path, e.strerror or e))
+        return row, None
+    if summed is None:
+        row.update(action="no usage", note="%s holds no assistant usage" % path)
+        return row, None
+    totals = run_totals(member, summed=summed)
+    row.update(action="re-sum", requests=summed["usage_json"]["messages"], new={k: totals[k] for k in RESUM_FIGURES})
+    return row, summed
+
+
+def resum_table(data):
+    """member resum's text: the table, one line per member with its old -> new figures, then one line saying
+    what was written."""
+    lines = []
+    for r in data["members"]:
+        line = {"ref": r["ref"], "action": r["action"], "requests": "-" if r["requests"] is None else r["requests"]}
+        for k in RESUM_FIGURES:
+            old = "-" if r["old"][k] is None else str(r["old"][k])
+            line[k] = old if r["new"] is None else "%s -> %s" % (old, "-" if r["new"][k] is None else r["new"][k])
+        line["transcript"] = ("%s: %s" % (r["found"], r["transcript"])) if r["action"] == "re-sum" else (r["note"] or "-")
+        lines.append(line)
+    text = table(lines, [("member", "ref"), ("action", "action"), ("requests", "requests"), ("total_tokens", "total_tokens"),
+                         ("tool_uses", "tool_uses"), ("duration_ms", "duration_ms"), ("transcript", "transcript")])
+    total = len(data["members"])
+    resum = sum(1 for r in data["members"] if r["action"] == "re-sum")
+    left = sum(1 for r in data["members"] if r["action"] in RESUM_LEFT)
+    return text + "\n" + "%s %d of %d member%s once per API request; %d left with a sum that added every entry; %d already counted by request, imported, or without a transcript sum" % (
+        "dry run, nothing written: would re-sum" if data["dry_run"] else "re-summed", resum, total, "" if total == 1 else "s", left, total - resum - left)
+
+
+def cmd_member_resum(ctx, args):
+    """member resum: stored transcript sums counted per entry, re-summed once per API request (Spud's)."""
+    if bool(args.refs) == bool(args.all):
+        raise SpudError(EXIT_USAGE, "member resum takes the members to re-sum (SPUD-nnn/<Name> ...) or --all, one of the two")
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        require_spud(con, actor, "re-summing members' stored run totals (member resum)")
+        if args.all:
+            members = con.execute("SELECT * FROM members WHERE json_extract(usage_json, '$.source') = 'transcript' ORDER BY ticket_id, lineage").fetchall()
+        else:
+            members, seen = [], set()
+            for ref in args.refs:
+                m = get_member(con, ref)
+                if m["id"] not in seen:
+                    seen.add(m["id"])
+                    members.append(m)
+        # Transcripts are read before the write lock is taken; the write re-reads each row and merges the sum into it.
+        plans = [resum_row(m, member_ref(con, m["id"])) for m in members]
+        resummed = []
+        if not args.dry_run and any(summed for _, summed in plans):
+            at = now()
+            with write_txn(con):
+                for (row, summed), member in zip(plans, members):
+                    if summed is None:
+                        continue
+                    fresh = get_member_by_id(con, member["id"])
+                    counting = stored_counting(fresh["usage_json"])
+                    if counting != "entry":  # changed since it was read (a concurrent re-sum): nothing left to do
+                        row.update(action=RESUM_KEPT[counting], requests=None, old={k: fresh[k] for k in RESUM_FIGURES}, new=None)
+                        continue
+                    totals = run_totals(fresh, summed=summed)
+                    new = {k: totals[k] for k in RESUM_FIGURES}
+                    new.update(transcript_path=row["transcript"], usage_json=totals["usage_json"])
+                    old = {k: fresh[k] for k in new}
+                    con.execute("UPDATE members SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in new), (*new.values(), fresh["id"]))
+                    row.update(old={k: old[k] for k in RESUM_FIGURES}, new={k: new[k] for k in RESUM_FIGURES})
+                    write_event(con, at, actor.label, "member.edited",
+                                "%s re-summed once per API request from its transcript: total_tokens %s -> %s, tool_uses %s -> %s, duration_ms %s -> %s"
+                                % (row["ref"], old["total_tokens"], new["total_tokens"], old["tool_uses"], new["tool_uses"], old["duration_ms"], new["duration_ms"]),
+                                ticket_id=fresh["ticket_id"], member_id=fresh["id"],
+                                data={"fields": sorted(k for k in new if new[k] != old[k]), "counting": REQUEST_COUNTING, "found": row["found"],
+                                      "transcript": row["transcript"], "requests": row["requests"], "old": old, "new": new})
+                    resummed.append(row["ref"])
+    finally:
+        con.close()
+    rows = [row for row, _ in plans]
+    left = [r for r in rows if r["action"] in RESUM_LEFT]
+    data = {"dry_run": bool(args.dry_run), "members": rows, "resummed": resummed, "left": [r["ref"] for r in left]}
+    if left:
+        return Result(data, resum_table(data), exit_code=EXIT_ERROR, stderr="%d sum%s counted per entry left as %s: %s" % (
+            len(left), "" if len(left) == 1 else "s", "it is" if len(left) == 1 else "they are",
+            "; ".join("%s (%s)" % (r["ref"], r["action"]) for r in left)))
+    return Result(data, resum_table(data))
+
+
 def cmd_proposal_file(ctx, args):
     con = connect(ctx)
     try:
@@ -3328,7 +3483,7 @@ AGENT_ID_RE = re.compile(r"^[0-9a-f]{17}$")
 SPUD_COMMANDS = ("init", "migrate", "backup", "doctor", "config", "settings", "import", "render", "ticket", "member",
                  "proposal", "handoff", "report", "board", "fleet", "card", "events", "sql", "hook")
 SPUD_ONLY_COMMANDS = ("init", "migrate", "import", "render", "backup")
-SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"))
+SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"), ("member", "resum"))
 MEMBER_OWN_COMMANDS = (("member", "log"), ("member", "result"), ("member", "block"), ("proposal", "file"))
 DB_PATH_RE = re.compile(r"ledger\.db|(?:^|[\s/'\"=])\.spud(?:/|$|[\s'\"])", re.IGNORECASE)
 SUBST = "__SPUD_SUBST__"  # what a lifted `$(...)` or backtick body leaves behind in the outer line
@@ -4067,7 +4222,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
             if call["command"] in SPUD_ONLY_COMMANDS or (call["command"], call["subcommand"]) in SPUD_ONLY_SUBCOMMANDS:
                 what = call["command"] + ((" " + call["subcommand"]) if call["subcommand"] and (call["command"], call["subcommand"]) in SPUD_ONLY_SUBCOMMANDS else "")
                 return ("Law 6: `spud %s` is Spud's (tickets are created, moved and edited by Spud alone; init, migrate, import, render, backup,"
-                        " settings sync and config sync are ledger-wide); file a proposal instead: spud proposal file --as %s" % (what, caller_agent_id)), analysis
+                        " settings sync, config sync and member resum are ledger-wide); file a proposal instead: spud proposal file --as %s" % (what, caller_agent_id)), analysis
             if call["actor"] is not None:
                 if caller_member is None:
                     return ("your agent_id %s is not bound to a member yet, so `--as %s` cannot be verified (a background spawn is bound right"
@@ -4468,17 +4623,43 @@ def parse_timestamp(value):
         return None
 
 
+# How a transcript sum counts (SPD-023).  The harness writes an API response as one transcript entry per
+# content block, each repeating the response's message.id, its requestId and the request's usage, with only
+# output_tokens growing to the final count (a read-only survey of five live subagent transcripts on
+# 2026-09-13: 177 requests, every entry one block, the last entry of each request the maximum on every key).
+# Before SPD-023 every entry was added, so a request counted once per block and the tokens ran four to five
+# times too high.  A sum counted once per request carries "counting": "request"; a stored transcript sum
+# without it is found and re-summed by `spud member resum`.
+REQUEST_COUNTING = "request"
+TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+
+
+def request_key(entry, index):
+    """The API request a transcript's assistant entry belongs to: its message.id with its requestId (None
+    when the entry has none).  An entry without a message id is a request of its own, whatever else it
+    carries; index is its line in the file."""
+    message_id = entry["message"].get("id")
+    if not isinstance(message_id, str) or not message_id:
+        return ("entry", index)
+    request_id = entry.get("requestId")
+    return ("request", message_id, request_id if isinstance(request_id, str) and request_id else None)
+
+
 def transcript_usage(path):
-    """Sum the usage of every assistant entry in a subagent transcript: a member's tokens whatever the
-    spawn shape, since a foreground completion's totals cover only its final request (run_totals keeps
-    both, SPD-021).  None when the file has no assistant usage.  Proposal 17: the harness writes one
-    entry per content block, each repeating its request's usage, so this sum counts a request once per
-    block."""
-    totals = {"input_tokens": 0, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
-    messages = tool_uses = 0
+    """A subagent transcript summed once per API request (SPD-023): a member's tokens whatever the spawn
+    shape, since a foreground completion's figures cover only its final request (run_totals keeps both,
+    SPD-021).  The assistant entries are grouped by request (request_key) and each request counts once,
+    by the usage of its last entry; messages counts the requests.  tool_uses counts distinct tool_use
+    block ids (a block without an id counts where it appears), the same whether a response's blocks come
+    one per entry or together; duration_ms runs from the first timestamp in the file to the last.  The
+    sum is marked "counting": "request".  None when the file holds no assistant usage; OSError when it
+    cannot be read."""
+    requests = {}
+    tool_ids = set()
+    tools_without_id = 0
     first = last = None
     with open(path, encoding="utf-8", errors="replace") as f:
-        for line in f:
+        for index, line in enumerate(f):
             try:
                 entry = json.loads(line)
             except ValueError:
@@ -4490,22 +4671,29 @@ def transcript_usage(path):
                 first = ts if first is None or ts < first else first
                 last = ts if last is None or ts > last else last
             msg = entry.get("message")
-            if entry.get("type") == "assistant" and isinstance(msg, dict):
-                usage = msg.get("usage")
-                if isinstance(usage, dict):
-                    messages += 1
-                    for k in totals:
-                        v = usage.get(k)
-                        if isinstance(v, (int, float)) and not isinstance(v, bool):
-                            totals[k] += int(v)
-                content = msg.get("content")
-                if isinstance(content, list):
-                    tool_uses += sum(1 for b in content if isinstance(b, dict) and b.get("type") == "tool_use")
-    if messages == 0:
+            if entry.get("type") != "assistant" or not isinstance(msg, dict):
+                continue
+            if isinstance(msg.get("usage"), dict):
+                requests[request_key(entry, index)] = msg["usage"]  # a later entry of the request replaces an earlier one
+            content = msg.get("content")
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_use":
+                        if isinstance(block.get("id"), str) and block["id"]:
+                            tool_ids.add(block["id"])
+                        else:
+                            tools_without_id += 1
+    if not requests:
         return None
+    totals = dict.fromkeys(TOKEN_KEYS, 0)
+    for usage in requests.values():
+        for k in TOKEN_KEYS:
+            v = usage.get(k)
+            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                totals[k] += int(v)
     duration = int((last - first).total_seconds() * 1000) if first is not None and last is not None else None
-    return {"total_tokens": sum(totals.values()), "duration_ms": duration, "tool_uses": tool_uses,
-            "usage_json": {"source": "transcript", "messages": messages, "usage": totals}}
+    return {"total_tokens": sum(totals.values()), "duration_ms": duration, "tool_uses": len(tool_ids) + tools_without_id,
+            "usage_json": {"source": "transcript", "counting": REQUEST_COUNTING, "messages": len(requests), "usage": totals}}
 
 
 RESULT_HOLD = ("record your Result with `spud --as %s member result '<what you produced, where, what you verified, what is left>'`"
@@ -4671,7 +4859,8 @@ def hook_subagent_stop(ctx, payload):
                 updates["transcript_path"] = transcript
             summed = None
             if usage_parts(member["usage_json"])[0] is None and transcript and os.path.isfile(transcript):
-                # a stored transcript sum stays; a completion recorded before this stop stays beside the new sum (SPD-021)
+                # a stored transcript sum stays, however it was counted (`member resum` re-sums one that added every
+                # entry, SPD-023); a completion recorded before this stop stays beside the new sum (SPD-021)
                 summed = transcript_usage(transcript)
                 if summed:
                     updates.update(run_totals(member, summed=summed))
@@ -4795,6 +4984,30 @@ hooks: `spud hook <event>` is the harness's entry point (payload on stdin, answe
 text values: an option value of @path reads the file, @- reads stdin.
 exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,
             5 transition refused, 6 render conflict (hand-edited file).
+"""
+
+RESUM_DESCRIPTION = """\
+Re-sum members' stored transcript sums from their transcripts, once per API request (SPD-023).
+
+The harness writes an API response as one transcript entry per content block, each repeating the
+request's message.id, requestId and usage.  A sum stored before SPD-023 added every entry, so its
+tokens run four to five times too high.  A sum made since counts each request once, by its last
+entry, and carries "counting": "request": it is left as it is, so a second run changes nothing.
+
+The transcript read is the recorded transcript_path when that is a file; else the one file with the
+same session directory and file name (<session>/subagents/agent-<id>.jsonl) under a project directory
+beside the recorded one, where the harness moves a worktree session's transcripts when the session
+leaves the worktree.  The new sum is merged through the run totals, so a foreground completion keeps
+its whole-run duration and tool count; transcript_path becomes the file read; and each member
+re-summed gets a member.edited event with its old and new figures and its old usage_json whole.
+An imported sum (no transcript behind it) and a member without a transcript sum are listed and left.
+"""
+
+RESUM_EPILOG = """\
+exit codes: 0 every member listed is re-summed, already counted by request, imported, or holds no
+            transcript sum; 1 a sum that added every entry was left as it is, because its transcript
+            was not found, is ambiguous, cannot be read or holds no usage (the other members are
+            still written, and --dry-run exits the same); 2 usage; 3 an actor other than Spud.
 """
 
 
@@ -4924,6 +5137,12 @@ def build_parser():
     q = ps.add_parser("show", help="print a member")
     q.add_argument("ref")
     q.set_defaults(func=cmd_member_show)
+    q = ps.add_parser("resum", help="re-sum stored transcript sums that added every entry (before SPD-023) once per API request, from the transcripts (Spud's)",
+                      description=RESUM_DESCRIPTION, epilog=RESUM_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    q.add_argument("refs", nargs="*", metavar="ref", help="a member, SPUD-nnn/<Name> or SPUD-nnn/<lineage>; several may be named")
+    q.add_argument("--all", action="store_true", help="every member whose usage_json holds a transcript sum")
+    q.add_argument("--dry-run", action="store_true", help="print the table and exit as the run would, and write nothing")
+    q.set_defaults(func=cmd_member_resum)
 
     p = sub.add_parser("proposal", help="ticket proposals and their climb")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
@@ -5036,16 +5255,21 @@ def main(argv=None):
             sys.stderr.write(result.stderr.rstrip("\n") + "\n")
         return result.exit_code
     if args.json:
-        payload = {"ok": True}
+        payload = {"ok": result.exit_code == EXIT_OK}
+        if result.exit_code != EXIT_OK:
+            payload.update({"error": result.stderr, "exit": result.exit_code})
         payload.update(result.data)
         sys.stdout.write(json.dumps(payload, indent=2) + "\n")
     elif result.text:
         sys.stdout.write(result.text.rstrip("\n") + "\n")
+    if result.stderr:
+        # a command that did its work and still exits non-zero (member resum leaving a sum) says why
+        sys.stderr.write("spud: %s\n" % result.stderr.rstrip("\n"))
     # A recording hook that failed open left its gap in the spool; any successful command drains it.
-    if args.command != "hook":
+    if args.command != "hook" and result.exit_code == EXIT_OK:
         with contextlib.suppress(Exception):
             spool_drain(ctx)
-    return EXIT_OK
+    return result.exit_code
 
 
 if __name__ == "__main__":

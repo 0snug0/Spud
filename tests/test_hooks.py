@@ -37,6 +37,9 @@ COMPLETION = {
 }
 # HookCase.two_requests summed, 442 tokens: 12 out, 130 in (input plus cache creation), 300 cached.
 TWO_REQUESTS_SUM = {"input_tokens": 30, "output_tokens": 12, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 300}
+# HookCase.per_block with every entry added, as transcript_usage summed before SPD-023: 994 tokens over 5 entries
+# (24 out, 370 in, 600 cached).  Counted once per request it is TWO_REQUESTS_SUM.
+PER_ENTRY_SUM = {"input_tokens": 70, "output_tokens": 24, "cache_creation_input_tokens": 300, "cache_read_input_tokens": 600}
 
 
 def common(cwd, agent_id=None, agent_type=None):
@@ -149,8 +152,58 @@ class HookCase(SpudTestCase):
         return path
 
     def assistant(self, text, usage, ts, tool_uses=0):
-        content = [{"type": "text", "text": text}] + [{"type": "tool_use", "id": "toolu_%d" % i, "name": "Bash", "input": {}} for i in range(tool_uses)]
+        """An assistant entry with neither a message id nor a requestId: a request of its own.  Its tool_use
+        ids are unique within a run, as the API issues them (tool uses count distinct ids since SPD-023)."""
+        content = [{"type": "text", "text": text}] + [{"type": "tool_use", "id": "toolu_%s%d" % (text, i), "name": "Bash", "input": {}} for i in range(tool_uses)]
         return {"type": "assistant", "timestamp": ts, "message": {"role": "assistant", "content": content, "usage": usage}}
+
+    def block(self, message_id, request_id, content, usage, ts):
+        """One transcript entry of an API response as the harness writes it (SPD-023): its content block (or
+        a list of blocks), with the response's message id and requestId (None leaves either out) and the
+        request's usage repeated on every entry."""
+        message = {"id": message_id, "type": "message", "role": "assistant", "content": content if isinstance(content, list) else [content], "usage": usage}
+        if message_id is None:
+            del message["id"]
+        entry = {"type": "assistant", "timestamp": ts, "message": message}
+        if request_id is not None:
+            entry["requestId"] = request_id
+        return entry
+
+    @staticmethod
+    def tool_use(block_id):
+        block = {"type": "tool_use", "name": "Bash", "input": {}}
+        if block_id is not None:
+            block["id"] = block_id
+        return block
+
+    def per_block(self):
+        """two_requests as the harness writes it (SPD-023): one entry per content block, each repeating its
+        API request's message id, requestId and usage, output_tokens growing to the request's final count.
+        Once per request, by its last entry: TWO_REQUESTS_SUM (442 tokens), 3 tool uses, 4500 ms from the
+        first entry to the last; every entry added: PER_ENTRY_SUM (994 tokens)."""
+        first = {"input_tokens": 10, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 0,
+                 "cache_creation": {"ephemeral_5m_input_tokens": 100, "ephemeral_1h_input_tokens": 0}, "service_tier": "standard"}
+        second = {"input_tokens": 20, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 300,
+                  "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}, "service_tier": "standard"}
+        return [
+            {"type": "user", "timestamp": "2026-09-12T13:30:00.000Z", "message": {"role": "user", "content": "hi"}},
+            self.block("msg_01", "req_01", {"type": "thinking", "thinking": "", "signature": "s"}, dict(first, output_tokens=2), "2026-09-12T13:30:01.000Z"),
+            self.block("msg_01", "req_01", self.tool_use("toolu_01"), dict(first, output_tokens=4), "2026-09-12T13:30:01.200Z"),
+            self.block("msg_01", "req_01", self.tool_use("toolu_02"), dict(first, output_tokens=5), "2026-09-12T13:30:01.400Z"),
+            {"type": "user", "timestamp": "2026-09-12T13:30:02.000Z", "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_01", "content": "x"}, {"type": "tool_result", "tool_use_id": "toolu_02", "content": "y"}]}},
+            self.block("msg_02", "req_02", {"type": "text", "text": "b"}, dict(second, output_tokens=6), "2026-09-12T13:30:04.000Z"),
+            self.block("msg_02", "req_02", self.tool_use("toolu_03"), dict(second, output_tokens=7), "2026-09-12T13:30:04.500Z"),
+        ]
+
+    def set_member(self, member_id, **columns):
+        """Columns of a members row set directly, for a row the hooks no longer write (a sum stored before SPD-023)."""
+        con = self.home.connect()
+        try:
+            with con:
+                con.execute("UPDATE members SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in columns), (*columns.values(), member_id))
+        finally:
+            con.close()
 
     def two_requests(self):
         """A run of two API requests as its transcript records them: TWO_REQUESTS_SUM (442 tokens),
@@ -183,17 +236,18 @@ class HookCase(SpudTestCase):
         self.assertEqual(post.code, 0, post)
         return self.home.json("member", "show", m["ref"])["member"]
 
-    def foreground(self, m, agent_id, order="stop-first"):
+    def foreground(self, m, agent_id, order="stop-first", entries=None):
         """A foreground spawn of m run to its end, and its members row after: PreToolUse(Agent),
         SubagentStart, the child's first tool call (which binds it from the harness's meta.json) and
-        its Result; then SubagentStop over two_requests and PostToolUse(Agent, completed), in the
-        harness's order (spike, Enforcement plan, fact 8) or reversed with order="completion-first"."""
+        its Result; then SubagentStop over two_requests (or the given transcript entries) and
+        PostToolUse(Agent, completed), in the harness's order (spike, Enforcement plan, fact 8) or
+        reversed with order="completion-first"."""
         tool_use_id = "toolu_" + agent_id
         description = self.description(m)
         pre = self.home.hook("PreToolUse", self.pre_agent(description, model=m["model"], subagent_type=m["agent_type"], tool_use_id=tool_use_id, run_in_background=False))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
         self.assertEqual(self.home.hook("SubagentStart", self.sub_start(agent_id, m["agent_type"])).code, 0)
-        transcript = self.write_transcript(agent_id, self.two_requests())
+        transcript = self.write_transcript(agent_id, self.two_requests() if entries is None else entries)
         transcript.with_name("agent-%s.meta.json" % agent_id).write_text(json.dumps({
             "agentType": m["agent_type"], "description": description, "toolUseId": tool_use_id, "spawnDepth": 1,
             "requestShape": "foreground", "requestNonInteractive": False, "model": m["model"]}), encoding="utf-8")
@@ -639,7 +693,18 @@ class SubagentStopTest(HookCase):
         self.assertEqual(shown["tool_uses"], 3)
         self.assertEqual(shown["duration_ms"], 4500)
         usage = json.loads(self.home.scalar("SELECT usage_json FROM members WHERE id = ?", m["id"]))
-        self.assertEqual(usage, {"source": "transcript", "messages": 2, "usage": TWO_REQUESTS_SUM})  # a background run: no completion
+        self.assertEqual(usage, {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM})  # a background run: no completion
+
+    def test_a_stop_counts_a_transcript_written_per_block_once_per_request(self):  # SPD-023, proof 4
+        m = self.plan()
+        self.spawn(m, AGENT_A)
+        self.home.json("member", "result", "ok", actor=AGENT_A)
+        path = self.write_transcript(AGENT_A, self.per_block())
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, transcript=str(path)))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        row = self.home.rows("SELECT total_tokens, duration_ms, tool_uses, usage_json FROM members WHERE id = ?", m["id"])[0]
+        self.assertEqual((row["total_tokens"], row["duration_ms"], row["tool_uses"]), (442, 4500, 3))
+        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM})
 
     def test_a_transcript_sum_after_the_completion_fills_total_tokens_and_keeps_the_completion(self):
         """SPD-021, the reverse of the harness's foreground order: the completion alone leaves
@@ -656,7 +721,7 @@ class SubagentStopTest(HookCase):
         shown = self.home.json("member", "show", m["ref"])["member"]
         self.assertEqual((shown["total_tokens"], shown["duration_ms"], shown["tool_uses"]), (2, 4791, 1))
         usage = json.loads(self.home.scalar("SELECT usage_json FROM members WHERE id = ?", m["id"]))
-        self.assertEqual(usage, {"source": "transcript", "messages": 1, "completion": COMPLETION,
+        self.assertEqual(usage, {"source": "transcript", "counting": "request", "messages": 1, "completion": COMPLETION,
                                  "usage": {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}})
 
     def test_foreground_binding_through_meta_json(self):
@@ -727,7 +792,7 @@ class RunTotalsTest(HookCase):
     def test_the_harness_order_keeps_the_transcript_sum_with_the_completion_beside_it(self):
         row = self.foreground(self.plan(), AGENT_B)
         self.assertEqual((row["total_tokens"], row["duration_ms"], row["tool_uses"]), (442, 4791, 1))
-        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})
+        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})
 
     def test_the_reverse_order_ends_in_the_same_row(self):
         harness_order = self.foreground(self.plan(), AGENT_B)
@@ -748,7 +813,7 @@ class RunTotalsTest(HookCase):
             {"type": "assistant", "timestamp": "2026-09-12T13:30:01.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}},
         ])
         kept = [
-            (summed, AGENT_B, (442, 4791, 1, {"source": "transcript", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})),
+            (summed, AGENT_B, (442, 4791, 1, {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})),
             (alone, AGENT_C, (None, 4791, 1, {"source": "PostToolUse", "completion": COMPLETION})),
         ]
         for m, agent_id, want in kept:
@@ -768,6 +833,113 @@ class RunTotalsTest(HookCase):
         r = self.home.hook("SubagentStop", self.sub_stop(AGENT_B, transcript=str(longer)))
         self.assertEqual((r.code, r.stdout), (0, ""), r)
         self.assertEqual(self.usage_of(m), {k: before[k] for k in self.USAGE_COLUMNS})
+
+    def test_both_orders_count_a_transcript_written_per_block_once_per_request(self):  # SPD-023, proof 4
+        for order, agent_id in (("stop-first", AGENT_B), ("completion-first", AGENT_C)):
+            with self.subTest(order=order):
+                row = self.foreground(self.plan(), agent_id, order=order, entries=self.per_block())
+                self.assertEqual((row["total_tokens"], row["duration_ms"], row["tool_uses"]), (442, 4791, 1))
+                self.assertEqual(json.loads(row["usage_json"]),
+                                 {"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})
+
+    def test_a_stop_leaves_a_sum_counted_per_entry_to_member_resum(self):  # SPD-023: a stored sum is not summed again at a stop
+        m = self.plan()
+        self.spawn(m, AGENT_A)
+        self.home.json("member", "result", "ok", actor=AGENT_A)
+        path = self.write_transcript(AGENT_A, self.per_block())
+        old = json.dumps({"source": "transcript", "messages": 5, "usage": PER_ENTRY_SUM})
+        self.set_member(m["id"], total_tokens=994, duration_ms=4500, tool_uses=3, usage_json=old)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, transcript=str(path)))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        self.assertEqual(self.usage_of(m), {"total_tokens": 994, "duration_ms": 4500, "tool_uses": 3, "usage_json": old})
+
+
+# =============================================================================
+# transcript_usage: each API request counted once (SPD-023)
+# =============================================================================
+
+
+class RequestCountingTest(HookCase):
+    """The harness writes an API response as one transcript entry per content block, each repeating the
+    request's message id, requestId and usage, with only output_tokens growing to its final count.  A sum
+    groups the entries by request and counts each once, by its last entry; tool uses count distinct
+    tool_use blocks; the sum is marked "counting": "request".  Before SPD-023 every entry was added."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls.spud = load_spud_module()
+
+    def sum_of(self, entries):
+        return self.spud.transcript_usage(self.write_transcript(AGENT_A, entries))
+
+    def test_a_request_written_as_several_entries_counts_once_by_its_last_entry(self):  # proof 1
+        shared = {"input_tokens": 2, "cache_creation_input_tokens": 75049, "cache_read_input_tokens": 0}
+        got = self.sum_of([
+            {"type": "user", "timestamp": "2026-09-13T09:00:00.000Z", "message": {"role": "user", "content": "go"}},
+            self.block("msg_A", "req_A", {"type": "thinking", "thinking": "", "signature": "s"}, dict(shared, output_tokens=5), "2026-09-13T09:00:01.000Z"),
+            self.block("msg_A", "req_A", {"type": "text", "text": "a"}, dict(shared, output_tokens=120), "2026-09-13T09:00:02.000Z"),
+            self.block("msg_A", "req_A", self.tool_use("toolu_A1"), dict(shared, output_tokens=234), "2026-09-13T09:00:03.000Z"),
+            self.block("msg_B", "req_B", {"type": "text", "text": "b"},
+                       {"input_tokens": 3, "output_tokens": 40, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 75049}, "2026-09-13T09:00:05.000Z"),
+        ])
+        self.assertEqual(got, {"total_tokens": 150377, "duration_ms": 5000, "tool_uses": 1, "usage_json": {
+            "source": "transcript", "counting": "request", "messages": 2,
+            "usage": {"input_tokens": 5, "output_tokens": 274, "cache_creation_input_tokens": 75049, "cache_read_input_tokens": 75049}}})
+
+    def test_the_request_is_the_message_id_with_its_request_id(self):  # the grouping key
+        usage = {"input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4}
+        cases = [
+            ("a message id without a requestId", [self.block("msg_A", None, {"type": "text", "text": "a"}, usage, "2026-09-13T09:00:01.000Z"),
+                                                  self.block("msg_A", None, self.tool_use("toolu_A1"), usage, "2026-09-13T09:00:02.000Z")], 1),
+            ("one message id with two requestIds", [self.block("msg_A", "req_A", {"type": "text", "text": "a"}, usage, "2026-09-13T09:00:01.000Z"),
+                                                    self.block("msg_A", "req_B", {"type": "text", "text": "b"}, usage, "2026-09-13T09:00:02.000Z")], 2),
+        ]
+        for label, entries, requests in cases:
+            with self.subTest(label):
+                got = self.sum_of(entries)
+                self.assertEqual((got["usage_json"]["messages"], got["total_tokens"], got["usage_json"]["counting"]), (requests, 10 * requests, "request"))
+
+    def test_tool_uses_count_distinct_tool_use_blocks(self):  # proof 2
+        first = {"input_tokens": 1, "cache_creation_input_tokens": 10, "cache_read_input_tokens": 100}
+        second = {"input_tokens": 2, "output_tokens": 3, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 110}
+        thinking = {"type": "thinking", "thinking": "", "signature": "s"}
+        one_block_each = [
+            self.block("msg_A", "req_A", thinking, dict(first, output_tokens=1), "2026-09-13T09:00:01.000Z"),
+            self.block("msg_A", "req_A", self.tool_use("toolu_A1"), dict(first, output_tokens=2), "2026-09-13T09:00:02.000Z"),
+            self.block("msg_A", "req_A", self.tool_use("toolu_A2"), dict(first, output_tokens=3), "2026-09-13T09:00:03.000Z"),
+            self.block("msg_B", "req_B", self.tool_use("toolu_B1"), second, "2026-09-13T09:00:04.000Z"),
+        ]
+        cases = [
+            ("one block per entry", one_block_each),
+            ("a block id written twice", one_block_each + [self.block("msg_B", "req_B", self.tool_use("toolu_B1"), second, "2026-09-13T09:00:04.000Z")]),
+            ("the same blocks in one entry each", [
+                self.block("msg_A", "req_A", [thinking, self.tool_use("toolu_A1"), self.tool_use("toolu_A2")], dict(first, output_tokens=3), "2026-09-13T09:00:03.000Z"),
+                self.block("msg_B", "req_B", [self.tool_use("toolu_B1")], second, "2026-09-13T09:00:04.000Z"),
+            ]),
+        ]
+        for label, entries in cases:
+            with self.subTest(label):
+                got = self.sum_of(entries)
+                self.assertEqual((got["tool_uses"], got["usage_json"]["messages"], got["total_tokens"]), (3, 2, 114 + 115))
+        with self.subTest("blocks without an id count where they appear"):
+            got = self.sum_of([
+                self.block("msg_A", "req_A", [self.tool_use(None), self.tool_use(None)], dict(first, output_tokens=2), "2026-09-13T09:00:01.000Z"),
+                self.block("msg_A", "req_A", self.tool_use(None), dict(first, output_tokens=3), "2026-09-13T09:00:02.000Z"),
+            ])
+            self.assertEqual((got["tool_uses"], got["usage_json"]["messages"], got["total_tokens"]), (3, 1, 114))
+
+    def test_entries_without_a_message_id_count_once_each(self):  # proof 3
+        usage = {"input_tokens": 1, "output_tokens": 2, "cache_creation_input_tokens": 3, "cache_read_input_tokens": 4}
+        got = self.sum_of([
+            self.assistant("a", usage, "2026-09-13T09:00:01.000Z"),  # neither a message id nor a requestId
+            self.assistant("b", usage, "2026-09-13T09:00:02.000Z"),
+            self.block(None, "req_C", {"type": "text", "text": "c"}, usage, "2026-09-13T09:00:03.000Z"),  # a requestId alone
+            self.block(None, "req_C", {"type": "text", "text": "d"}, usage, "2026-09-13T09:00:04.000Z"),
+        ])
+        self.assertEqual(got, {"total_tokens": 40, "duration_ms": 3000, "tool_uses": 0, "usage_json": {
+            "source": "transcript", "counting": "request", "messages": 4,
+            "usage": {"input_tokens": 4, "output_tokens": 8, "cache_creation_input_tokens": 12, "cache_read_input_tokens": 16}}})
 
 
 # =============================================================================
@@ -1067,8 +1239,10 @@ class PreBashTest(HookCase):
             self.assertRefused(cmd, "Law 7")
 
     def test_law_6_spud_mutations_for_members(self):
-        for tail in ("ticket new --title x", "ticket move SPD-001 --status done", "ticket edit SPD-001 --title y", "--as spud member log hi", "init", "migrate", "import", "import --file x.md", "render", "backup", "settings sync", "config sync", "--json --as spud board", "member finish SPUD-001/01 --as spud --status done --outcome x"):
+        for tail in ("ticket new --title x", "ticket move SPD-001 --status done", "ticket edit SPD-001 --title y", "--as spud member log hi", "init", "migrate", "import", "import --file x.md", "render", "backup", "settings sync", "config sync", "--json --as spud board", "member finish SPUD-001/01 --as spud --status done --outcome x",
+                     "member resum --all", "member resum --all --dry-run", "--as %s member resum SPUD-001/01" % AGENT_A):
             self.assertRefused("%s %s" % (self.spud_cli, tail), "Law 6")
+        self.assertIn("member resum", self.assertRefused("%s member resum --all" % self.spud_cli, "Law 6").reason)
         self.assertRefused("%s/bin/spud ticket new --title x" % self.home.path, "Law 6")
         self.assertRefused("cd %s && python3.14 -I -S bin/spud ticket new --title x" % self.home.path, "Law 6")
         self.assertRefused("spud ticket new --title x", "Law 6")
