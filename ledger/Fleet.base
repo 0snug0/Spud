@@ -3,6 +3,9 @@ filters:
     - file.hasTag("spudagent")
     - not:
         - file.inFolder("ledger/_templates")
+formulas:
+  persona_on: 'if(persona == "contractor", persona + " on " + agent_type, persona)'
+  minutes: 'if(duration_ms, (duration_ms / 60000).round())'
 properties:
   file.name:
     displayName: Name
@@ -22,6 +25,18 @@ properties:
     displayName: Spawned
   finished:
     displayName: Finished
+  formula.persona_on:
+    displayName: Persona
+  formula.minutes:
+    displayName: Minutes
+  tokens_out:
+    displayName: Out
+  tokens_in:
+    displayName: In
+  tokens_cached:
+    displayName: Cached
+  tool_uses:
+    displayName: Tools
 views:
   - type: table
     name: Active
@@ -58,3 +73,28 @@ views:
         direction: DESC
       - property: id
         direction: ASC
+  - type: table
+    name: Team
+    filters:
+      and:
+        - ticket == this
+    order:
+      - file.name
+      - id
+      - formula.persona_on
+      - model
+      - status
+      - formula.minutes
+      - tokens_out
+      - tokens_in
+      - tokens_cached
+      - tool_uses
+    sort:
+      - property: id
+        direction: ASC
+    summaries:
+      formula.minutes: Sum
+      tokens_out: Sum
+      tokens_in: Sum
+      tokens_cached: Sum
+      tool_uses: Sum

@@ -8,9 +8,14 @@ ticket: "[[SPD-nnn]]"
 status: planned
 spawned: ""
 finished: ""
+duration_ms: 0
+tool_uses: 0
+tokens_out: 0
+tokens_in: 0
+tokens_cached: 0
 tags: [spudagent]
 ---
-<!-- the shape of a rendered member note: `spud render` writes ledger/teams/SPUD-nnn/<Name>.md from the database; nobody edits the rendered file. The frontmatter is the parent's: id and name from `spud member new`, status and the timestamps from the hooks and `member finish` -->
+<!-- the shape of a rendered member note: `spud render` writes ledger/teams/SPUD-nnn/<Name>.md from the database; nobody edits the rendered file. The frontmatter is the parent's: id and name from `spud member new`, status and the timestamps from the hooks and `member finish`; duration_ms, tool_uses and tokens_out, tokens_in, tokens_cached come from the hooks' record of the run (the tokens only from the member's transcript sum) and are left out until recorded -->
 # Name (01, engineer) — SPD-nnn
 
 ## Brief
@@ -30,4 +35,4 @@ Objective, deliverables (globs), read first, limits, done when.
 <!-- the member: `spud --as <agent_id> member result "…"` (what you produced, where, what you verified, what is left), or `member block "…"` which renders as "## Blocked" with the question and options. The SubagentStop hook holds a member once if neither is recorded. -->
 
 ## Outcome
-<!-- the parent: `spud --as <parent> member finish SPUD-nnn/<Name> --status done|blocked|failed --outcome "…" [--summary "…"]`, which also sets status and finished -->
+<!-- the parent: `spud --as <parent> member finish SPUD-nnn/<Name> --status done|blocked|failed --outcome "…" --summary "…"`, which also sets status and finished; the summary is this member's line on the ticket's Team card: one or two sentences, what it built or changed and where -->
