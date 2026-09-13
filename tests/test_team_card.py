@@ -20,7 +20,7 @@ from helpers import (
     load_spud_module,
     real_config,
 )
-from test_hooks import AGENT_B, COMPLETION, HookCase
+from test_hooks import AGENT_B, COMPLETION, PER_ENTRY_SUM, HookCase
 
 spud = load_spud_module()
 FIXTURE = json.loads((Path(__file__).resolve().parent / "fixtures" / "team_card.json").read_text(encoding="utf-8"))
@@ -469,6 +469,32 @@ class ForegroundUsageTest(HookCase):
         note = (out / "ledger" / "teams" / self.team / ("%s.md" % m["name"])).read_text(encoding="utf-8")
         self.assertEqual(cells(table_rows(team_section(ticket))[0])[6:], ["12 out · 130 in · 300 cached", "1"])
         self.assertEqual(usage_lines(note), ["duration_ms: 4791", "tool_uses: 1", "tokens_out: 12", "tokens_in: 130", "tokens_cached: 300"])
+
+
+class ResummedUsageTest(HookCase):
+    """SPD-023: a member whose stored sum added every entry of its transcript (the hooks before SPD-023)
+    shows those figures until Spud runs `member resum`, and the figures counted once per request after."""
+
+    def card_and_note(self, m):
+        """The Tokens and Tools cells of m's row on the rendered card, and its note's usage keys."""
+        out = self.home.path / "out"
+        self.home.json("render", "--out", out)
+        ticket = (out / "ledger" / "tickets" / ("%s.md" % self.t["key"])).read_text(encoding="utf-8")
+        note = (out / "ledger" / "teams" / self.team / ("%s.md" % m["name"])).read_text(encoding="utf-8")
+        return cells(table_rows(team_section(ticket))[0])[6:], usage_lines(note)
+
+    def test_the_tokens_cell_and_the_token_keys_show_the_re_summed_figures(self):  # proof 6
+        m = self.plan(persona="engineer", model="opus")
+        self.spawn(m, AGENT_B)
+        self.home.json("member", "result", "Built it.", actor=AGENT_B)
+        path = self.write_transcript(AGENT_B, self.per_block())
+        self.set_member(m["id"], stopped_at="2026-09-12T06:30:05-07:00", transcript_path=str(path), total_tokens=994, duration_ms=4500, tool_uses=3,
+                        usage_json=json.dumps({"source": "transcript", "messages": 5, "usage": PER_ENTRY_SUM}))
+        self.assertEqual(self.card_and_note(m), (["24 out · 370 in · 600 cached", "3"],
+                                                 ["duration_ms: 4500", "tool_uses: 3", "tokens_out: 24", "tokens_in: 370", "tokens_cached: 600"]))
+        self.home.json("member", "resum", m["ref"], actor="spud")
+        self.assertEqual(self.card_and_note(m), (["12 out · 130 in · 300 cached", "3"],
+                                                 ["duration_ms: 4500", "tool_uses: 3", "tokens_out: 12", "tokens_in: 130", "tokens_cached: 300"]))
 
 
 class StableRenderTest(TeamCardCase):
