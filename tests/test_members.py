@@ -487,7 +487,11 @@ class MemberListTest(SpudTestCase):
     def test_json_shape_matches_member_show(self):
         shown = self.home.json("member", "show", self.lead["ref"])["member"]
         listed = self.home.json("member", "list", "--ticket", self.t["key"])["members"]
-        self.assertEqual(listed[0], shown)
+        # SPD-013 added tokens/cost_usd/not_priced to every team_tree node -- what card's team, and so
+        # member list --ticket, shows -- which member show's plain member_dict never carries.
+        extra = set(listed[0]) - set(shown)
+        self.assertEqual(extra, {"tokens", "cost_usd", "not_priced"})
+        self.assertEqual({k: v for k, v in listed[0].items() if k not in extra}, shown)
 
     def test_unknown_ticket_is_an_error(self):
         proc = self.home.run("member", "list", "--ticket", "SPD-999", check=False)

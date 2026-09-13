@@ -24,7 +24,7 @@ from test_hooks import AGENT_B, COMPLETION, PER_ENTRY_SUM, HookCase
 
 spud = load_spud_module()
 FIXTURE = json.loads((Path(__file__).resolve().parent / "fixtures" / "team_card.json").read_text(encoding="utf-8"))
-USAGE_KEYS = ("duration_ms", "tool_uses", "tokens_out", "tokens_in", "tokens_cached")
+USAGE_KEYS = ("duration_ms", "tool_uses", "tokens_out", "tokens_in", "tokens_cached", "cost_usd")
 
 
 def usage_json_of(input_tokens, output_tokens, cache_creation, cache_read, messages=40):
@@ -54,8 +54,23 @@ def card_blocks(section):
     return blocks
 
 
+TOTAL = "| **Total** |"  # the table's last row since SPD-013: the ticket's tokens, list-price cost and tools
+
+
 def table_rows(section):
-    return card_blocks(section)[0].split("\n")[2:]
+    """The member rows of the card's table: the rows after the delimiter, without the Total row that ends it."""
+    rows = card_blocks(section)[0].split("\n")[2:]
+    if not rows or not rows[-1].startswith(TOTAL) or any(row.startswith(TOTAL) for row in rows[:-1]):
+        raise AssertionError("the table does not end with its one Total row: %r" % rows)
+    return rows[:-1]
+
+
+def total_row(section):
+    """The Total row that ends the card's table."""
+    rows = card_blocks(section)[0].split("\n")
+    if not rows[-1].startswith(TOTAL):
+        raise AssertionError("the table does not end with its Total row: %r" % rows)
+    return rows[-1]
 
 
 def tree_lines(section):
@@ -137,7 +152,8 @@ class TeamSectionTest(TeamCardCase):
             "\n".join([
                 HEADER,
                 DELIMITER,
-                "| [[SPUD-001/Russet\\|Russet]] | 01 | scout | haiku | planned | — | — | — |",
+                "| [[SPUD-001/Russet\\|Russet]] | 01 | scout | haiku | planned | — | — | — | — |",
+                "| **Total** |  |  |  |  |  | — | — | — |",
                 "",
                 "- [[SPUD-001/Russet|Russet]] (01, scout, haiku)",
                 "",
@@ -152,7 +168,7 @@ class TeamSectionTest(TeamCardCase):
         self.sql("INSERT INTO imported_sections (entity, entity_id, section, body, through_id) VALUES ('ticket', ?, 'Team', '- custom prose', 0)", t["id"])
         self.assertEqual(
             self.team().split("\n"),
-            [HEADER, DELIMITER, "| [[SPUD-001/Russet\\|Russet]] | 01 | scout | haiku | planned | — | — | — |", "",
+            [HEADER, DELIMITER, "| [[SPUD-001/Russet\\|Russet]] | 01 | scout | haiku | planned | — | — | — | — |", "| **Total** |  |  |  |  |  | — | — | — |", "",
              "- [[SPUD-001/Russet|Russet]] (01, scout, haiku)", "", EMBED],
         )
         self.assertEqual(self.home.rows("SELECT entity, section, body FROM imported_sections"), [{"entity": "ticket", "section": "Team", "body": "- custom prose"}])
@@ -161,14 +177,14 @@ class TeamSectionTest(TeamCardCase):
         t = self.new_ticket("Refused")
         m = self.new_member(t["key"], name="Russet")
         self.home.json("member", "finish", m["ref"], "--status", "failed", "--outcome", "The spawn was refused.", actor="spud")
-        self.assertEqual([cells(r) for r in table_rows(self.team())], [["[[SPUD-001/Russet\\|Russet]]", "01", "scout", "haiku", "**failed**", "—", "—", "—"]])
+        self.assertEqual([cells(r) for r in table_rows(self.team())], [["[[SPUD-001/Russet\\|Russet]]", "01", "scout", "haiku", "**failed**", "—", "—", "—", "—"]])
 
     def test_a_contractor(self):  # case 4
         t = self.new_ticket("Contractor")
         lead = self.new_member(t["key"], name="Russet", persona="engineer", model="opus")
         self.new_member(t["key"], actor=lead["ref"], name="Yukon", persona="contractor", model="sonnet", agent_type="claude-code-guide")
         section = self.team()
-        self.assertEqual(table_rows(section)[1], "| ↳ [[SPUD-001/Yukon\\|Yukon]] | 01.01 | contractor on `claude-code-guide` | sonnet | planned | — | — | — |")
+        self.assertEqual(table_rows(section)[1], "| ↳ [[SPUD-001/Yukon\\|Yukon]] | 01.01 | contractor on `claude-code-guide` | sonnet | planned | — | — | — | — |")
         self.assertEqual(tree_lines(section)[1], "  - [[SPUD-001/Yukon|Yukon]] (01.01, contractor on `claude-code-guide`, sonnet)")
         # the Team view's Persona formula reads these two keys: `contractor on claude-code-guide`
         fm = frontmatter(self.member_note("Yukon"))
@@ -182,7 +198,7 @@ class TeamSectionTest(TeamCardCase):
         self.set("members", lead["id"], resolved_model="claude|opus")
         section = self.team()
         rows = table_rows(section)
-        self.assertEqual([len(cells(r)) for r in rows], [8, 8])
+        self.assertEqual([len(cells(r)) for r in rows], [9, 9])
         self.assertEqual(cells(rows[0])[3], "opus (claude\\|opus)")
         self.assertEqual(cells(rows[1])[2], "contractor on `odd\\|type`")
         self.assertEqual(tree_lines(section)[1], "  - [[SPUD-001/Yukon|Yukon]] (01.01, contractor on `odd|type`, sonnet)")
@@ -293,7 +309,7 @@ class RunAndTokensTest(TeamCardCase):
         ]
         for n, (name, columns) in enumerate(members, start=1):
             self.insert_member(tid, "%02d" % n, name, **columns)
-        self.assertEqual(self.columns(6, 7), {
+        self.assertEqual(self.columns(6, 8), {
             "Pompadour": ("161k out · 2.9M in · 44.3M cached", "105"),
             "Sarpo": ("122k out · 2.6M in · 22.2M cached", "70"),
             "Yukon": ("0 out · 999 in · 1.0k cached", "0"),
@@ -317,7 +333,7 @@ class RunAndTokensTest(TeamCardCase):
         completion = {"source": "PostToolUse", "completion": COMPLETION}
         self.set("members", m["id"], status="active", spawned_at="2026-09-12T13:30:00-07:00", stopped_at="2026-09-12T13:30:05-07:00",
                  total_tokens=None, duration_ms=4791, tool_uses=1, usage_json=json.dumps(completion))
-        self.assertEqual(cells(table_rows(self.team())[0])[5:], ["13:30 → 13:30 · <1 min", "—", "1"])
+        self.assertEqual(cells(table_rows(self.team())[0])[5:], ["13:30 → 13:30 · <1 min", "—", "—", "1"])
         self.assertEqual(usage_lines(self.member_note("Pompadour")), ["duration_ms: 4791", "tool_uses: 1"])
 
 
@@ -358,7 +374,7 @@ class WorkedOnTest(TeamCardCase):
         self.home.json("member", "finish", self.m["ref"], "--status", "done", "--outcome", "Accepted.",
                        "--summary", "Split `a|b` parsing and the a | b case\nacross two lines.", actor="spud")
         self.assertEqual(self.suffix(), "Split `a|b` parsing and the a | b case across two lines.")
-        self.assertEqual([len(cells(r)) for r in table_rows(self.team())], [8])
+        self.assertEqual([len(cells(r)) for r in table_rows(self.team())], [9])
 
     def test_a_summary_that_is_a_bullet_list_falls_through_to_the_result(self):  # case 10
         self.set("members", self.m["id"], summary="- first\n- second", result="Built the Team card renderer. Tests green.")
@@ -513,7 +529,7 @@ class ForegroundUsageTest(HookCase):
         self.home.json("render", "--out", out)
         ticket = (out / "ledger" / "tickets" / ("%s.md" % self.t["key"])).read_text(encoding="utf-8")
         note = (out / "ledger" / "teams" / self.team / ("%s.md" % m["name"])).read_text(encoding="utf-8")
-        self.assertEqual(cells(table_rows(team_section(ticket))[0])[6:], ["12 out · 130 in · 300 cached", "1"])
+        self.assertEqual(cells(table_rows(team_section(ticket))[0])[6:], ["12 out · 130 in · 300 cached", "—", "1"])  # two_requests names no model: no cost
         self.assertEqual(usage_lines(note), ["duration_ms: 4791", "tool_uses: 1", "tokens_out: 12", "tokens_in: 130", "tokens_cached: 300"])
 
 
@@ -536,10 +552,10 @@ class ResummedUsageTest(HookCase):
         path = self.write_transcript(AGENT_B, self.per_block())
         self.set_member(m["id"], stopped_at="2026-09-12T06:30:05-07:00", transcript_path=str(path), total_tokens=994, duration_ms=4500, tool_uses=3,
                         usage_json=json.dumps({"source": "transcript", "messages": 5, "usage": PER_ENTRY_SUM}))
-        self.assertEqual(self.card_and_note(m), (["24 out · 370 in · 600 cached", "3"],
+        self.assertEqual(self.card_and_note(m), (["24 out · 370 in · 600 cached", "—", "3"],
                                                  ["duration_ms: 4500", "tool_uses: 3", "tokens_out: 24", "tokens_in: 370", "tokens_cached: 600"]))
         self.home.json("member", "resum", m["ref"], actor="spud")
-        self.assertEqual(self.card_and_note(m), (["12 out · 130 in · 300 cached", "3"],
+        self.assertEqual(self.card_and_note(m), (["12 out · 130 in · 300 cached", "—", "3"],
                                                  ["duration_ms: 4500", "tool_uses: 3", "tokens_out: 12", "tokens_in: 130", "tokens_cached: 300"]))
 
 
@@ -741,8 +757,8 @@ class TeamImportTest(SpudTestCase):
             rel = "ledger/teams/SPUD-001/%s.md" % name
             self.assertEqual(frontmatter((out / rel).read_text(encoding="utf-8")), frontmatter((root / rel).read_text(encoding="utf-8")), rel)
         rows = {cells(r)[1]: cells(r) for r in table_rows(team_section((out / "ledger" / "tickets" / "SPD-001.md").read_text(encoding="utf-8")))}
-        self.assertEqual(rows["01.01"][6:], ["161k out · 2.9M in · 44.3M cached", "105"])
-        self.assertEqual(rows["01.02"][5:], ["10:00 → 11:00 · <1 min", "—", "3"])
+        self.assertEqual(rows["01.01"][6:], ["161k out · 2.9M in · 44.3M cached", "—", "105"])  # an imported sum without cost_usd has no cost
+        self.assertEqual(rows["01.02"][5:], ["10:00 → 11:00 · <1 min", "—", "—", "3"])
 
     def test_a_usage_key_that_is_not_a_non_negative_integer_is_refused(self):  # section 8.2, step 3
         cases = [("tokens_in", value) for value in ("-1", "1.5", '""', "", "12abc", "[1, 2]", "１２", "9223372036854775808")]

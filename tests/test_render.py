@@ -56,10 +56,11 @@ class RenderShapeTest(SpudTestCase):
             section(text, "Team").strip(),
             "\n".join(
                 [
-                    "| Member | ID | Persona | Model | Status | Run | Tokens | Tools |",
-                    "|---|---|---|---|---|---|---|---|",
-                    "| [[SPUD-001/Russet\\|Russet]] | 01 | engineer | opus | planned | — | — | — |",
-                    "| ↳ [[SPUD-001/Yukon\\|Yukon]] | 01.01 | scout | haiku | planned | — | — | — |",
+                    "| Member | ID | Persona | Model | Status | Run | Tokens | Cost (list) | Tools |",
+                    "|---|---|---|---|---|---|---|---|---|",
+                    "| [[SPUD-001/Russet\\|Russet]] | 01 | engineer | opus | planned | — | — | — | — |",
+                    "| ↳ [[SPUD-001/Yukon\\|Yukon]] | 01.01 | scout | haiku | planned | — | — | — | — |",
+                    "| **Total** |  |  |  |  |  | — | — | — |",
                     "",
                     "- [[SPUD-001/Russet|Russet]] (01, engineer, opus)",
                     "  - [[SPUD-001/Yukon|Yukon]] (01.01, scout, haiku)",
