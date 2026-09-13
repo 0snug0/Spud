@@ -45,7 +45,7 @@ Laws are things you never do, whatever the reasoning in the moment. When a law a
 6. **Never let a spudagent create a ticket.** Proposals climb the tree (`spud proposal file`, then `proposal decide --decision escalate`); you alone create with `ticket new` or `proposal decide --decision create`, prioritize, or decline, and every decision is written down. The CLI refuses members; the Bash hook refuses `--as spud` inside a subagent.
 7. **Never let a spudagent `git commit`.** The Bash hook refuses `git commit`, `add`, `stash`, `checkout`, `switch`, `rebase`, `reset`, `push`, `merge`, `cherry-pick` and `worktree` for any caller with an `agent_id`. You commit, after the outcome is recorded.
 8. **Never answer "what are you working on" from memory.** Run `spud board` at answer time.
-9. **Never leave a returned spudagent unrecorded.** `member finish`, proposals decided, ticket updated, report entry, render, commit, and only then the next action. The `Stop` hook lists what is unrecorded and holds your turn once.
+9. **Never leave a returned spudagent unrecorded.** `member finish`, proposals decided, ticket updated, report entry, render, commit, and only then the next action. The `Stop` hook lists what is unrecorded and holds your turn once. The law binds every parent, not only you: since SPD-015 the `SubagentStop` hook holds a spudagent the same way when a child it spawned has returned without a verdict or is still alive.
 10. **Never build code on `main`.** Code is built in a worktree on a ticket branch and merged when Eric says. The rendered ledger, reports, docs and anything else Eric reads in Obsidian go the other way: committed on `main` at the ledger root and pushed, never parked on a branch. See Main and worktrees.
 
 ## Spudagent protocol
@@ -104,7 +104,7 @@ Format `sqlite-v1`: the database is `.spud/ledger.db` at the ledger root (WAL, g
 - `reports/YYYY-MM-DD.md`: rendered from `report add` entries, one per recorded outcome and per ticket decision; the full story of a day is `spud events`.
 - A hand edit of a rendered file is detected by hash at the next `render` (exit 6). Accept it, when it is one of the fields `spud import --file` allows, or overwrite it with `spud render --discard <path>`, which keeps the discarded text in the event. Never write a property value shaped like `word:text`; Obsidian reads it as a URL scheme.
 - Templates live in `ledger/_templates/` (`ticket.md`, `spudagent.md`): the shape of a rendered note, with the command that fills each section. Nothing else in the ledger starts with `_`.
-- The hooks, from `spud settings sync`: `PreToolUse` (Agent, Bash, the edit tools) and `Stop` enforce and fail closed; `PostToolUse(Agent)`, `SubagentStart`, `SubagentStop` and `SessionStart` record and fail open, spooling any gap into a `hook.error` event. A spudagent that returns without `member result` or `member block` is held once with the reason. Hook denials are `hook.denied` events: `spud events --kind hook.denied` shows who tried what.
+- The hooks, from `spud settings sync`: `PreToolUse` (Agent, Bash, the edit tools) and `Stop` enforce and fail closed; `PostToolUse(Agent)`, `SubagentStart`, `SubagentStop` and `SessionStart` record and fail open, spooling any gap into a `hook.error` event. A spudagent that returns without `member result` or `member block`, or while a child of its own is unrecorded or still alive, is held once with the reason and the exact commands. Hook denials are `hook.denied` events: `spud events --kind hook.denied` shows who tried what.
 
 ## Main and worktrees
 
@@ -126,7 +126,7 @@ Ticket [[SPD-nnn]]: <title>. Ledger: `spud` is `python3.14 -I -S /Users/ericlugo
 Objective: …
 Deliverables (only these paths, as planned): …
 Read first: …
-Limits: up to <child_fan_out> children alive at once, <depth remaining> level(s), same protocol: `member new` (persona, model, brief, deliverables) then Agent with description `SPUD-nnn/<Child> (<lineage>, <persona>)`, background, and `member finish` when a child returns.
+Limits: up to <child_fan_out> children alive at once, <depth remaining> level(s), same protocol: `member new` (persona, model, brief, deliverables) then Agent with description `SPUD-nnn/<Child> (<lineage>, <persona>)`, background, and `member finish` when a child returns. A background child is not killed when you return and its notification does not follow you, so wait for it inside your turn (poll `spud member show`) or spawn your last child in the foreground; a child you planned and never spawned is recorded `--status failed`. `SubagentStop` holds you once if you try to return with either outstanding.
 Done when: …
 Rules: no git commit; no tickets; never edit a file under ledger/ or reports/, the CLI writes them; write only your deliverables; timestamps are the CLI's, never typed.
 Return: ≤10 lines — what you produced, where, proposals if any, open questions. Run `member result` first; the harness holds you once if you return without it.
@@ -151,7 +151,7 @@ Open this repo as a vault and start at `ledger/Home.md`. Frontmatter and wikilin
 `spud` and `git` are the tools. There is no build; the test suite is `bin/spud`'s:
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests   # 207 tests, about 90 s, leaves no bytecode
+python3.14 -I -S -m unittest discover -s tests -t tests   # 220 tests, about two minutes, leaves no bytecode
 ```
 
 ```bash
