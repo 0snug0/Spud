@@ -11,6 +11,7 @@ open: exit 0 whatever happens, the gap spooled and drained later as a `hook.erro
 import json
 import os
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from helpers import EXIT_ERROR, EXIT_USAGE, SpudTestCase, load_spud_module, real_config
@@ -21,7 +22,8 @@ def case_insensitive_fs(path):
     return swapped != str(path) and os.path.exists(swapped) and os.path.samefile(str(path), swapped)
 
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
-TRANSCRIPT = "/Users/eric/.claude/projects/-Users-eric-Personal-Spud/%s.jsonl" % SESSION
+SESSION_B = "7d1e6a0c-5b2f-4c8d-9e3a-1f2b3c4d5e6f"  # a second Spud session working in parallel (SPD-018)
+TRANSCRIPT = "/Users/eric/.claude/projects/-Users-eric-Personal-Spud/%s.jsonl"
 AGENT_A = "ac8c90dafa6697045"  # the spike's background probe
 AGENT_B = "adb9ecf5d69362ddd"  # the spike's foreground probe
 AGENT_C = "a0cfc2d597e041e6b"
@@ -42,14 +44,16 @@ TWO_REQUESTS_SUM = {"input_tokens": 30, "output_tokens": 12, "cache_creation_inp
 PER_ENTRY_SUM = {"input_tokens": 70, "output_tokens": 24, "cache_creation_input_tokens": 300, "cache_read_input_tokens": 600}
 
 
-def common(cwd, agent_id=None, agent_type=None):
+def common(cwd, agent_id=None, agent_type=None, session=SESSION):
+    """The common input fields; inside a subagent the session is still the main session's (the SPD-015 probe
+    captures: a lead's PreToolUse(Agent) and SubagentStop carry the main session_id, SPD-018)."""
     d = {
-        "session_id": SESSION,
-        "transcript_path": TRANSCRIPT,
+        "session_id": session,
+        "transcript_path": TRANSCRIPT % session,
         "cwd": cwd,
         "permission_mode": "default",
         "prompt_id": "550e8400-e29b-41d4-a716-446655440000",
-        "scratchpad_dir": "/tmp/claude-501/-Users-eric-Personal-Spud/%s/scratchpad" % SESSION,
+        "scratchpad_dir": "/tmp/claude-501/-Users-eric-Personal-Spud/%s/scratchpad" % session,
     }
     if agent_id:
         d["agent_id"] = agent_id
@@ -65,19 +69,21 @@ class HookCase(SpudTestCase):
         self.cwd = str(self.home.path)
         self.t = self.new_ticket("Hooks", status="active")
         self.team = self.t["team_key"]
+        # Spud's Bash runs in the session the payloads name, and `member new` records it (SPD-018).
+        self.home.env["CLAUDE_CODE_SESSION_ID"] = SESSION
 
     # -- payloads ---------------------------------------------------------------
-    def pre_agent(self, description, model="haiku", subagent_type="spudagent", agent_id=None, tool_use_id="toolu_01AGENT", **extra):
+    def pre_agent(self, description, model="haiku", subagent_type="spudagent", agent_id=None, tool_use_id="toolu_01AGENT", session=SESSION, **extra):
         tool_input = {"description": description, "prompt": "Do the thing.", "subagent_type": subagent_type}
         if model is not None:
             tool_input["model"] = model
         tool_input.update(extra)
-        p = common(self.cwd, agent_id)
+        p = common(self.cwd, agent_id, session=session)
         p.update({"hook_event_name": "PreToolUse", "tool_name": "Agent", "tool_use_id": tool_use_id, "tool_input": tool_input})
         return p
 
-    def post_agent_launched(self, tool_use_id, agent_id, description, resolved="claude-haiku-4-5-20251001", caller=None):
-        p = common(self.cwd, caller)
+    def post_agent_launched(self, tool_use_id, agent_id, description, resolved="claude-haiku-4-5-20251001", caller=None, session=SESSION):
+        p = common(self.cwd, caller, session=session)
         p.update({
             "hook_event_name": "PostToolUse", "tool_name": "Agent", "tool_use_id": tool_use_id,
             "tool_input": {"description": description, "prompt": "Do the thing.", "subagent_type": "spudagent", "model": "haiku", "run_in_background": True},
@@ -103,13 +109,13 @@ class HookCase(SpudTestCase):
         })
         return p
 
-    def sub_start(self, agent_id, agent_type="spudagent"):
-        p = common(self.cwd)
+    def sub_start(self, agent_id, agent_type="spudagent", session=SESSION):
+        p = common(self.cwd, session=session)
         p.update({"hook_event_name": "SubagentStart", "agent_id": agent_id, "agent_type": agent_type})
         return p
 
-    def sub_stop(self, agent_id, last="potato", agent_type="spudagent", stop_hook_active=False, transcript=None):
-        p = common(self.cwd)
+    def sub_stop(self, agent_id, last="potato", agent_type="spudagent", stop_hook_active=False, transcript=None, session=SESSION):
+        p = common(self.cwd, session=session)
         p.update({
             "hook_event_name": "SubagentStop", "stop_hook_active": stop_hook_active, "agent_id": agent_id, "agent_type": agent_type,
             "agent_transcript_path": transcript or (str(self.home.path / "transcripts" / SESSION / "subagents" / ("agent-%s.jsonl" % agent_id))),
@@ -136,8 +142,8 @@ class HookCase(SpudTestCase):
         p.update({"hook_event_name": "SessionStart", "source": source, "model": "claude-fable-5-1"})
         return p
 
-    def stop(self, stop_hook_active=False, agent_id=None):
-        p = common(self.cwd, agent_id)
+    def stop(self, stop_hook_active=False, agent_id=None, session=SESSION):
+        p = common(self.cwd, agent_id, session=session)
         p.update({"hook_event_name": "Stop", "stop_hook_active": stop_hook_active, "last_assistant_message": "Done.", "background_tasks": [], "session_crons": []})
         return p
 
@@ -225,14 +231,14 @@ class HookCase(SpudTestCase):
     def description(self, m):
         return "%s/%s (%s, %s)" % (self.team, m["name"], m["lineage"], m["persona"])
 
-    def spawn(self, m, agent_id, caller=None, tool_use_id=None, model=None):
-        """PreToolUse(Agent) allow followed by the background PostToolUse binding."""
+    def spawn(self, m, agent_id, caller=None, tool_use_id=None, model=None, session=SESSION):
+        """PreToolUse(Agent) allow followed by the background PostToolUse binding, all in session."""
         tool_use_id = tool_use_id or ("toolu_" + agent_id)
-        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=model or m["model"], subagent_type=m["agent_type"], agent_id=caller, tool_use_id=tool_use_id))
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=model or m["model"], subagent_type=m["agent_type"], agent_id=caller, tool_use_id=tool_use_id, session=session))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
-        st = self.home.hook("SubagentStart", self.sub_start(agent_id, m["agent_type"]))
+        st = self.home.hook("SubagentStart", self.sub_start(agent_id, m["agent_type"], session=session))
         self.assertEqual(st.code, 0, st)
-        post = self.home.hook("PostToolUse", self.post_agent_launched(tool_use_id, agent_id, self.description(m), caller=caller))
+        post = self.home.hook("PostToolUse", self.post_agent_launched(tool_use_id, agent_id, self.description(m), caller=caller, session=session))
         self.assertEqual(post.code, 0, post)
         return self.home.json("member", "show", m["ref"])["member"]
 
@@ -1614,6 +1620,209 @@ class StopTest(HookCase):
         os.remove(self.home.db)
         r = self.home.hook("Stop", self.stop())
         self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""))
+
+
+class StopSessionTest(HookCase):
+    """Spud's Stop hook, one session at a time (SPD-018).  Eric runs tickets in parallel sessions, so a session is
+    held only for what it owes: the members of the trees it spawned, and a row with no known session (from before
+    sessions were recorded).  Three kinds, in one block: returned and unrecorded, planned and never spawned, and
+    still running under a finished parent (told once per session)."""
+
+    # Today's reason when only returned members are listed, kept byte for byte.
+    RETURNED_ONLY = ("Law 9: %d returned spudagent(s) are not recorded: %s. Record each with `spud --as spud member finish <SPUD-nnn/Name>"
+                     " --status done|blocked|failed --outcome '<verdict>' [--summary '<one paragraph>']`, decide its proposals"
+                     " (spud proposal list --open; spud --as spud proposal decide ...), then end the turn.")
+    SESSION_C = "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d"
+
+    def in_session(self, session):
+        """The session `member new` runs in from here on (None: outside every session)."""
+        if session is None:
+            self.home.env.pop("CLAUDE_CODE_SESSION_ID", None)
+        else:
+            self.home.env["CLAUDE_CODE_SESSION_ID"] = session
+
+    def returned(self, agent_id, session=SESSION, name=None):
+        """A root member planned and spawned in session that recorded its Result and stopped: returned, unrecorded."""
+        self.in_session(session)
+        m = self.spawn(self.plan(name=name), agent_id, session=session)
+        self.home.json("member", "result", "Built it.", actor=agent_id)
+        r = self.home.hook("SubagentStop", self.sub_stop(agent_id, session=session))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        return self.home.json("member", "show", m["ref"])["member"]
+
+    def orphan(self, lead_agent, child_agent, session=SESSION):
+        """A lead spawned in session and its child, still running after Spud finished the lead: (lead, child)."""
+        self.in_session(session)
+        lead = self.spawn(self.plan(persona="engineer", model="opus"), lead_agent, session=session)
+        child = self.spawn(self.plan(actor=lead["ref"]), child_agent, caller=lead_agent, session=session)
+        self.home.json("member", "finish", lead["ref"], "--status", "done", "--outcome", "Accepted.", actor="spud")
+        return lead, child
+
+    def stop_in(self, session, stop_hook_active=False):
+        return self.home.hook("Stop", self.stop(stop_hook_active=stop_hook_active, session=session))
+
+    def assertSilent(self, r):
+        self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""), r)
+
+    @staticmethod
+    def ago(minutes):
+        return (datetime.now().astimezone() - timedelta(minutes=minutes)).isoformat(timespec="seconds")
+
+    def session_of(self, m):
+        return self.home.scalar("SELECT session_id FROM members WHERE id = ?", m["id"])
+
+    # -- returned and unrecorded ----------------------------------------------------
+    def test_a_returned_member_holds_only_the_session_that_spawned_it(self):
+        kestrel = self.returned(AGENT_A, SESSION, name="Kestrel")
+        yukon = self.returned(AGENT_B, SESSION_B, name="Yukon")
+        r = self.stop_in(SESSION)
+        self.assertEqual((r.code, r.json["decision"]), (0, "block"), r)
+        self.assertEqual(r.json["reason"], self.RETURNED_ONLY % (1, "SPUD-001/Kestrel (01, scout) on SPD-001, stopped %s" % kestrel["stopped_at"][:16]))
+        r = self.stop_in(SESSION_B)
+        self.assertEqual(r.json["reason"], self.RETURNED_ONLY % (1, "SPUD-001/Yukon (02, scout) on SPD-001, stopped %s" % yukon["stopped_at"][:16]))
+        self.assertSilent(self.stop_in(self.SESSION_C))  # a third session owes neither
+        self.assertEqual([d["data"] for d in self.denied()], [
+            {"hook_event_name": "Stop", "session_id": SESSION, "members": ["SPUD-001/Kestrel"], "returned": ["SPUD-001/Kestrel"], "planned": [], "running": []},
+            {"hook_event_name": "Stop", "session_id": SESSION_B, "members": ["SPUD-001/Yukon"], "returned": ["SPUD-001/Yukon"], "planned": [], "running": []},
+        ])
+
+    def test_the_spawn_request_names_the_session_when_the_row_records_none(self):
+        m = self.returned(AGENT_A, SESSION_B)
+        self.set_member(m["id"], session_id=None)
+        self.assertSilent(self.stop_in(SESSION))
+        self.assertEqual(self.stop_in(SESSION_B).json["decision"], "block")
+
+    def test_a_member_with_no_known_session_holds_every_session(self):
+        """A row from before sessions were recorded: no spawn request and no session on the row."""
+        self.in_session(None)
+        m = self.plan(name="Kestrel")
+        self.home.json("member", "start", m["ref"], actor="spud")
+        self.set_member(m["id"], stopped_at="2026-09-12T20:15:48-07:00")
+        for session in (SESSION, SESSION_B):
+            r = self.stop_in(session)
+            self.assertEqual(r.json["reason"], self.RETURNED_ONLY % (1, "SPUD-001/Kestrel (01, scout) on SPD-001, stopped 2026-09-12T20:15"), (session, r))
+
+    def test_a_stop_payload_without_a_session_owes_every_member(self):
+        """session_id is a common input field (hooks reference), so a Stop without one is malformed: the hook holds
+        as it did before SPD-018, ledger-wide, rather than letting every member go."""
+        yukon = self.returned(AGENT_B, SESSION_B, name="Yukon")
+        payload = self.stop()
+        del payload["session_id"]
+        r = self.home.hook("Stop", payload)
+        self.assertEqual(r.json["reason"], self.RETURNED_ONLY % (1, "SPUD-001/Yukon (01, scout) on SPD-001, stopped %s" % yukon["stopped_at"][:16]), r)
+        self.assertIsNone(self.denied()[-1]["data"]["session_id"])
+
+    # -- planned and never spawned --------------------------------------------------
+    def test_a_planned_row_never_spawned_holds_the_session_that_planned_it(self):
+        m = self.plan(name="Kestrel")
+        self.assertEqual(self.session_of(m), SESSION)  # member new records CLAUDE_CODE_SESSION_ID
+        self.assertSilent(self.stop_in(SESSION_B))
+        r = self.stop_in(SESSION)
+        self.assertEqual(r.json["decision"], "block", r)
+        reason = r.json["reason"]
+        self.assertTrue(reason.startswith("Law 9: 1 planned spudagent(s) were never spawned: SPUD-001/Kestrel (01, scout) on SPD-001, planned %s. " % m["planned_at"][:16]), reason)
+        self.assertIn("subagent_type `spudagent`, model `haiku`, description `SPUD-001/Kestrel (01, scout)`", reason)
+        self.assertIn("`spud --as spud member finish SPUD-001/Kestrel --status failed --outcome '<why>'`", reason)
+        self.assertTrue(reason.endswith(". Then end the turn."), reason)
+        self.assertEqual(self.denied()[-1]["data"]["planned"], ["SPUD-001/Kestrel"])
+        self.assertEqual(self.stop_in(SESSION).json["decision"], "block")  # every fresh stop, until it is spawned or recorded
+        self.home.json("member", "finish", m["ref"], "--status", "failed", "--outcome", "Never spawned.", actor="spud")
+        self.assertSilent(self.stop_in(SESSION))
+
+    def test_a_planned_row_with_no_known_session_holds_any_session_after_ten_minutes(self):
+        self.in_session(None)
+        m = self.plan(name="Kestrel")
+        self.assertIsNone(self.session_of(m))
+        self.assertSilent(self.stop_in(SESSION))  # planned a moment ago, perhaps by a session about to spawn it
+        self.set_member(m["id"], planned_at=self.ago(9))
+        self.assertSilent(self.stop_in(SESSION))
+        self.set_member(m["id"], planned_at=self.ago(11))
+        for session in (SESSION, SESSION_B):
+            r = self.stop_in(session)
+            self.assertEqual(r.json["decision"], "block", (session, r))
+            self.assertIn("SPUD-001/Kestrel (01, scout) on SPD-001, planned ", r.json["reason"])
+
+    def test_a_spawn_waiting_to_bind_and_a_living_leads_child_are_not_held(self):
+        reserved = self.plan(name="Kestrel")
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(reserved), tool_use_id="toolu_reserved"))
+        self.assertEqual(pre.decision, "allow", pre)
+        lead = self.spawn(self.plan(persona="engineer", model="opus", name="Yukon"), AGENT_A)
+        self.plan(actor=lead["ref"], name="Russet")
+        self.assertSilent(self.stop_in(SESSION))  # a spawn on its way, and a child its living lead answers for
+        self.home.json("member", "finish", lead["ref"], "--status", "failed", "--outcome", "Died.", actor="spud")
+        r = self.stop_in(SESSION)
+        reason = r.json["reason"]
+        self.assertTrue(reason.startswith("Law 9: 1 planned spudagent(s) were never spawned: SPUD-001/Russet (02.01, scout) on SPD-001, planned "), reason)
+        self.assertIn("`spud --as spud member finish SPUD-001/Russet --status failed --outcome '<why>'`", reason)
+        self.assertNotIn("description `SPUD-001/Russet", reason)  # nobody can spawn it: its parent is finished
+        self.assertNotIn("Kestrel", reason)
+
+    # -- running under a finished parent --------------------------------------------
+    def test_a_child_running_under_a_finished_parent_is_held_once_and_then_as_returned(self):
+        lead, child = self.orphan(AGENT_A, AGENT_B)
+        r = self.stop_in(SESSION)
+        self.assertEqual(r.json["decision"], "block", r)
+        reason = r.json["reason"]
+        self.assertTrue(reason.startswith("Law 9: 1 spudagent(s) are still running under a finished parent: %s (01.01, scout) on SPD-001, running since %s, under %s (done). "
+                                          % (child["ref"], child["spawned_at"][:16], lead["ref"])), reason)
+        self.assertIn("`spud --as spud member finish %s --status done|blocked|failed --outcome '<verdict>'`" % child["ref"], reason)
+        self.assertEqual(self.denied()[-1]["data"]["running"], [child["ref"]])
+        self.assertSilent(self.stop_in(SESSION))  # told once in this session
+        self.assertSilent(self.stop_in(SESSION_B))  # and never another session's to record
+        self.home.json("member", "result", "Child done.", actor=AGENT_B)
+        self.assertEqual(self.home.hook("SubagentStop", self.sub_stop(AGENT_B)).stdout, "")
+        stopped = self.home.json("member", "show", child["ref"])["member"]["stopped_at"]
+        r = self.stop_in(SESSION)
+        self.assertEqual(r.json["reason"], self.RETURNED_ONLY % (1, "%s (01.01, scout) on SPD-001, stopped %s" % (child["ref"], stopped[:16])))
+
+    def test_a_running_child_with_no_known_session_is_held_once_in_each_session(self):
+        self.in_session(None)
+        lead = self.plan(persona="engineer", model="opus")
+        self.home.json("member", "start", lead["ref"], actor="spud")
+        child = self.plan(actor=lead["ref"])
+        self.home.json("member", "start", child["ref"], actor="spud")
+        self.home.json("member", "finish", lead["ref"], "--status", "blocked", "--outcome", "Needs Eric.", actor="spud")
+        for session in (SESSION, SESSION_B):
+            r = self.stop_in(session)
+            self.assertEqual(r.json["decision"], "block", (session, r))
+            self.assertIn("%s (01.01, scout) on SPD-001, running since " % child["ref"], r.json["reason"])
+            self.assertSilent(self.stop_in(session))
+
+    def test_spuds_own_running_child_never_holds(self):
+        self.spawn(self.plan(), AGENT_A)  # a background child at work: ending the turn meanwhile is the design
+        for session in (SESSION, SESSION_B):
+            self.assertSilent(self.stop_in(session))
+        self.assertEqual(self.denied(), [])
+
+    # -- one block --------------------------------------------------------------------
+    def three_kinds(self):
+        """One member of each kind, all in SESSION: (returned, planned, running)."""
+        _, running = self.orphan(AGENT_A, AGENT_B)
+        returned = self.returned(AGENT_C)
+        planned = self.plan()
+        return returned, planned, running
+
+    def test_stop_hook_active_lets_every_kind_through(self):
+        self.three_kinds()
+        self.assertSilent(self.stop_in(SESSION, stop_hook_active=True))
+        self.assertEqual(self.denied(), [])
+        r = self.stop_in(SESSION)  # the let-go stop told nobody anything
+        self.assertEqual(r.json["decision"], "block", r)
+        self.assertEqual(len(self.denied()[-1]["data"]["running"]), 1)
+
+    def test_one_block_names_the_three_kinds_in_order(self):
+        returned, planned, running = self.three_kinds()
+        reason = self.stop_in(SESSION).json["reason"]
+        heads = ["Law 9: 1 returned spudagent(s) are not recorded: %s (" % returned["ref"],
+                 "1 planned spudagent(s) were never spawned: %s (" % planned["ref"],
+                 "1 spudagent(s) are still running under a finished parent: %s (" % running["ref"]]
+        at = [reason.find(h) for h in heads]
+        self.assertEqual(at[0], 0, reason)
+        self.assertTrue(0 < at[1] < at[2], (at, reason))
+        self.assertTrue(reason.endswith(". Then end the turn."), reason)
+        self.assertEqual([d["data"] for d in self.denied()], [{
+            "hook_event_name": "Stop", "session_id": SESSION, "members": [returned["ref"], planned["ref"], running["ref"]],
+            "returned": [returned["ref"]], "planned": [planned["ref"]], "running": [running["ref"]]}])
 
 
 # =============================================================================

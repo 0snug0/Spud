@@ -4,6 +4,7 @@ append-only events, board."""
 import re
 import sqlite3
 import unittest
+from datetime import datetime
 
 from helpers import EXIT_ERROR, EXIT_OWNERSHIP, EXIT_TRANSITION, SpudTestCase
 
@@ -136,6 +137,35 @@ class TicketTest(SpudTestCase):
         self.assertIn("SPD-001", brief)
         self.assertIn("active", brief)
         self.assertIn("SPD-002", brief)
+
+    def set_stopped(self, member, stamp):
+        """A member's final stop, as the SubagentStop hook stamps it."""
+        con = sqlite3.connect(self.home.db)
+        try:
+            with con:
+                con.execute("UPDATE members SET stopped_at = ? WHERE id = ?", (stamp, member["id"]))
+        finally:
+            con.close()
+
+    def test_board_brief_marks_a_member_that_returned_and_is_not_recorded(self):
+        """SessionStart injects the brief, so a later or parallel session sees a member another session has not
+        recorded yet without being held for it (SPD-018)."""
+        t = self.new_ticket("Active one", status="active")
+        kestrel = self.new_member(t["key"], name="Kestrel")
+        yukon = self.new_member(t["key"], name="Yukon")
+        for m in (kestrel, yukon):
+            self.home.json("member", "start", m["ref"], actor="spud")
+        today = datetime.now().astimezone().isoformat(timespec="seconds")
+        self.set_stopped(kestrel, today)
+        lines = self.home.run("board", "--brief").stdout.splitlines()
+        self.assertIn("  Kestrel (01, scout, haiku) returned %s, unrecorded" % today[11:16], lines)
+        self.assertIn("  Yukon (02, scout, haiku) active", lines)
+        self.set_stopped(kestrel, "2026-01-02T20:15:48-08:00")  # another day: the clock alone would mislead
+        self.assertIn("  Kestrel (01, scout, haiku) returned 2026-01-02T20:15, unrecorded", self.home.run("board", "--brief").stdout.splitlines())
+        self.home.json("member", "finish", kestrel["ref"], "--status", "done", "--outcome", "Accepted.", actor="spud")
+        lines = self.home.run("board", "--brief").stdout.splitlines()
+        self.assertEqual([line for line in lines if line.startswith("  Kestrel")], [])
+        self.assertIn("  Yukon (02, scout, haiku) active", lines)
 
     def test_text_arguments_can_come_from_files_and_stdin(self):
         p = self.home.path / "brief.md"

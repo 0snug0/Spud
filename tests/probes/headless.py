@@ -15,7 +15,9 @@ Scenarios: no-row, no-model, git-commit, write-outside, write-outside-fg, backgr
 and for SPD-015, a lead that records its own Result, plans a child and tries to return without
 recording it: lead-hold (background child, the lead waits for it first), lead-hold-fg (foreground
 child, so it has already returned at the lead's stop) and lead-running (background child, the lead
-returns at once and is held for a child that is still alive).  Run them one at a time:
+returns at once and is held for a child that is still alive); and for SPD-018, stop-planned (the main session
+plans a member with `member new` and ends its turn without spawning it: Spud's Stop holds it once with the planned
+clause, and the row's session_id is compared with the Stop payload's).  Run them one at a time:
 each spawns real subagents and costs about $0.10 to $0.50 on haiku.  Nothing touches the
 repository: SPUD_HOME is the scratch home, and the session's cwd is that home.
 """
@@ -200,6 +202,17 @@ SCENARIOS = {
             "2. Wait for the agent to finish, then report."
         ),
     },
+    "stop-planned": {
+        "members": [],
+        "prompt": (
+            "1. Run exactly this Bash command: python3.14 -I -S $SPUD_HOME/bin/spud --as spud member new --ticket SPD-001 --persona scout "
+            "--model haiku --name Russet --brief 'Probe row: planned and never spawned.' --deliverable 'tests/**'\n"
+            "2. Do not call the Agent tool at any point. Report the command's output and end your turn.\n"
+            "3. If a Stop hook message then says a planned spudagent was never spawned, do not spawn it: run the "
+            "`spud --as spud member finish ... --status failed` command it names, exactly, as python3.14 -I -S $SPUD_HOME/bin/spud ..., "
+            "with '<why>' replaced by 'probe: never spawned', then end your turn again."
+        ),
+    },
 }
 
 
@@ -223,6 +236,9 @@ def build_home(root, scenario):
         (home / d).mkdir()
     env = dict(os.environ)
     env.pop("CLAUDECODE", None)
+    # The probe session sets the session id its own Bash and hooks see (SPD-018); the one inherited from the session
+    # running this driver would otherwise be stamped on the rows `member new` plans here, and on the probe's own.
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["SPUD_HOME"] = str(home)
     spud(env, home, "init")
     spud(env, home, "--as", "spud", "ticket", "new", "--title", "Probe %s" % scenario, "--status", "active")
@@ -364,7 +380,7 @@ def summarize_capture(path):
         elif tool == "Agent":
             resp = p.get("tool_response") if isinstance(p.get("tool_response"), dict) else {}
             extra = " description=%r background=%s status=%s" % (tool_input.get("description"), tool_input.get("run_in_background"), resp.get("status"))
-        rows.append("  %s %s %s agent_id=%s tool_use_id=%s%s" % (local_time(p.get("_captured_at")), event, tool or "", p.get("agent_id"), p.get("tool_use_id"), extra))
+        rows.append("  %s %s %s session=%s agent_id=%s tool_use_id=%s%s" % (local_time(p.get("_captured_at")), event, tool or "", p.get("session_id"), p.get("agent_id"), p.get("tool_use_id"), extra))
     head = "captured %d payloads: %s" % (sum(counts.values()), ", ".join("%s%s x%d" % (e, ("(" + t + ")") if t else "", n) for (e, t), n in sorted(counts.items(), key=lambda kv: str(kv[0]))))
     return [head] + rows
 
@@ -462,7 +478,7 @@ def main(argv=None):
         name = row["name"] if isinstance(row, dict) else row[0]
         out.append("--- ledger: spud member show SPUD-001/%s ---" % name)
         out.append(spud(env, home, "member", "show", "SPUD-001/%s" % name).stdout.rstrip())
-        out.append(spud(env, home, "sql", "--readonly", "SELECT status, agent_id, resolved_model, total_tokens, duration_ms, tool_uses, substr(usage_json, 1, 200) AS usage_json, substr(return_text, 1, 200) AS return_text, stopped_at FROM members WHERE name = '%s'" % name).stdout.rstrip())
+        out.append(spud(env, home, "sql", "--readonly", "SELECT status, session_id, agent_id, resolved_model, total_tokens, duration_ms, tool_uses, substr(usage_json, 1, 200) AS usage_json, substr(return_text, 1, 200) AS return_text, stopped_at FROM members WHERE name = '%s'" % name).stdout.rstrip())
     spool = home / ".spud" / "hook-errors.jsonl"
     out.append("--- spool: %s ---" % ("empty" if not spool.exists() or spool.stat().st_size == 0 else spool.read_text(encoding="utf-8")[:2000]))
     text = "\n".join(out)
