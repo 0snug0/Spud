@@ -37,6 +37,8 @@ properties:
     displayName: Cached
   tool_uses:
     displayName: Tools
+  cost_usd:
+    displayName: Cost (list)
 views:
   - type: table
     name: Active
@@ -88,6 +90,7 @@ views:
       - tokens_out
       - tokens_in
       - tokens_cached
+      - cost_usd
       - tool_uses
     sort:
       - property: id
@@ -97,4 +100,5 @@ views:
       tokens_out: Sum
       tokens_in: Sum
       tokens_cached: Sum
+      cost_usd: Sum
       tool_uses: Sum

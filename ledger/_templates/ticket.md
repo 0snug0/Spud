@@ -21,11 +21,12 @@ What Eric asked for, in Spud's words. Done when: …
 Small (one spudagent) or large (a lead with a team). Persona and tier per member, with a reason for any tier override.
 
 ## Team
-<!-- rendered from the members `spud member new` planned: the table (the lead's subtree first, then lineage order), the tree with what each member worked on and built (the parent's `member finish --summary`, else the first paragraph of its Result that reads as work, else its final message), and the Fleet.base Team view -->
-| Member | ID | Persona | Model | Status | Run | Tokens | Tools |
-|---|---|---|---|---|---|---|---|
-| [[SPUD-nnn/Name\|Name]] | 01 | persona | tier (resolved model) | done | HH:MM → HH:MM · N min | Nk out · N.NM in · N.NM cached | N |
-| ↳ [[SPUD-nnn/Child\|Child]] | 01.01 | persona | tier | active | HH:MM → | — | — |
+<!-- rendered from the members `spud member new` planned: the table (the lead's subtree first, then lineage order; Cost (list) is a run at the API list price from spud.config.json `pricing`, and a Total row ends the table), the tree with what each member worked on and built (the parent's `member finish --summary`, else the first paragraph of its Result that reads as work, else its final message), and the Fleet.base Team view -->
+| Member | ID | Persona | Model | Status | Run | Tokens | Cost (list) | Tools |
+|---|---|---|---|---|---|---|---|---|
+| [[SPUD-nnn/Name\|Name]] | 01 | persona | tier (resolved model) | done | HH:MM → HH:MM · N min | Nk out · N.NM in · N.NM cached | $N.NN | N |
+| ↳ [[SPUD-nnn/Child\|Child]] | 01.01 | persona | tier | active | HH:MM → | — | — | — |
+| **Total** |  |  |  |  |  | Nk out · N.NM in · N.NM cached | $N.NN | N |
 
 - [[SPUD-nnn/Name|Name]] (01, persona, tier) — what it built or changed and where, in one or two sentences
   - [[SPUD-nnn/Child|Child]] (01.01, persona, tier)

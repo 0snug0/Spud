@@ -13,9 +13,10 @@ tool_uses: 0
 tokens_out: 0
 tokens_in: 0
 tokens_cached: 0
+cost_usd: 0
 tags: [spudagent]
 ---
-<!-- the shape of a rendered member note: `spud render` writes ledger/teams/SPUD-nnn/<Name>.md from the database; nobody edits the rendered file. The frontmatter is the parent's: id and name from `spud member new`, status and the timestamps from the hooks and `member finish`; duration_ms, tool_uses and tokens_out, tokens_in, tokens_cached come from the hooks' record of the run (the tokens only from the member's transcript sum) and are left out until recorded -->
+<!-- the shape of a rendered member note: `spud render` writes ledger/teams/SPUD-nnn/<Name>.md from the database; nobody edits the rendered file. The frontmatter is the parent's: id and name from `spud member new`, status and the timestamps from the hooks and `member finish`; duration_ms, tool_uses and tokens_out, tokens_in, tokens_cached come from the hooks' record of the run (the tokens only from the member's transcript sum), and cost_usd is that sum at the API list price, computed at render from spud.config.json `pricing`; each is left out until known -->
 # Name (01, engineer) — SPD-nnn
 
 ## Brief
