@@ -25,6 +25,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -482,17 +483,80 @@ def write_txn(con):
         con.execute("COMMIT")
 
 
-def do_backup(ctx, con, label=None):
-    """wal_checkpoint(TRUNCATE) then VACUUM INTO .spud/backups/ledger-<stamp>.db."""
+def do_backup(ctx, con, label=None, stamp=None):
+    """wal_checkpoint(TRUNCATE) then VACUUM INTO .spud/backups/ledger-<stamp>[-<label>].db.  The stamp is
+    the clock's, read here unless the caller read it first (backup --daily names its copy before writing)."""
     backups = ctx.home / ".spud" / "backups"
     backups.mkdir(parents=True, exist_ok=True)
-    name = "ledger-%s%s.db" % (backup_stamp(), ("-" + label) if label else "")
+    name = "ledger-%s%s.db" % (stamp or backup_stamp(), ("-" + label) if label else "")
     target = backups / name
     if target.exists():
         raise SpudError(EXIT_ERROR, "backup %s already exists" % target)
     con.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     con.execute("VACUUM INTO ?", (str(target),))
     return target
+
+
+# backup --daily (SPD-012): one checked copy a local calendar day, and the newest DAILY_KEEP daily copies kept.
+DAILY_LABEL = "daily"
+DAILY_KEEP = 14
+# A daily copy's whole name.  The stamp is fixed-width, so the names sort chronologically; ASCII digits and
+# fullmatch only, so neither other digits nor a trailing newline make a look-alike name a daily copy.
+DAILY_NAME_RE = re.compile(r"ledger-[0-9]{8}T[0-9]{6}-daily\.db")
+BACKUP_NAME_RE = re.compile(r"ledger-.*\.db", re.DOTALL)  # ledger-*.db: manual, pre-migration and daily copies
+
+
+def backups_dir(ctx):
+    return ctx.home / ".spud" / "backups"
+
+
+def backup_listing(directory):
+    """(daily, other), from the listing of .spud/backups/ alone: the names of the regular files (a symlink or
+    a directory is not one) whose whole name is a daily copy's, oldest first, and the count of the other
+    regular files named ledger-*.db.  A missing or unreadable directory holds no copies."""
+    try:
+        with os.scandir(directory) as entries:
+            files = [entry.name for entry in entries if entry.is_file(follow_symlinks=False)]
+    except OSError:
+        return [], 0
+    daily = sorted(name for name in files if DAILY_NAME_RE.fullmatch(name))
+    other = sum(1 for name in files if BACKUP_NAME_RE.fullmatch(name) and not DAILY_NAME_RE.fullmatch(name))
+    return daily, other
+
+
+def backup_quick_check(path):
+    """PRAGMA quick_check on a backup copy: its rows, ['ok'] for a sound copy.  The copy is opened read-only
+    and immutable, so the check writes nothing beside it; a copy SQLite cannot read answers with the error."""
+    uri = "file:%s?mode=ro&immutable=1" % str(path).replace("%", "%25").replace("?", "%3F").replace("#", "%23")
+    try:
+        con = sqlite3.connect(uri, uri=True, autocommit=True)
+        try:
+            return [str(row[0]) for row in con.execute("PRAGMA quick_check").fetchall()] or ["quick_check returned no rows"]
+        finally:
+            con.close()
+    except sqlite3.Error as e:
+        return ["%s: %s" % (type(e).__name__, e)]
+
+
+def prune_daily_backups(directory, keep, spare, pruned):
+    """Unlink all but the newest `keep` daily copies in `directory`, and never `spare`, the copy this run wrote
+    and checked.  Each path unlinked is directory / a name backup_listing returned: never a glob, a tree, or
+    any other entry.  Appends each name unlinked to `pruned` and returns how many daily copies are left; an
+    OSError other than a copy already gone stops the prune and propagates."""
+    if keep < 1:
+        raise SpudError(EXIT_USAGE, "backup --daily keeps at least one daily copy (--keep %d)" % keep)
+    daily, _ = backup_listing(directory)
+    gone = 0
+    for name in daily[:-keep]:
+        if name == spare:
+            continue
+        try:
+            (directory / name).unlink()
+        except FileNotFoundError:
+            gone += 1
+            continue
+        pruned.append(name)
+    return len(daily) - len(pruned) - gone
 
 
 def apply_migrations(ctx, con, created):
@@ -2418,12 +2482,234 @@ def cmd_migrate(ctx, args):
 
 
 def cmd_backup(ctx, args):
+    if args.keep is not None and not args.daily:
+        raise SpudError(EXIT_USAGE, "--keep is how many daily copies `spud backup --daily` keeps; plain `spud backup` prunes nothing")
+    keep = DAILY_KEEP if args.keep is None else args.keep
+    if args.daily and keep < 1:
+        raise SpudError(EXIT_USAGE, "backup --daily keeps at least one daily copy (--keep %d)" % keep)
     con = connect(ctx)
     try:
+        if args.daily:
+            return daily_backup(ctx, con, keep)
         path = do_backup(ctx, con)
     finally:
         con.close()
     return Result({"path": str(path)}, "backup written to %s" % path)
+
+
+def daily_backup(ctx, con, keep):
+    """backup --daily: today's copy unless one exists, quick_check-ed, then the newest `keep` daily copies kept.
+    Nothing is pruned unless this run wrote a copy that checked ok."""
+    directory = backups_dir(ctx)
+    stamp = backup_stamp()
+    daily, _ = backup_listing(directory)
+    today = [name for name in daily if name.startswith("ledger-%sT" % stamp[:8])]
+    if today:
+        path = directory / today[-1]
+        return Result({"path": str(path), "written": False, "pruned": [], "kept": len(daily)},
+                      "today's daily backup already exists: %s\nnothing written, nothing pruned; %d daily %s kept"
+                      % (path, len(daily), "copy" if len(daily) == 1 else "copies"))
+    target = directory / ("ledger-%s-%s.db" % (stamp, DAILY_LABEL))
+    not_written = {"path": str(target), "written": False, "pruned": [], "kept": len(daily)}
+    in_the_way = os.path.lexists(target)
+    try:
+        path = do_backup(ctx, con, DAILY_LABEL, stamp=stamp)
+    except BaseException as e:
+        # A write that failed part way can leave a partial copy behind: remove it, when this run made it.
+        if not in_the_way and target.is_file() and not target.is_symlink():
+            with contextlib.suppress(OSError):
+                target.unlink()
+        if isinstance(e, (SpudError, sqlite3.Error, OSError)):
+            raise SpudError(EXIT_ERROR, "daily backup %s not written, nothing pruned: %s" % (target, e.message if isinstance(e, SpudError) else e),
+                            data=not_written)
+        raise
+    check = backup_quick_check(path)
+    if check != ["ok"]:
+        try:
+            path.unlink()
+            removed = "the copy was removed"
+        except FileNotFoundError:
+            removed = "the copy is gone"
+        except OSError as e:
+            removed = "the copy could not be removed (%s)" % e
+        raise SpudError(EXIT_ERROR, "quick_check of the daily backup %s did not return ok (%s); %s, nothing pruned" % (path, "; ".join(check)[:1000], removed),
+                        data=dict(not_written, quick_check=check))
+    pruned = []
+    try:
+        kept = prune_daily_backups(directory, keep, path.name, pruned)
+    except OSError as e:
+        raise SpudError(EXIT_ERROR, "daily backup written to %s (quick_check ok), but the prune stopped: %s" % (path, e),
+                        data={"path": str(path), "written": True, "pruned": pruned, "kept": len(backup_listing(directory)[0])})
+    text = "daily backup written to %s (quick_check ok)\npruned %d daily %s%s; %d kept" % (
+        path, len(pruned), "copy" if len(pruned) == 1 else "copies", (": " + ", ".join(pruned)) if pruned else "", kept)
+    return Result({"path": str(path), "written": True, "pruned": pruned, "kept": kept}, text)
+
+
+# schedule (SPD-012): the macOS LaunchAgent that runs `spud backup --daily`.  Eric chose launchd over a Claude
+# scheduled task: the CLI runs alone, with the app closed, and a run missed during sleep fires at wake.
+SCHEDULE_LABEL = "local.spud.backup"
+SCHEDULE_AT = "03:00"
+SCHEDULE_LOG = "~/Library/Logs/spud-backup.log"
+# Seconds slept before each bootstrap retry: launchd can refuse a bootstrap while the job it has just booted
+# out is still going away, so five attempts over about two seconds.
+BOOTSTRAP_RETRY_DELAYS = (0.25, 0.5, 0.5, 0.75)
+
+
+def at_arg(value):
+    """--at HH:MM, local time from 00:00 to 23:59: (hour, minute)."""
+    m = re.fullmatch(r"([01]?[0-9]|2[0-3]):([0-5][0-9])", value)
+    if not m:
+        raise argparse.ArgumentTypeError("expected HH:MM from 00:00 to 23:59, got %r" % value)
+    return int(m.group(1)), int(m.group(2))
+
+
+def require_spud_flag(args, what):
+    """A Spud-only command that reads and writes no ledger row: --as must name Spud himself."""
+    if args.actor is None:
+        raise SpudError(EXIT_ERROR, "`%s` is Spud's and needs --as spud" % what)
+    if args.actor != "spud":
+        raise SpudError(EXIT_OWNERSHIP, "`%s` is Spud's; %s may not (use --as spud)" % (what, args.actor))
+
+
+def schedule_plist_path():
+    """$SPUD_LAUNCH_AGENTS_DIR/local.spud.backup.plist, default ~/Library/LaunchAgents."""
+    agents = os.environ.get("SPUD_LAUNCH_AGENTS_DIR") or "~/Library/LaunchAgents"
+    return Path(os.path.abspath(os.path.expanduser(agents))) / (SCHEDULE_LABEL + ".plist")
+
+
+def schedule_plist(ctx, at):
+    """The LaunchAgent as a dict: the home's bin/spud (never a worktree's copy) run by this interpreter as
+    given, symlinks unresolved so a Homebrew upgrade keeps the path valid; SPUD_HOME set, because launchd's
+    environment is minimal; at load and daily at `at` (hour, minute)."""
+    if not sys.executable:
+        raise SpudError(EXIT_ERROR, "cannot tell which Python runs spud: sys.executable is empty")
+    log = os.path.abspath(os.path.expanduser(SCHEDULE_LOG))
+    return {
+        "Label": SCHEDULE_LABEL,
+        "ProgramArguments": [sys.executable, "-I", "-S", str(ctx.home / "bin" / "spud"), "--as", "spud", "backup", "--daily"],
+        "EnvironmentVariables": {"SPUD_HOME": str(ctx.home)},
+        "RunAtLoad": True,
+        "StartCalendarInterval": {"Hour": at[0], "Minute": at[1]},
+        "StandardOutPath": log,
+        "StandardErrorPath": log,
+        "ProcessType": "Background",
+    }
+
+
+def launchctl(*args):
+    """Run launchctl ($SPUD_LAUNCHCTL, default /bin/launchctl): (exit code, stdout, stderr)."""
+    exe = os.environ.get("SPUD_LAUNCHCTL") or "/bin/launchctl"
+    try:
+        proc = subprocess.run([exe, *args], capture_output=True, text=True, errors="replace", timeout=60)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise SpudError(EXIT_ERROR, "cannot run %s %s: %s" % (exe, " ".join(args), e))
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def write_plist(path, data):
+    """Write through a temporary file in the same directory, then os.replace; mode 0644."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + path.name + ".", suffix=".tmp", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def cmd_schedule_show(ctx, args):
+    require_spud_flag(args, "spud schedule show")
+    import plistlib  # imported here, not at the top: the hooks run on every tool call and never need it
+
+    plist = schedule_plist(ctx, args.at)
+    xml = plistlib.dumps(plist).decode("utf-8")
+    path = schedule_plist_path()
+    exists = path.is_file()
+    matches = False
+    if exists:
+        try:
+            matches = plistlib.loads(path.read_bytes()) == plist
+        except Exception:  # unreadable, or not a plist: it does not match
+            matches = False
+    service = "gui/%d/%s" % (os.getuid(), SCHEDULE_LABEL)
+    loaded = launchctl("print", service)[0] == 0
+    at = "%02d:%02d" % args.at
+    data = {"label": SCHEDULE_LABEL, "path": str(path), "at": at, "exists": exists, "matches": matches, "loaded": loaded, "plist": xml}
+    state = ("installed, matches" if matches else "installed, differs from the plist below") if exists else "not installed"
+    lines = [
+        "label       %s" % SCHEDULE_LABEL,
+        "plist       %s (%s)" % (path, state),
+        "loaded      %s (launchctl print %s)" % ("yes" if loaded else "no", service),
+        "runs        %s" % shlex.join(plist["ProgramArguments"]),
+        "when        at load, and daily at %s (a run missed during sleep fires at wake)" % at,
+        "log         %s" % plist["StandardOutPath"],
+        "",
+        xml.rstrip("\n"),
+    ]
+    return Result(data, "\n".join(lines))
+
+
+def cmd_schedule_install(ctx, args):
+    require_spud_flag(args, "spud schedule install")
+    import plistlib  # see cmd_schedule_show
+
+    plist = schedule_plist(ctx, args.at)
+    path = schedule_plist_path()
+    at = "%02d:%02d" % args.at
+    replaced = os.path.lexists(path)
+    try:
+        write_plist(path, plistlib.dumps(plist))
+    except OSError as e:
+        raise SpudError(EXIT_ERROR, "cannot write %s: %s" % (path, e))
+    domain = "gui/%d" % os.getuid()
+    service = "%s/%s" % (domain, SCHEDULE_LABEL)
+    booted_out = launchctl("bootout", service)[0] == 0  # a job that was not loaded is fine
+    attempts = 0
+    for delay in (0,) + BOOTSTRAP_RETRY_DELAYS:
+        if delay:
+            time.sleep(delay)
+        attempts += 1
+        code, stdout, stderr = launchctl("bootstrap", domain, str(path))
+        if code == 0:
+            break
+    else:
+        said = (stderr or stdout).strip() or "no output"
+        raise SpudError(EXIT_ERROR, "launchctl bootstrap %s %s failed %d times, the last with exit %d: %s; the plist stays at %s (spud schedule uninstall removes it)"
+                        % (domain, path, attempts, code, said, path),
+                        data={"label": SCHEDULE_LABEL, "path": str(path), "at": at, "replaced": replaced, "booted_out": booted_out, "attempts": attempts, "stderr": stderr})
+    data = {"label": SCHEDULE_LABEL, "path": str(path), "at": at, "replaced": replaced, "booted_out": booted_out, "attempts": attempts}
+    lines = [
+        "wrote %s%s" % (path, " (replacing the plist that was there)" if replaced else ""),
+        "launchctl bootout %s: %s" % (service, "booted out the loaded job" if booted_out else "no job was loaded"),
+        "launchctl bootstrap %s %s: loaded%s" % (domain, path, "" if attempts == 1 else " on attempt %d" % attempts),
+        "%s runs `spud backup --daily` at load and daily at %s; its output goes to %s" % (SCHEDULE_LABEL, at, plist["StandardOutPath"]),
+    ]
+    return Result(data, "\n".join(lines))
+
+
+def cmd_schedule_uninstall(ctx, args):
+    require_spud_flag(args, "spud schedule uninstall")
+    path = schedule_plist_path()
+    service = "gui/%d/%s" % (os.getuid(), SCHEDULE_LABEL)
+    booted_out = launchctl("bootout", service)[0] == 0  # a job that was not loaded is fine
+    removed = False
+    if os.path.lexists(path):
+        try:
+            path.unlink()
+        except OSError as e:
+            raise SpudError(EXIT_ERROR, "cannot remove %s: %s" % (path, e), data={"label": SCHEDULE_LABEL, "path": str(path), "booted_out": booted_out, "removed": False})
+        removed = True
+    data = {"label": SCHEDULE_LABEL, "path": str(path), "booted_out": booted_out, "removed": removed}
+    if not booted_out and not removed:
+        return Result(data, "%s is not installed: no plist at %s and no job loaded (launchctl bootout %s); nothing to do" % (SCHEDULE_LABEL, path, service))
+    return Result(data, "launchctl bootout %s: %s\n%s" % (
+        service, "booted out the loaded job" if booted_out else "no job was loaded", ("removed %s" % path) if removed else ("no plist at %s" % path)))
 
 
 def cmd_config_sync(ctx, args):
@@ -3438,6 +3724,10 @@ def cmd_doctor(ctx, args):
             con.close()
     else:
         problems.append("no database at %s; run `spud init`" % ctx.db_path)
+    # The backup copies, read from the directory listing alone (SPD-012).  No backup state is ever a problem:
+    # a Mac switched off for a weekend misses its daily copies and is not at fault.
+    daily, other = backup_listing(backups_dir(ctx))
+    report["backups"] = {"dir": str(backups_dir(ctx)), "daily": {"count": len(daily), "newest": daily[-1] if daily else None, "oldest": daily[0] if daily else None}, "other": other}
     report["problems"] = problems
     lines = [
         "python      %s (%s; isolated=%s, no_site=%s)" % (report["interpreter"]["path"], report["interpreter"]["version"], report["interpreter"]["flags"]["isolated"], report["interpreter"]["flags"]["no_site"]),
@@ -3450,6 +3740,10 @@ def cmd_doctor(ctx, args):
         lines.append("            user_version %s, journal_mode %s, foreign_keys %s, busy_timeout %s, synchronous %s" % (db.get("user_version"), db.get("journal_mode"), db.get("foreign_keys"), db.get("busy_timeout"), db.get("synchronous")))
         if "tickets" in db:
             lines.append("            %d tickets, %d events, %d members alive" % (db["tickets"], db["events"], db["live_members"]))
+    if daily:
+        lines.append("backups     %d daily (newest %s, oldest %s), %d other" % (len(daily), daily[-1], daily[0], other))
+    else:
+        lines.append("backups     0 daily, %d other" % other)
     lines.append("problems    %s" % (("\n            ".join(problems)) if problems else "none"))
     result = Result(report, "\n".join(lines))
     if problems:
@@ -3480,9 +3774,9 @@ SPUD_PATHS = ("spud.config.json", "CLAUDE.md", ".claude/**", "docs/superpowers/s
 GENERATED_ROOTS = ("ledger", "reports")
 DESCRIPTION = re.compile(r"^\s*(?P<team>[A-Z][A-Z0-9]*-\d+)/(?P<name>[A-Za-z][\w-]*)\s*\(\s*(?P<lineage>\d+(?:\.\d+)*)\s*,\s*(?P<persona>[a-z]+)\s*\)\s*$")
 AGENT_ID_RE = re.compile(r"^[0-9a-f]{17}$")
-SPUD_COMMANDS = ("init", "migrate", "backup", "doctor", "config", "settings", "import", "render", "ticket", "member",
+SPUD_COMMANDS = ("init", "migrate", "backup", "schedule", "doctor", "config", "settings", "import", "render", "ticket", "member",
                  "proposal", "handoff", "report", "board", "fleet", "card", "events", "sql", "hook")
-SPUD_ONLY_COMMANDS = ("init", "migrate", "import", "render", "backup")
+SPUD_ONLY_COMMANDS = ("init", "migrate", "import", "render", "backup", "schedule")
 SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"), ("member", "resum"))
 MEMBER_OWN_COMMANDS = (("member", "log"), ("member", "result"), ("member", "block"), ("proposal", "file"))
 DB_PATH_RE = re.compile(r"ledger\.db|(?:^|[\s/'\"=])\.spud(?:/|$|[\s'\"])", re.IGNORECASE)
@@ -4222,7 +4516,8 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
             if call["command"] in SPUD_ONLY_COMMANDS or (call["command"], call["subcommand"]) in SPUD_ONLY_SUBCOMMANDS:
                 what = call["command"] + ((" " + call["subcommand"]) if call["subcommand"] and (call["command"], call["subcommand"]) in SPUD_ONLY_SUBCOMMANDS else "")
                 return ("Law 6: `spud %s` is Spud's (tickets are created, moved and edited by Spud alone; init, migrate, import, render, backup,"
-                        " settings sync, config sync and member resum are ledger-wide); file a proposal instead: spud proposal file --as %s" % (what, caller_agent_id)), analysis
+                        " settings sync, config sync and member resum are ledger-wide, and schedule installs the ledger's daily backup on this Mac);"
+                        " file a proposal instead: spud proposal file --as %s" % (what, caller_agent_id)), analysis
             if call["actor"] is not None:
                 if caller_member is None:
                     return ("your agent_id %s is not bound to a member yet, so `--as %s` cannot be verified (a background spawn is bound right"
@@ -5010,6 +5305,33 @@ exit codes: 0 every member listed is re-summed, already counted by request, impo
             still written, and --dry-run exits the same); 2 usage; 3 an actor other than Spud.
 """
 
+BACKUP_DESCRIPTION = """\
+Back up the ledger: PRAGMA wal_checkpoint(TRUNCATE), then VACUUM INTO .spud/backups/ledger-<stamp>.db.
+
+--daily is the LaunchAgent's run (spud schedule).  It writes ledger-<stamp>-daily.db, unless a daily copy
+for today's local date is already there: then it writes nothing and exits 0.  It runs PRAGMA quick_check
+on the new copy; anything but ok removes that copy, prunes nothing and exits 1.  Then it keeps the newest
+--keep daily copies (default 14): of the regular files in .spud/backups/ whose whole name is
+ledger-<YYYYMMDD>T<HHMMSS>-daily.db, it unlinks the older ones, never the copy it has just written.
+Nothing else is ever deleted: manual and pre-migration copies, look-alike names, directories, the live
+database and its -wal and -shm all stay.  `spud doctor` reports the copies.
+
+--json with --daily: path, written, pruned (the names unlinked) and kept (the daily copies left).
+"""
+
+BACKUP_EPILOG = """\
+exit codes: 0 a copy written, or today's daily copy already there; 1 the write or its quick_check failed
+            (nothing pruned); 2 usage (--keep below 1, or --keep without --daily).
+"""
+
+SCHEDULE_DESCRIPTION = """\
+The macOS LaunchAgent local.spud.backup runs `spud --as spud backup --daily` at load and daily at the
+--at time; launchd fires a run missed during sleep at wake, and backup --daily writes one copy a day
+however often it runs.  The plist is $SPUD_LAUNCH_AGENTS_DIR/local.spud.backup.plist (default
+~/Library/LaunchAgents), launchctl is $SPUD_LAUNCHCTL (default /bin/launchctl), and the run's output
+goes to ~/Library/Logs/spud-backup.log.  Every verb is Spud's (--as spud).
+"""
+
 
 def build_parser():
     parser = argparse.ArgumentParser(prog="spud", description="The one program that writes Spud's ledger.", epilog=EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -5023,8 +5345,23 @@ def build_parser():
     p.set_defaults(func=cmd_init)
     p = sub.add_parser("migrate", help="apply pending migrations (backup first)")
     p.set_defaults(func=cmd_migrate)
-    p = sub.add_parser("backup", help="wal_checkpoint(TRUNCATE) then VACUUM INTO .spud/backups/")
+    p = sub.add_parser("backup", help="wal_checkpoint(TRUNCATE) then VACUUM INTO .spud/backups/; --daily keeps one checked copy a day, the newest 14 (Spud's)",
+                       description=BACKUP_DESCRIPTION, epilog=BACKUP_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--daily", action="store_true", help="write ledger-<stamp>-daily.db unless today's is there, quick_check it, then keep the newest --keep daily copies")
+    p.add_argument("--keep", type=int, metavar="N", help="daily copies --daily keeps (default %d, at least 1)" % DAILY_KEEP)
     p.set_defaults(func=cmd_backup)
+    p = sub.add_parser("schedule", help="the macOS LaunchAgent %s that runs `spud backup --daily` (Spud's)" % SCHEDULE_LABEL,
+                       description=SCHEDULE_DESCRIPTION, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
+    ps.required = True
+    q = ps.add_parser("show", help="print the plist install would write, where it goes, whether it is installed and matches, whether the job is loaded; writes nothing")
+    q.add_argument("--at", type=at_arg, default=SCHEDULE_AT, metavar="HH:MM", help="the daily time of the plist to show and compare (default %s)" % SCHEDULE_AT)
+    q.set_defaults(func=cmd_schedule_show)
+    q = ps.add_parser("install", help="write the plist atomically, then launchctl bootout and bootstrap it in gui/<uid>; a second install replaces and reloads")
+    q.add_argument("--at", type=at_arg, default=SCHEDULE_AT, metavar="HH:MM", help="the daily run, local time (default %s)" % SCHEDULE_AT)
+    q.set_defaults(func=cmd_schedule_install)
+    q = ps.add_parser("uninstall", help="launchctl bootout, then remove the plist")
+    q.set_defaults(func=cmd_schedule_uninstall)
     p = sub.add_parser("doctor", help="interpreter, SQLite, SPUD_HOME, database pragmas, config sanity")
     p.set_defaults(func=cmd_doctor)
 
