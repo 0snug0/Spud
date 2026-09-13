@@ -995,6 +995,7 @@ class LeadHoldTest(HookCase):
         self.assertIn("`spud proposal list --open`", reason)
         self.assertIn("`spud --as %s proposal decide " % AGENT_A, reason)
         self.assertNotIn("member result", reason)  # its own Result is recorded
+        self.assertNotIn("--next", reason)  # Law 9 one level down never offers it (SPD-027 touched Spud's Stop only)
         self.assertTrue(reason.endswith(" Then return your summary."), reason)
         # held, so nothing is stamped: stopped_at belongs to the final stop
         shown = self.home.json("member", "show", lead["ref"])["member"]
@@ -1103,6 +1104,7 @@ class LeadHoldTest(HookCase):
         self.assertIn(self.finish_command(AGENT_A, child["ref"]), reason)
         self.assertIn("Wait inside this turn", reason)
         self.assertIn("`spud member show %s`" % child["ref"], reason)
+        self.assertNotIn("--next", reason)  # Law 9 one level down never offers it (SPD-027 touched Spud's Stop only)
         held = self.stopped_events(lead["ref"])[-1]
         self.assertEqual(held["data"]["alive_children"], [child["ref"]])
         self.assertNotIn("unrecorded_children", held["data"])
@@ -1650,10 +1652,17 @@ class StopSessionTest(HookCase):
     sessions were recorded).  Three kinds, in one block: returned and unrecorded, planned and never spawned, and
     still running under a finished parent (told once per session)."""
 
-    # Today's reason when only returned members are listed, kept byte for byte.
+    # Today's reason when only returned members are listed, kept byte for byte for a root member; since SPD-027 the
+    # printed command also carries --next (member finish's own Next line, since a root member's finish is the one
+    # that writes a report entry).
     RETURNED_ONLY = ("Law 9: %d returned spudagent(s) are not recorded: %s. Record each with `spud --as spud member finish <SPUD-nnn/Name>"
-                     " --status done|blocked|failed --outcome '<verdict>' [--summary '<one paragraph>']`, decide its proposals"
-                     " (spud proposal list --open; spud --as spud proposal decide ...), then end the turn.")
+                     " --status done|blocked|failed --outcome '<verdict>' [--summary '<one paragraph>'] [--next '<what happens next>']`,"
+                     " decide its proposals (spud proposal list --open; spud --as spud proposal decide ...), then end the turn.")
+    # A nested returned member (its parent finished): the SPD-008 wording, unchanged, since member finish writes no
+    # report entry and so no Next line for a child.
+    RETURNED_ONLY_NESTED = ("Law 9: %d returned spudagent(s) are not recorded: %s. Record each with `spud --as spud member finish <SPUD-nnn/Name>"
+                           " --status done|blocked|failed --outcome '<verdict>' [--summary '<one paragraph>']`, decide its proposals"
+                           " (spud proposal list --open; spud --as spud proposal decide ...), then end the turn.")
     SESSION_C = "5a6b7c8d-9e0f-4a1b-8c2d-3e4f5a6b7c8d"
 
     def in_session(self, session):
@@ -1708,6 +1717,20 @@ class StopSessionTest(HookCase):
             {"hook_event_name": "Stop", "session_id": SESSION_B, "members": ["SPUD-001/Yukon"], "returned": ["SPUD-001/Yukon"], "planned": [], "unbound": [], "running": []},
         ])
 
+    def test_the_printed_next_option_actually_runs(self):
+        """The --next this reason offers a root member is not just words: filled in and run, it exits 0 and
+        writes a report entry whose last line is the Next line (SPD-027)."""
+        kestrel = self.returned(AGENT_A, SESSION, name="Kestrel")
+        reason = self.stop_in(SESSION).json["reason"]
+        self.assertIn("[--next '<what happens next>']", reason)
+        before = len(self.events("report.entry"))
+        out = self.home.json("member", "finish", kestrel["ref"], "--status", "done", "--outcome", "x", "--next", "y", actor="spud")
+        self.assertEqual(out["member"]["status"], "done")
+        entries = self.events("report.entry")
+        self.assertEqual(len(entries), before + 1)
+        self.assertTrue(entries[-1]["body"].endswith("- Next: y"), entries[-1])
+        self.assertSilent(self.stop_in(SESSION))
+
     def test_the_spawn_request_names_the_session_when_the_row_records_none(self):
         m = self.returned(AGENT_A, SESSION_B)
         self.set_member(m["id"], session_id=None)
@@ -1744,7 +1767,8 @@ class StopSessionTest(HookCase):
         reason = r.json["reason"]
         self.assertTrue(reason.startswith("Law 9: 1 planned spudagent(s) were never spawned: SPUD-001/Kestrel (01, scout) on SPD-001, planned %s. " % m["planned_at"][:16]), reason)
         self.assertIn("subagent_type `spudagent`, model `haiku`, description `SPUD-001/Kestrel (01, scout)`", reason)
-        self.assertIn("`spud --as spud member finish SPUD-001/Kestrel --status failed --outcome '<why>'`", reason)
+        # a root row (Kestrel's parent_id is NULL): its failed command also offers --next, since SPD-027
+        self.assertIn("`spud --as spud member finish SPUD-001/Kestrel --status failed --outcome '<why>' [--next '<what happens next>']`", reason)
         self.assertTrue(reason.endswith(". Then end the turn."), reason)
         self.assertEqual(self.denied()[-1]["data"]["planned"], ["SPUD-001/Kestrel"])
         self.assertEqual(self.stop_in(SESSION).json["decision"], "block")  # every fresh stop, until it is spawned or recorded
@@ -1776,6 +1800,7 @@ class StopSessionTest(HookCase):
         reason = r.json["reason"]
         self.assertTrue(reason.startswith("Law 9: 1 planned spudagent(s) were never spawned: SPUD-001/Russet (02.01, scout) on SPD-001, planned "), reason)
         self.assertIn("`spud --as spud member finish SPUD-001/Russet --status failed --outcome '<why>'`", reason)
+        self.assertNotIn("--next", reason)  # Russet is nested (under Yukon): its failed command stays as it was
         self.assertNotIn("description `SPUD-001/Russet", reason)  # nobody can spawn it: its parent is finished
         self.assertNotIn("Kestrel", reason)
 
@@ -1788,6 +1813,7 @@ class StopSessionTest(HookCase):
         self.assertTrue(reason.startswith("Law 9: 1 spudagent(s) are still running under a finished parent: %s (01.01, scout) on SPD-001, running since %s, under %s (done). "
                                           % (child["ref"], child["spawned_at"][:16], lead["ref"])), reason)
         self.assertIn("`spud --as spud member finish %s --status done|blocked|failed --outcome '<verdict>'`" % child["ref"], reason)
+        self.assertNotIn("--next", reason)  # the running clause never offers it (SPD-027)
         self.assertEqual(self.denied()[-1]["data"]["running"], [child["ref"]])
         self.assertSilent(self.stop_in(SESSION))  # told once in this session
         self.assertSilent(self.stop_in(SESSION_B))  # and never another session's to record
@@ -1795,7 +1821,8 @@ class StopSessionTest(HookCase):
         self.assertEqual(self.home.hook("SubagentStop", self.sub_stop(AGENT_B)).stdout, "")
         stopped = self.home.json("member", "show", child["ref"])["member"]["stopped_at"]
         r = self.stop_in(SESSION)
-        self.assertEqual(r.json["reason"], self.RETURNED_ONLY % (1, "%s (01.01, scout) on SPD-001, stopped %s" % (child["ref"], stopped[:16])))
+        # child is nested (its parent_id is the lead's, not NULL): returned without --next, unlike a root member
+        self.assertEqual(r.json["reason"], self.RETURNED_ONLY_NESTED % (1, "%s (01.01, scout) on SPD-001, stopped %s" % (child["ref"], stopped[:16])))
 
     def test_a_running_child_with_no_known_session_is_held_once_in_each_session(self):
         self.in_session(None)
