@@ -43,7 +43,8 @@ class ConcurrencyTest(SpudTestCase):
         logs = self.home.scalar("SELECT count(*) FROM events WHERE kind = 'member.log'")
         reports = self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'")
         edits = self.home.scalar("SELECT count(*) FROM events WHERE kind = 'ticket.edited'")
-        self.assertEqual((logs, reports, edits), (3 * rounds, 3 * rounds, 2 * rounds))
+        # every report add landed, beside the entry ticket new wrote (SPD-011); a brief edit writes none
+        self.assertEqual((logs, reports, edits), (3 * rounds, 3 * rounds + 1, 2 * rounds))
 
 
 if __name__ == "__main__":

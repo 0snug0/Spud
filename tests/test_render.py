@@ -166,7 +166,8 @@ class RenderConflictTest(SpudTestCase):
         out = self.home.json("render")
         ticket_path = self.home.path / "ledger" / "tickets" / "SPD-001.md"
         member_path = self.home.path / "ledger" / "teams" / "SPUD-001" / "Russet.md"
-        self.assertEqual(sorted(out["written"]), ["ledger/teams/SPUD-001/Russet.md", "ledger/tickets/SPD-001.md"])
+        # and the day file of the report entry ticket new wrote (SPD-011), stamped with the ticket's clock read
+        self.assertEqual(sorted(out["written"]), ["ledger/teams/SPUD-001/Russet.md", "ledger/tickets/SPD-001.md", "reports/%s.md" % t["created_at"][:10]])
         self.assertTrue(ticket_path.exists() and member_path.exists())
         rows = {r["path"]: r for r in self.home.rows("SELECT path, sha256, through_event_id FROM renders")}
         self.assertEqual(rows["ledger/tickets/SPD-001.md"]["sha256"], hashlib.sha256(ticket_path.read_bytes()).hexdigest())
@@ -292,7 +293,8 @@ class StyleOnlyRewriteTest(SpudTestCase):
         rendered = self.member_path.read_text(encoding="utf-8")
         restyled = self.rewrite(self.member_path, ('finished: ""', "finished:"), ("tags: [spudagent]", "tags:\n  - spudagent"))
         proc = self.home.run("render")
-        self.assertIn(": 1 written, 1 unchanged, 1 style-only rewrite re-rendered\n", proc.stdout)
+        # unchanged: the ticket and the day file of its report entry (SPD-011)
+        self.assertIn(": 1 written, 2 unchanged, 1 style-only rewrite re-rendered\n", proc.stdout)
         self.assertIn("  re-rendered %s over a style-only frontmatter rewrite\n" % self.MEMBER, proc.stdout)
         self.assertEqual(self.member_path.read_text(encoding="utf-8"), rendered)
         self.assertEqual([(e["path"], e["text"]) for e in self.render_events("style_only")], [(self.MEMBER, restyled)])
@@ -622,7 +624,8 @@ class HandEditAllowlistTest(SpudTestCase):
         path.write_text(text + "\n## 23:59 — Appended by hand\n- Next: by hand\n", encoding="utf-8")
         accepted = self.home.json("import", "--file", path, actor="spud")
         self.assertEqual(accepted["changed"], ["entries:1"])
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'"), 3)
+        # the three, and the entry setUp's ticket new wrote (SPD-011)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'"), 4)
         self.home.json("render")
         text = path.read_text(encoding="utf-8")
         path.write_text(text.replace("- Next: a", "- Next: changed"), encoding="utf-8")
@@ -631,14 +634,13 @@ class HandEditAllowlistTest(SpudTestCase):
         self.assertIn("append-only", proc.stderr)
         self.restore(path)
         text = path.read_text(encoding="utf-8")
-        start = text.index("## ")
-        second = text.index("## ", start + 1)
-        third = text.index("## ", second + 1)
-        path.write_text(text[:second] + text[third:], encoding="utf-8")  # delete the second entry
+        second = text.rindex("\n## ", 0, text.index(" — Second\n")) + 1  # the Second entry's heading
+        third = text.index("\n## ", second) + 1  # the heading after it
+        path.write_text(text[:second] + text[third:], encoding="utf-8")  # delete the Second entry
         proc = self.home.run("import", "--file", path, actor="spud", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn("Second", proc.stderr)
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'"), 3)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'"), 4)
 
 
 class DiscardTest(SpudTestCase):

@@ -277,7 +277,8 @@ class MemberStateTest(SpudTestCase):
         proc = self.home.run("member", "finish", m["ref"], "--status", "failed", "--outcome", "again", actor="spud", check=False)
         self.assertEqual(proc.returncode, EXIT_TRANSITION)
         kinds = [e["kind"] for e in self.home.json("events", "--member", m["ref"])["events"]]
-        self.assertEqual(kinds, ["member.planned", "member.status", "member.outcome", "member.status"])
+        # Spud's finish of a root member ends with its report entry (SPD-011)
+        self.assertEqual(kinds, ["member.planned", "member.status", "member.outcome", "member.status", "report.entry"])
         m2 = self.new_member(t["key"])
         failed = self.home.json("member", "finish", m2["ref"], "--status", "failed", "--outcome", "spawn failed", actor="spud")["member"]
         self.assertEqual(failed["status"], "failed")
