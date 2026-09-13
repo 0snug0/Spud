@@ -5,28 +5,29 @@ persona: engineer
 model: opus
 parent: "[[Spud]]"
 ticket: "[[SPD-nnn]]"
-status: active
-spawned: YYYY-MM-DDTHH:MM
+status: planned
+spawned: ""
 finished: ""
 tags: [spudagent]
 ---
+<!-- the shape of a rendered member note: `spud render` writes ledger/teams/SPUD-nnn/<Name>.md from the database; nobody edits the rendered file. The frontmatter is the parent's: id and name from `spud member new`, status and the timestamps from the hooks and `member finish` -->
 # Name (01, engineer) — SPD-nnn
 
 ## Brief
-<!-- written by the parent before spawn -->
-Objective, deliverables (paths), read first, limits, done when.
+<!-- the parent, at `spud member new --brief @- --deliverable …` (or `member edit --brief` before a re-spawn) -->
+Objective, deliverables (globs), read first, limits, done when.
 
 ## Log
-<!-- the spudagent: dated lines -->
+<!-- the member: `spud --as <agent_id> member log "…"`, one line per call, stamped by the CLI -->
 
 ## Sub-agents
-<!-- the spudagent: one line per child, folder-qualified link, id, persona, tier -->
+<!-- rendered from the children the member planned with `member new`: folder-qualified link, id, persona, tier -->
 
 ## Ticket proposals
-<!-- the spudagent: title / why / evidence / suggested priority -->
+<!-- the member: `spud --as <agent_id> proposal file --title … --why … --evidence … --priority P? -->
 
 ## Result
-<!-- the spudagent: what you produced, where, what you verified, what is left. Or "## Blocked" with the question and options. Leave the frontmatter to your parent. -->
+<!-- the member: `spud --as <agent_id> member result "…"` (what you produced, where, what you verified, what is left), or `member block "…"` which renders as "## Blocked" with the question and options. The SubagentStop hook holds a member once if neither is recorded. -->
 
 ## Outcome
-<!-- written by the parent after return; the parent also sets status (done | blocked | failed) and finished, both from date -->
+<!-- the parent: `spud --as <parent> member finish SPUD-nnn/<Name> --status done|blocked|failed --outcome "…" [--summary "…"]`, which also sets status and finished -->
