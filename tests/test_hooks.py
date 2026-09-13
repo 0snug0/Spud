@@ -340,7 +340,7 @@ class PreAgentTest(HookCase):
         self.assertEqual(len(self.denied()), 4)
 
     def test_lineage_persona_and_name_must_match_the_row(self):
-        m = self.plan(persona="scout", model="haiku")
+        m = self.plan(persona="scout", model="haiku", name="Yukon")  # fixed name: the third case's literal Kestrel must never be what the draw picked (SPD-026)
         for desc, what in (
             ("%s/%s (02, scout)" % (self.team, m["name"]), "lineage"),
             ("%s/%s (01, engineer)" % (self.team, m["name"]), "persona"),
