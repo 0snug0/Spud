@@ -379,5 +379,126 @@ class OwnershipTest(SpudTestCase):
         self.assertEqual(kinds, ["handoff", "handoff"])
 
 
+class MemberHandleTest(SpudTestCase):
+    """SPD-017: get_member also accepts the handle the CLI prints, wherever a ref is taken."""
+
+    def setUp(self):
+        super().setUp()
+        self.t = self.new_ticket("Handles", status="active")
+        self.lead = self.new_member(self.t["key"], persona="engineer", model="opus", name="Russet")
+        self.child = self.new_member(self.t["key"], actor=self.lead["ref"], persona="scout", model="haiku", name="Yukon")
+
+    @staticmethod
+    def handle(m, with_model):
+        tail = ", %s)" % m["model"] if with_model else ")"
+        return "%s (%s, %s" % (m["ref"], m["lineage"], m["persona"]) + tail
+
+    def test_member_show_accepts_both_handle_forms(self):
+        for with_model in (False, True):
+            shown = self.home.json("member", "show", self.handle(self.child, with_model))["member"]
+            self.assertEqual(shown["id"], self.child["id"], with_model)
+
+    def test_events_member_accepts_both_handle_forms(self):
+        for with_model in (False, True):
+            events = self.home.json("events", "--member", self.handle(self.child, with_model))["events"]
+            self.assertTrue(events, with_model)
+            self.assertTrue(all(e["member"] == self.child["ref"] for e in events), with_model)
+
+    def test_member_edit_accepts_both_handle_forms(self):
+        out = self.home.json("member", "edit", self.handle(self.child, False), "--summary", "two-tuple", actor=self.lead["ref"])["member"]
+        self.assertEqual((out["id"], out["summary"]), (self.child["id"], "two-tuple"))
+        out = self.home.json("member", "edit", self.handle(self.child, True), "--summary", "three-tuple", actor=self.lead["ref"])["member"]
+        self.assertEqual((out["id"], out["summary"]), (self.child["id"], "three-tuple"))
+
+    def test_member_start_accepts_both_handle_forms(self):
+        a = self.new_member(self.t["key"], name="Kestrel")
+        b = self.new_member(self.t["key"], name="Rooster")
+        started = self.home.json("member", "start", self.handle(a, False), actor="spud")["member"]
+        self.assertEqual((started["id"], started["status"]), (a["id"], "active"))
+        started = self.home.json("member", "start", self.handle(b, True), actor="spud")["member"]
+        self.assertEqual((started["id"], started["status"]), (b["id"], "active"))
+
+    def test_member_finish_accepts_both_handle_forms(self):
+        a = self.new_member(self.t["key"], name="Kestrel")
+        b = self.new_member(self.t["key"], name="Rooster")
+        done = self.home.json("member", "finish", self.handle(a, False), "--status", "failed", "--outcome", "x", actor="spud")["member"]
+        self.assertEqual((done["id"], done["status"]), (a["id"], "failed"))
+        done = self.home.json("member", "finish", self.handle(b, True), "--status", "failed", "--outcome", "x", actor="spud")["member"]
+        self.assertEqual((done["id"], done["status"]), (b["id"], "failed"))
+
+    def test_handoff_add_from_and_to_accept_both_handle_forms(self):
+        out = self.home.json("handoff", "add", "--ticket", self.t["key"], "--from", self.handle(self.lead, False),
+                              "--to", self.handle(self.child, True), "--what", "the draft", actor=self.lead["ref"])
+        self.assertTrue(out["ok"])
+        rows = self.home.rows("SELECT from_member_id, to_member_id, what FROM handoffs ORDER BY id")
+        self.assertEqual(rows[-1], {"from_member_id": self.lead["id"], "to_member_id": self.child["id"], "what": "the draft"})
+
+    def test_a_disagreeing_handle_is_refused_naming_the_real_handle_and_writes_nothing(self):
+        real = self.handle(self.lead, True)
+        for bad, field in (
+            ("%s (99, engineer, opus)" % self.lead["ref"], "lineage"),
+            ("%s (01, scout, opus)" % self.lead["ref"], "persona"),
+            ("%s (01, engineer, sonnet)" % self.lead["ref"], "model"),
+        ):
+            proc = self.home.run("member", "show", bad, check=False)
+            self.assertEqual(proc.returncode, EXIT_ERROR, field)
+            self.assertIn(real, proc.stderr, field)
+        # caught before any write: an edit through the same disagreeing handle changes nothing
+        proc = self.home.run("member", "edit", "%s (99, engineer, opus)" % self.lead["ref"], "--summary", "should not land", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIsNone(self.home.json("member", "show", self.lead["ref"])["member"]["summary"])
+
+    def test_as_refuses_a_handle_exactly_as_an_unknown_actor(self):
+        handle = self.handle(self.lead, True)
+        proc = self.home.run("member", "log", "hi", actor=handle, check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("no member %s" % handle, proc.stderr)
+        # the same shape of refusal a plain unknown actor gets today
+        unknown = "%s/NotAName" % self.t["team_key"]
+        proc2 = self.home.run("member", "log", "hi", actor=unknown, check=False)
+        self.assertEqual(proc2.returncode, EXIT_ERROR)
+        self.assertIn("no member %s" % unknown, proc2.stderr)
+
+
+class MemberListTest(SpudTestCase):
+    """SPD-017: member list [--ticket], an alias of card's team listing / fleet, read-only."""
+
+    def setUp(self):
+        super().setUp()
+        self.t = self.new_ticket("Listing", status="active")
+        self.lead = self.new_member(self.t["key"], persona="engineer", model="opus", name="Russet")
+        self.child = self.new_member(self.t["key"], actor=self.lead["ref"], persona="scout", model="haiku", name="Yukon")
+        self.other_t = self.new_ticket("Other listing", status="active")
+        self.other = self.new_member(self.other_t["key"], persona="writer", model="sonnet", name="Kestrel")
+
+    def test_list_by_ticket_matches_cards_order_with_handle_and_status(self):
+        listed = self.home.json("member", "list", "--ticket", self.t["key"])["members"]
+        self.assertEqual([m["id"] for m in listed], [self.lead["id"], self.child["id"]])
+        lines = self.home.run("member", "list", "--ticket", self.t["key"]).stdout.splitlines()
+        self.assertEqual(lines[0], "%s (01, engineer, opus) planned" % self.lead["ref"])
+        self.assertEqual(lines[1], "%s (01.01, scout, haiku) planned" % self.child["ref"])
+
+    def test_list_without_ticket_matches_fleets_order(self):
+        fleet_rows = self.home.json("fleet")["members"]
+        listed = self.home.json("member", "list")["members"]
+        self.assertEqual(len(listed), 3)
+        self.assertEqual([(d["team_key"], d["lineage"]) for d in listed], [(r["team_key"], r["id"]) for r in fleet_rows])
+
+    def test_json_shape_matches_member_show(self):
+        shown = self.home.json("member", "show", self.lead["ref"])["member"]
+        listed = self.home.json("member", "list", "--ticket", self.t["key"])["members"]
+        self.assertEqual(listed[0], shown)
+
+    def test_unknown_ticket_is_an_error(self):
+        proc = self.home.run("member", "list", "--ticket", "SPD-999", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+
+    def test_member_list_is_documented_in_help(self):
+        text = " ".join(self.home.run("member", "--help").stdout.split())
+        self.assertIn("list", text)
+        self.assertIn("card", text)
+        self.assertIn("fleet", text)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -916,11 +916,27 @@ def get_member_by_id(con, member_id):
     return con.execute("SELECT * FROM members WHERE id = ?", (member_id,)).fetchone()
 
 
-def get_member(con, ref):
-    """SPUD-nnn/<Name> or SPUD-nnn/<lineage>."""
-    if "/" not in ref:
+# The two handles the CLI prints (member new's is the three-tuple form; the Agent description
+# DESCRIPTION parses, below, is the two-tuple): SPUD-nnn/<Name> (<lineage>, <persona>) and
+# SPUD-nnn/<Name> (<lineage>, <persona>, <model>), with the same whitespace DESCRIPTION allows.
+HANDLE_RE = re.compile(
+    r"^\s*(?P<team>[A-Z][A-Z0-9]*-\d+)/(?P<name>[A-Za-z][\w-]*)\s*\(\s*(?P<lineage>\d+(?:\.\d+)*)\s*,\s*(?P<persona>[a-z]+)\s*(?:,\s*(?P<model>[a-z]+)\s*)?\)\s*$"
+)
+
+
+def get_member(con, ref, *, allow_handle=True):
+    """SPUD-nnn/<Name> or SPUD-nnn/<lineage>; with allow_handle (the default), a member may also be
+    written as either handle HANDLE_RE parses.  A handle's parenthetical must agree with the row --
+    lineage and persona, and model when the handle gives one -- or the lookup is refused naming the
+    member's real handle, never a silent pick.  resolve_actor passes allow_handle=False so --as stays
+    exactly as strict as it has always been: a handle in --as is refused the way an unknown actor is."""
+    handle = HANDLE_RE.match(ref) if allow_handle else None
+    if handle:
+        team_key, who = handle.group("team"), handle.group("name")
+    elif "/" in ref:
+        team_key, _, who = ref.partition("/")
+    else:
         raise SpudError(EXIT_ERROR, "a member is written SPUD-nnn/<Name> or SPUD-nnn/<lineage>, not %r" % ref)
-    team_key, _, who = ref.partition("/")
     ticket = con.execute("SELECT * FROM tickets WHERE team_key = ?", (team_key,)).fetchone()
     if ticket is None:
         raise SpudError(EXIT_ERROR, "no team %s" % team_key)
@@ -930,6 +946,11 @@ def get_member(con, ref):
         row = con.execute("SELECT * FROM members WHERE ticket_id = ? AND name = ?", (ticket["id"], who)).fetchone()
     if row is None:
         raise SpudError(EXIT_ERROR, "no member %s" % ref)
+    if handle:
+        given_model = handle.group("model")
+        if handle.group("lineage") != row["lineage"] or handle.group("persona") != row["persona"] or (given_model and given_model != row["model"]):
+            real = "%s/%s (%s, %s, %s)" % (team_key, row["name"], row["lineage"], row["persona"], row["model"])
+            raise SpudError(EXIT_ERROR, "%s does not match the ledger; it is %s" % (ref.strip(), real))
     return row
 
 
@@ -1063,7 +1084,7 @@ def resolve_actor(con, text):
             )
         return Actor("member", row)
     if "/" in text:
-        return Actor("member", get_member(con, text))
+        return Actor("member", get_member(con, text, allow_handle=False))
     raise SpudError(EXIT_ERROR, "unknown actor %r: use spud, SPUD-nnn/<Name>, or an agent_id" % text)
 
 
@@ -3755,6 +3776,16 @@ def team_tree(con, ticket):
     return roots
 
 
+def flatten_team(nodes):
+    """team_tree()'s roots flattened in the depth-first order `card` prints (format_tree's order:
+    each root, then its children recursively), each member dict without its "children" key."""
+    flat = []
+    for n in nodes:
+        flat.append({k: v for k, v in n.items() if k != "children"})
+        flat.extend(flatten_team(n["children"]))
+    return flat
+
+
 def format_tree(nodes, depth=0):
     lines = []
     for n in nodes:
@@ -3777,6 +3808,23 @@ def cmd_card(ctx, args):
     lines = ["%s — %s  [%s, %s]  lead: %s" % (d["key"], d["title"], d["status"], d["priority"], d["lead"] or "-")]
     lines.extend(format_tree(tree) or ["(no team yet)"])
     return Result({"ticket": d, "team": tree}, "\n".join(lines))
+
+
+def cmd_member_list(ctx, args):
+    """member list [--ticket]: what `card`'s team shows for one ticket, in its order, or what
+    `fleet` shows for every member, in its order; read-only, for any actor or none."""
+    con = connect(ctx)
+    try:
+        if args.ticket:
+            t = get_ticket(con, args.ticket)
+            members = flatten_team(team_tree(con, t))
+        else:
+            rows = con.execute("SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id ORDER BY t.id DESC, m.lineage").fetchall()
+            members = [member_dict(con, m) for m in rows]
+    finally:
+        con.close()
+    lines = ["%s (%s, %s, %s) %s" % (d["ref"], d["lineage"], d["persona"], d["model"], d["status"]) for d in members]
+    return Result({"members": members}, "\n".join(lines) or "(no members)")
 
 
 def cmd_doctor(ctx, args):
@@ -5755,6 +5803,9 @@ def build_parser():
     q = ps.add_parser("show", help="print a member")
     q.add_argument("ref")
     q.set_defaults(func=cmd_member_show)
+    q = ps.add_parser("list", help="list members: what card shows for --ticket, else what fleet shows for every member (read-only)")
+    q.add_argument("--ticket", help="a ticket key; without it, every member")
+    q.set_defaults(func=cmd_member_list)
     q = ps.add_parser("resum", help="re-sum stored transcript sums that added every entry (before SPD-023) once per API request, from the transcripts (Spud's)",
                       description=RESUM_DESCRIPTION, epilog=RESUM_EPILOG, formatter_class=argparse.RawDescriptionHelpFormatter)
     q.add_argument("refs", nargs="*", metavar="ref", help="a member, SPUD-nnn/<Name> or SPUD-nnn/<lineage>; several may be named")

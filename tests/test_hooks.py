@@ -1278,7 +1278,8 @@ class PreBashTest(HookCase):
         r = self.assertRefused("%s --as %s member log hi" % (self.spud_cli, AGENT_D), "not bound", agent_id=AGENT_D)
         self.assertIn(AGENT_D, r.reason)
         # reads need no --as and are allowed
-        for tail in ("board --brief", "events --member %s" % lead["ref"], "member show %s" % lead["ref"], "sql --readonly 'select 1'", "doctor", "ticket show SPD-001", "fleet", "card SPD-001", "proposal list"):
+        for tail in ("board --brief", "events --member %s" % lead["ref"], "member show %s" % lead["ref"], "member list", "member list --ticket SPD-001",
+                     "sql --readonly 'select 1'", "doctor", "ticket show SPD-001", "fleet", "card SPD-001", "proposal list"):
             self.assertAllowed("%s %s" % (self.spud_cli, tail))
 
     def test_hook_and_database_access_are_refused_for_everyone(self):
@@ -1385,7 +1386,7 @@ class PreBashTest(HookCase):
         for who in (AGENT_A, lead["ref"], "%s/%s" % (self.team, lead["lineage"])):
             for tail in ("member log hi", "member result done", "member block why", "proposal file --title x"):
                 self.assertRefused("%s --as %s %s" % (self.spud_cli, who, tail), "Law 5", agent_id=None)
-            for tail in ("member show %s" % lead["ref"], "events", "board"):
+            for tail in ("member show %s" % lead["ref"], "member list", "events", "board"):
                 self.assertAllowed("%s --as %s %s" % (self.spud_cli, who, tail), agent_id=None)
         self.assertAllowed("%s --as spud member finish %s --status done --outcome x" % (self.spud_cli, lead["ref"]), agent_id=None)
         self.assertAllowed("%s --as spud member log hi" % self.spud_cli, agent_id=None)  # the CLI refuses it (exit 3); not the hook's call
