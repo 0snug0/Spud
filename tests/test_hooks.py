@@ -1240,13 +1240,24 @@ class PreBashTest(HookCase):
 
     def test_law_6_spud_mutations_for_members(self):
         for tail in ("ticket new --title x", "ticket move SPD-001 --status done", "ticket edit SPD-001 --title y", "--as spud member log hi", "init", "migrate", "import", "import --file x.md", "render", "backup", "settings sync", "config sync", "--json --as spud board", "member finish SPUD-001/01 --as spud --status done --outcome x",
-                     "member resum --all", "member resum --all --dry-run", "--as %s member resum SPUD-001/01" % AGENT_A):
+                     "member resum --all", "member resum --all --dry-run", "--as %s member resum SPUD-001/01" % AGENT_A,
+                     "backup --daily", "backup --daily --keep 3", "--as %s backup --daily" % AGENT_A, "schedule show", "schedule install", "schedule install --at 04:30",
+                     "schedule uninstall", "--as %s schedule show" % AGENT_A, "--as spud schedule install"):
             self.assertRefused("%s %s" % (self.spud_cli, tail), "Law 6")
         self.assertIn("member resum", self.assertRefused("%s member resum --all" % self.spud_cli, "Law 6").reason)
+        for verb in ("show", "install", "uninstall"):
+            reason = self.assertRefused("%s schedule %s" % (self.spud_cli, verb), "Law 6").reason
+            self.assertIn("spud schedule", reason)
+            self.assertIn("proposal file", reason)
         self.assertRefused("%s/bin/spud ticket new --title x" % self.home.path, "Law 6")
         self.assertRefused("cd %s && python3.14 -I -S bin/spud ticket new --title x" % self.home.path, "Law 6")
         self.assertRefused("spud ticket new --title x", "Law 6")
         self.assertRefused("%s ticket show SPD-001 && %s init" % (self.spud_cli, self.spud_cli), "Law 6")
+
+    def test_spud_runs_backup_daily_and_schedule(self):
+        for tail in ("backup --daily", "backup --daily --keep 3", "schedule show", "schedule show --at 04:30", "schedule install", "schedule install --at 04:30", "schedule uninstall"):
+            self.assertAllowed("%s --as spud %s" % (self.spud_cli, tail), agent_id=None)
+            self.assertAllowed("%s --json --as spud %s" % (self.spud_cli, tail), agent_id=None)
 
     def test_as_must_resolve_to_the_caller(self):
         lead, other = self.lead, self.other
