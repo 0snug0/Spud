@@ -20,6 +20,7 @@ from helpers import (
     load_spud_module,
     real_config,
 )
+from test_hooks import AGENT_B, COMPLETION, HookCase
 
 spud = load_spud_module()
 FIXTURE = json.loads((Path(__file__).resolve().parent / "fixtures" / "team_card.json").read_text(encoding="utf-8"))
@@ -309,15 +310,13 @@ class RunAndTokensTest(TeamCardCase):
             "Cara": ("—", "—"),
         })
 
-    def test_foreground_usage_shows_no_tokens(self):  # case 16
+    def test_a_completion_without_a_transcript_sum_shows_no_tokens(self):  # case 16, since SPD-021
         m = self.new_member(self.t["key"], name="Pompadour", persona="engineer", model="opus")
-        # what record_completion stores for a completed foreground Agent call (tests/test_hooks.py's payload)
-        completion = {"source": "PostToolUse", "status": "completed",
-                      "usage": {"input_tokens": 3, "output_tokens": 40, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 40788, "iterations": [{"n": 1}]},
-                      "toolStats": {"readCount": 0, "searchCount": 0, "bashCount": 1, "editFileCount": 0, "linesAdded": 0, "linesRemoved": 0, "otherToolCount": 0},
-                      "modelsUsed": None}
+        # what record_completion stores for a completed foreground Agent call before any transcript sum:
+        # the completion's figures under "completion" and total_tokens empty (tests/test_hooks.py's payload)
+        completion = {"source": "PostToolUse", "completion": COMPLETION}
         self.set("members", m["id"], status="active", spawned_at="2026-09-12T13:30:00-07:00", stopped_at="2026-09-12T13:30:05-07:00",
-                 total_tokens=41831, duration_ms=4791, tool_uses=1, usage_json=json.dumps(completion))
+                 total_tokens=None, duration_ms=4791, tool_uses=1, usage_json=json.dumps(completion))
         self.assertEqual(cells(table_rows(self.team())[0])[5:], ["13:30 → 13:30 · <1 min", "—", "1"])
         self.assertEqual(usage_lines(self.member_note("Pompadour")), ["duration_ms: 4791", "tool_uses: 1"])
 
@@ -417,7 +416,7 @@ class UsageKeysTest(TeamCardCase):
             ("a duration alone", dict(tool_uses=None, total_tokens=None, usage_json=None), ["duration_ms: 2127776"]),
             ("zeros are known", dict(duration_ms=None, tool_uses=0, usage_json=usage_json_of(0, 0, 0, 0)),
              ["tool_uses: 0", "tokens_out: 0", "tokens_in: 0", "tokens_cached: 0"]),
-            ("a foreground completion", dict(duration_ms=None, tool_uses=None, usage_json=json.dumps({"source": "PostToolUse", "usage": {"output_tokens": 40}})), []),
+            ("a completion alone", dict(duration_ms=None, tool_uses=None, total_tokens=None, usage_json=json.dumps({"source": "PostToolUse", "completion": COMPLETION})), []),
             ("a figure that is no count", dict(duration_ms=None, tool_uses=None, usage_json=json.dumps({"source": "transcript", "usage": {"output_tokens": -1}})), []),
         ]
         for name, columns, want in cases:
@@ -454,6 +453,22 @@ class UsageKeysTest(TeamCardCase):
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn("tool_uses", proc.stderr)
         self.assertEqual(self.home.scalar("SELECT tool_uses FROM members WHERE id = ?", self.m["id"]), 105)
+
+
+class ForegroundUsageTest(HookCase):
+    """A foreground member recorded by the hooks in the harness's order, SubagentStop and then
+    PostToolUse(Agent, completed) (SPD-021): the card and the note read its transcript sum, beside
+    its completion's whole-run duration and tool count."""
+
+    def test_the_tokens_cell_and_the_token_keys_show_the_transcript_sum(self):
+        m = self.plan(persona="engineer", model="opus")
+        self.foreground(m, AGENT_B)
+        out = self.home.path / "out"
+        self.home.json("render", "--out", out)
+        ticket = (out / "ledger" / "tickets" / ("%s.md" % self.t["key"])).read_text(encoding="utf-8")
+        note = (out / "ledger" / "teams" / self.team / ("%s.md" % m["name"])).read_text(encoding="utf-8")
+        self.assertEqual(cells(table_rows(team_section(ticket))[0])[6:], ["12 out · 130 in · 300 cached", "1"])
+        self.assertEqual(usage_lines(note), ["duration_ms: 4791", "tool_uses: 1", "tokens_out: 12", "tokens_in: 130", "tokens_cached: 300"])
 
 
 class StableRenderTest(TeamCardCase):
@@ -774,6 +789,9 @@ class VectorTest(unittest.TestCase):
             (json.dumps({"source": "transcript", "usage": [5]}), None),
             (json.dumps({"source": "transcript"}), None),
             (json.dumps({"source": "PostToolUse", "usage": {"output_tokens": 40}}), None),
+            (json.dumps({"source": "PostToolUse", "completion": {"usage": {"output_tokens": 40}, "totalTokens": 40}}), None),  # a completion alone (SPD-021)
+            (json.dumps({"source": "transcript", "messages": 2, "usage": {"output_tokens": 5}, "completion": {"usage": {"output_tokens": 40}, "totalTokens": 40}}),
+             {"out": 5, "in": 0, "cached": 0}),  # the sum beside a completion: never the completion's figures
             (json.dumps([1]), None),
             ("not json", None),
             ("", None),

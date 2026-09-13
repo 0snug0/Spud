@@ -27,6 +27,17 @@ AGENT_B = "adb9ecf5d69362ddd"  # the spike's foreground probe
 AGENT_C = "a0cfc2d597e041e6b"
 AGENT_D = "0123456789abcdef0"
 
+# What post_agent_completed's tool_response reports beside the child's text, as the ledger keeps it in
+# usage_json.completion (SPD-021).  totalTokens and usage cover the final request only.
+COMPLETION = {
+    "status": "completed",
+    "usage": {"input_tokens": 3, "output_tokens": 40, "cache_creation_input_tokens": 1000, "cache_read_input_tokens": 40788, "iterations": [{"n": 1}]},
+    "totalTokens": 41831, "totalDurationMs": 4791, "totalToolUseCount": 1,
+    "toolStats": {"readCount": 0, "searchCount": 0, "bashCount": 1, "editFileCount": 0, "linesAdded": 0, "linesRemoved": 0, "otherToolCount": 0},
+}
+# HookCase.two_requests summed, 442 tokens: 12 out, 130 in (input plus cache creation), 300 cached.
+TWO_REQUESTS_SUM = {"input_tokens": 30, "output_tokens": 12, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 300}
+
 
 def common(cwd, agent_id=None, agent_type=None):
     d = {
@@ -127,6 +138,30 @@ class HookCase(SpudTestCase):
         p.update({"hook_event_name": "Stop", "stop_hook_active": stop_hook_active, "last_assistant_message": "Done.", "background_tasks": [], "session_crons": []})
         return p
 
+    # -- transcripts --------------------------------------------------------------
+    def write_transcript(self, agent_id, messages):
+        """The subagent's own transcript, where sub_stop's agent_transcript_path points by default."""
+        path = self.home.path / "transcripts" / SESSION / "subagents" / ("agent-%s.jsonl" % agent_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for m in messages:
+                f.write(json.dumps(m) + "\n")
+        return path
+
+    def assistant(self, text, usage, ts, tool_uses=0):
+        content = [{"type": "text", "text": text}] + [{"type": "tool_use", "id": "toolu_%d" % i, "name": "Bash", "input": {}} for i in range(tool_uses)]
+        return {"type": "assistant", "timestamp": ts, "message": {"role": "assistant", "content": content, "usage": usage}}
+
+    def two_requests(self):
+        """A run of two API requests as its transcript records them: TWO_REQUESTS_SUM (442 tokens),
+        3 tool uses, 4500 ms from the first entry to the last."""
+        return [
+            {"type": "user", "timestamp": "2026-09-12T13:30:00.000Z", "message": {"role": "user", "content": "hi"}},
+            self.assistant("a", {"input_tokens": 10, "output_tokens": 5, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 0}, "2026-09-12T13:30:01.000Z", tool_uses=2),
+            {"type": "user", "timestamp": "2026-09-12T13:30:02.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}},
+            self.assistant("b", {"input_tokens": 20, "output_tokens": 7, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 300}, "2026-09-12T13:30:04.500Z", tool_uses=1),
+        ]
+
     # -- team ---------------------------------------------------------------------
     def plan(self, actor="spud", persona="scout", model="haiku", name=None, **kw):
         kw.setdefault("deliverable", ["tests/**", "bin/spud"])
@@ -147,6 +182,31 @@ class HookCase(SpudTestCase):
         post = self.home.hook("PostToolUse", self.post_agent_launched(tool_use_id, agent_id, self.description(m), caller=caller))
         self.assertEqual(post.code, 0, post)
         return self.home.json("member", "show", m["ref"])["member"]
+
+    def foreground(self, m, agent_id, order="stop-first"):
+        """A foreground spawn of m run to its end, and its members row after: PreToolUse(Agent),
+        SubagentStart, the child's first tool call (which binds it from the harness's meta.json) and
+        its Result; then SubagentStop over two_requests and PostToolUse(Agent, completed), in the
+        harness's order (spike, Enforcement plan, fact 8) or reversed with order="completion-first"."""
+        tool_use_id = "toolu_" + agent_id
+        description = self.description(m)
+        pre = self.home.hook("PreToolUse", self.pre_agent(description, model=m["model"], subagent_type=m["agent_type"], tool_use_id=tool_use_id, run_in_background=False))
+        self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
+        self.assertEqual(self.home.hook("SubagentStart", self.sub_start(agent_id, m["agent_type"])).code, 0)
+        transcript = self.write_transcript(agent_id, self.two_requests())
+        transcript.with_name("agent-%s.meta.json" % agent_id).write_text(json.dumps({
+            "agentType": m["agent_type"], "description": description, "toolUseId": tool_use_id, "spawnDepth": 1,
+            "requestShape": "foreground", "requestNonInteractive": False, "model": m["model"]}), encoding="utf-8")
+        first_call = self.pre_bash("ls", agent_id=agent_id)
+        first_call["transcript_path"] = str(self.home.path / "transcripts" / ("%s.jsonl" % SESSION))
+        self.assertEqual(self.home.hook("PreToolUse", first_call).code, 0)
+        self.home.json("member", "result", "Built it.", actor=agent_id)
+        events = [("SubagentStop", self.sub_stop(agent_id, agent_type=m["agent_type"], transcript=str(transcript))),
+                  ("PostToolUse", self.post_agent_completed(tool_use_id, agent_id, description))]
+        for event, payload in (events if order == "stop-first" else events[::-1]):
+            r = self.home.hook(event, payload)
+            self.assertEqual((r.code, r.stdout), (0, ""), (event, r))
+        return self.home.rows("SELECT * FROM members WHERE id = ?", m["id"])[0]
 
     def events(self, kind=None, **filters):
         args = ["events"]
@@ -447,7 +507,10 @@ class PostAgentTest(HookCase):
         self.assertTrue(out["ok"])
         self.assertEqual(out["member"]["ref"], m["ref"])
 
-    def test_completed_foreground_fills_the_usage_columns(self):
+    def test_a_completion_alone_keeps_its_figures_and_leaves_total_tokens_empty(self):
+        """SPD-021: totalTokens and usage cover the final request only, so with no transcript sum yet
+        total_tokens stays empty and the figures are kept under "completion", away from the usage key
+        token_counts reads; the whole-run duration and tool count fill their columns."""
         m = self.plan()
         pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), tool_use_id="toolu_fg", run_in_background=False))
         self.assertEqual(pre.decision, "allow")
@@ -456,13 +519,10 @@ class PostAgentTest(HookCase):
         shown = self.home.json("member", "show", m["ref"])["member"]
         self.assertEqual(shown["status"], "active")
         self.assertEqual(shown["agent_id"], AGENT_B)
-        self.assertEqual((shown["total_tokens"], shown["duration_ms"], shown["tool_uses"]), (41831, 4791, 1))
+        self.assertEqual((shown["total_tokens"], shown["duration_ms"], shown["tool_uses"]), (None, 4791, 1))
         row = self.home.rows("SELECT return_text, usage_json FROM members WHERE id = ?", m["id"])[0]
         self.assertEqual(row["return_text"], "potato\n(done)")
-        usage = json.loads(row["usage_json"])
-        self.assertEqual(usage["source"], "PostToolUse")
-        self.assertEqual(usage["usage"]["cache_read_input_tokens"], 40788)
-        self.assertEqual(usage["toolStats"]["bashCount"], 1)
+        self.assertEqual(json.loads(row["usage_json"]), {"source": "PostToolUse", "completion": COMPLETION})
 
     def test_unknown_tool_use_id_is_a_gap_not_a_failure(self):
         r = self.home.hook("PostToolUse", self.post_agent_launched("toolu_unknown", AGENT_A, "whatever"))
@@ -525,18 +585,6 @@ class SubagentStartTest(HookCase):
 
 
 class SubagentStopTest(HookCase):
-    def write_transcript(self, agent_id, messages):
-        path = self.home.path / "transcripts" / SESSION / "subagents" / ("agent-%s.jsonl" % agent_id)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            for m in messages:
-                f.write(json.dumps(m) + "\n")
-        return path
-
-    def assistant(self, text, usage, ts, tool_uses=0):
-        content = [{"type": "text", "text": text}] + [{"type": "tool_use", "id": "toolu_%d" % i, "name": "Bash", "input": {}} for i in range(tool_uses)]
-        return {"type": "assistant", "timestamp": ts, "message": {"role": "assistant", "content": content, "usage": usage}}
-
     def test_hold_once_then_let_go_after_result(self):
         m = self.plan()
         self.spawn(m, AGENT_A)
@@ -583,12 +631,7 @@ class SubagentStopTest(HookCase):
         m = self.plan()
         self.spawn(m, AGENT_A)
         self.home.json("member", "result", "ok", actor=AGENT_A)
-        path = self.write_transcript(AGENT_A, [
-            {"type": "user", "timestamp": "2026-09-12T13:30:00.000Z", "message": {"role": "user", "content": "hi"}},
-            self.assistant("a", {"input_tokens": 10, "output_tokens": 5, "cache_creation_input_tokens": 100, "cache_read_input_tokens": 0}, "2026-09-12T13:30:01.000Z", tool_uses=2),
-            {"type": "user", "timestamp": "2026-09-12T13:30:02.000Z", "message": {"role": "user", "content": [{"type": "tool_result", "content": "x"}]}},
-            self.assistant("b", {"input_tokens": 20, "output_tokens": 7, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 300}, "2026-09-12T13:30:04.500Z", tool_uses=1),
-        ])
+        path = self.write_transcript(AGENT_A, self.two_requests())
         r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, transcript=str(path)))
         self.assertEqual(r.code, 0, r)
         shown = self.home.json("member", "show", m["ref"])["member"]
@@ -596,20 +639,25 @@ class SubagentStopTest(HookCase):
         self.assertEqual(shown["tool_uses"], 3)
         self.assertEqual(shown["duration_ms"], 4500)
         usage = json.loads(self.home.scalar("SELECT usage_json FROM members WHERE id = ?", m["id"]))
-        self.assertEqual(usage["source"], "transcript")
-        self.assertEqual(usage["messages"], 2)
-        self.assertEqual(usage["usage"]["cache_read_input_tokens"], 300)
+        self.assertEqual(usage, {"source": "transcript", "messages": 2, "usage": TWO_REQUESTS_SUM})  # a background run: no completion
 
-    def test_harness_totals_are_not_overwritten_by_the_transcript(self):
+    def test_a_transcript_sum_after_the_completion_fills_total_tokens_and_keeps_the_completion(self):
+        """SPD-021, the reverse of the harness's foreground order: the completion alone leaves
+        total_tokens empty and the later stop's transcript sum fills it; the completion's figures stay
+        beside the sum, and its whole-run duration and tool count keep their columns."""
         m = self.plan()
         self.home.hook("PreToolUse", self.pre_agent(self.description(m), tool_use_id="toolu_fg"))
         self.home.hook("PostToolUse", self.post_agent_completed("toolu_fg", AGENT_B, self.description(m)))
+        self.assertIsNone(self.home.json("member", "show", m["ref"])["member"]["total_tokens"])
         self.home.json("member", "result", "ok", actor=AGENT_B)
         path = self.write_transcript(AGENT_B, [self.assistant("a", {"input_tokens": 1, "output_tokens": 1}, "2026-09-12T13:30:01.000Z")])
         r = self.home.hook("SubagentStop", self.sub_stop(AGENT_B, transcript=str(path)))
         self.assertEqual(r.code, 0, r)
         shown = self.home.json("member", "show", m["ref"])["member"]
-        self.assertEqual(shown["total_tokens"], 41831)
+        self.assertEqual((shown["total_tokens"], shown["duration_ms"], shown["tool_uses"]), (2, 4791, 1))
+        usage = json.loads(self.home.scalar("SELECT usage_json FROM members WHERE id = ?", m["id"]))
+        self.assertEqual(usage, {"source": "transcript", "messages": 1, "completion": COMPLETION,
+                                 "usage": {"input_tokens": 1, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}})
 
     def test_foreground_binding_through_meta_json(self):
         m = self.plan()
@@ -657,6 +705,69 @@ class SubagentStopTest(HookCase):
         os.remove(self.home.db)
         r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
         self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""))
+
+
+# =============================================================================
+# SubagentStop and PostToolUse(Agent): a member's run totals (SPD-021)
+# =============================================================================
+
+
+class RunTotalsTest(HookCase):
+    """A foreground spawn fires SubagentStop, then PostToolUse(Agent, completed) (spike, Enforcement
+    plan, fact 8).  In either order total_tokens and the usage key token_counts reads are the
+    transcript sum; the completion, whose totalTokens and usage cover its final request only (hooks
+    reference, Agent tool telemetry), is kept beside the sum; its totalDurationMs and
+    totalToolUseCount, whole-run figures, fill duration_ms and tool_uses."""
+
+    USAGE_COLUMNS = ("total_tokens", "duration_ms", "tool_uses", "usage_json")
+
+    def usage_of(self, m):
+        return self.home.rows("SELECT total_tokens, duration_ms, tool_uses, usage_json FROM members WHERE id = ?", m["id"])[0]
+
+    def test_the_harness_order_keeps_the_transcript_sum_with_the_completion_beside_it(self):
+        row = self.foreground(self.plan(), AGENT_B)
+        self.assertEqual((row["total_tokens"], row["duration_ms"], row["tool_uses"]), (442, 4791, 1))
+        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})
+
+    def test_the_reverse_order_ends_in_the_same_row(self):
+        harness_order = self.foreground(self.plan(), AGENT_B)
+        reverse = self.foreground(self.plan(), AGENT_C, order="completion-first")
+        self.assertEqual(json.loads(reverse["usage_json"])["source"], "transcript")
+        self.assertEqual({k: reverse[k] for k in self.USAGE_COLUMNS}, {k: harness_order[k] for k in self.USAGE_COLUMNS})
+
+    def test_a_stop_without_a_readable_transcript_erases_nothing(self):
+        summed = self.plan()
+        self.foreground(summed, AGENT_B)
+        alone = self.plan()
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(alone), tool_use_id="toolu_alone", run_in_background=False))
+        self.assertEqual(pre.decision, "allow", pre)
+        self.home.hook("PostToolUse", self.post_agent_completed("toolu_alone", AGENT_C, self.description(alone)))
+        self.home.json("member", "result", "Built it.", actor=AGENT_C)
+        no_usage = self.write_transcript(AGENT_D, [
+            {"type": "user", "timestamp": "2026-09-12T13:30:00.000Z", "message": {"role": "user", "content": "hi"}},
+            {"type": "assistant", "timestamp": "2026-09-12T13:30:01.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "a"}]}},
+        ])
+        kept = [
+            (summed, AGENT_B, (442, 4791, 1, {"source": "transcript", "messages": 2, "usage": TWO_REQUESTS_SUM, "completion": COMPLETION})),
+            (alone, AGENT_C, (None, 4791, 1, {"source": "PostToolUse", "completion": COMPLETION})),
+        ]
+        for m, agent_id, want in kept:
+            for label, path in (("a missing transcript", self.home.path / "transcripts" / "missing.jsonl"), ("no assistant usage", no_usage)):
+                with self.subTest(member=m["name"], transcript=label):
+                    r = self.home.hook("SubagentStop", self.sub_stop(agent_id, transcript=str(path)))
+                    self.assertEqual((r.code, r.stdout), (0, ""), r)
+                    row = self.usage_of(m)
+                    self.assertEqual((row["total_tokens"], row["duration_ms"], row["tool_uses"], json.loads(row["usage_json"])), want)
+
+    def test_a_stored_transcript_sum_is_not_summed_again(self):
+        m = self.plan()
+        before = self.foreground(m, AGENT_B)
+        self.assertEqual(before["total_tokens"], 442)
+        longer = self.write_transcript(AGENT_D, self.two_requests() + [
+            self.assistant("c", {"input_tokens": 1000, "output_tokens": 1000}, "2026-09-12T13:31:00.000Z", tool_uses=5)])
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_B, transcript=str(longer)))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        self.assertEqual(self.usage_of(m), {k: before[k] for k in self.USAGE_COLUMNS})
 
 
 # =============================================================================
