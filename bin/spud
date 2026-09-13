@@ -5380,23 +5380,29 @@ def stop_item(r, what):
 
 
 def returned_clause(rows):
-    """The returned members, in the words of Spud's Stop since SPD-008, without the ending."""
+    """The returned members, in the words of Spud's Stop since SPD-008, without the ending; when every one is a
+    root member the printed command also carries --next, since SPD-027 (a nested one's stays as it was: `member
+    finish` writes no report entry, and no Next line, for a child)."""
+    next_opt = " [--next '<what happens next>']" if rows and all(r["parent_id"] is None for r in rows) else ""
     return ("%d returned spudagent(s) are not recorded: %s. Record each with `spud --as spud member finish <SPUD-nnn/Name> --status done|blocked|failed"
-            " --outcome '<verdict>' [--summary '<one paragraph>']`, decide its proposals (spud proposal list --open; spud --as spud proposal decide ...)"
-            % (len(rows), "; ".join(stop_item(r, "stopped " + fm_minute(r["stopped_at"])) for r in rows)))
+            " --outcome '<verdict>' [--summary '<one paragraph>']%s`, decide its proposals (spud proposal list --open; spud --as spud proposal decide ...)"
+            % (len(rows), "; ".join(stop_item(r, "stopped " + fm_minute(r["stopped_at"])) for r in rows), next_opt))
 
 
 def planned_clause(con, rows):
-    """Planned rows never spawned: Spud spawns its own or records them failed; one under a finished parent nobody can spawn."""
+    """Planned rows never spawned: Spud spawns its own or records them failed; one under a finished parent nobody
+    can spawn.  A root row's failed command also carries --next, since SPD-027; a nested row's does not, the same
+    as its unchanged member finish (no report entry for a child)."""
     items, steps = [], []
     for r in rows:
         ref = "%s/%s" % (r["team_key"], r["name"])
-        fail = "`spud --as spud member finish %s --status failed --outcome '<why>'`" % ref
         if r["parent_id"] is None:
+            fail = "`spud --as spud member finish %s --status failed --outcome '<why>' [--next '<what happens next>']`" % ref
             items.append(stop_item(r, "planned " + fm_minute(r["planned_at"])))
             steps.append("spawn %s now (the Agent tool with subagent_type `%s`, model `%s`, description `%s (%s, %s)`) or record it with %s"
                          % (ref, r["agent_type"], r["model"], ref, r["lineage"], r["persona"], fail))
         else:
+            fail = "`spud --as spud member finish %s --status failed --outcome '<why>'`" % ref
             parent = member_ref(con, r["parent_id"])
             items.append(stop_item(r, "planned %s, under %s (%s)" % (fm_minute(r["planned_at"]), parent, r["parent_status"])))
             steps.append("nobody can spawn %s now that %s is %s: record it with %s" % (ref, parent, r["parent_status"], fail))
@@ -5417,7 +5423,7 @@ def running_clause(con, rows):
 
 def stop_reason(con, returned, planned, running):
     """One block: returned first, then planned, then running.  With returned members alone it is the reason Spud's Stop
-    has given since SPD-008, byte for byte."""
+    has given since SPD-008, with --next added to the printed command when every one is a root member, since SPD-027."""
     if returned and not planned and not running:
         return "Law 9: " + returned_clause(returned) + ", then end the turn."
     clauses = ([returned_clause(returned)] if returned else []) + ([planned_clause(con, planned)] if planned else []) + ([running_clause(con, running)] if running else [])
