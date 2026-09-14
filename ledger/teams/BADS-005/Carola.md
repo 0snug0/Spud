@@ -30,6 +30,9 @@ Then `member result` with the diff summary and proof, and `member block` asking 
 Never commit, push, tag, dispatch a workflow, publish or upload. Do not touch dist/ except to read the built app.asar. Do not use the Browser pane.
 
 ## Log
+- 2026-09-14T15:07 Confirmed cause: @electron/asar listFiles builds paths with path.join('/', ...), so Windows prints \brand\fonts\... Fix: listing=${listing//\\//} right after capture in both steps (pure bash, no new pipe). No test in test/ reads release.yml; real mac-arm64 listing captured (373 lines) in fwd and backslash form under scratchpad/proof.
+- 2026-09-14T15:08 Proof (scratchpad/proof/proof.sh, steps extracted verbatim, npx stubbed to print the real mac-arm64 listing): HEAD workflow gives 3 WRONG in backslash form (fonts real exit 1, as CI; leak +\server\x and +\site\x exit 0), fwd form all correct. Fixed workflow: 12/12 as expected on bash 3.2.57 (macOS) and 5.2.37 (podman node:22-trixie-slim, --network none), both forms: fonts pass real/fail without face; leak pass clean, fail on server, site, voicepacks. Added test/release-workflow.test.js (skipped on win32).
+- 2026-09-14T15:08 test/release-workflow.test.js: 12/12 pass on the fixed workflow. Red check (copy aimed at HEAD's release.yml): 9 pass, 3 fail, exactly fonts-passes (windows), leak catches server (windows), leak catches site (windows). Full suite running.
 
 ## Sub-agents
 
