@@ -6,8 +6,8 @@ model: opus
 parent: "[[Spud]]"
 ticket: "[[BAD-004]]"
 project: badtakes
-status: planned
-spawned: ""
+status: active
+spawned: 2026-09-14T14:31
 finished: ""
 tags: [spudagent]
 ---
@@ -39,6 +39,7 @@ Never type a password, code or other credential. Never click Save, Publish, Subm
 Log each page's result with member log as you go. Your result must list each page, each field and the exact value you entered, and the button that change still waits on.
 
 ## Log
+- 2026-09-14T14:32 Read brief, spec §3.3-3.6 and §5, privacy.html (contact elugo25111@gmail.com). ASC tab 'seed' signed in on Apps list: badtakes.io, iOS 1.0 Rejected. Banners seen (not acted on): EU trader status, new social media age-rating questions.
 
 ## Sub-agents
 
