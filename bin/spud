@@ -5051,10 +5051,14 @@ def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_
             reason = "%s is %s, not planned; a spawned member is never spawned twice, a re-spawn is a new member row (spud member new)" % (ref, member["status"])
         elif pending is not None:
             # The first allow reserves the row (Rooster's HIGH-1): until that spawn binds, a second
-            # Agent call for the same member would run a copy the ledger cannot see or count.
+            # Agent call for the same member would run a copy the ledger cannot see or count.  The
+            # way out names the caller's own actor (SPD-028): a spudagent cannot run `--as spud`
+            # (Law 6 refuses it inside a subagent), so only Spud's own root row offers --next.
+            fail = ("`spud --as %s member finish %s --status failed --outcome '<why>'`" % (caller_agent_id, ref)) if caller_agent_id else (
+                    "`spud --as spud member finish %s --status failed --outcome '<why>' [--next '<what happens next>']`" % ref)
             reason = ("%s was already allowed to spawn at %s (tool_use_id %s) and is not yet bound; a planned member is spawned once."
-                      " If that spawn failed in the harness, record it with `spud --as spud member finish %s --status failed --outcome '<why>'`"
-                      " and plan a new member: a re-spawn is a new row" % (ref, pending["at"], pending["tool_use_id"], ref))
+                      " If that spawn failed in the harness, record it with %s"
+                      " and plan a new member: a re-spawn is a new row" % (ref, pending["at"], pending["tool_use_id"], fail))
         elif member["lineage"] != lineage:
             reason = "lineage %s in the description, but %s is planned as %s" % (lineage, ref, member["lineage"])
         elif member["persona"] != persona:
@@ -5561,16 +5565,34 @@ def children_hold_reason(agent_id, children):
                finish_commands(agent_id, children), "it" if n == 1 else "they", agent_id))
 
 
-def alive_children_reason(agent_id, children):
-    """The other half of the parent's job: a child still running, or planned and never spawned."""
+def alive_children_reason(con, agent_id, children):
+    """The other half of the parent's job: a child still running, planned and never spawned, or
+    planned with its spawn allowed and never bound.  The last is not "never spawned": the
+    reservation refuses a second spawn of it (hook_agent_spawn), so telling the lead to spawn it
+    now would be wrong; its way out is the hook.error check and the lead's own actor, with no
+    grace period, since a lead's background child binds at launch and a foreground one cannot
+    outlive the lead's own turn (SPD-028; SPD-025 gives the session-level kind, ten minutes on)."""
+    reserved = {}
+    for c in children:
+        if c["status"] != "active":
+            waiting = reservations(con, c)
+            if waiting:
+                reserved[c["id"]] = waiting[0]
+
+    def item(c):
+        if c["status"] == "active":
+            return "running since " + (c["spawned_at"] or "")[11:16]
+        if c["id"] in reserved:
+            first = reserved[c["id"]]
+            return "spawn allowed %s (tool_use_id %s), never bound" % ((first["at"] or "")[11:16], first["tool_use_id"])
+        return "planned " + (c["planned_at"] or "")[11:16] + " and never spawned"
+
     n = len(children)
-    items = "; ".join("%s/%s (%s, %s), %s" % (
-        c["team_key"], c["name"], c["lineage"], c["persona"],
-        ("running since " + (c["spawned_at"] or "")[11:16]) if c["status"] == "active" else ("planned " + (c["planned_at"] or "")[11:16] + " and never spawned"))
-        for c in children)
+    items = "; ".join("%s/%s (%s, %s), %s" % (c["team_key"], c["name"], c["lineage"], c["persona"], item(c)) for c in children)
     text = "%d child%s you planned %s still alive: %s." % (n, "" if n == 1 else "ren", "is" if n == 1 else "are", items)
     running = [c for c in children if c["status"] == "active"]
-    unspawned = [c for c in children if c["status"] != "active"]
+    unspawned = [c for c in children if c["status"] != "active" and c["id"] not in reserved]
+    unbound = [c for c in children if c["id"] in reserved]
     if running:
         one = len(running) == 1
         text += (" Ending your turn ends your run: a background child is not killed with you, its completion notification goes to the main"
@@ -5584,17 +5606,28 @@ def alive_children_reason(agent_id, children):
                  % ("" if one else "ren", "it" if one else "them", "it" if one else "each",
                     "; ".join("`spud --as %s member finish %s/%s --status failed --outcome '<why>'`" % (agent_id, c["team_key"], c["name"]) for c in unspawned),
                     "row stops" if one else "rows stop"))
+    if unbound:
+        one = len(unbound) == 1
+        refs = ["%s/%s" % (c["team_key"], c["name"]) for c in unbound]
+        steps = ["record %s with `spud --as %s member finish %s --status failed --outcome '<why>'` and plan a new member, since the reservation refuses a second spawn of `%s (%s, %s)`"
+                 % (ref, agent_id, ref, ref, c["lineage"], c["persona"]) for c, ref in zip(unbound, refs)]
+        text += (" The planned %s allowed to spawn and never bound: first look for %s in `spud events --kind hook.error --json`: a gap there means that child may"
+                 " still be running, so wait inside this turn (%s until the child's Result is there), then record %s. If the harness failed %s, %s."
+                 % ("child was" if one else "children were", "its tool_use_id" if one else "each tool_use_id",
+                    "; ".join("`spud member show %s`" % ref for ref in refs),
+                    "it" if one else "each",
+                    "the spawn" if one else "a spawn", "; ".join(steps)))
     return text
 
 
-def stop_hold_reason(agent_id, recorded, returned, still_alive):
+def stop_hold_reason(con, agent_id, recorded, returned, still_alive):
     """One block for the whole finishing rule, children first; with no children of its own it is
     the Result hold, word for word."""
     clauses = []
     if returned:
         clauses.append(children_hold_reason(agent_id, returned))
     if still_alive:
-        clauses.append(alive_children_reason(agent_id, still_alive))
+        clauses.append(alive_children_reason(con, agent_id, still_alive))
     if not clauses:
         return RESULT_HOLD % (agent_id, agent_id)
     return "Law 9: " + " ".join(clauses) + (" Then return your summary." if recorded else " Then " + RESULT_HOLD % (agent_id, agent_id))
@@ -5671,7 +5704,7 @@ def hook_subagent_stop(ctx, payload):
                     data["alive_children"] = alive_refs
                 write_event(con, at, "hook:SubagentStop", "member.stopped", "%s returned %s; held once" % (ref, " and ".join(what)),
                             ticket_id=member["ticket_id"], member_id=member["id"], agent_id=agent_id, data=data)
-                return HookOutput({"decision": "block", "reason": stop_hold_reason(agent_id, recorded, returned, still_alive)})
+                return HookOutput({"decision": "block", "reason": stop_hold_reason(con, agent_id, recorded, returned, still_alive)})
             updates = {"stopped_at": at}
             if isinstance(last, str) and last.strip():
                 updates["return_text"] = last
