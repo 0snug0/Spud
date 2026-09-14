@@ -5,6 +5,7 @@ persona: engineer
 model: sonnet
 parent: "[[Spud]]"
 ticket: "[[SPD-027]]"
+project: spud
 status: done
 spawned: 2026-09-13T14:23
 finished: 2026-09-13T14:37

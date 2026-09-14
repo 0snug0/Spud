@@ -21,6 +21,8 @@ properties:
     displayName: Parent
   ticket:
     displayName: Ticket
+  project:
+    displayName: Project
   spawned:
     displayName: Spawned
   finished:
@@ -62,6 +64,7 @@ views:
     name: All
     order:
       - ticket
+      - project
       - id
       - file.name
       - persona

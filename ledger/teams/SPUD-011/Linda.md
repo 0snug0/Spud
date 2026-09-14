@@ -5,6 +5,7 @@ persona: engineer
 model: opus
 parent: "[[Spud]]"
 ticket: "[[SPD-011]]"
+project: spud
 status: done
 spawned: 2026-09-13T13:33
 finished: 2026-09-13T14:08

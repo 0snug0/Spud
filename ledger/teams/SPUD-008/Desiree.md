@@ -5,6 +5,7 @@ persona: engineer
 model: fable
 parent: "[[Spud]]"
 ticket: "[[SPD-008]]"
+project: spud
 status: done
 spawned: 2026-09-12T16:25
 finished: 2026-09-12T18:10

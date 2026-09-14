@@ -5,6 +5,7 @@ persona: scout
 model: haiku
 parent: "[[Spud]]"
 ticket: "[[SPD-004]]"
+project: spud
 status: done
 spawned: 2026-09-12T12:37
 finished: 2026-09-12T12:38

@@ -5,6 +5,7 @@ persona: researcher
 model: fable
 parent: "[[Spud]]"
 ticket: "[[SPD-006]]"
+project: spud
 status: done
 spawned: 2026-09-12T13:19
 finished: 2026-09-12T13:58

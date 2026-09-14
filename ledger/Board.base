@@ -3,6 +3,8 @@ formulas:
 properties:
   file.name:
     displayName: Ticket
+  project:
+    displayName: Project
   status:
     displayName: Status
   priority:
@@ -33,6 +35,7 @@ views:
       direction: ASC
     order:
       - file.name
+      - project
       - status
       - priority
       - title
@@ -53,6 +56,36 @@ views:
       note.title: 673
       note.lead: 193
       note.proposed_by: 146
+  - type: table
+    name: By project
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+        - file.inFolder("ledger/tickets")
+        - status != "done"
+    groupBy:
+      property: project
+      direction: ASC
+    order:
+      - file.name
+      - project
+      - status
+      - priority
+      - title
+      - lead
+      - origin
+      - proposed_by
+      - created
+    sort:
+      - property: priority
+        direction: ASC
+      - property: status
+        direction: DESC
+      - property: file.name
+        direction: ASC
+      - property: formula.status_rank
+        direction: ASC
   - type: table
     name: Reports
     filters:
@@ -77,6 +110,7 @@ views:
       direction: ASC
     order:
       - file.name
+      - project
       - status
       - priority
       - title

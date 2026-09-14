@@ -5,6 +5,7 @@ persona: reviewer
 model: opus
 parent: "[[Spud]]"
 ticket: "[[SPD-036]]"
+project: spud
 status: done
 spawned: 2026-09-13T21:06
 finished: 2026-09-13T21:38

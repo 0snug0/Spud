@@ -5,6 +5,7 @@ persona: reviewer
 model: fable
 parent: "[[SPUD-007/Atlantic]]"
 ticket: "[[SPD-007]]"
+project: spud
 status: done
 spawned: 2026-09-12T15:20
 finished: 2026-09-12T16:04

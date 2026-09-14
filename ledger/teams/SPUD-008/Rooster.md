@@ -5,6 +5,7 @@ persona: reviewer
 model: fable
 parent: "[[SPUD-008/Desiree]]"
 ticket: "[[SPD-008]]"
+project: spud
 status: done
 spawned: 2026-09-12T17:22
 finished: 2026-09-12T17:57

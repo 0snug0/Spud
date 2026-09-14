@@ -5,6 +5,7 @@ persona: writer
 model: sonnet
 parent: "[[Spud]]"
 ticket: "[[SPD-024]]"
+project: spud
 status: done
 spawned: 2026-09-13T12:29
 finished: 2026-09-13T12:39

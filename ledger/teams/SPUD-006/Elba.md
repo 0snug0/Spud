@@ -6,6 +6,7 @@ agent_type: claude-code-guide
 model: sonnet
 parent: "[[SPUD-006/Vitelotte]]"
 ticket: "[[SPD-006]]"
+project: spud
 status: done
 spawned: 2026-09-12T13:26
 finished: 2026-09-12T13:49
