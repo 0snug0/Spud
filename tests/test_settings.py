@@ -63,6 +63,9 @@ class SettingsSyncTest(SpudTestCase):
         text = self.home.run("settings", "sync", "--path", path, "--dry-run").stdout
         self.assertIn("CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH", text)
         self.assertIn("bin/spud hook", text)
+        self.assertIn('"Agent(isolation:*)"', text)
+        self.assertIn('"Agent(model:inherit)"', text)
+        self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
 
     def test_missing_file_is_created_with_caps_hooks_and_allow_rules(self):
         path = self.home.path / "elsewhere" / "settings.json"
@@ -106,7 +109,24 @@ class SettingsSyncTest(SpudTestCase):
         self.assertIn("Bash(%s -I -S %s/bin/spud *)" % (sys.executable, self.home.path), allow)
         self.assertIn("Bash(%s/bin/spud *)" % self.home.path, allow)
         self.assertEqual(len(allow), len(set(allow)))
-        self.assertEqual(out["settings"]["permissions"].get("deny", []), [])
+
+    def test_deny_rules_for_the_agent_parameters_law_3_forbids(self):
+        # SPD-016: the permission system itself refuses these spawns, even when the PreToolUse(Agent) hook is removed or
+        # does not run.  The syntax is the documented parameter rule, Tool(param:value), deny and ask rules only.
+        out = self.home.json("settings", "sync", "--path", self.home.path / ".claude" / "settings.json")
+        self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
+
+    def test_deny_rules_merge_like_the_allow_rules(self):
+        path = self.home.write_settings({"permissions": {"deny": ["Bash(rm -rf *)", "Agent(model:inherit)", 7, {"x": 1}]}})
+        first = self.home.json("settings", "sync", "--path", path)
+        self.assertEqual(first["settings"]["permissions"]["deny"], ["Bash(rm -rf *)", "Agent(model:inherit)", "Agent(isolation:*)"])
+        second = self.home.json("settings", "sync", "--path", path)
+        self.assertFalse(second["written"])
+        self.assertEqual(second["settings"]["permissions"]["deny"], first["settings"]["permissions"]["deny"])
+        path = self.home.write_settings({"permissions": {"deny": "notalist", "ask": ["Bash(curl *)"]}})
+        out = self.home.json("settings", "sync", "--path", path)
+        self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
+        self.assertEqual(out["settings"]["permissions"]["ask"], ["Bash(curl *)"])
 
     def test_merge_keeps_foreign_hooks_and_replaces_stale_ledger_hooks(self):
         stale = {
@@ -130,7 +150,7 @@ class SettingsSyncTest(SpudTestCase):
         self.assertEqual(data["hooks"]["Notification"], stale["hooks"]["Notification"])
         foreign = [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"] if "bin/spud hook" not in h["command"]]
         self.assertEqual(foreign, ["echo foreign", "echo also-mine"])
-        self.assertEqual(data["permissions"]["deny"], ["Bash(rm -rf *)"])
+        self.assertEqual(data["permissions"]["deny"], ["Bash(rm -rf *)", "Agent(isolation:*)", "Agent(model:inherit)"])
         self.assertIn("Bash(date:*)", data["permissions"]["allow"])
         self.assertFalse(any("/old/" in a for a in data["permissions"]["allow"]))
 
@@ -161,6 +181,7 @@ class SettingsSyncTest(SpudTestCase):
         events = self.home.json("events", "--kind", "config.synced")["events"]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["data"]["hooks"], 8)
+        self.assertEqual(events[0]["data"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
         self.assertIn("path", events[0]["data"])
 
     def test_default_path_is_under_spud_home(self):
