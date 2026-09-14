@@ -2546,6 +2546,119 @@ class ReadWriteRedirectTest(BashHookCase):
                 self.assertEqual(m.analyse_command(command).redirects, [])
 
 
+class GitConfigAliasTest(BashHookCase):
+    """SPD-044: git expands an alias (a config key `alias.NAME`) into whatever command it names before it dispatches, so a
+    member's write can run under a verb Law 7's table does not list.  git_verb skips `-c` and its value and reads the next word
+    as the verb, so `git -c alias.p=push p` was read as verb `p` and refused nothing, while git ran push.  Probed (zsh/bash,
+    scratch dir, read-only `version` as the stand-in, never push): `git -c alias.v=version v` printed the version; the joined
+    `-calias.v=version` is rejected by git (`unknown option`); an alias does not override a builtin (`git -c alias.status=... status`
+    ran the builtin status).  The env forms (GIT_CONFIG_COUNT/KEY_n/VALUE_n, GIT_CONFIG_PARAMETERS, GIT_CONFIG*/GLOBAL/SYSTEM) are
+    documented git config injection; the harness's own worktree guard refuses them when they redirect writes, and Law 7's hook,
+    which runs in every session, closes them too.  The fix refuses a member's git call whose own line defines an alias/include by
+    `-c`/`--config-env` or sets a GIT_CONFIG_* variable, as an unresolvable verb; it does not inspect the value, so it also refuses
+    an alias to a read (an over-refusal a member never hits in ordinary work).  Non-alias `-c` config (user.name, color.ui,
+    core.pager) is a control git honours without changing the verb, and stays silent.  AGENT_A plans tests/** and bin/spud;
+    AGENT_C plans **; Spud (no agent_id) is not bound by Law 7 and sees no change."""
+
+    EVIDENCE = "git -c alias.p=push p"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7", cwd=None):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id, cwd)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None, cwd=cwd)  # Law 7 does not bind Spud
+        return r
+
+    def test_the_tickets_evidence_command(self):
+        r = self.refused_for_members(self.EVIDENCE)
+        self.assertIn("alias", r.reason)
+        m = load_spud_module()
+        self.assertEqual(m.analyse_command(self.EVIDENCE, m.ShellAnalysis(cwd=str(self.home.path))).findings,
+                         [("git-config", "-c alias.p=push")])
+
+    def test_c_option_alias_and_include_forms(self):
+        for cmd in ("git -c alias.p=push p", "git -c alias.co=checkout co", "git -c include.path=/tmp/x v",
+                    "git -c includeIf.gitdir:/x/.path=/tmp/y v", "git -C . -c alias.p=push p", "git --no-pager -c alias.p=push p",
+                    "git -c ALIAS.p=push p", "git -c Include.Path=/tmp/x v", "git -c alias.p p"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_the_config_env_forms(self):
+        for cmd in ("git --config-env alias.p=E p", "git --config-env=alias.p=E p", "git --config-env include.path=E v",
+                    "git --config-env=includeIf.gitdir:/x/.path=E v"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_the_alias_value_is_not_inspected(self):
+        # A value naming a write, another alias, a `!` shell command, or an alias to a read: refused on the definition alone.
+        for cmd in ("git -c alias.p='push --force' p", "git -c alias.a=co p", "git -c alias.x='!echo hi' x",
+                    "git -c alias.x='!git push' x", "git -c alias.st=status st", "git -c alias.l=log l"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_env_config_variable_forms(self):
+        for cmd in ("GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p",
+                    "GIT_CONFIG_PARAMETERS=\"'alias.p=push'\" git p", "GIT_CONFIG=/tmp/x git v",
+                    "GIT_CONFIG_GLOBAL=/tmp/x git v", "GIT_CONFIG_SYSTEM=/tmp/x git v",
+                    "export GIT_CONFIG_GLOBAL=/tmp/x; git v", "export GIT_CONFIG_COUNT=1; git p",
+                    "env GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p",
+                    "env GIT_CONFIG_GLOBAL=/tmp/x git v", "/usr/bin/env GIT_CONFIG=/tmp/x git v"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_config_forms_inside_shell_strings_eval_and_subshells(self):
+        for cmd in ("sh -c 'git -c alias.p=push p'", "bash -c \"git -c alias.p=push p\"", "zsh -c 'git -c alias.p=push p'",
+                    "eval 'git -c alias.p=push p'", "(git -c alias.p=push p)", "echo $(git -c alias.p=push p)",
+                    "env sh -c 'git -c alias.p=push p'", "sh -c 'GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p'",
+                    "true && git -c alias.p=push p"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_a_defined_alias_beside_a_write_verb_still_refuses(self):
+        # The git-config finding dominates; the command is refused whatever the verb the hook reads.
+        for cmd in ("git -c alias.p=push commit -m x", "git -c alias.x='!echo hi' status"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_non_alias_c_config_stays_silent(self):
+        for ok in ("git -c user.name=x log", "git -c color.ui=never status", "git -c core.pager=cat diff",
+                   "git -c commit.gpgsign=false log", "git -c http.sslVerify=false fetch", "git -C . -c user.name=x log",
+                   "git -c user.name=x rev-parse HEAD"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        # Non-alias config does not mask a real write verb: the verb is still read and refused.
+        self.assertRefused("git -c user.name=x commit -m y", "Law 7")
+        self.assertIn("git commit", self.assertRefused("git -c user.name=x commit -m y", "Law 7").reason)
+
+    def test_a_bare_env_var_that_only_looks_like_git_config_stays_silent(self):
+        # GIT_CONFIG_NOSYSTEM disables system config, it does not inject any; an unrelated variable is not git config.
+        for ok in ("GIT_CONFIG_NOSYSTEM=1 git status", "GIT_EDITOR=vi git log", "FOO=1 git status", "env FOO=1 git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_globs_in_config_still_refuse(self):
+        # SPD-041's glob readings still apply: a glob in the verb or the value is read, and an alias glob refuses.
+        for cmd in ("git -c k=v c?mmit -m x", "git -c alias.p=p?sh p", "git -c alias.{p,q}=push p"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_reads_and_writes_without_config_are_unchanged(self):
+        for ok in ("git status", "git log --oneline -5", "git diff", "git -C /tmp status", "git show HEAD"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+        for verb in ("push", "commit -m x", "merge x"):
+            with self.subTest(verb):
+                self.assertRefused("git " + verb, "Law 7")
+
+
 # =============================================================================
 # PreToolUse / Write|Edit|MultiEdit|NotebookEdit
 # =============================================================================

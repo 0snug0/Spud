@@ -4376,6 +4376,16 @@ GIT_WRITE_VERBS = {"commit", "add", "checkout", "switch", "rebase", "reset", "pu
                    "apply", "revert", "restore", "rm", "mv", "clean", "notes", "replace", "update-ref", "symbolic-ref",
                    "filter-branch", "gc", "prune", "submodule", "init", "clone", "bisect", "mergetool", "citool", "gui"}
 GIT_GLOBAL_VALUE_FLAGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env", "--list-cmds"}
+# A git alias is a config key `alias.NAME` whose value git expands into a whole command before it dispatches, so a write can run
+# under a name Law 7's verb table does not list (`git -c alias.p=push p` pushes; probed).  `include`/`includeIf` load a config
+# file that can define one.  git config sections are case-insensitive (SPD-044).
+GIT_ALIAS_SECTIONS = {"alias", "include", "includeif"}
+# GIT_CONFIG_* variables that inject config git reads before it dispatches: a file it points at (which can hold aliases the hook
+# cannot read), or config set inline (GIT_CONFIG_COUNT with GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n, and GIT_CONFIG_PARAMETERS).
+# The harness's worktree guard refuses these when they redirect writes; Law 7's hook runs in every session, so it closes them too.
+GIT_CONFIG_FILE_VARS = ("GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
+GIT_CONFIG_INLINE_VARS = ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
+GIT_CONFIG_INDEXED_RE = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_\d+\Z")
 BRANCH_READ_FLAGS = {"-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", "--all", "--remotes", "--verbose", "--color",
                      "--no-color", "--column", "--no-column", "-i", "--ignore-case", "--no-abbrev"}
 BRANCH_READ_VALUE_FLAGS = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--abbrev"}
@@ -5337,12 +5347,13 @@ def separate_redirects(tokens):
 
 def strip_wrapper(words):
     """`env`, `nohup`, `xargs`, `timeout 10`, `sudo -u x`, ...: drop the wrapper, its options and their values; return (the
-    words it runs, the command strings it hands a shell, the index in `words` of the first word it did not consume).  The name
-    is matched case-folded (SPD-030: ENV runs /usr/bin/env on macOS); `env -S` splits its string into the words it runs (no
-    shell: none of them is expanded), GNU `script -c` hands its string to a shell."""
+    words it runs, the command strings it hands a shell, the index in `words` of the first word it did not consume, the
+    (name, value) assignments `env` sets in the command's environment).  The name is matched case-folded (SPD-030: ENV runs
+    /usr/bin/env on macOS); `env -S` splits its string into the words it runs (no shell: none of them is expanded), GNU
+    `script -c` hands its string to a shell; `env NAME=value` puts NAME in the environment of the command it runs (SPD-044)."""
     name = os.path.basename(words[0]).casefold()
     values = WRAPPER_VALUE_OPTIONS.get(name, set())
-    rest, strings = words[1:], []
+    rest, strings, assignments = words[1:], [], []  # `assignments`: the (name, value) pairs `env` sets in the command's environment
     originals = len(rest)  # the words of `words` still in rest, at its end (env -S puts its words before them)
 
     def take(opt, value):
@@ -5386,12 +5397,15 @@ def strip_wrapper(words):
         break
     if name == "env":
         while rest and ASSIGNMENT_RE.match(rest[0]):
+            am = ASSIGNMENT_WORD_RE.match(rest[0])
+            if am and not am.group(2):
+                assignments.append((am.group(1), am.group(3)))  # env's environment reaches the command it runs (SPD-044)
             rest = rest[1:]
     elif name == "timeout" and rest and DURATION_RE.fullmatch(rest[0]):
         rest = rest[1:]
     elif name == "script" and rest:
         rest = rest[1:]  # the typescript file; what follows it is the command
-    return rest, strings, len(words) - min(originals, len(rest))
+    return rest, strings, len(words) - min(originals, len(rest)), assignments
 
 
 def prefix_effect(word, following):
@@ -5433,6 +5447,63 @@ def git_verb(words):
             continue
         return w, words[i + 1 :]
     return None, []
+
+
+def git_config_section(operand):
+    """The section of a `-c name=value` or `--config-env name=envvar` operand (everything before the first `.` of the key),
+    case-folded, since git config sections are case-insensitive.  `-c alias.p=push` -> `alias`; `includeIf.gitdir:/x/.path=f`
+    -> `includeif`; `user.name=x` -> `user`."""
+    key = operand.split("=", 1)[0]
+    return key.split(".", 1)[0].strip().casefold()
+
+
+def git_line_defines_alias(words):
+    """The spelling of the first `-c`/`--config-env` option on a git line that defines an alias or an include (which git
+    expands or loads before it dispatches, so the verb the hook reads is not what runs, SPD-044), or None.  Non-alias config
+    (`-c user.name=x`, `-c color.ui=never`, `-c core.pager=cat`) is a control git honours without changing the verb, so it is
+    left silent.  The joined `-calias.x=y` form is not read: git rejects it (`unknown option`, probed)."""
+    i = 1
+    while i < len(words):
+        w = words[i]
+        if w == "-c" or w == "--config-env":
+            operand = words[i + 1] if i + 1 < len(words) else ""
+            if git_config_section(operand) in GIT_ALIAS_SECTIONS:
+                return "%s %s" % (w, operand)
+            i += 2
+            continue
+        if w.startswith("--config-env="):
+            operand = w[len("--config-env=") :]
+            if git_config_section(operand) in GIT_ALIAS_SECTIONS:
+                return w
+            i += 1
+            continue
+        if w in GIT_GLOBAL_VALUE_FLAGS:
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        return None  # the verb: git's global options are done
+    return None
+
+
+def is_git_config_var(name):
+    """A GIT_CONFIG_* variable that points git at a config file or injects config inline (SPD-044)."""
+    return name in GIT_CONFIG_FILE_VARS or name in GIT_CONFIG_INLINE_VARS or GIT_CONFIG_INDEXED_RE.match(name) is not None
+
+
+def git_env_defines_alias(variables):
+    """The name of a GIT_CONFIG_* variable in force that injects config the hook cannot resolve (a file GIT_CONFIG,
+    GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM points at, or GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n and
+    GIT_CONFIG_PARAMETERS set inline), any of which can define an alias git expands into a write verb, or None.  A fixed
+    order so the reason is deterministic."""
+    for name in GIT_CONFIG_FILE_VARS + GIT_CONFIG_INLINE_VARS:
+        if name in variables:
+            return name
+    for name in sorted(variables):
+        if GIT_CONFIG_INDEXED_RE.match(name):
+            return name
+    return None
 
 
 def flag_list_refused(verb, args, read_flags, value_flags):
@@ -6274,7 +6345,10 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed):
             prefixed = True
             words = words[1:]
         elif os.path.basename(w).casefold() in WRAPPERS and w not in a.vars:
-            rest, strings, consumed = strip_wrapper(words)
+            rest, strings, consumed, env_assignments = strip_wrapper(words)
+            for aname, avalue in env_assignments:
+                if is_git_config_var(aname):  # `env GIT_CONFIG_*=... git ...` injects config git reads (SPD-044)
+                    a.vars[aname] = avalue
             k = first_glob_index(words[: consumed + 1], 1)  # its options, their values, and the command word it runs
             if k is not None:
                 if glob(k, command=k == consumed, dash=True, shift=k < consumed):
@@ -6317,9 +6391,13 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed):
         while (k := git_glob_index(words)) is not None:
             if glob(k, dash=True, shift=True):
                 return
-        verb, args = git_verb(words)
         a.kinds.append("git")
-        a.findings.append(("git", (verb, git_refused(verb, args))))
+        alias = git_line_defines_alias(words) or git_env_defines_alias(a.vars)
+        if alias is not None:  # a defined alias/include or GIT_CONFIG_* injection: the verb the hook reads is not what runs (SPD-044)
+            a.findings.append(("git-config", alias))
+        else:
+            verb, args = git_verb(words)
+            a.findings.append(("git", (verb, git_refused(verb, args))))
     elif base in SHELLS:
         while (k := shell_glob_index(words)) is not None:
             if glob(k, dash=True, shift=True):
@@ -6529,6 +6607,10 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
             if refused:
                 return ("Law 7: spudagents never run `git %s` (commit, add, stash, checkout, switch, rebase, reset, push, merge, cherry-pick,"
                         " worktree, branch, tag, pull, apply, restore, rm, mv, clean ...); Spud commits, after the outcome is recorded" % verb), analysis
+        elif kind == "git-config":
+            return ("Law 7: this git call defines an alias or include (%s); git expands an alias into whatever command it names before it"
+                    " dispatches, so a write can run under a verb Law 7's table does not list. Run git with no `-c`/`--config-env` alias or"
+                    " include and no GIT_CONFIG_* variable; Spud commits, after the outcome is recorded" % detail), analysis
         elif kind == "var":
             return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
         elif kind == "glob":
