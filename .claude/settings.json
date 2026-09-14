@@ -15,6 +15,10 @@
       "Bash(python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud *)",
       "Bash(/opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud *)",
       "Bash(/Users/ericlugo/Personal/Spud/bin/spud *)"
+    ],
+    "deny": [
+      "Agent(isolation:*)",
+      "Agent(model:inherit)"
     ]
   },
   "hooks": {

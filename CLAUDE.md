@@ -16,7 +16,7 @@ Inside this repo this file supersedes the oh-my-claudecode block in `~/.claude/C
 
 ## The ledger CLI
 
-The ledger is one SQLite database, `.spud/ledger.db` at the ledger root, and **`bin/spud` is the only program that writes it**. In this file `spud …` means:
+The ledger is one SQLite database, `.spud/ledger.db` at the ledger root, and **`bin/spud` is the only program that writes it** (since SPD-016 a launcher for `bin/spud_ledger.py`, whose bytecode it caches under `.spud/pycache/`; the module run directly refuses). In this file `spud …` means:
 
 ```bash
 python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud …
@@ -104,7 +104,7 @@ Format `sqlite-v1`: the database is `.spud/ledger.db` at the ledger root (WAL, g
 - `reports/YYYY-MM-DD.md`: rendered from `report.entry` events, one per recorded outcome and per ticket decision: since SPD-011 Spud's recording commands write them, with his `--next` line, and `report add` covers the rest; the full story of a day is `spud events`.
 - A hand edit of a rendered file is detected at the next `render` (exit 6). A file matching neither its last render nor the new one byte for byte is compared with both as a note, frontmatter as parsed values and the rest byte for byte. A difference of YAML style alone (quoting, block lists, key order, bare empty values: what Obsidian writes over a note it has open) is no hand edit; the render goes over it and its `render` event keeps the replaced text with `style_only: true`. A changed value or body, or frontmatter the parser cannot read, is one: accept it, when it is one of the fields `spud import --file` allows, or overwrite it with `spud render --discard <path>`, which keeps the discarded text in the event. A report has no frontmatter and keeps the byte check. Never write a property value shaped like `word:text`; Obsidian reads it as a URL scheme.
 - Templates live in `ledger/_templates/` (`ticket.md`, `spudagent.md`): the shape of a rendered note, with the command that fills each section. Nothing else in the ledger starts with `_`.
-- The hooks, from `spud settings sync`: `PreToolUse` (Agent, Bash, the edit tools) and `Stop` enforce and fail closed; `PostToolUse(Agent)`, `SubagentStart`, `SubagentStop` and `SessionStart` record and fail open, spooling any gap into a `hook.error` event. `Stop` holds only the stopping session's members (since SPD-018): a member's session is its spawn request's, else its row's (recorded at `member new`), else its root's; a member with no known session holds every session, a planned one only after ten minutes; a planned row whose spawn was allowed and never bound holds its session once the allow is ten minutes old (since SPD-025); its `hook.denied` data lists `returned`, `planned`, `unbound`, `running` and `session_id`. A spudagent that returns without `member result` or `member block`, or while a child of its own is unrecorded or still alive, is held once with the reason and the exact commands. Hook denials are `hook.denied` events: `spud events --kind hook.denied` shows who tried what.
+- The hooks, from `spud settings sync`: `PreToolUse` (Agent, Bash, the edit tools) and `Stop` enforce and fail closed; `PostToolUse(Agent)`, `SubagentStart`, `SubagentStop` and `SessionStart` record and fail open, spooling any gap into a `hook.error` event. `Stop` holds only the stopping session's members (since SPD-018): a member's session is its spawn request's, else its row's (recorded at `member new`), else its root's; a member with no known session holds every session, a planned one only after ten minutes; a planned row whose spawn was allowed and never bound holds its session once the allow is ten minutes old (since SPD-025); its `hook.denied` data lists `returned`, `planned`, `unbound`, `running` and `session_id`. A spudagent that returns without `member result` or `member block`, or while a child of its own is unrecorded or still alive, is held once with the reason and the exact commands. Hook denials are `hook.denied` events: `spud events --kind hook.denied` shows who tried what. Since SPD-016 `settings sync` also writes the native deny rules `Agent(isolation:*)` and `Agent(model:inherit)`, so Law 3 holds without the hook (a spawn that omits `model` matches no rule and is refused by the hook alone), and the path rule maps every worktree `git worktree list` names, wherever it lives, to repository-relative paths.
 
 ## Main and worktrees
 
@@ -151,7 +151,7 @@ Open this repo as a vault and start at `ledger/Home.md`. Frontmatter and wikilin
 `spud` and `git` are the tools. There is no build; the test suite is `bin/spud`'s:
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests   # 416 tests, about four minutes, leaves no bytecode
+python3.14 -I -S -m unittest discover -s tests -t tests   # 429 tests, about two and a half minutes, leaves no bytecode
 ```
 
 ```bash
