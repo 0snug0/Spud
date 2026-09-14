@@ -4304,8 +4304,10 @@ DB_REASON = ("direct access to the ledger database is refused (%s); the inspecti
 SUBST = "__SPUD_SUBST__"  # what a lifted `$(...)` or backtick body leaves behind in the outer line
 
 # Shell analysis for PreToolUse(Bash).
-OUT_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&"}
-IN_REDIRECTS = {"<", "<<", "<<<", "<<-", "<&", "<>"}
+# `<>` opens its target read-write and creates it (SPD-040, probed in zsh 5.9, bash 3.2 and sh: `1<>f` overwrote f from its
+# start), so it is an output redirection whose operand is checked like any other target.
+OUT_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<>"}
+IN_REDIRECTS = {"<", "<<", "<<<", "<<-", "<&"}
 RESERVED_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "select", "case", "esac",
                   "in", "function", "!", "{", "}", "coproc"}
 # Matched case-folded (SPD-030): macOS PATH lookup is case-insensitive, so ENV runs /usr/bin/env.  noglob and nocorrect are
@@ -5310,14 +5312,15 @@ def union_dirs(a, b):
 
 
 def separate_redirects(tokens):
-    """Drop redirection operators and their operands; return (words, output targets)."""
+    """Drop redirection operators and their operands; return (words, output targets).  A `<>` operand is always a file name
+    (SPD-040, probed: `<>3` and `<>-` created files named 3 and -, and `1<>&2` is a syntax error), never a descriptor."""
     words, targets = [], []
     i = 0
     while i < len(tokens):
         t = tokens[i]
         if t in OUT_REDIRECTS:
             operand = tokens[i + 1] if i + 1 < len(tokens) else None
-            if operand is not None and not re.fullmatch(r"-|\d+", operand) and not operand.startswith("&"):
+            if operand is not None and (t == "<>" or not (re.fullmatch(r"-|\d+", operand) or operand.startswith("&"))):
                 targets.append(operand)
             i += 2
             continue

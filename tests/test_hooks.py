@@ -2431,6 +2431,121 @@ class GlobCommandWordTest(BashHookCase):
         self.assertRefused("git push", "Law 7")
 
 
+class ReadWriteRedirectTest(BashHookCase):
+    """SPD-040: the read-write redirection `<>` opens its target O_RDWR|O_CREAT, so it writes or creates the file, and `1<>`
+    lets the command overwrite it from the start without truncating.  Before, the hook read `<>` as an input redirection and
+    dropped its operand unchecked.  Probed in zsh 5.9 -f, zsh -f -o nobareglobqual (this Mac's Bash tool), bash 3.2 and sh,
+    scratchpad files only: bare `<>f`, spaced `<> f`, `0<>`, `1<>`, `2<>`, `9<>`, `10<>`, a leading `<>f echo x`, a quoted
+    operand, `<>f<>g` (both), and the same inside `sh -c`, `bash -c`, `zsh -c`, `eval`, a subshell and `$(...)` each created
+    its file; `printf abcd > g; echo x 1<>g` left `x` then `cd`.  An operand that is all digits or `-` is a file name after
+    `<>` (`<>3` and `<>-` created files named 3 and -); `1<>&2` is a syntax error in both shells, so `<>` has no dup form.
+    `exec {fd}<>f` created f in all four (zsh's named descriptor, bash 3.2's command word).  `<>` goes through every check an
+    output target gets: the path rule, glob, brace and zsh-pattern readings, the directories before it, Spud's Law 1 and the
+    state directory.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    EVIDENCE = "echo x 1<>ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        home = self.home.path
+        for rel in ("ledger/tickets/SPD-001.md", "ledger/tickets/SPD-002.md", "tests/keep.py", "docs/x.md"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+
+    def refused_for_all(self, command):
+        """A generated file: refused for both members (whatever their deliverables) and for Spud under Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, "generated", agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertRefused(command, "Law 1", agent_id=None)
+
+    def test_the_tickets_evidence_overwrites_a_generated_file(self):
+        """Proposal 33 (SPUD-039/Bintje): `echo x 1<>ledger/tickets/SPD-001.md` changed the file and the hook recorded no redirect."""
+        self.refused_for_all(self.EVIDENCE)
+        m = load_spud_module()
+        self.assertEqual([t for t, _cwds in m.analyse_command(self.EVIDENCE).redirects], ["ledger/tickets/SPD-001.md"])
+
+    def test_every_spelling_of_the_operator_keeps_its_operand(self):
+        target = "ledger/tickets/SPD-001.md"
+        for command in ("echo x <>%s", "echo x <> %s", "echo x 0<>%s", "echo x 1<> %s", "echo x 2<>%s", "echo x 9<>%s",
+                        "echo x 10<>%s", "<>%s echo x", "1<>%s echo x", "echo x 1<>'%s'", 'echo x 1<>"%s"', "cat <>%s",
+                        "echo x <>tests/keep.py<>%s", "echo x 1<>tests/keep.py 2<>%s", "echo x 1<>%s 2>&1", "exec {fd}<>%s",
+                        "exec 3<>%s", "echo x >/dev/null 1<>%s"):
+            self.refused_for_all(command % target)
+
+    def test_the_operand_is_a_file_name_whatever_its_shape(self):
+        # `<>3` and `<>-` created files named 3 and - (probed): neither is a descriptor or a close after `<>`.  The home is
+        # the cwd, outside AGENT_A's deliverables.
+        for command in ("echo x <>3", "echo x 1<>3", "echo x <> -", "echo x <>docs/x.md", "echo x 1<>docs/new.md"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables", AGENT_A)
+        self.assertSilent("echo x 1<>tests/keep.py")
+        self.assertSilent("echo x <> tests/new.py")
+        self.assertSilent("echo x 1<>3", agent_id=AGENT_C)
+
+    def test_inside_shell_strings_eval_and_subshells(self):
+        target = "ledger/tickets/SPD-001.md"
+        for command in ("sh -c 'echo x 1<>%s'", "bash -c 'echo x <>%s'", "zsh -c 'echo x 2<> %s'", "eval 'echo x 1<>%s'",
+                        "(echo x 1<>%s)", "echo $(echo x 1<>%s)", "echo `echo x 1<>%s`", "{ echo x; } 1<>%s", "(echo x) 1<>%s",
+                        "if true; then echo x 1<>%s; fi", "for f in a; do echo x 1<>%s; done", "true && echo x <>%s",
+                        "echo x | cat 1<>%s", "env sh -c 'echo x 1<>%s'", "sh -c \"eval 'echo x 1<>%s'\""):
+            self.refused_for_all(command % target)
+
+    def test_a_glob_brace_or_zsh_pattern_operand_is_expanded(self):
+        # SPD-034, SPD-039 and SPD-041's readings of an output target apply to `<>` alike.
+        for target in ("ledger/tickets/SPD-00?.md", "led*/tickets/SPD-001.md", "ledger/tickets/SPD-00[12].md",
+                       "{ledger,docs}/tickets/SPD-001.md", "ledger/tickets/SPD-00{1,2}.md", "(ledger|x)/tickets/SPD-001.md",
+                       "ledger/tickets/SPD-<1-1>.md"):
+            with self.subTest(target):
+                self.assertRefused("echo x 1<>%s" % target, "generated", AGENT_C)
+                self.assertRefused("echo x <>%s" % target, "Law 1", agent_id=None)
+        self.assertRefused("sh -c 'echo x 1<>ledg*/tickets/SPD-001.md'", "generated", AGENT_C)
+        self.assertRefused("echo x 1<>tests/nomatch-xyzzy*.py", "matches no file", AGENT_A)
+        self.assertSilent("echo x 1<>tests/k*.py")
+
+    def test_the_directories_before_it_are_followed(self):
+        home = self.home.path
+        self.assertRefused("cd ledger && echo x 1<>tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertRefused("cd %s/ledger; echo x <>tickets/SPD-001.md" % home, "Law 1", agent_id=None)
+        self.assertRefused("{ cd ledger; true; } 1<>tickets/SPD-001.md", "generated", AGENT_C)  # a compound's redirection (redirect_cwds)
+        self.assertRefused("cd $DIR; echo x 1<>tests/keep.py", "cannot follow", AGENT_A)
+        self.assertRefused("echo x 1<>~+/ledger/tickets/SPD-001.md", "generated", AGENT_C)
+
+    def test_the_state_directory_and_a_variable_target(self):
+        for agent_id in (AGENT_A, None):
+            with self.subTest(agent_id=agent_id):
+                # `>.spud/` escapes DB_PATH_RE (a `>` before `.spud`), so the target itself is what refuses it
+                self.assertRefused("echo x 1<>.spud/pycache/x", "ledger database", agent_id)
+                self.assertRefused("cd .spud && echo x <>backups/x", "ledger database", agent_id)
+        self.assertRefused("echo x 1<>$T", "spell the path out", AGENT_A)
+
+    def test_a_spud_call_with_a_read_write_redirection_is_not_allowed(self):
+        # The allow needs every redirection quiet (SPD-032): a `<>` into a file is a write the prompt would ask about.
+        log = "%s --as %s member log x" % (self.spud_cli, AGENT_A)
+        self.assertSilent(log + " 1<>tests/keep.py")
+        self.assertRefused(log + " 1<>docs/x.md", "deliverables")
+        self.assertAllowed(log + " <>/dev/null")
+
+    def test_input_redirections_are_unchanged(self):
+        for ok in ("cat <ledger/tickets/SPD-001.md", "cat < docs/x.md", "cat 0<docs/x.md", "wc -l <ledger/tickets/SPD-001.md",
+                   "cat <<<ledger/tickets/SPD-001.md", "cat <<EOF\nledger/tickets/SPD-001.md\nEOF", "cat <<-EOF\n\tx\n\tEOF",
+                   "cat <&0", "cat 3<&0", "cat <&-", "diff <(cat docs/x.md) docs/x.md", "make 2>&1", "ls > /dev/null",
+                   "exec 3<&0", "echo x >&2", "sh -c 'cat <docs/x.md'"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        self.assertSilent("cat <tests/keep.py >tests/new.py")
+        self.assertAllowed("%s --as %s member log x < docs/x.md" % (self.spud_cli, AGENT_A))
+        self.assertRefused("cat <tests/keep.py >docs/x.md", "deliverables")
+        m = load_spud_module()
+        for command in ("cat <f", "cat 0<f", "cat <<<f", "cat <&3", "cat <<EOF\nf\nEOF"):
+            with self.subTest(command):
+                self.assertEqual(m.analyse_command(command).redirects, [])
+
+
 # =============================================================================
 # PreToolUse / Write|Edit|MultiEdit|NotebookEdit
 # =============================================================================
