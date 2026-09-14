@@ -1937,6 +1937,120 @@ class ShellModelTest(BashHookCase):
                 self.assertSilent(ok)
 
 
+class GlobRedirectTest(BashHookCase):
+    """SPD-034: a redirection or tee target the shell expands (an unquoted glob character, a brace list) is checked as
+    every file it can open from every candidate directory, not as its literal spelling.  bash and zsh both expand a
+    glob in a redirection target before opening it, so `echo x > ledg*/tickets/SPD-00?.md` writes ledger/tickets/SPD-001.md
+    (probed in zsh 5.9 and bash 3.2).  A quoted or escaped glob character is literal.  A member is refused when the hook
+    cannot know what a glob opens (no match now, the cost bound reached); Spud is checked against every match and the
+    literal name bash writes when nothing matches.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for rel in ("ledger/tickets/SPD-001.md", "ledger/tickets/SPD-002.md", "tests/keep.py", "tests/other.py", "docs/x.md"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+
+    def test_the_tickets_evidence_glob_writes_a_generated_file(self):
+        """The hole from SPUD-030/Elba (proposal 30): the hook saw the literal `ledg*/tickets/SPD-00?.md`, under no root."""
+        evidence = "echo overwritten > ledg*/tickets/SPD-00?.md"
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(agent_id=agent_id):
+                self.assertRefused(evidence, "generated", agent_id)
+        self.assertRefused(evidence, "Law 1", agent_id=None)
+
+    def test_each_glob_character_expands(self):
+        for target in ("ledger/tickets/SPD-00?.md", "ledger/tickets/SPD-00[12].md", "ledger/tickets/SPD-00[!x].md",
+                       "led*/tickets/SPD-001.md", "led?er/tickets/SPD-001.md", "**/SPD-001.md",
+                       "ledger/tickets/SPD-00{1,2}.md", "ledger/tickets/SPD-00{1..2}.md", "{ledger,docs}/tickets/SPD-001.md",
+                       "ledger/tickets/../tickets/SPD-00?.md"):
+            with self.subTest(target):
+                self.assertRefused("echo x > %s" % target, "generated", AGENT_C)
+                self.assertRefused("echo x > %s" % target, "Law 1", agent_id=None)
+
+    def test_a_quoted_or_escaped_glob_character_is_literal(self):
+        # Quoted or escaped: the literal path ledg*/tickets/SPD-001.md is inside the repo but not a generated file, so it is
+        # refused for a member as outside the deliverables (not "generated"), never expanded to ledger/tickets/SPD-001.md.
+        for target in ("'ledg*'/tickets/SPD-001.md", '"ledg*"/tickets/SPD-001.md', "ledg\\*/tickets/SPD-001.md",
+                       "'ledg*/tickets/SPD-001.md'", "ledg\\?r/tickets/SPD-001.md"):
+            with self.subTest(target):
+                r = self.assertRefused("echo x > %s" % target, "deliverables", AGENT_A)
+                self.assertNotIn("generated", r.reason)
+        # Partial quoting still expands the unquoted character.
+        self.assertRefused("echo x > 'ledg'*/tickets/SPD-001.md", "generated", AGENT_A)
+
+    def test_a_glob_matching_only_deliverables_is_allowed(self):
+        self.assertSilent("echo x > tests/*.py")
+        self.assertSilent("echo x > tests/keep.p?")
+        self.assertSilent("printf x | tee tests/*.py")
+        self.assertSilent("echo x > tests/{keep,other}.py")
+        # a quoted glob character in a deliverable target is a literal filename under tests/**
+        self.assertSilent("echo x > 'tests/star*.py'")
+
+    def test_several_matches_are_all_checked(self):
+        # Both SPD-001.md and SPD-002.md match; a member is refused (generated), Spud on Law 1.
+        self.assertRefused("echo x > ledger/tickets/SPD-00?.md", "generated", AGENT_C)
+        self.assertRefused("echo x >> ledger/tickets/SPD-00?.md", "Law 1", agent_id=None)
+        # a glob that matches a deliverable and a generated file is refused on the generated one
+        (self.home.path / "tests" / "tickets").mkdir(parents=True, exist_ok=True)
+        (self.home.path / "tests" / "tickets" / "SPD-001.md").write_text("x\n", encoding="utf-8")
+        self.assertRefused("echo x > */tickets/SPD-001.md", "generated", AGENT_C)
+
+    def test_a_glob_that_matches_nothing_now(self):
+        # A member: refused, since the hook cannot know what the shell opens (a match may appear, or bash writes the name).
+        for target in ("tests/nomatch-xyzzy*.py", "ledger/tickets/SPD-09?.md", "no-such-dir-*/x"):
+            with self.subTest(target):
+                self.assertRefused("echo x > %s" % target, "matches no file", AGENT_A)
+                self.assertRefused("echo x | tee %s" % target, "matches no file", AGENT_A)
+        # Spud: the literal name a shell writes on no match is checked too -- outside the repository it stays unchecked,
+        # inside it is refused (bash writes the file named literally, glob characters and all).
+        self.assertSilent("echo x > %s/outside-nomatch*.md" % self.out, agent_id=None)
+        self.assertRefused("echo x > tests/nomatch-xyzzy*.py", "Law 1", agent_id=None)
+
+    def test_tee_arguments_expand(self):
+        self.assertRefused("printf x | tee ledger/tickets/SPD-00?.md", "generated", AGENT_C)
+        self.assertRefused("printf x | tee {ledger,docs}/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertRefused("printf x | tee -a ledger/tickets/SPD-00?.md", "Law 1", agent_id=None)
+        self.assertRefused("printf x | tee ledger/tickets/SPD-00?.md tests/keep.py", "generated", AGENT_C)
+        self.assertSilent("printf x | tee tests/*.py")
+
+    def test_a_variable_in_a_glob_target_is_refused_for_a_member(self):
+        # Existing behaviour, pinned: a $ in a target is unresolvable.
+        self.assertRefused("X=ledger; echo x > $X/tickets/SPD-00?.md", "spell the path out", AGENT_C)
+        self.assertSilent("X=ledger; echo x > $X/tickets/SPD-001.md", agent_id=None)
+
+    def test_tilde_before_a_glob(self):
+        home = self.home.path
+        self.assertRefused("cd %s && echo x > ~+/ledger/tickets/SPD-00?.md" % home, "generated", AGENT_C)
+        self.assertRefused("cd %s && echo x > ~+/ledger/tickets/SPD-00?.md" % home, "Law 1", agent_id=None)
+        self.assertRefused("echo x > ~-/ledger/tickets/SPD-00?.md", "cannot follow", AGENT_C)
+
+    def test_a_glob_over_a_directory_the_hook_cannot_follow(self):
+        # cwds unknown (a cd the hook cannot follow) plus a glob: refused for a member, unchecked for Spud.
+        self.assertRefused("cd $DIR; echo x > ledger/tickets/SPD-00?.md", "cannot follow", AGENT_C)
+        self.assertSilent("cd $DIR; echo x > ledger/tickets/SPD-00?.md", agent_id=None)
+
+    def test_the_glob_cost_is_bounded(self):
+        # A glob whose expansion reaches the hook's match budget is refused for a member rather than walked without limit.
+        cap = load_spud_module().GLOB_MATCH_CAP
+        many = self.home.path / "tests" / "many"
+        many.mkdir(parents=True, exist_ok=True)
+        for i in range(cap + 20):
+            (many / ("f%04d.txt" % i)).write_text("x\n", encoding="utf-8")
+        self.assertRefused("echo x > tests/many/*.txt", "budget", AGENT_A)
+
+    def test_controls_stay_allowed(self):
+        self.assertSilent("ls > /dev/null")
+        self.assertSilent("make 2>&1", agent_id=None)
+        self.assertSilent("echo x > tests/plain.py")
+        self.assertRefused("echo x > docs/plain.md", "deliverables")
+
+
 # =============================================================================
 # PreToolUse / Write|Edit|MultiEdit|NotebookEdit
 # =============================================================================
