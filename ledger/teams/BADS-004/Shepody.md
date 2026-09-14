@@ -6,9 +6,9 @@ model: opus
 parent: "[[Spud]]"
 ticket: "[[BAD-004]]"
 project: badtakes
-status: active
+status: blocked
 spawned: 2026-09-14T14:49
-finished: ""
+finished: 2026-09-14T14:52
 duration_ms: 91418
 tool_uses: 19
 tokens_out: 5605
@@ -51,4 +51,4 @@ In `member result`, record the Content Rights value as saved and the state of ta
 App Privacy publish (tab seed) was REFUSED by App Store Connect. After I verified the Product Interaction form (purposes Analytics, Product Personalization, App Functionality; not linked; tracking No) and clicked its Publish, the modal showed: 'Your app contains NSUserTrackingUsageDescription, indicating that it may request permission to track users. To submit for review, update your App Privacy response to indicate that data collected from this app will be used for tracking purposes, or update your app binary and upload a new build.' Nothing was published: the page still reads 'Published 5 days ago' and Product Interaction is still 'Used for tracking purposes'. The modal is left open with tracking No, unpublished; I did not retry or cancel it. Per the brief's rule about warnings, I stopped: Content Rights (tab-1) was NOT attempted (the Age Ratings questionnaire there is untouched), and tab-2 was not touched. Question for Eric, options: (A) upload build 0.13.4 (13004), which drops NSUserTrackingUsageDescription, and then publish tracking No, which is Apple's stated path and the one I recommend; (B) meanwhile re-brief a member to do only the Content Rights save, which does not depend on the binary; (C) something else. Keeping tracking Yes is not viable, because the drafted reply says no data is used to track.
 
 ## Outcome
-Blocked correctly. App Store Connect refused Publish on the Product Interaction tracking answer because the live binary (13003) still contains NSUserTrackingUsageDescription, and Apple requires a new build first. The label is unchanged, and the form is left open with tracking set to No. Content Rights was not attempted, since the brief said to stop on a submission warning; tab-2 is untouched. Resolution: the tracking Publish waits for build 13004 to be uploaded. Content Rights, which Eric already approved and which does not depend on the build, is re-briefed alone.
+Blocked correctly: App Store Connect refused the tracking Publish until the build without NSUserTrackingUsageDescription is uploaded. The re-brief could not re-spawn this row (a spawned member is never spawned twice), so Content Rights moves to a new member row; the tracking Publish waits for build 13004.
