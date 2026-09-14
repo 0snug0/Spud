@@ -16,6 +16,7 @@ Exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,
 5 state transition refused, 6 render conflict (a hand-edited file).
 """
 
+import bisect
 import contextlib
 import fcntl
 import json
@@ -4337,7 +4338,6 @@ SHELL_PUNCTUATION = frozenset("();<>|&")
 LIST_TERMINATORS = {";", ";;", ";&", ";;&"}
 DIRECTORY_COMMANDS = {"cd", "chdir", "pushd", "popd"}  # the builtins, spelled exactly: CD and /usr/bin/cd are programs
 SHELL_DECLARATIONS = {"export", "typeset", "declare", "local", "readonly"}
-GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}")
 # A redirection or tee target the shell expands is checked as every file it opens, not as its literal spelling (SPD-034).
 # neutralize_quoted_globs replaces a quoted or escaped metacharacter with a sentinel so filename generation is read only
 # from the unquoted ones; deglob restores the literal character.  The sentinels are private-use characters shlex keeps in
@@ -4345,7 +4345,17 @@ GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}")
 _GLOB_META = "*?[]{},"
 _GLOB_SENTINELS = {c: chr(0xE000 + i) for i, c in enumerate(_GLOB_META)}
 _GLOB_UNSENTINEL = {v: k for k, v in _GLOB_SENTINELS.items()}
-_GLOB_SENTINEL_RE = re.compile("[" + "".join(_GLOB_SENTINELS.values()) + "]")
+# zsh's own glob operators (SPD-039): parenthesised alternation `(a|b)` and the numeric range `<n-m>`, which shlex reads as a
+# subshell and as an input redirection.  mark_zsh_patterns replaces each character zsh reads as part of such a pattern (the
+# parentheses, bars and blanks of a group, the angle brackets of a range) with one of these sentinels, so the pattern stays
+# in one word; they are active glob syntax, unlike the quoted sentinels above, and deglob restores both kinds.
+_ZSH_PATTERN_CHARS = "(|)<> \t"
+_ZSH_SENTINELS = {c: chr(0xE010 + i) for i, c in enumerate(_ZSH_PATTERN_CHARS)}
+ZSH_OPEN, ZSH_BAR, ZSH_CLOSE, ZSH_RANGE_OPEN, ZSH_RANGE_CLOSE = (_ZSH_SENTINELS[c] for c in "(|)<>")
+_SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **{v: k for k, v in _ZSH_SENTINELS.items()})
+_GLOB_SENTINEL_RE = re.compile("[" + "".join(_SENTINEL_TEXT) + "]")
+GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}|[" + ZSH_OPEN + ZSH_RANGE_OPEN + "]")
+ZSH_RANGE_RE = re.compile(r"<(\d*)-(\d*)>")  # zsh's numeric glob, read as one wherever it stands unquoted (probed)
 GLOB_MATCH_CAP = 500   # the most files a redirection glob is expanded to before the hook refuses a member (SPD-034)
 GLOB_SCAN_CAP = 5000   # the most directory entries scanned expanding one glob, so `**` never walks a large tree unbounded
 ARRAY_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=$")
@@ -4800,6 +4810,7 @@ class ShellAnalysis:
         self.unparseable = False
         self.loop_depth = 0  # inside a loop or a function body, where a relative cd may repeat
         self.cd_uncertain = False  # the last directory change may not happen (a target that does not exist now)
+        self.isolated_done = set()  # (command, depth, starting state) of every body analysed in its own process (SPD-039)
 
     @property
     def all_spud(self):
@@ -4970,10 +4981,277 @@ def neutralize_quoted_globs(text):
 
 
 def deglob(text):
-    """Restore the glob metacharacters neutralize_quoted_globs replaced with sentinels (a no-op for text that has none)."""
+    """Restore the characters neutralize_quoted_globs and mark_zsh_patterns replaced with sentinels (a no-op for text that has none)."""
     if not text:
         return text
-    return _GLOB_SENTINEL_RE.sub(lambda m: _GLOB_UNSENTINEL[m.group()], text)
+    return _GLOB_SENTINEL_RE.sub(lambda m: _SENTINEL_TEXT[m.group()], text)
+
+
+# Reserved words after which zsh is still in command position, so `(` opens a subshell (zsh's lexer: a word turns command
+# position off, these and an assignment keep it; probed with `time (cd x)`, `! (cd x)`, `if (cd x)`, `{ (cd x) }`).
+ZSH_COMMAND_POSITION_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "done", "{", "}", "!", "time", "coproc", "nocorrect"}
+_PLAIN_RUN_RE = re.compile(r"[^\s;&|<>()'\"\\$]+")  # characters a word copies as they are
+_ARRAY_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")  # `name=` or `name+=` before an array's parenthesis
+
+
+def _scan_pairs(text):
+    """One pass over a line's masked outer text, quotes and escapes skipped (SPD-039): the index of the `)` matching each
+    unquoted `(` and of the `}` matching each unquoted `{`, and the sorted indexes of the unquoted characters a zsh glob group
+    cannot hold (`;` `&` `>`, a newline, a `<` that opens no range).  Marking a line reads groups through it, in time linear in
+    the line's length: scanning from every `(` of a line of unbalanced ones was quadratic."""
+    parens, braces, bad, opened, braced = {}, {}, [], [], []
+    state, i, n = None, 0, len(text)
+    while i < n:
+        c = text[i]
+        if state == "'":
+            state = None if c == "'" else state
+        elif c == "\\":
+            i += 2
+            continue
+        elif state == '"':
+            state = None if c == '"' else state
+        elif c in "'\"":
+            state = c
+        elif c == "(":
+            opened.append(i)
+        elif c == ")":
+            if opened:
+                parens[opened.pop()] = i
+        elif c == "{":
+            braced.append(i)
+        elif c == "}":
+            if braced:
+                braces[braced.pop()] = i
+        elif c == "<":
+            m = ZSH_RANGE_RE.match(text, i)
+            if m:
+                i = m.end()
+                continue
+            bad.append(i)
+        elif c in ";&>\n":
+            bad.append(i)
+        i += 1
+    return parens, braces, bad
+
+
+def _zsh_group(text, i, scan):
+    """(the marked text, the index after it) of the zsh glob group opening at text[i], or None where zsh reads none: unbalanced,
+    or holding an unquoted `;` `&` `>` or a `<` that opens no range, which zsh rejects as a parse error (probed).  Blanks, bars,
+    nested groups and ranges are part of the pattern; quoted and escaped characters stay as they are.  `scan` is the line's
+    _scan_pairs."""
+    parens, _braces, bad = scan
+    end = parens.get(i)
+    if end is None:
+        return None
+    k = bisect.bisect_right(bad, i)
+    if k < len(bad) and bad[k] < end:
+        return None
+    out, depth, n, state, j = [], 0, end + 1, None, i
+    while j < n:
+        c = text[j]
+        if state == "'":
+            out.append(c)
+            state = None if c == "'" else state
+        elif c == "\\" and j + 1 < n:
+            out.append(text[j : j + 2])
+            j += 2
+            continue
+        elif state == '"':
+            out.append(c)
+            state = None if c == '"' else state
+        elif c in "'\"":
+            state = c
+            out.append(c)
+        elif c == "(":
+            depth += 1
+            out.append(ZSH_OPEN)
+        elif c == ")":
+            depth -= 1
+            out.append(ZSH_CLOSE)
+            if depth == 0:
+                return "".join(out), j + 1
+        elif c == "|":
+            out.append(ZSH_BAR)
+        elif c in " \t":
+            out.append(_ZSH_SENTINELS[c])
+        elif c == "<":
+            m = ZSH_RANGE_RE.match(text, j)
+            if not m:
+                return None
+            out.append(ZSH_RANGE_OPEN + text[j + 1 : m.end() - 1] + ZSH_RANGE_CLOSE)
+            j = m.end()
+            continue
+        elif c in ";&>\n":
+            return None
+        else:
+            out.append(c)
+        j += 1
+    return None
+
+
+def mark_zsh_patterns(text):
+    """zsh's reading of its own glob operators (SPD-039), for the masked outer text of a line: a group `(a|b)` and a numeric range
+    `<n-m>` that zsh reads as part of a word are kept in that word with sentinels, where shlex would read a subshell and an
+    input redirection.  Returns (zsh's text, the other reading's text).  Probed in zsh 5.9 with its default options and with
+    nobareglobqual, and in bash 3.2:
+
+    - a range (`<->`, `<n->`, `<-m>`, `<n-m>`) is a pattern wherever it stands unquoted, in command position too; bash reads
+      its `<` and `>` as redirections, so the other reading restores it;
+    - `(` opening a word is a pattern outside command position (after a command word, a redirection operator, `for x in`),
+      a subshell in it (at the start of a command, after an assignment, `()`, a reserved word such as `time`, `!` or `{`, and
+      after a redirection's target at the start of a command).  bash rejects the pattern line, but the shells place command
+      position differently in places (`time -p (` and `coproc NAME (` are bash subshells, `repeat 1 (` a zsh one), so the
+      other reading restores the parenthesis for shlex to read as before;
+    - glued inside a word, `(` is a pattern in zsh and a syntax error in bash, whole in both readings, except `()` (a function's
+      header), `$((`, `name=(` and a reserved word in command position (bash runs `!(`, `{(`, `if(`, `time(`, `then(`, `do(`
+      and `else(` as a subshell, zsh `{(` and `else(`);
+    - `>(` and `2>(` stay a process substitution; `&>(` and `>|(` open a pattern target;
+    - case patterns, `[[ ... ]]`, `(( ... ))`, `${...}` and here-document delimiters are left as they are.
+
+    Both texts are the input when it holds none of these."""
+    if "(" not in text and "<" not in text:
+        return text, text
+    scan = _scan_pairs(text)
+    parens, braces = scan[0], scan[1]
+    out, other, i, n = [], [], 0, len(text)
+    command = True  # zsh's command position
+    target = None  # after a redirection operator: the command position to restore after its target
+    heredoc = cond = arith_next = punctuation_next = False
+    cases = []  # per open case command: "subject", "in", "pattern" or "body"
+    while i < n:
+        c = text[i]
+        if c in " \t":
+            out.append(c)
+            other.append(c)
+            i += 1
+            continue
+        in_pattern = bool(cases) and cases[-1] == "pattern"
+        if punctuation_next:  # a word stopped here without reading a pattern: this is shell punctuation, as before SPD-039
+            word_start = False
+        elif c == "(":
+            if text.startswith("((", i) and (command or arith_next) and i in parens:  # (( arithmetic )), or a for loop's header
+                end = parens[i] + 1
+                out.append(text[i:end])
+                other.append(text[i:end])
+                i, command, arith_next = end, False, False
+                continue
+            word_start = not (command or cond or heredoc or in_pattern or text.startswith("()", i)) and _zsh_group(text, i, scan) is not None
+        else:
+            word_start = c == "<" and not (cond or heredoc) and ZSH_RANGE_RE.match(text, i) is not None
+        punctuation_next = False
+        if c in ";&|<>()" and not word_start:
+            op = "()" if text.startswith("()", i) else next((o for o in SHELL_OPERATORS if text.startswith(o, i)), c)
+            out.append(op)
+            other.append(op)
+            i += len(op)
+            arith_next = False
+            if op in ("<(", ">("):
+                command, target = True, None
+            elif op in ("(", "()"):  # a subshell, or a function's header: a command follows (zsh's INOUTPAR)
+                command = True
+            elif op == ")":
+                if in_pattern:
+                    cases[-1], command = "body", True
+                else:
+                    command = False
+            elif op in OUT_REDIRECTS or op in IN_REDIRECTS:
+                target = command if target is None else target
+                command, heredoc = False, op in ("<<", "<<-")
+            elif not in_pattern:  # ; ;; ;& ;;& & && || | |&
+                command, target, heredoc = True, None, False
+                if op in (";;", ";&", ";;&") and cases and cases[-1] == "body":
+                    cases[-1] = "pattern"
+            continue
+        # a word: copy it, marking the groups and ranges zsh reads in it; the other reading restores a range and a group that
+        # opens the word, and keeps a group glued inside it whole
+        start, j, word, alternative, state = i, i, [], [], None
+        while j < n:
+            ch = text[j]
+            if state == "'":
+                piece, state = ch, (None if ch == "'" else state)
+            elif ch == "\\" and j + 1 < n:
+                piece = text[j : j + 2]
+            elif state == '"':
+                piece, state = ch, (None if ch == '"' else state)
+            elif ch in "'\"":
+                piece, state = ch, ch
+            elif ch in " \t;&|>)":
+                break
+            elif ch == "$" and text.startswith("${", j):
+                piece = text[j : braces[j + 1] + 1] if j + 1 in braces else text[j:]
+            elif ch == "<":
+                m = None if (cond or heredoc) else ZSH_RANGE_RE.match(text, j)
+                if not m:
+                    break
+                word.append(ZSH_RANGE_OPEN + text[j + 1 : m.end() - 1] + ZSH_RANGE_CLOSE)
+                alternative.append(m.group())
+                j = m.end()
+                continue
+            elif ch == "(":
+                if j > start and text[j - 1] == "$" and j in parens:  # $(( arithmetic ))
+                    piece = text[j : parens[j] + 1]
+                else:
+                    reserved = command and 0 < j - start <= 9 and text[start:j] in ZSH_COMMAND_POSITION_WORDS  # `{(`, `else(`: a subshell
+                    array = target is None and j > start and text[j - 1] == "=" and _ARRAY_NAME_RE.fullmatch(text, start, j)
+                    group = None
+                    if not (cond or heredoc or reserved or array or text.startswith("()", j)):
+                        group = _zsh_group(text, j, scan)
+                    if group is None:
+                        punctuation_next = True  # the walk reads this parenthesis as it did before SPD-039
+                        break
+                    word.append(group[0])
+                    alternative.append(text[j : group[1]] if j == start else group[0])
+                    j = group[1]
+                    continue
+            else:
+                run = _PLAIN_RUN_RE.match(text, j)  # ordinary characters, copied at once
+                piece = run.group() if run else ch
+            word.append(piece)
+            alternative.append(piece)
+            j += len(piece)
+        if j == start:  # nothing a word could hold: the outer loop reads it as punctuation
+            punctuation_next = True
+            if c not in ";&|<>()":
+                out.append(c)
+                other.append(c)
+                i += 1
+            continue
+        out.append("".join(word))
+        other.append("".join(alternative))
+        w, i = text[start:j], j
+        arith_next = False
+        if heredoc:
+            heredoc = False
+        if target is not None:
+            command, target = target, None
+        elif w.isdigit() and j < n and text[j] in "<>":
+            pass  # a file descriptor before its redirection operator
+        elif cond:
+            if w == "]]":
+                cond, command = False, True
+        elif cases and cases[-1] == "subject":
+            cases[-1] = "in"
+        elif cases and cases[-1] == "in":
+            cases[-1] = "pattern" if w == "in" else "in"
+        elif in_pattern:
+            if w == "esac":
+                cases.pop()
+                command = True
+        elif command:
+            if w == "case":
+                cases.append("subject")
+                command = False
+            elif w == "esac" and cases:
+                cases.pop()
+            elif w == "[[":
+                cond, command = True, False
+            elif w in ("for", "select", "foreach", "function", "repeat"):
+                command, arith_next = False, w in ("for", "select")
+            elif w in ZSH_COMMAND_POSITION_WORDS or ASSIGNMENT_WORD_RE.match(w):
+                pass
+            else:
+                command = False
+    return "".join(out), "".join(other)
 
 
 def shell_tokens(text):
@@ -5262,13 +5540,31 @@ def analyse_command(command, analysis=None, depth=0):
         return a
     text, bodies = strip_heredocs(command)
     outer, inner = split_substitutions(newlines_as_separators(text))
-    tokens = shell_tokens(neutralize_quoted_globs(outer))
+    plain = neutralize_quoted_globs(outer)
+    marked, other = mark_zsh_patterns(plain)
+    tokens = shell_tokens(marked)  # the readings differ only in unquoted characters, so each tokenizes when zsh's does
     if tokens is None:
         for sub in inner:
-            isolated(a, lambda: analyse_command(sub, a, depth + 1))
+            analyse_isolated(a, sub, depth + 1)
         a.unparseable = True
         return a
+    if marked == plain:
+        ShellWalk(a, inner, bodies, depth).walk(tokens)
+        return a
+    # Two readings of one line (SPD-039): zsh's, its groups and ranges kept whole, then the other shell's, where a range is two
+    # redirections (bash) and a group opening a word is read as shlex reads it, a subshell where one runs (mark_zsh_patterns).
+    # Every command and target either reading finds is checked, zsh's first; the directories and variables after the line are
+    # those of both.  The quotes are the same, so both tokenize.
+    cwds, variables, loop_depth = a.cwds, dict(a.vars), a.loop_depth
     ShellWalk(a, inner, bodies, depth).walk(tokens)
+    if other == marked:
+        return a
+    zsh_cwds, zsh_vars = a.cwds, a.vars
+    a.cwds, a.vars, a.loop_depth, a.cd_uncertain = cwds, variables, loop_depth, False
+    ShellWalk(a, inner, bodies, depth).walk(shell_tokens(other) or [])
+    a.cwds = union_dirs(zsh_cwds, a.cwds)
+    for name, value in zsh_vars.items():
+        a.vars[name] = value if a.vars.get(name, value) == value else SUBST  # readings that disagree: a value the hook cannot know
     return a
 
 
@@ -5278,6 +5574,68 @@ def isolated(a, run):
     run()
     a.cwds = before
     a.cd_uncertain = False
+
+
+def analyse_isolated(a, command, depth):
+    """analyse_command on a body that runs in its own process, once per body and starting state: both readings of a line walk
+    its substitutions (SPD-039), and a nested line must not double its work at every level."""
+    key = (command, depth, a.cwds, a.loop_depth, tuple(sorted(a.vars.items())))
+    if key in a.isolated_done:
+        return
+    a.isolated_done.add(key)
+    isolated(a, lambda: analyse_command(command, a, depth))
+
+
+_QUALIFIER_CLOSERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+
+
+def trailing_group(word):
+    """(start, end) of the group a marked word ends with, when it has no top-level `|`: what zsh with bareglobqual, its
+    default, reads as a glob qualifier list (SPD-039, probed: `SPD-001.md(.)` opened the file); else None."""
+    if not word.endswith(ZSH_CLOSE):
+        return None
+    depth, k = 0, len(word) - 1
+    while k >= 0:
+        if word[k] == ZSH_CLOSE:
+            depth += 1
+        elif word[k] == ZSH_OPEN:
+            depth -= 1
+            if depth == 0:
+                break
+        elif word[k] == ZSH_BAR and depth == 1:
+            return None
+        k -= 1
+    return (k, len(word)) if k > 0 else None
+
+
+def qualifier_code(word):
+    """The shell code a trailing qualifier list runs in zsh with bareglobqual (probed: `(e:"touch ran":)`, `(oe:...:)`,
+    `(e{...})`, `(e[...])` ran their string, `(+f)` ran f): each `e` qualifier's string, delimited by the character after the
+    `e` (or its closing bracket), and each name after a `+`.  Read loosely, from every `e` and `+` outside a string already
+    taken, so another qualifier's argument is at worst read as one more command."""
+    span = trailing_group(word)
+    if span is None:
+        return []
+    text = deglob(word[span[0] + 1 : span[1] - 1])
+    codes, i, n = [], 0, len(text)
+    while i < n:
+        if text[i] == "e" and i + 1 < n:
+            end = text.find(_QUALIFIER_CLOSERS.get(text[i + 1], text[i + 1]), i + 2)
+            end = n if end == -1 else end
+            codes.append(text[i + 2 : end])
+            i = end + 1
+            continue
+        if text[i] == "+":
+            m = _QUALIFIER_NAME_RE.match(text, i + 1)
+            if m:
+                codes.append(m.group())
+                i = m.end()
+                continue
+        i += 1
+    return [code for code in codes if code.strip()]
+
+
+_QUALIFIER_NAME_RE = re.compile(r"[\w:.-]+")  # the command a `+` qualifier names
 
 
 class ShellFrame:
@@ -5373,8 +5731,17 @@ class ShellWalk:
         for w in words:
             for _ in range(w.count(SUBST)):
                 if self.inner:
-                    body = self.inner.pop(0)
-                    isolated(self.a, lambda: analyse_command(body, self.a, self.depth + 1))
+                    analyse_isolated(self.a, self.inner.pop(0), self.depth + 1)
+            if ZSH_CLOSE in w:
+                for code in qualifier_code(w):
+                    # zsh runs it in the shell that expands the word, once for every file the glob matches (probed: a cd there
+                    # moved the command's own directory), so its commands are checked and its cd is followed as a loop's
+                    before = self.a.cwds
+                    self.a.loop_depth += 1
+                    analyse_command(code, self.a, self.depth + 1)
+                    self.a.loop_depth -= 1
+                    self.a.cwds = union_dirs(before, self.a.cwds)
+                    self.a.cd_uncertain = False
         cleaned, bodies, k = [], [], 0
         while k < len(words):
             if words[k] in ("<<", "<<-"):
@@ -5519,8 +5886,7 @@ class ShellWalk:
             self.pop()
         self.end_list()
         while self.inner:  # a substitution no word held (a malformed line): still analysed
-            body = self.inner.pop(0)
-            isolated(self.a, lambda: analyse_command(body, self.a, self.depth + 1))
+            analyse_isolated(self.a, self.inner.pop(0), self.depth + 1)
 
 
 def cdpath_entries(a):
@@ -5648,7 +6014,7 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=_CURRENT):
             effect = max(effect, prefix_effect(w, words[1] if len(words) > 1 else None), key=EFFECT_ORDER.get)
             words, strings = strip_wrapper(words)
             for s in strings:
-                isolated(a, lambda: analyse_command(s, a, depth + 1))
+                analyse_isolated(a, s, depth + 1)
         else:
             break
     if not words:
@@ -5685,13 +6051,13 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=_CURRENT):
             w = words[i]
             if w.startswith("-") and "c" in w[1:] and not w.startswith("--"):
                 if i + 1 < len(words):
-                    isolated(a, lambda: analyse_command(words[i + 1], a, depth + 1))
+                    analyse_isolated(a, words[i + 1], depth + 1)
                 break
             if not w.startswith("-"):
                 break
             i += 1
         for body in bodies:
-            isolated(a, lambda: analyse_command(body, a, depth + 1))
+            analyse_isolated(a, body, depth + 1)
     elif base == "eval":
         a.kinds.append("eval")
         before = a.cwds
@@ -6047,18 +6413,72 @@ def brace_expand(pattern):
 
 
 def _has_bare_glob(seg):
-    """True when a masked path segment holds an unquoted `* ? [` (a sentinel is a literal character)."""
-    return any(c in "*?[" for c in seg)
+    """True when a masked path segment holds an unquoted `* ? [`, a zsh group or a zsh range (a quoted sentinel is literal)."""
+    return any(c in "*?[" or c == ZSH_OPEN or c == ZSH_RANGE_OPEN for c in seg)
+
+
+def _digit_span(a, b):
+    """A regex for the digit strings as long as a and b that lie between them (a <= b, equal lengths, zeros kept)."""
+    if a == b:
+        return a
+    if set(a) == {"0"} and set(b) == {"9"}:
+        return r"\d{%d}" % len(a)
+    if len(a) == 1:
+        return "[%s-%s]" % (a, b)
+    if a[0] == b[0]:
+        return a[0] + "(?:%s)" % _digit_span(a[1:], b[1:])
+    rest = len(a) - 1
+    parts = [a[0] + "(?:%s)" % _digit_span(a[1:], "9" * rest)]
+    if int(b[0]) - int(a[0]) > 1:
+        parts.append(r"[%d-%d]\d{%d}" % (int(a[0]) + 1, int(b[0]) - 1, rest))
+    parts.append(b[0] + "(?:%s)" % _digit_span("0" * rest, b[1:]))
+    return "|".join(parts)
+
+
+def numeric_range_regex(lo, hi):
+    """A regex for the digit strings zsh's `<lo-hi>` matches (SPD-039, probed: `SPD-<1-1>.md` opened SPD-001.md, `<->` every
+    number): a run of digits whose value lies in the range, leading zeros included, an empty bound open.  A reversed range,
+    which zsh matches to nothing, is read as the ordered one, and bounds too long to split as any digits: more files checked."""
+    if len(lo) > 18 or len(hi) > 18:
+        return r"\d+"
+    low, high = int(lo or 0), (int(hi) if hi else None)
+    if high is not None and high < low:
+        low, high = high, low
+    top = len(str(high if high is not None else low))
+    spans = []
+    for width in range(len(str(low)), top + 1):
+        a = max(low, 10 ** (width - 1) if width > 1 else 0)
+        b = 10 ** width - 1 if high is None else min(high, 10 ** width - 1)
+        if a <= b:
+            spans.append(_digit_span(str(a), str(b)))
+    if high is None:
+        spans.append(r"[1-9]\d{%d,}" % top)
+    return "0*(?:%s)" % "|".join(spans)
+
+
+_GROUP_REGEX = {ZSH_OPEN: "(?:", ZSH_BAR: "|", ZSH_CLOSE: ")"}
 
 
 def _segment_regex(seg):
-    """A regex matching one filename against a masked glob segment: bare `*` `?` `[...]` glob, a sentinel or any other
-    character is literal.  An unbalanced `[` is a literal bracket, as the shells read it (probed)."""
+    """A regex matching one filename against a masked glob segment: bare `*` `?` `[...]` glob, a zsh group is an alternation
+    and a zsh range a number in range (SPD-039), a quoted sentinel or any other character is literal.  An unbalanced `[` is
+    a literal bracket, as the shells read it (probed).  A segment the regex engine rejects matches any name: more checked."""
     out, i, n = [], 0, len(seg)
     while i < n:
         c = seg[i]
         if c in _GLOB_UNSENTINEL:
             out.append(re.escape(_GLOB_UNSENTINEL[c]))
+            i += 1
+        elif c in _GROUP_REGEX:
+            out.append(_GROUP_REGEX[c])
+            i += 1
+        elif c == ZSH_RANGE_OPEN and ZSH_RANGE_CLOSE in seg[i:]:
+            end = seg.index(ZSH_RANGE_CLOSE, i)
+            lo, _, hi = seg[i + 1 : end].partition("-")
+            out.append("(?:%s)" % numeric_range_regex(lo, hi))
+            i = end + 1
+        elif c in _SENTINEL_TEXT:  # a blank inside a group, or a stray range bracket
+            out.append(re.escape(_SENTINEL_TEXT[c]))
             i += 1
         elif c == "*":
             out.append("[^/]*")
@@ -6078,7 +6498,7 @@ def _segment_regex(seg):
                 out.append(re.escape("["))
                 i += 1
             else:
-                inner = "".join(_GLOB_UNSENTINEL.get(ch, ch) for ch in seg[i + 1:j])
+                inner = "".join(_SENTINEL_TEXT.get(ch, ch) for ch in seg[i + 1:j])
                 if inner.startswith(("!", "^")):
                     inner = "^" + inner[1:]
                 out.append("[" + inner.replace("\\", "\\\\") + "]")
@@ -6086,13 +6506,29 @@ def _segment_regex(seg):
         else:
             out.append(re.escape(c))
             i += 1
-    return re.compile("".join(out) + r"\Z")
+    try:
+        return re.compile("".join(out) + r"\Z")
+    except (re.error, RecursionError, OverflowError):  # a group a bracket swallowed half of, or nesting too deep to compile
+        return re.compile(r"[^/]*\Z")
 
 
 def bounded_glob(pattern):
     """The existing files a masked absolute glob pattern names, and whether the scan budget was reached.  `**` matches
     directories recursively; the scan is bounded by GLOB_SCAN_CAP entries and GLOB_MATCH_CAP matches so a recursive glob
-    never walks a large tree without limit (SPD-034), and stops reporting the bound was hit instead."""
+    never walks a large tree without limit (SPD-034), and stops reporting the bound was hit instead.  A zsh group holding a
+    `/`, or one left open, is a bad pattern zsh opens nothing for (SPD-039, probed)."""
+    depth = 0
+    for c in pattern:
+        if c == ZSH_OPEN:
+            depth += 1
+        elif c == ZSH_CLOSE:
+            depth -= 1
+            if depth < 0:
+                return [], False
+        elif c == "/" and depth:
+            return [], False
+    if depth:
+        return [], False
     parts = [p for p in pattern.split("/") if p != ""]
     frontier = {"/" if pattern.startswith("/") else os.getcwd()}
     scanned, capped = 0, False
@@ -6161,12 +6597,21 @@ def expand_redirect_target(target, cwds):
         patterns, c = brace_expand(base)
         capped = capped or c
         for pat in patterns:
-            m, c2 = bounded_glob(pat)
-            matches.update(m)
-            capped = capped or c2
-            if len(matches) > GLOB_MATCH_CAP:
-                return sorted(matches)[:GLOB_MATCH_CAP], True
+            for reading in qualifier_readings(pat):
+                m, c2 = bounded_glob(reading)
+                matches.update(m)
+                capped = capped or c2
+                if len(matches) > GLOB_MATCH_CAP:
+                    return sorted(matches)[:GLOB_MATCH_CAP], True
     return sorted(matches), capped
+
+
+def qualifier_readings(pattern):
+    """The patterns a marked pattern stands for: with a trailing group that has no `|`, zsh's default bareglobqual reads glob
+    qualifiers, which only narrow the files the rest matches (`(N)` also drops a word matching nothing), and nobareglobqual
+    (this Mac's Bash tool) reads a group (SPD-039, probed: `SPD-001.md(.)` opened the file only with bareglobqual); both count."""
+    span = trailing_group(pattern)
+    return [pattern] if span is None else [pattern[: span[0]], pattern]
 
 
 # -- the PreToolUse handlers ---------------------------------------------------------
