@@ -4289,6 +4289,12 @@ SPUD_ONLY_COMMANDS = ("init", "migrate", "import", "render", "backup", "schedule
 SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"), ("member", "resum"))
 MEMBER_OWN_COMMANDS = (("member", "log"), ("member", "result"), ("member", "block"), ("proposal", "file"))
 DB_PATH_RE = re.compile(r"ledger\.db|(?:^|[\s/'\"=])\.spud(?:/|$|[\s'\"])", re.IGNORECASE)
+# The ledger state directory at a project root: the database, its WAL and shm files, the worktree list cache, the backups
+# and the launcher's cached bytecode (bin/spud).  Only the CLI writes there; the Bash hook and the edit hook refuse it to
+# everyone in the same words (SPD-031).
+STATE_DIR = ".spud"
+DB_REASON = ("direct access to the ledger database is refused (%s); the inspection path is `spud sql --readonly '<statement>'`,"
+             " and every write goes through the spud CLI")
 SUBST = "__SPUD_SUBST__"  # what a lifted `$(...)` or backtick body leaves behind in the outer line
 
 # Shell analysis for PreToolUse(Bash).
@@ -4631,10 +4637,11 @@ def map_into_repository(home, path, worktrees=()):
     base, parts = best
     if len(parts) > 3 and same_entry(base, parts[:2], [".claude", "worktrees"]):
         base, parts = os.path.join(base, ".claude", "worktrees", parts[2]), parts[3:]
-    if parts and parts[0] not in GENERATED_ROOTS:
-        for generated in GENERATED_ROOTS:
-            if same_entry(base, parts[:1], [generated]):
-                parts = [generated] + parts[1:]
+    named = GENERATED_ROOTS + (STATE_DIR,)
+    if parts and parts[0] not in named:
+        for canonical in named:
+            if same_entry(base, parts[:1], [canonical]):
+                parts = [canonical] + parts[1:]
                 break
     return base, "/".join(parts)
 
@@ -4685,8 +4692,22 @@ def path_reason(rel, member, ref, fold=False):
     return "Law 5: %s is not among %s's deliverables (%s); write only there, or ask your parent to extend them" % (rel, ref, ", ".join(globs) or "none")
 
 
+def in_state_dir(rel):
+    """True when the repository path lies in the ledger state directory at its root (or is that directory).  The first
+    component is case-folded, like a generated root's, so a case variant or a simple fold (U+017F for s) is refused on
+    every filesystem; map_into_repository has already named a same-file spelling of it canonically (SPD-031).  A state
+    directory deeper in the tree is no ledger's (bin/spud keeps its state at the root of its home) and stays under the globs."""
+    return rel.split("/", 1)[0].casefold() == STATE_DIR
+
+
+def state_dir_reason(rel):
+    return DB_REASON % ("%s is in the ledger state directory at a project root, which holds the database, its WAL and shm files, the worktree"
+                        " list cache, the backups and the launcher's cached bytecode; only the CLI writes there, whatever the deliverables" % rel)
+
+
 def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd):
-    """The path rule for a Write/Edit target (and for a shell redirection target)."""
+    """The path rule for a Write/Edit target (and for a shell redirection target).  A path in the ledger state directory
+    at any project root, by any reading of it, is refused to everyone before the binding, Law 1 and glob checks (SPD-031)."""
     p = os.path.expanduser(path) if path.startswith("~") else path
     if not os.path.isabs(p):
         p = os.path.join(cwd or os.getcwd(), p)
@@ -4697,6 +4718,9 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd):
     inside = repository_paths(ctx, path, cwd)
     if not inside:
         return None, None
+    for _root, rel in inside:
+        if in_state_dir(rel):
+            return state_dir_reason(rel), rel
     if caller_agent_id and caller_member is None:
         return ("your agent_id %s is not bound to a member yet (the PostToolUse(Agent) hook binds a background spawn right after launch;"
                 " a foreground spawn is bound at its first tool call or at its stop), so %s cannot be checked against your deliverables" % (caller_agent_id, inside[0][1])), inside[0][1]
@@ -5160,8 +5184,7 @@ def actor_is_self(con, actor, caller_member, caller_agent_id):
 
 def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
     """(reason or None, analysis) for a Bash command line."""
-    db_reason = ("direct access to the ledger database is refused (%s); the inspection path is `spud sql --readonly '<statement>'`,"
-                 " and every write goes through the spud CLI")
+    db_reason = DB_REASON
     if DB_PATH_RE.search(command):
         return db_reason % "the command names ledger.db or .spud/", None
     analysis = analyse_command(command, ShellAnalysis(cwd=cwd))
@@ -5210,9 +5233,10 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
             if caller_agent_id:
                 return "the redirection target %s is relative to a directory the hook cannot follow (`cd` into a variable); use an absolute path" % target, analysis
             continue
-        reason, _rel = edit_reason(ctx, con, caller_agent_id, caller_member, target, target_cwd or cwd)
+        reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, target, target_cwd or cwd)
         if reason:
-            return ("Law 1: a redirection or tee into %s: %s" % (target, reason)) if not caller_agent_id else ("a redirection or tee into %s: %s" % (target, reason)), analysis
+            law_1 = not caller_agent_id and not (rel is not None and in_state_dir(rel))  # the state directory is refused in the database's words, not Law 1's
+            return ("Law 1: a redirection or tee into %s: %s" if law_1 else "a redirection or tee into %s: %s") % (target, reason), analysis
     return None, analysis
 
 
