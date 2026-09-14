@@ -4465,6 +4465,18 @@ def case_insensitive_fs(path):
     return _CASE_CACHE[key]
 
 
+def folds_case(root):
+    """case_insensitive_fs for a project root, asked per root (a worktree elsewhere may sit on a case-sensitive volume)
+    of the root itself or, when it does not exist yet, of its nearest existing ancestor, whose filesystem it will be on."""
+    cur = str(root)
+    while not os.path.isdir(cur):
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return case_insensitive_fs(cur)
+
+
 HARNESS_FILES_RE = re.compile(r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/subagents/", re.IGNORECASE)
 
 
@@ -4553,17 +4565,61 @@ def home_worktrees(home):
     return listed
 
 
+def file_identity(path):
+    """(st_dev, st_ino) of what `path` names, symlinks followed; None when there is nothing to stat.  Every spelling the
+    filesystem resolves to one directory has its identity: a case variant or an NFD spelling on APFS, a simple case
+    fold (U+017F for s, U+212A for k), the /System/Volumes/Data firmlink prefix on macOS, a symlink (SPD-029)."""
+    try:
+        st = os.stat(path)
+    except (OSError, ValueError):
+        return None
+    return st.st_dev, st.st_ino
+
+
+def same_entry(base, spelled, canonical):
+    """True when the components `spelled` under `base` name the directory the components `canonical` do: the same
+    strings, the same file, or, where that directory does not exist yet on a case-insensitive filesystem, the same
+    strings case-folded."""
+    if spelled == canonical:
+        return True
+    ident = file_identity(os.path.join(base, *canonical))
+    if ident is not None:
+        return file_identity(os.path.join(base, *spelled)) == ident
+    return case_insensitive_fs(base) and [s.casefold() for s in spelled] == [c.casefold() for c in canonical]
+
+
 def map_into_repository(home, path, worktrees=()):
     """(root, repository-relative path) when `path` (absolute, normalized) lies in Spud's home or in one of its
     worktrees: one git names (SPD-016), wherever it is, or a directory under .claude/worktrees/<name>/; None when
-    outside.  The root nearest the path wins, so a worktree inside the home maps to itself, not to the home."""
-    bases = []
+    outside.  The root nearest the path wins, so a worktree inside the home maps to itself, not to the home.
+
+    A root is found by file identity, not by spelling (SPD-029): the nearest existing ancestor of the path whose
+    (st_dev, st_ino) is a root's, the components below it being the repository-relative path, so any spelling of the
+    root the filesystem honours is the root.  A root with nothing to stat (a worktree git still lists after its
+    directory went) is matched by spelling as before.  A generated root spelled another way (Ledger, reportſ) is
+    named ledger or reports when it is the same directory."""
+    roots, spelled = {}, []
     for root in (str(home), *worktrees):
-        for b in (root, os.path.realpath(root)):
-            if b not in bases:
-                bases.append(b)
+        ident = file_identity(root)
+        if ident is not None:
+            roots.setdefault(ident, root)
+        else:
+            for b in (root, os.path.realpath(root)):
+                if b not in spelled:
+                    spelled.append(b)
     best = None
-    for base in bases:
+    below, cur = [], path
+    while True:
+        ident = file_identity(cur)
+        if ident is not None and ident in roots:
+            best = (roots[ident], below[::-1])
+            break
+        parent, name = os.path.split(cur)
+        if parent == cur:
+            break
+        below.append(name)
+        cur = parent
+    for base in spelled:
         rel = os.path.relpath(path, base)
         if rel == ".." or rel.startswith(".." + os.sep):
             continue
@@ -4573,22 +4629,30 @@ def map_into_repository(home, path, worktrees=()):
     if best is None:
         return None
     base, parts = best
-    if len(parts) > 3 and parts[0] == ".claude" and parts[1] == "worktrees":
-        return os.path.join(base, *parts[:3]), "/".join(parts[3:])
+    if len(parts) > 3 and same_entry(base, parts[:2], [".claude", "worktrees"]):
+        base, parts = os.path.join(base, ".claude", "worktrees", parts[2]), parts[3:]
+    if parts and parts[0] not in GENERATED_ROOTS:
+        for generated in GENERATED_ROOTS:
+            if same_entry(base, parts[:1], [generated]):
+                parts = [generated] + parts[1:]
+                break
     return base, "/".join(parts)
 
 
 def repository_paths(ctx, path, cwd):
     """Every reading of `path` that lands inside the repository: the lexical path and, when
-    a symlink changes it, the real one.  Relative paths resolve against the payload's cwd."""
+    a symlink changes it, the real one.  Relative paths resolve against the payload's cwd.
+    The real path is taken of the path as given too, since the kernel resolves a symlink
+    before a `..` after it (tests/link/.. is the link target's parent) where normpath drops
+    the pair (SPD-029)."""
     p = os.path.expanduser(path) if path.startswith("~") else path
     if not os.path.isabs(p):
         p = os.path.join(cwd or os.getcwd(), p)
     lexical = os.path.normpath(p)
     candidates = [lexical]
-    real = os.path.realpath(lexical)
-    if real != lexical:
-        candidates.append(real)
+    for real in (os.path.realpath(lexical), os.path.realpath(p)):
+        if real not in candidates:
+            candidates.append(real)
     worktrees = home_worktrees(ctx.home)
     out = []
     for c in candidates:
@@ -4601,8 +4665,9 @@ def repository_paths(ctx, path, cwd):
 def path_reason(rel, member, ref, fold=False):
     """None when the actor may write the repository path `rel`, else the reason.  The
     generated roots are matched whatever the case (a case variant is refused on every
-    filesystem); globs fold case only where the filesystem does."""
-    generated = rel.split("/")[0].lower() in GENERATED_ROOTS
+    filesystem), case-folded rather than lower-cased so that the simple folds APFS honours
+    (reportſ is reports) count too (SPD-029); globs fold case only where the filesystem does."""
+    generated = rel.split("/")[0].casefold() in GENERATED_ROOTS
     if member is None:
         if any(path_matches_glob(rel, g, fold) for g in SPUD_PATHS):
             return None
@@ -4636,9 +4701,8 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd):
         return ("your agent_id %s is not bound to a member yet (the PostToolUse(Agent) hook binds a background spawn right after launch;"
                 " a foreground spawn is bound at its first tool call or at its stop), so %s cannot be checked against your deliverables" % (caller_agent_id, inside[0][1])), inside[0][1]
     ref = member_ref(con, caller_member["id"]) if caller_member else "Spud"
-    fold = case_insensitive_fs(ctx.home)
-    for _root, rel in inside:
-        reason = path_reason(rel, caller_member, ref, fold)
+    for root, rel in inside:
+        reason = path_reason(rel, caller_member, ref, folds_case(root))
         if reason:
             return reason, rel
     return None, inside[0][1]
@@ -4935,6 +4999,23 @@ def python_interpreter_args(args):
     return None, None, False, None, []
 
 
+def spud_launcher(script, cwd):
+    """True when running `script` runs a spud launcher however its path is spelled (SPD-029): Law 6's refusals and
+    Law 5's `--as` check depend on seeing the call.  Its name case-folded is spud (bin/SPUD and bin/ſpud are bin/spud
+    on macOS), or the name its symlinks resolve to is (the launcher finds its program from its own real path, so a
+    link by any name runs it).  A relative path resolves against the directory the shell would be in."""
+    if os.path.basename(script).casefold() == "spud":
+        return True
+    if "$" in script or "`" in script or SUBST in script:
+        return False
+    p = os.path.expanduser(script) if script.startswith("~") else script
+    if not os.path.isabs(p):
+        if not cwd:
+            return False
+        p = os.path.join(cwd, p)
+    return os.path.basename(os.path.realpath(p)).casefold() == "spud"
+
+
 def analyse_command(command, analysis=None, depth=0):
     """Walk every simple command the shell would run, recursing into substitutions,
     `sh -c` strings, `eval` and here-documents fed to a shell."""
@@ -5002,7 +5083,9 @@ def analyse_segment(tokens, bodies, a, depth):
         a.kinds.append("var")
         a.findings.append(("var", "$(...)"))
         return
-    base = os.path.basename(cmd).lower()
+    base = os.path.basename(cmd).casefold()
+    if base != "spud" and "/" in cmd and spud_launcher(cmd, a.cwd):
+        base = "spud"  # a symlink to bin/spud run by its path, whatever its own name (SPD-029)
     if base == "git":
         verb, args = git_verb(words)
         a.kinds.append("git")
@@ -5032,7 +5115,7 @@ def analyse_segment(tokens, bodies, a, depth):
         if (code and "sqlite" in code.lower()) or (module and "sqlite" in module.lower()) or (stdin_script and any("sqlite" in b.lower() for b in bodies)):
             a.kinds.append("db")
             a.findings.append(("db", cmd))
-        elif script and os.path.basename(script) == "spud":
+        elif script and spud_launcher(script, a.cwd):
             a.kinds.append("spud")
             a.findings.append(("spud", parse_spud_call(script_args)))
         else:
