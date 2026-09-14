@@ -4,8 +4,8 @@ filters:
     - not:
         - file.inFolder("ledger/_templates")
 formulas:
-  persona_on: 'if(persona == "contractor", persona + " on " + agent_type, persona)'
-  minutes: 'if(duration_ms, (duration_ms / 60000).round())'
+  persona_on: if(persona == "contractor", persona + " on " + agent_type, persona)
+  minutes: if(duration_ms, (duration_ms / 60000).round())
 properties:
   file.name:
     displayName: Name
@@ -75,6 +75,8 @@ views:
         direction: DESC
       - property: id
         direction: ASC
+    columnSize:
+      note.ticket: 154
   - type: table
     name: Team
     filters:
