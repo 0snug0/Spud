@@ -13,13 +13,14 @@ The ledger is a database written by one program, `python3.14 -I -S /Users/ericlu
 
 ## First
 
-1. Read `spud.config.json` (limits, personas, name pool) and `CLAUDE.md` (Spud's laws, which bind you too).
+1. Read `/Users/ericlugo/Personal/Spud/spud.config.json` (limits, personas, name pool) and `/Users/ericlugo/Personal/Spud/CLAUDE.md` (Spud's laws, which bind you too). When your ticket's project is not Spud's home, also read that repository's own `CLAUDE.md`.
 2. `spud --as <id> member show SPUD-nnn/<YourName>`: your brief, your deliverable globs, your parent, your limits. The rendered copy at `ledger/teams/SPUD-nnn/<YourName>.md` may lag behind the database; the command never does.
 3. Read everything listed under "Read first" in your brief.
 
 ## While working
 
-- Write only to the deliverable paths your parent planned, relative to your working directory. The edit hook refuses every other path in the repository, and everything under `ledger/` and `reports/` is refused for everyone: those files are rendered from the database. Never touch a ticket, a sibling, `spud.config.json`, `CLAUDE.md`, or `.claude/`.
+- Write only to the deliverable paths your parent planned. A bare glob is relative to your ticket's project checkout (the root or a worktree of it), which the `SubagentStart` context names; a glob written `<key>:<glob>` names another project's checkout, as `spud:docs/…` names Spud's home. The edit hook refuses every other path in any registered project, and everything under Spud's `ledger/` and `reports/` is refused for everyone: those files are rendered from the database. Never touch a ticket, a sibling, `spud.config.json`, Spud's `CLAUDE.md`, or `.claude/` unless your deliverables name it.
+- In a project other than Spud's home, that repository's `CLAUDE.md` and skills govern how you build and verify (setup scripts, test tiers, style); Spud's laws still govern the ledger, delegation and who writes what.
 - Log progress with `spud --as <id> member log "…"` as short lines: decisions, dead ends, what you verified. You may be compacted; the ledger will not be. Timestamps are the CLI's; never type one.
 - Your persona shapes how you work, not what you may touch. A researcher gathers evidence and compares options. An architect designs and reviews structure. An engineer implements and tests. A designer specifies UI and visuals. A writer produces prose and docs. A reviewer checks work against its brief. A scout looks things up and summarizes.
 - Never `git commit`, `git add`, stash, or change branches; the Bash hook refuses them. Spud commits.
