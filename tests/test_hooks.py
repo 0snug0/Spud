@@ -1567,6 +1567,45 @@ class PathAliasAsserts(PathRuleAsserts):
         self.assertBashSilent("echo x > %s/tests/out.txt" % a)
 
 
+STATE = ".spud"  # the ledger state directory at a project root (SPD-031); the Bash hook refuses a command naming it, so its paths are built here
+DB_WORDING = "spud sql --readonly"  # the Bash hook's database refusal, which the edit hook gives for the state directory too
+
+
+def quote_split(path):
+    """A shell spelling of `path` that the Bash hook's raw-text database regex misses and its shell analysis resolves: the state
+    directory and the database file names split by adjacent quotes (."spud", ledger."db"), so a refusal comes from the path rule."""
+    parts = []
+    for part in str(path).split("/"):
+        if part.casefold() == STATE or part.casefold().startswith("ledger.db"):
+            i = part.index(".")
+            part = '%s."%s"' % (part[:i], part[i + 1:])
+        parts.append(part)
+    return "/".join(parts)
+
+
+class StateDirAsserts(PathAliasAsserts):
+    """SPD-031: a path in the state directory is refused to the edit tools and to a shell redirection for every actor, in the Bash
+    hook's database wording (never Law 1's or Law 5's), whatever the deliverable globs."""
+
+    def assertStateRefused(self, path, agent_id, tool="Write"):
+        r = self.assertRefused(path, DB_WORDING, agent_id=agent_id, tool=tool)
+        self.assertNotIn("Law", r.reason, (str(path), r.reason))
+        return r
+
+    def assertStateBashRefused(self, command, agent_id):
+        r = self.home.hook("PreToolUse", self.pre_bash(command, agent_id=agent_id))
+        self.assertEqual((r.code, r.decision), (0, "deny"), (command, r))
+        self.assertIn(DB_WORDING, r.reason, (command, r.reason))
+        self.assertIn("redirection or tee", r.reason, (command, r.reason))  # the path rule refused it, not the raw-text regex
+        self.assertNotIn("Law", r.reason, (command, r.reason))
+        return r
+
+    def assertStateHolds(self, target, agents=(AGENT_A, None)):
+        for agent_id in agents:
+            self.assertStateRefused(target, agent_id)
+            self.assertStateBashRefused("echo x > %s" % quote_split(target), agent_id)
+
+
 class PreEditTest(PathRuleAsserts, HookCase):
     def setUp(self):
         super().setUp()
@@ -1679,7 +1718,7 @@ class PreEditTest(PathRuleAsserts, HookCase):
         self.assertIn("file_path", r.reason)
 
 
-class WorktreeElsewhereTest(PathAliasAsserts, HookCase):
+class WorktreeElsewhereTest(StateDirAsserts, HookCase):
     """SPD-016: every worktree `git worktree list --porcelain` names for the home maps to repository-relative paths,
     wherever `git worktree add` put it, so the deliverable globs and the generated roots bind there too.  The home is
     a real repository here; the list is cached under .spud/ until a worktree is added, moved or removed, and a list
@@ -1761,6 +1800,21 @@ class WorktreeElsewhereTest(PathAliasAsserts, HookCase):
     def test_a_worktree_elsewhere_under_the_data_volume_firmlink(self):
         self.assertRootHolds(self.alias_or_skip(self.elsewhere, FIRMLINK + str(self.elsewhere), "the %s firmlink prefix" % FIRMLINK))
 
+    def test_the_state_directory_holds_at_the_home_and_at_a_worktree_elsewhere(self):
+        """SPD-031: the worktree cache this class exercises, which the hook itself writes, and a worktree elsewhere's own state
+        directory, refused to a member whose glob is ** and to Spud."""
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_B)
+        self.assertSilent(self.elsewhere / "tests" / "x.py", agent_id=AGENT_B)  # lists the worktrees, writing the cache
+        cache = self.home.path / STATE / "worktrees.json"
+        self.assertTrue(cache.is_file())
+        agents = (AGENT_B, None)
+        self.assertStateHolds(cache, agents)
+        self.assertStateHolds(self.elsewhere / STATE / "ledger.db", agents)
+        self.assertStateHolds(self.elsewhere / STATE / "pycache" / "x.pyc", agents)
+        for what, spelled in (("upper case", str(self.elsewhere).upper()), ("the %s firmlink prefix" % FIRMLINK, FIRMLINK + str(self.elsewhere))):
+            with self.subTest(what):
+                self.assertStateHolds(self.alias_or_skip(self.elsewhere, spelled, what) + "/" + STATE + "/worktrees.json", agents)
+
 
 class PathAliasTest(PathAliasAsserts, HookCase):
     """SPD-029 (proposal 24): the path rule found a root by comparing spellings, so on macOS a target spelled with a case
@@ -1834,6 +1888,107 @@ class NonAsciiHomeTest(PathAliasAsserts, HookCase):
         nfd = unicodedata.normalize("NFD", str(self.home.path))
         self.assertNotEqual(nfd, str(self.home.path))
         self.assertRootHolds(self.alias_or_skip(self.home.path, nfd, "NFD normalization"))
+
+
+class StateDirTest(StateDirAsserts, HookCase):
+    """SPD-031 (proposal 27): the ledger state directory at a project root holds the database, its WAL and shm files, the worktree
+    list cache, the backups and the launcher's cached bytecode, which every hook run loads.  The Bash hook refused a command
+    naming it, but the edit hook checked a path there only against Law 1 and the deliverable globs, so a member whose globs
+    reached it could Write the database.  Nothing but the CLI writes there now, for any actor."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_A)
+        self.named = self.spawn(self.plan(persona="engineer", model="opus", deliverable=[STATE + "/**", STATE + "/ledger.db"]), AGENT_B)
+        self.state = self.home.path / STATE
+        self.pyc = sorted((self.state / "pycache").rglob("*.pyc"))
+        self.targets = {
+            "database": self.state / "ledger.db",
+            "WAL": self.state / "ledger.db-wal",
+            "worktree cache": self.state / "worktrees.json",
+            "cached bytecode": self.pyc[0] if self.pyc else self.state / "pycache" / "spud_ledger.cpython-314.pyc",
+            "backup": self.state / "backups" / "ledger-2026-09-13.db",
+            "the directory itself": self.state,
+        }
+
+    def test_every_edit_tool_is_refused_for_everyone_whatever_the_globs(self):
+        self.assertEqual((self.wide["deliverables"], self.named["deliverables"]), (["**"], [STATE + "/**", STATE + "/ledger.db"]))
+        self.assertTrue(self.targets["database"].is_file())
+        self.assertTrue(self.pyc, "the launcher caches its bytecode under the state directory")
+        for what, target in self.targets.items():
+            for agent_id in (AGENT_A, AGENT_B, None):
+                for tool in ("Write", "Edit"):
+                    with self.subTest(what=what, agent_id=agent_id, tool=tool):
+                        self.assertStateRefused(target, agent_id, tool)
+        for tool in ("MultiEdit", "NotebookEdit"):
+            self.assertStateRefused(self.targets["database"], AGENT_A, tool)
+        self.assertStateRefused(self.targets["database"], AGENT_D)  # an unbound caller: refused in the same words
+        self.assertIn(STATE + "/ledger.db", [e["data"].get("path") for e in self.denied()])
+
+    def test_a_shell_redirection_is_refused_for_everyone(self):
+        home = self.home.path
+        for what in ("database", "worktree cache", "cached bytecode"):
+            for agent_id in (AGENT_A, AGENT_B, None):
+                with self.subTest(what=what, agent_id=agent_id):
+                    self.assertStateBashRefused("echo x > %s" % quote_split(self.targets[what]), agent_id)
+        for agent_id in (AGENT_A, AGENT_B, None):
+            with self.subTest("tee and relative after cd", agent_id=agent_id):
+                self.assertStateBashRefused("printf x | tee -a %s" % quote_split(self.targets["worktree cache"]), agent_id)
+                self.assertStateBashRefused("cd %s && echo x > .\"spud\"/pycache/x.pyc" % home, agent_id)
+                self.assertStateBashRefused("cd %s && echo x >> .'spud'/ledger.'db'-wal" % home, agent_id)
+
+    def test_aliases_of_the_state_directory(self):
+        home, state = str(self.home.path), str(self.state)
+        for what, spelled in (("upper case", home + "/.SPUD"), ("mixed case", home + "/.SpUd"), ("long s (U+017F)", home + "/.ſpud"),
+                              ("upper-case home", state.upper()), ("mixed-case home", mixed_case(home) + "/" + STATE),
+                              ("the %s firmlink prefix" % FIRMLINK, FIRMLINK + state)):
+            with self.subTest(what):
+                spelled = self.alias_or_skip(state, spelled, what)
+                for name in ("ledger.db", "worktrees.json"):
+                    self.assertStateHolds(spelled + "/" + name, (AGENT_A, AGENT_B, None))
+
+    def test_symlinks_and_dot_dot_into_the_state_directory(self):
+        home = self.home.path
+        (home / "tests").mkdir(exist_ok=True)
+        (home / "tests" / "state").symlink_to(self.state)
+        (home / "tests" / "db").symlink_to(self.targets["database"])
+        (home / "tests" / "sub").symlink_to(self.state / "pycache")
+        outside = home.parent / ("%s-state-%d" % (home.name, os.getpid()))
+        outside.symlink_to(self.state)
+        self.addCleanup(outside.unlink)
+        for what, spelled in (("a symlink in the repository", home / "tests" / "state" / "ledger.db"),
+                              ("a symlink to the database file", home / "tests" / "db"),
+                              ("a symlink outside every root", outside / "worktrees.json"),
+                              (".. after a symlink", "%s/tests/sub/../ledger.db" % home)):
+            with self.subTest(what):
+                self.assertStateHolds(spelled, (AGENT_A, None))
+
+    def test_the_state_directory_of_a_claude_worktree_root(self):
+        """Refused at every project root, not only the home's: a worktree's own bin/spud run without SPUD_HOME takes the worktree
+        as its home and keeps its database and cached bytecode in that root's state directory (bin/spud); only the CLI writes one."""
+        wt = self.home.path / ".claude" / "worktrees" / "spd-099-thing"
+        (wt / STATE).mkdir(parents=True)
+        for name in ("ledger.db", "worktrees.json", "pycache/x.pyc"):
+            self.assertStateHolds(wt / STATE / name, (AGENT_A, AGENT_B, None))
+        with self.subTest("upper case"):
+            self.assertStateHolds(self.alias_or_skip(wt, str(wt).upper(), "upper case") + "/" + STATE + "/ledger.db")
+
+    def test_names_like_the_state_directory_stay_under_the_globs(self):
+        """Controls.  Only the first component below a project root is the state directory: a nested one (tests/fixtures/.spud) is no
+        ledger's state, since bin/spud keeps its state at the root of its home, so it stays under the deliverable globs like any
+        similar name.  (The Bash hook's raw-text regex still refuses a command that spells a nested one plainly.)"""
+        home = self.home.path
+        nested = (home / "tests" / "fixtures" / STATE / "ledger.db", home / "docs" / STATE / "worktrees.json")
+        similar = (home / (STATE + "rc"), home / (STATE + "-notes") / "x.md", home / "x.spud", home / "docs" / "spud" / "x.md", home / "spud" / "ledger.db")
+        for p in nested + similar:
+            with self.subTest(str(p)):
+                self.assertSilent(p, agent_id=AGENT_A)
+                self.assertRefused(p, "Law 1", agent_id=None)
+        self.assertRefused(nested[0], "deliverables", agent_id=AGENT_B)
+        self.assertBashSilent("echo x > %s" % quote_split(nested[0]), agent_id=AGENT_A)
+        self.assertBashSilent("echo x > %s" % (home / (STATE + "rc")), agent_id=AGENT_A)
+        self.assertBashRefused("echo x > %s" % quote_split(nested[0]), "Law 1", agent_id=None)
+        self.assertBashSilent("echo x > %s" % (home / "tests" / "out.txt"), agent_id=AGENT_A)
 
 
 class DeliverableGlobTest(SpudTestCase):
