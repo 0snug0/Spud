@@ -132,6 +132,15 @@ class RoundTripMixin:
         cls.home.cleanup()
         cls.tmp.cleanup()
 
+    def rendered_text(self, rel):
+        """The rendered file, less its `project` property when the committed note predates it: SPD-014 names the project in
+        every note, and a corpus committed before the first render with it carries no such line."""
+        got = (self.out / rel).read_text(encoding="utf-8")
+        want = (self.src / rel).read_text(encoding="utf-8")
+        if rel.parts[0] == "ledger" and want.startswith("---\n") and not re.search(r"^project: ", want.split("\n---\n", 1)[0], re.M):
+            got = re.sub(r"\A(---\n(?:[^\n]*\n)*?)project: [^\n]*\n", r"\1", got, count=1)
+        return got
+
     def sources(self):
         files = sorted(self.src.glob("ledger/tickets/SPD-*.md"))
         files += sorted(self.src.glob("ledger/teams/SPUD-*/*.md"))
@@ -162,7 +171,7 @@ class RoundTripMixin:
         self.assertGreater(self.imported["report_entries"], 0)
 
     def test_every_source_file_is_generated_and_nothing_else(self):
-        expected = set(self.sources())
+        expected = set(self.sources()) | {Path("ledger/Projects.md")}  # generated whatever the corpus holds (SPD-014)
         generated = {p.relative_to(self.out) for p in self.out.rglob("*") if p.is_file()}
         self.assertEqual(generated, expected)
         for never in ["ledger/Home.md", "ledger/Spud.md", "ledger/Board.base", "ledger/Fleet.base"]:
@@ -184,7 +193,7 @@ class RoundTripMixin:
         failures = []
         for rel in self.sources():
             want_text = (self.src / rel).read_text(encoding="utf-8")
-            got_text = (self.out / rel).read_text(encoding="utf-8")
+            got_text = self.rendered_text(rel)
             if is_ticket(rel):
                 # ## Team is generated from the members table: its own rule; the rest of the note byte for byte
                 want_text, want_team = split_team_section(want_text)
@@ -210,7 +219,7 @@ class RoundTripMixin:
             if rel.parts[0] == "reports":
                 continue
             want, _ = split_frontmatter((self.src / rel).read_text(encoding="utf-8"))
-            got, _ = split_frontmatter((self.out / rel).read_text(encoding="utf-8"))
+            got, _ = split_frontmatter(self.rendered_text(rel))
             self.assertEqual([l.rstrip() for l in want], [l.rstrip() for l in got], rel)
 
     def test_sections_identical_in_order(self):
@@ -243,7 +252,8 @@ class RoundTripMixin:
         for r in rows:
             self.assertIsNotNone(r["data"])
             paths.add(json.loads(r["data"])["source"])
-        self.assertEqual(paths, {str(rel) for rel in self.sources()})
+        projects = {"ledger/Projects.md"} if (self.src / "ledger" / "Projects.md").is_file() else set()  # SPD-014: imported first, when committed
+        self.assertEqual(paths, {str(rel) for rel in self.sources()} | projects)
 
     def test_second_import_is_refused(self):
         proc = self.home.run("import", self.src / "ledger", self.src / "reports", check=False)
