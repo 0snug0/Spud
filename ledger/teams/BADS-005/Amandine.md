@@ -31,6 +31,10 @@ Then run `member result` with every gate's command and outcome, the staged asset
 Never run `gh release create`, `gh release upload`, `npm run dist:ios -- --upload`, `--validate`, npm publish, or any git commit, push, tag or merge. Those wait for Eric's approval and for Spud. Do not use the Browser pane; another agent is driving App Store Connect in it.
 
 ## Log
+- 2026-09-14T14:50 Preflight: tree clean at 3eaa7c6, tag v0.13.4 at HEAD, origin/main...HEAD = 0 behind / 1 ahead; package.json, site/downloads.js and pbxproj all stamp 0.13.4 (13004); electron-builder.env present; BT_ADMOB_TESTING unset; node v26.8.2; gh logged in as 0snug0.
+- 2026-09-14T14:50 §3 prep: 'git worktree prune' refused by the Law 7 hook for spudagents (not retried; prune only drops stale admin entries). Idle check 'pgrep -fl electron|node | grep worktrees' -> 'worktrees idle'. Proceeding: rm -rf dist dist-arm64 dist-x64, npm ci.
+- 2026-09-14T14:52 npm ci exit 0, but npm 11.19.1 left node_modules/electron/dist absent (no path.txt): electron's postinstall did not run, so every worktree symlinking this node_modules had no Electron binary. Repairing with 'node node_modules/electron/install.js'. First 'npm test': 1641 tests, 1541 pass, 100 fail, all server-integration tests; a foreign supabase_*_bad-takes stack is listening on 54321. Rerunning with SUPABASE_URL=http://127.0.0.1:1 per runbook section 3.
+- 2026-09-14T14:52 Gate npm test: 'SUPABASE_URL=http://127.0.0.1:1 npm test' exit 0, 1641 tests, 1537 pass, 0 fail, 104 skipped (the server suite) -> the 100 red were the foreign stack, not the tree. Electron binary restored (path.txt = Electron.app/Contents/MacOS/Electron). Started 'npm run dist:signed' in the background.
 
 ## Sub-agents
 
