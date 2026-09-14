@@ -3050,6 +3050,8 @@ HOOK_TABLE = (
 )
 HOOK_TIMEOUT = 30  # seconds; a hook is one Python start and one short transaction (busy_timeout 5 s)
 HOOK_MARK = "bin/spud hook"  # what marks a hook entry as the ledger's, whatever home it was generated for
+# What marks an allow rule as the ledger's, whatever home it names and whatever spelling an older sync wrote (the #! rule
+# `Bash(<home>/bin/spud *)` until SPD-038, the `:*` form): settings sync drops every such rule and writes cli_allow_rules.
 ALLOW_RULE_MARK = re.compile(r"^Bash\(.*bin/spud(?: \*|:\*)\)$")
 
 
@@ -3060,10 +3062,12 @@ def hook_command(ctx, event):
 
 
 def cli_allow_rules(ctx):
-    """The permission rules for the CLI in the forms spudagents type: the documented
-    interpreter name, the absolute interpreter, and the script alone (#! line)."""
+    """The permission rules for the CLI in the prescribed form, `python3.14 -I -S <home>/bin/spud ...`: by the documented
+    interpreter name and by the absolute interpreter.  None for the script alone: its #! line runs the interpreter with
+    neither -I nor -S, so PYTHONPATH and user-site .pth files inherited from the shell load code before the program, and
+    that spelling gets the harness's prompt (SPD-038).  merge_allow_rules drops an older sync's rule for it."""
     script = str(ctx.home / "bin" / "spud")
-    rules = ["Bash(python3.14 -I -S %s *)" % script, "Bash(%s -I -S %s *)" % (sys.executable, script), "Bash(%s *)" % script]
+    rules = ["Bash(python3.14 -I -S %s *)" % script, "Bash(%s -I -S %s *)" % (sys.executable, script)]
     out = []
     for r in rules:
         if r not in out:
