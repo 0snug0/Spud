@@ -10,6 +10,7 @@ open: exit 0 whatever happens, the gap spooled and drained later as a `hook.erro
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -2050,6 +2051,221 @@ class GlobRedirectTest(BashHookCase):
         self.assertSilent("make 2>&1", agent_id=None)
         self.assertSilent("echo x > tests/plain.py")
         self.assertRefused("echo x > docs/plain.md", "deliverables")
+
+
+class ZshGlobOperatorTest(BashHookCase):
+    """SPD-039: zsh reads parenthesised alternation `(a|b)` and the numeric range `<n-m>` (`<->`, `<n->`, `<-m>`) as glob
+    operators in a word it expands, where shlex reads `(` as a subshell and `<` as an input redirection.  Probed in zsh 5.9
+    with its default options and with nobareglobqual (this Mac's Bash tool), and in bash 3.2: `echo x > (ledger|x)/tickets/
+    SPD-001.md` and `echo x > tests/<1-1>/../../ledger/tickets/SPD-002.md` write the ledger file in zsh; bash rejects the `(`
+    line and reads `<1-1>` as `< 1-1 >`.  The hook checks both readings: zsh's, the pattern kept whole and expanded as
+    SPD-034 expands a glob, and the other shell's.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        home = self.home.path
+        for rel in ("ledger/tickets/SPD-001.md", "ledger/tickets/SPD-002.md", "ledger/tickets/SPD-010.md", "tests/keep.py", "tests/other.py", "docs/x.md"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+        for d in ("tests/1", "tests/007"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        for d in ("1", "007"):
+            (self.out / d).mkdir()
+
+    def outside(self, pattern, rel):
+        """A target that opens <home>/<rel> through `pattern` matching a directory outside the repository, so that the other
+        shell's reading (`<out>/`, then `/../<home>/<rel>` from the root) names only paths outside it."""
+        return "%s/%s/../%s/%s" % (self.out, pattern, os.path.relpath(self.home.path, self.out), rel)
+
+    def test_the_tickets_evidence_alternation(self):
+        """The hole from SPUD-034/Atlantic (proposal 32): the hook read `(` as a subshell and checked `/tickets/SPD-001.md`."""
+        evidence = "echo x > (ledger|x)/tickets/SPD-001.md"
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(agent_id=agent_id):
+                self.assertRefused(evidence, "generated", agent_id)
+        self.assertRefused(evidence, "Law 1", agent_id=None)
+        for target in ("led(ger|x)/tickets/SPD-001.md", "(x|ledger)/(tickets|y)/SPD-00(1|9).md", "ledger/tickets/SPD-001.m(d|x)"):
+            with self.subTest(target):
+                self.assertRefused("echo x > %s" % target, "generated", AGENT_C)
+                self.assertRefused("echo x >| %s" % target, "Law 1", agent_id=None)
+        self.assertRefused("echo x &>(ledger|x)/tickets/SPD-001.md", "generated", AGENT_C)  # zsh: &>( and >|( open a glob target
+        self.assertRefused("cd %s && echo x > ~+/(ledger|x)/tickets/SPD-001.md" % self.home.path, "generated", AGENT_C)
+        self.assertRefused("echo x > (nomatch|zz)/x.py", "matches no file", AGENT_C)
+
+    def test_the_tickets_evidence_range(self):
+        """`SPD-<1-1>.md`: bash opens `SPD-` beside the ledger file, which was refused before SPD-039 on that reading alone; a
+        range in a directory component sends bash's fragments elsewhere, and only zsh's reading finds the ledger file."""
+        self.assertRefused("echo x > ledger/tickets/SPD-<1-1>.md", "generated", AGENT_C)
+        self.assertRefused("echo x > ledger/tickets/SPD-<1-1>.md", "Law 1", agent_id=None)
+        for pattern in ("<1-1>", "<7-7>", "<01-01>"):  # tests/1 and tests/007
+            with self.subTest(pattern):
+                for agent_id in (AGENT_C, AGENT_A):
+                    self.assertRefused("echo x > tests/%s/../../ledger/tickets/SPD-001.md" % pattern, "generated", agent_id)
+                self.assertRefused("echo x > %s" % self.outside(pattern, "ledger/tickets/SPD-001.md"), "Law 1", agent_id=None)
+        self.assertRefused("echo x > tests/<1-1>/../../docs/x.md", "deliverables", AGENT_A)
+        self.assertSilent("echo x > tests/<1-1>/../../docs/x.md", AGENT_C)
+
+    def test_the_open_range(self):
+        for pattern in ("<->", "<1->", "<-9>", "<0-7>"):
+            with self.subTest(pattern):
+                self.assertRefused("echo x > ledger/tickets/SPD-%s.md" % pattern, "generated", AGENT_C)
+                for agent_id in (AGENT_C, AGENT_A):
+                    self.assertRefused("echo x > tests/%s/../../ledger/tickets/SPD-002.md" % pattern, "generated", agent_id)
+                self.assertRefused("echo x > %s" % self.outside(pattern, "ledger/tickets/SPD-002.md"), "Law 1", agent_id=None)
+        self.assertRefused("echo x > tests/<2->/../../ledger/tickets/SPD-001.md", "generated", AGENT_A)  # 007
+        self.assertRefused("echo x > tests/<8->/../../ledger/tickets/SPD-001.md", "matches no file", AGENT_A)
+
+    def test_nested_alternation(self):
+        for target in ("((ledger|y)|x)/tickets/SPD-001.md", "led(g(e|x)r|zz)/tickets/SPD-001.md", "(x|(y|(ledger)))/tickets/SPD-00(1|(2|3)).md",
+                       "{docs,(ledger|x)}/tickets/SPD-001.md", "ledger/tickets/SPD-(<1-1>|zz).md"):
+            with self.subTest(target):
+                self.assertRefused("echo x > %s" % target, "generated", AGENT_C)
+                self.assertRefused("echo x > %s" % target, "Law 1", agent_id=None)
+        self.assertRefused("echo x > %s" % self.outside("(1|zz)", "ledger/tickets/SPD-001.md"), "Law 1", agent_id=None)
+
+    def test_a_group_zsh_cannot_read_opens_nothing(self):
+        # `/` inside a group is a bad pattern in zsh (probed): nothing opens, so a member is refused as for a glob matching nothing.
+        self.assertRefused("echo x > (ledger/tickets|x)/SPD-001.md", "matches no file", AGENT_C)
+        # `;` `&` `<` `>` inside a group are parse errors in zsh and nothing on the line runs: the other shell's reading stands.
+        self.assertRefused("echo x > ledger/tickets/SPD-00(1;|3).md", "generated", AGENT_C)
+
+    def test_the_range_matcher_reads_numbers_as_zsh_does(self):
+        """Any digit string whose value is in range, leading zeros included (`SPD-<1-1>.md` wrote SPD-001.md); a reversed range,
+        which zsh matches to nothing, is read as the ordered one (checking more files is the safe side)."""
+        m = load_spud_module()
+        for lo, hi in (("", ""), ("1", ""), ("", "9"), ("1", "1"), ("001", "002"), ("5", "150"), ("0", "0"), ("99", "101"), ("2", "1"), ("7", "1000")):
+            rx = re.compile(m.numeric_range_regex(lo, hi) + r"\Z")
+            a, b = int(lo or 0), (int(hi) if hi else None)
+            if b is not None and b < a:
+                a, b = b, a
+            for v in range(0, 1200):
+                for name in (str(v), "0" + str(v), "00" + str(v)):
+                    self.assertEqual(bool(rx.match(name)), a <= v and (b is None or v <= b), (lo, hi, name))
+            for name in ("", "-1", "1a", "a1", " 1"):
+                self.assertIsNone(rx.match(name), (lo, hi, name))
+
+    def test_tee_arguments(self):
+        self.assertRefused("printf x | tee (ledger|x)/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertRefused("printf x | tee -a tests/keep.py (ledger|x)/tickets/SPD-002.md", "generated", AGENT_C)
+        self.assertRefused("printf x | tee tests/<1-1>/../../ledger/tickets/SPD-00<1-2>.md", "generated", AGENT_A)
+        self.assertRefused("printf x | tee (ledger|x)/tickets/SPD-001.md", "Law 1", agent_id=None)
+        self.assertRefused("printf x | tee %s" % self.outside("<->", "ledger/tickets/SPD-001.md"), "Law 1", agent_id=None)
+        self.assertSilent("printf x | tee tests/keep.(py|zz)")
+
+    def test_a_trailing_qualifier_shaped_group_is_read_both_ways(self):
+        """Decision: zsh's default bareglobqual reads a trailing group with no `|` as glob qualifiers (`(.)` plain files, `(N)`
+        null glob), nobareglobqual (this Mac's Bash tool) as a group; the hook checks the files of both readings."""
+        self.assertRefused("echo x > (ledger|x)/tickets/SPD-001.md(.)", "Law 1", agent_id=None)  # the qualifier reading
+        self.assertRefused("echo x > (ledger|x)/tickets/SPD-001.md(N)", "generated", AGENT_C)
+        self.assertRefused("echo x > (ledger|x)/tickets/SPD-001(.md)", "generated", AGENT_C)  # the group reading
+        self.assertRefused("echo x > (ledger|x)/tickets/SPD-001(.md)", "Law 1", agent_id=None)
+        self.assertSilent("echo x > tests/keep.py(.)")
+        self.assertSilent("echo x > tests/(keep|other).py(N)")
+
+    def test_code_in_a_glob_qualifier_is_analysed(self):
+        """With bareglobqual (zsh's default) the string of an `e` qualifier, `oe` included, runs for every file the glob matches,
+        in the shell that expands it (probed: `(e:"touch ran":)`, `(oe:...:)`, `(e{...})`, `(e[...])` and `(+f)` ran, and a cd
+        there moved the command's directory); the hook reads each string as a command run once or more."""
+        for word in ("tests/*(e:'git push':)", "tests/*(oe:'git push':)", "tests/keep.py(e{git push})", "tests/keep.py(e[git push])",
+                     "tests/*(.e:'git push':)", "(tests|x)/keep.py(e:'git push':)"):
+            with self.subTest(word):
+                self.assertRefused("ls %s" % word, "Law 7")
+                self.assertRefused("echo x > %s" % word, "Law 7")
+        self.assertRefused("ls tests/*(e:'echo y > ledger/tickets/SPD-001.md':)", "Law 1", agent_id=None)
+        self.assertRefused("ls tests/*(e:'echo y > ledger/tickets/SPD-001.md':)", "generated", AGENT_C)
+        self.assertRefused("ls tests/*(e:'cd ledger':) > tickets/SPD-001.md", "cannot follow", AGENT_C)
+        for ok in ("ls tests/*(om[1])", "ls tests/*(.)", "ls tests/*(Lk+1)"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+
+    def test_a_cd_into_a_zsh_pattern_is_unfollowable(self):
+        """zsh follows `cd (ledger|y)` and `pushd (ledger|y)` to what they match (probed); a glob cd target is unfollowable
+        (SPD-030), so these are too, rather than a cd to the home directory beside a subshell or an input redirection."""
+        for cd in ("cd (ledger|x)", "cd led(ger|x)", "pushd (ledger|x)", "cd tests/<1-1>", "cd <1-1>", "cd tests/<->", "cd -P (ledger|x)"):
+            with self.subTest(cd):
+                self.assertRefused("%s && echo x > tickets/SPD-001.md" % cd, "cannot follow", AGENT_C)
+                self.assertRefused("%s; echo x | tee tickets/SPD-001.md" % cd, "cannot follow", AGENT_C)
+        self.assertRefused("cd (ledger|x) && echo x > %s/ledger/tickets/SPD-001.md" % self.home.path, "Law 1", agent_id=None)
+
+    def test_bashs_reading_of_a_range_is_still_checked(self):
+        """bash reads `<1-2>` as `< 1-2 >`: `cat <1-2> out` writes out in bash and reads a glob in zsh (probed)."""
+        self.assertRefused("cat <1-2> ledger/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertRefused("cat <1-2> ledger/tickets/SPD-001.md", "Law 1", agent_id=None)
+
+    def test_a_subshell_either_shell_runs_is_still_read(self):
+        """bash runs `!(...)`, `{(...)}`, `if(...)`, `time(...)`, `then(...)`, `do(...)`, `else(...)` and `time -p (...)` as
+        subshells, zsh `{(...)}`, `else(...)` and `f()(...)` (probed): their commands are checked, whatever zsh's reading."""
+        for cmd in ("!(git push)", "{(git push)}", "if(git push) then :; fi", "time(git push)", "if true; then(git push); fi",
+                    "for i in 1; do(git push); done", "if false; then :; else(git push); fi", "time -p (git push)", "f()(git push); f",
+                    "g () (git push)", "coproc CO (git push)", "echo a; (git push)"):
+            with self.subTest(cmd):
+                self.assertRefused(cmd, "Law 7")
+        self.assertRefused("{(echo x > ledger/tickets/SPD-001.md)}", "generated", AGENT_C)
+        self.assertRefused("time -p (echo x > ledger/tickets/SPD-001.md)", "generated", AGENT_C)
+
+    def test_pathological_patterns_neither_raise_nor_grow_quadratic(self):
+        """A hook that raises refuses everyone, and one that runs past the harness's timeout protects nothing: deep nesting, a line
+        of unbalanced openings, huge range bounds and long qualifier lists are read in bounded time (robustness probe)."""
+        m = load_spud_module()
+        home = str(self.home.path)
+        for command in ("echo x > " + "(" * 4000 + "a" + ")" * 4000, "echo x > " + "(" * 40000 + "a", "echo x > " + "$((" * 20000,
+                        "echo x > " + "${" * 40000, "echo x > f<%s-%s>" % ("1" * 5000, "9" * 5000), "ls x(" + "+a" * 20000 + ")",
+                        "echo " + "a(" * 20000, "echo x > " + "a" * 200000 + "(b|c)"):
+            with self.subTest(command[:24]):
+                start = datetime.now()
+                a = m.analyse_command(command, m.ShellAnalysis(cwd=home))
+                for target, cwds in a.redirects:
+                    if m.target_has_active_glob(target):
+                        m.expand_redirect_target(target, cwds)
+                self.assertLess((datetime.now() - start).total_seconds(), 10)
+
+    def test_both_readings_stay_linear_in_nested_substitutions(self):
+        m = load_spud_module()
+        walks = []
+        original = m.ShellWalk.walk
+
+        def counting(walk, tokens):
+            walks.append(1)
+            return original(walk, tokens)
+
+        m.ShellWalk.walk = counting
+        command = "echo (a|b)"
+        for _ in range(6):
+            command = "echo (a|b) $(%s)" % command
+        m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+        self.assertLessEqual(len(walks), 16)
+
+    def test_controls_stay_as_they_are(self):
+        out = self.out
+        self.assertRefused("(cd %s) && echo x > note.txt" % out, "deliverables")  # a subshell's cd does not carry out
+        self.assertSilent("(cd %s && echo x > note.txt)" % out)
+        self.assertSilent("time (cd %s); echo x > tests/keep.py" % out)
+        self.assertSilent("cat <tests/keep.py > tests/out.py")
+        self.assertSilent("sort < tests/keep.py > tests/out.py")
+        self.assertRefused("cat <tests/keep.py > docs/x.md", "deliverables")
+        self.assertRefused("cat <(git push)", "Law 7")
+        self.assertSilent("diff <(ls tests) <(ls bin)")
+        self.assertRefused("echo x >(tee ledger/tickets/SPD-001.md)", "generated", AGENT_C)
+        self.assertSilent("echo x > 'tests/(a|b).py'")
+        self.assertSilent('echo x > "tests/(keep|other).py"')
+        self.assertSilent("echo x > tests/\\(a\\|b\\).py")
+        self.assertRefused("echo x > 'ledger/(a|b).md'", "generated")
+        self.assertSilent("echo x > tests/(keep|other).py")
+        self.assertRefused("echo x > tests/(keep|other).py", "Law 1", agent_id=None)
+        self.assertSilent("make 2>&1", agent_id=None)
+        self.assertSilent("make > /dev/null 2>&1")
+        self.assertSilent("ls > /dev/null")
+        for ok in ("f() { echo hi; }; f", "arr=(a b); echo $arr", "typeset -a arr=(a b)", "x=$(( 1<2 )); (( 3 > 2 )) && echo y",
+                   "[[ -n x && ( -d tests ) ]] && echo y", "case x in (x|y) echo y;; esac", "for f in tests/(keep|other).py; do echo $f; done",
+                   "noglob echo (a|b)", "echo a |(cat)", "! (true)", "{ (true) }"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+        self.assertRefused("case x in (x) git push;; esac", "Law 7")
+        self.assertAllowed("%s --as %s member log 'a (b|c) <1-2>'" % (self.spud_cli, AGENT_A))
 
 
 # =============================================================================
