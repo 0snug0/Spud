@@ -2556,9 +2556,10 @@ class GitConfigAliasTest(BashHookCase):
     documented git config injection; the harness's own worktree guard refuses them when they redirect writes, and Law 7's hook,
     which runs in every session, closes them too.  The fix refuses a member's git call whose own line defines an alias/include by
     `-c`/`--config-env` or sets a GIT_CONFIG_* variable, as an unresolvable verb; it does not inspect the value, so it also refuses
-    an alias to a read (an over-refusal a member never hits in ordinary work).  Non-alias `-c` config (user.name, color.ui,
-    core.pager) is a control git honours without changing the verb, and stays silent.  AGENT_A plans tests/** and bin/spud;
-    AGENT_C plans **; Spud (no agent_id) is not bound by Law 7 and sees no change."""
+    an alias to a read (an over-refusal a member never hits in ordinary work).  SPD-046 later narrowed the non-alias case: only
+    inert config (color.ui, core.pager=cat, and the rest of GitProgramTest's allowlist) stays silent; user.name, commit.gpgsign
+    and other non-allowlisted keys now refuse as a git-program finding.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **;
+    Spud (no agent_id) is not bound by Law 7 and sees no change."""
 
     EVIDENCE = "git -c alias.p=push p"
 
@@ -2627,19 +2628,21 @@ class GitConfigAliasTest(BashHookCase):
                 self.refused_for_members(cmd)
 
     def test_non_alias_c_config_stays_silent(self):
-        for ok in ("git -c user.name=x log", "git -c color.ui=never status", "git -c core.pager=cat diff",
-                   "git -c commit.gpgsign=false log", "git -c http.sslVerify=false fetch", "git -C . -c user.name=x log",
-                   "git -c user.name=x rev-parse HEAD"):
+        # SPD-046 narrowed this: only inert, non-program config stays silent (the full allowlist is exercised by GitProgramTest);
+        # user.name, commit.gpgsign and http.sslVerify now refuse as non-allowlisted keys.  The alias split of SPD-044 still holds.
+        for ok in ("git -c color.ui=never status", "git -c core.pager=cat diff", "git -c core.quotepath=false log",
+                   "git -C . -c color.ui=never log"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
-        # Non-alias config does not mask a real write verb: the verb is still read and refused.
-        self.assertRefused("git -c user.name=x commit -m y", "Law 7")
-        self.assertIn("git commit", self.assertRefused("git -c user.name=x commit -m y", "Law 7").reason)
+        # Inert non-alias config does not mask a real write verb: the verb is still read and refused as a git verb.
+        r = self.assertRefused("git -c color.ui=never commit -m y", "Law 7")
+        self.assertIn("git commit", r.reason)
 
     def test_a_bare_env_var_that_only_looks_like_git_config_stays_silent(self):
-        # GIT_CONFIG_NOSYSTEM disables system config, it does not inject any; an unrelated variable is not git config.
-        for ok in ("GIT_CONFIG_NOSYSTEM=1 git status", "GIT_EDITOR=vi git log", "FOO=1 git status", "env FOO=1 git status"):
+        # GIT_CONFIG_NOSYSTEM disables system config, it does not inject any; an unrelated variable is not git config; and a pager
+        # set to `cat` is inert (SPD-046).  GIT_EDITOR and other program-naming variables now refuse -- see GitProgramTest.
+        for ok in ("GIT_CONFIG_NOSYSTEM=1 git status", "GIT_PAGER=cat git log", "FOO=1 git status", "env FOO=1 git status"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
@@ -2657,6 +2660,166 @@ class GitConfigAliasTest(BashHookCase):
         for verb in ("push", "commit -m x", "merge x"):
             with self.subTest(verb):
                 self.assertRefused("git " + verb, "Law 7")
+
+
+class GitProgramTest(BashHookCase):
+    """SPD-046: git config and the environment can name a program git runs -- a pager, editor, ssh or proxy command, diff or
+    merge driver, hooks or exec path, credential or askpass helper -- and some verb options name one too, any of which git runs
+    under a verb Law 7's table allows.  git_verb reads only the verb, so `git -c core.pager=cmd log`, `GIT_SSH_COMMAND=cmd git
+    fetch` and `git ls-remote --upload-pack=cmd host:r` ran the program while the hook saw an allowed read.  Probed (git 2.50.1,
+    scratch throwaway repo, markers only in the scratchpad, never a real repo or remote): core.sshCommand, diff.external,
+    core.pager, GIT_SSH_COMMAND, GIT_EXTERNAL_DIFF and GIT_PAGER each ran the named program, as did ls-remote/fetch
+    --upload-pack, grep -O/--open-files-in-pager, difftool -x/--extcmd and archive --exec; `-c core.pager=cat` ran cat and stayed
+    inert.  git help --config lists ~950 keys whose program-naming members are scattered across many sections, so the fix
+    allowlists inert keys (color/advice/i18n/column sections; core.quotepath, core.abbrev, log.date, safe.directory; core.pager
+    and pager.<cmd> only with an empty or `cat` value, only in the `-c` form the hook can read) and refuses everything else as a
+    new git-program finding with its own reason, distinct from SPD-044's git-config alias reason.  It does not inspect the value,
+    so it over-refuses an inert program (an editor set to `true`), which a member never needs.  Round 2 (probed by Spud, then me)
+    also closes: abbreviated long options (git accepts any unambiguous prefix, `--upload` == --upload-pack); clustered short
+    options (`-nO<cmd>`); the global `--exec-path=<dir>` (the command-line form of GIT_EXEC_PATH; bare `--exec-path` prints the
+    path and stays silent); and GIT_ALLOW_PROTOCOL, which enables the ext:: transport whose URL is a command.  AGENT_A plans
+    tests/** and bin/spud; AGENT_C plans **; Spud (no agent_id) is not bound by Law 7 and sees no change."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7", cwd=None):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id, cwd)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None, cwd=cwd)  # Law 7 does not bind Spud
+        return r
+
+    def finding(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path))).findings
+
+    def test_program_config_keys_by_c_are_refused(self):
+        for cmd in ("git -c core.pager=less log", "git -c core.editor=vi log", "git -c sequence.editor=vi status",
+                    "git -c core.sshCommand=cmd fetch", "git -c core.hooksPath=/tmp/h status", "git -c core.fsmonitor=cmd status",
+                    "git -c core.alternateRefsCommand=cmd log", "git -c core.gitProxy=cmd fetch", "git -c core.askPass=cmd fetch",
+                    "git -c diff.external=cmd diff", "git -c diff.mine.command=cmd diff", "git -c diff.mine.textconv=cmd diff",
+                    "git -c filter.f.clean=cmd status", "git -c filter.f.smudge=cmd status", "git -c credential.helper=cmd fetch",
+                    "git -c gpg.program=cmd log", "git -c gpg.ssh.defaultKeyCommand=cmd log", "git -c log.showSignature=true log",
+                    "git -c uploadpack.packObjectsHook=cmd fetch", "git -c protocol.ext.allow=always fetch",
+                    "git -c url.x.insteadOf=y fetch", "git -c difftool.t.cmd=cmd status", "git -c mergetool.t.cmd=cmd status",
+                    "git -c pager.log=less log", "git -c core.pager=less commit -m x"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_program_config_keys_by_config_env_are_refused(self):
+        # --config-env reads the value from an environment variable the hook cannot see, so even core.pager is never inert here.
+        for cmd in ("git --config-env core.pager=E log", "git --config-env=core.pager=E log",
+                    "git --config-env core.sshCommand=E fetch", "git --config-env=core.editor=E log"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_the_finding_names_the_key_var_or_option(self):
+        self.assertEqual(self.finding("git -c core.pager=less log"), [("git-program", "-c core.pager=less")])
+        self.assertEqual(self.finding("GIT_SSH_COMMAND=cmd git fetch"), [("git-program", "GIT_SSH_COMMAND")])
+        self.assertEqual(self.finding("git ls-remote --upload-pack=cmd host:r"),
+                         [("git-program", "ls-remote --upload-pack=cmd")])
+        r = self.refused_for_members("git -c core.sshCommand=cmd fetch")
+        self.assertIn("core.sshCommand", r.reason)
+        self.assertNotIn("alias", r.reason)  # its own reason, not SPD-044's git-config alias reason
+
+    def test_program_env_vars_are_refused(self):
+        for cmd in ("GIT_EDITOR=vi git log", "GIT_SEQUENCE_EDITOR=vi git log", "EDITOR=vi git log", "VISUAL=vi git log",
+                    "GIT_SSH=cmd git fetch", "GIT_SSH_COMMAND=cmd git fetch", "GIT_EXTERNAL_DIFF=cmd git diff",
+                    "GIT_ASKPASS=cmd git fetch", "SSH_ASKPASS=cmd git fetch", "GIT_PROXY_COMMAND=cmd git fetch",
+                    "GIT_EXEC_PATH=/x git status", "GIT_TEMPLATE_DIR=/x git status", "GIT_PAGER=less git log",
+                    "PAGER=less git log"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_program_env_vars_via_export_and_env_wrapper(self):
+        for cmd in ("export GIT_SSH_COMMAND=cmd; git fetch", "env GIT_EDITOR=vi git log",
+                    "/usr/bin/env GIT_PAGER=less git log", "env GIT_SSH_COMMAND=cmd sh -c 'git fetch'"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_verb_options_that_name_a_program_are_refused(self):
+        for cmd in ("git ls-remote --upload-pack=cmd host:r", "git ls-remote --upload-pack cmd host:r",
+                    "git fetch --upload-pack=cmd r", "git fetch --upload-pack cmd r", "git grep -Ocat foo", "git grep -O foo",
+                    "git grep --open-files-in-pager=cat foo", "git grep --open-files-in-pager foo", "git difftool -x cmd A B",
+                    "git difftool --extcmd=cmd A B", "git archive --remote=r --exec=cmd HEAD"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_abbreviated_long_options_are_refused(self):
+        # git's parse-options accepts any unambiguous prefix (`git ls-remote --upload=cmd .` runs cmd, probed); refuse every prefix.
+        for cmd in ("git ls-remote --upload=cmd .", "git ls-remote --up=cmd .", "git ls-remote --upload-pac cmd .",
+                    "git fetch --upload=cmd r", "git grep --open=cat foo", "git grep --open-files=cat foo",
+                    "git difftool --ext=cmd A B", "git difftool --extc cmd A B", "git archive --exe=cmd HEAD",
+                    "git archive --exec cmd HEAD"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_clustered_short_options_are_refused(self):
+        # A short cluster carrying the program letter runs it (`git grep -nO<cmd> hi`, probed); refuse the letter anywhere in the
+        # cluster, value attached or not.  A false refusal of a pattern value is acceptable -- the hook fails closed.
+        for cmd in ("git grep -nOcat foo", "git grep -nO foo", "git grep -inOcat foo", "git difftool -dx cmd A B",
+                    "git difftool -yx cmd A B"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_exec_path_global_option_is_refused(self):
+        # `git --exec-path=<dir> ls-remote https://x` runs <dir>/git-remote-https (probed): the command-line form of GIT_EXEC_PATH.
+        for cmd in ("git --exec-path=/dir ls-remote x", "git --exec=/dir fetch", "git --exec-p=/dir status",
+                    "git --exec-path=/dir status"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.assertEqual(self.finding("git --exec-path=/dir status"), [("git-program", "--exec-path=/dir")])
+
+    def test_git_allow_protocol_env_is_refused(self):
+        # GIT_ALLOW_PROTOCOL enables the ext:: transport, whose URL is a command git runs.
+        for cmd in ("GIT_ALLOW_PROTOCOL=ext git fetch x", "env GIT_ALLOW_PROTOCOL=ext git fetch x",
+                    "export GIT_ALLOW_PROTOCOL=ext; git fetch x"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_program_forms_inside_shell_strings_eval_and_subshells(self):
+        for cmd in ("sh -c 'git -c core.pager=less log'", "bash -c \"GIT_EDITOR=vi git log\"",
+                    "zsh -c 'git ls-remote --upload-pack=cmd host:r'", "eval 'git -c core.sshCommand=cmd fetch'",
+                    "(git -c core.editor=vi log)", "echo $(git fetch --upload-pack=cmd r)", "true && GIT_PAGER=less git log"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_a_program_form_beside_a_write_verb_still_refuses(self):
+        for cmd in ("git -c core.pager=less commit -m x", "GIT_EDITOR=vi git commit", "git -c core.sshCommand=cmd push"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_inert_config_keys_stay_silent(self):
+        for ok in ("git -c color.ui=never status", "git -c color.diff.new=green log", "git -c advice.detachedHead=false status",
+                   "git -c i18n.logOutputEncoding=utf-8 log", "git -c column.ui=auto status", "git -c core.quotepath=false status",
+                   "git -c core.abbrev=12 log", "git -c log.date=iso log", "git -c safe.directory=/x status",
+                   "git -c core.pager=cat diff", "git -c core.pager= diff", "git -c pager.log=cat log", "git -c pager.diff= diff",
+                   "git -C . -c color.ui=never log"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_inert_pager_env_vars_stay_silent(self):
+        for ok in ("GIT_PAGER=cat git log", "PAGER=cat git log", "GIT_PAGER= git log", "env GIT_PAGER=cat git log",
+                   "export GIT_PAGER=cat; git log", "GIT_CONFIG_NOSYSTEM=1 git status", "FOO=1 git status", "env FOO=1 git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_allowed_verbs_without_a_program_option_stay_silent(self):
+        for ok in ("git fetch", "git fetch origin main", "git ls-remote host:r", "git grep x", "git grep -n foo",
+                   "git grep -i foo", "git grep -ni foo", "git difftool A B", "git difftool --no-prompt A B",
+                   "git difftool -d A B", "git archive HEAD", "git grep -- -Ofoo",  # after --, -Ofoo is a pattern, not grep -O
+                   # options adjacent to a program option but not a prefix of it stay silent
+                   "git ls-remote --tags .", "git fetch --unshallow r", "git fetch --update-head-ok r",
+                   "git --exec-path", "git --exec-path status"):  # bare --exec-path prints the path, it does not set one
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
 
 
 # =============================================================================
