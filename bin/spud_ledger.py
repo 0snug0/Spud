@@ -4772,9 +4772,12 @@ class ShellAnalysis:
 
     `cwds` (SPD-030) is the set of absolute directories the shell may be in at this point of the line, every one of them
     checked, or None when the hook cannot know it: where zsh and bash disagree, or a cd may not run or may fail, the hook
-    keeps both the old directory and the new one rather than guess."""
+    keeps both the old directory and the new one rather than guess.
 
-    def __init__(self, cwd=None):
+    `home` (SPD-032) is the ledger root whose launcher a spud call must run for the hook to allow it."""
+
+    def __init__(self, cwd=None, home=None):
+        self.home = home
         self.findings = []
         self.kinds = []
         self.redirects = []
@@ -5557,12 +5560,14 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=_CURRENT):
     for t in targets:
         a.redirects.append((t, a.cwds if redirect_cwds is _CURRENT else redirect_cwds))
     effect = "shell"  # where a builtin behind the prefixes runs (prefix_effect)
+    prefixed = False  # a wrapper, zsh's `-` or coproc runs the command (SPD-032: no spud call behind one is allowed)
     while words:
         w = words[0]
         m = ASSIGNMENT_WORD_RE.match(w)
         if w in RESERVED_WORDS:
             if w == "coproc":
                 effect = "process"
+                prefixed = True
             words = words[1:]
         elif m:
             name, append, value = m.groups()
@@ -5573,8 +5578,10 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=_CURRENT):
             words = words[1:]
         elif w == "-":
             effect = max(effect, "either", key=EFFECT_ORDER.get)  # zsh's `-` precommand modifier; bash finds no `-`
+            prefixed = True
             words = words[1:]
         elif os.path.basename(w).casefold() in WRAPPERS and w not in a.vars:
+            prefixed = True
             effect = max(effect, prefix_effect(w, words[1] if len(words) > 1 else None), key=EFFECT_ORDER.get)
             words, strings = strip_wrapper(words)
             for s in strings:
@@ -5640,7 +5647,9 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=_CURRENT):
             a.findings.append(("db", cmd))
         elif script and any_spud_launcher(script, a.cwds):
             a.kinds.append("spud")
-            a.findings.append(("spud", parse_spud_call(script_args)))
+            call = parse_spud_call(script_args)
+            call["vouched"] = vouched_spud_call(a, cmd, words[1 : len(words) - len(script_args) - 1], script, prefixed)
+            a.findings.append(("spud", call))
         else:
             a.kinds.append("other")
     elif base in JS_RUNTIMES:
@@ -5651,7 +5660,9 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=_CURRENT):
             a.kinds.append("other")
     elif base == "spud":
         a.kinds.append("spud")
-        a.findings.append(("spud", parse_spud_call(words[1:])))
+        call = parse_spud_call(words[1:])
+        call["vouched"] = False  # its #! line runs python3.14 with neither -I nor -S (SPD-032)
+        a.findings.append(("spud", call))
     elif base == "tee":
         a.kinds.append("tee")
         for w in words[1:]:
@@ -5675,6 +5686,103 @@ def any_spud_launcher(script, cwds):
     return any(spud_launcher(script, c) for c in (sorted(cwds) if cwds else [None]))
 
 
+# What the Bash hook's allow needs beyond recognizing a spud call (SPD-032).  Recognition by name stays wide, since Laws 5 and 6
+# refuse every spelling; the allow skips the harness's prompt, so it is given only to a call whose every moving part the hook
+# can vouch for, each pinned by a probe in the scratchpad (python3.14 3.14.7, framework build):
+#   the launcher: the ledger root's bin/spud by file identity, run from its own directory, since it loads spud_ledger.py beside
+#     its real path (a hard link elsewhere is the same file running another program; __file__ keeps the path as given, and its
+#     realpath is the kernel's reading, symlinks before `..` included).  Not a worktree's: bin/** there is a member's deliverable.
+#   the interpreter: the file the hook itself runs on, in the same directory (a symlink elsewhere is a file anyone who can write
+#     that directory swaps, and a pyvenv.cfg beside it moves sys.prefix); a bare name as the hook's PATH finds it, with no
+#     relative entry ahead of it (the Bash tool inherits the same environment; a PATH the line changes is an assignment).
+#   the options: exactly -I and -S.  Without -I a PYTHONPATH json.py runs before the program, without -I or -S a user-site .pth;
+#     -X pycache_prefix reads an unchecked-hash pyc of a stdlib module from anywhere; -c, -m and - run other code.
+#   the environment: no wrapper (env, exec -a, nohup, sudo ... change the environment, argv[0] or the user) and no variable
+#     assigned earlier in the line or as a prefix (DYLD_INSERT_LIBRARIES loads a dylib under -I -S; assigning a variable the shell
+#     already exports changes what the interpreter inherits), except SPUD_HOME naming the root: the launcher caches its bytecode
+#     under <SPUD_HOME>/.spud/pycache and loads an unchecked-hash pyc it finds there.
+PYTHON_FLAGS_RE = re.compile(r"-[IS]+")
+
+
+def python_options_vouched(options):
+    """The options before the script are -I and -S, separately or clustered, both of them and nothing else."""
+    letters = set()
+    for o in options:
+        if not PYTHON_FLAGS_RE.fullmatch(o):
+            return False
+        letters.update(o[1:])
+    return letters == {"I", "S"}
+
+
+def unresolvable_word(word):
+    return "$" in word or "`" in word or SUBST in word
+
+
+def interpreter_vouched(word, cwds):
+    """The interpreter word runs the file the hook runs on (sys.executable), found in the same directory: an absolute path,
+    a relative path from every directory the shell may be in, or a bare name as PATH finds it."""
+    if unresolvable_word(word) or word.startswith("~"):
+        return False
+    exe = sys.executable
+    want = (file_identity(exe), file_identity(os.path.dirname(exe)))
+    if None in want:
+        return False
+
+    def same(path):
+        return (file_identity(path), file_identity(os.path.dirname(path))) == want
+
+    if "/" not in word:
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if not os.path.isabs(entry):
+                return False  # an empty or relative entry is the shell's working directory, not the hook's
+            found = os.path.join(entry, word)
+            if os.path.isfile(found) and os.access(found, os.X_OK):
+                return same(found)
+        return False
+    if os.path.isabs(word):
+        return same(word)
+    return bool(cwds) and all(same(os.path.join(c, word)) for c in cwds)
+
+
+def launcher_vouched(script, cwds, home):
+    """The script is the ledger root's own bin/spud, the same file in the same directory, from every directory the shell may be in."""
+    if unresolvable_word(script) or (script.startswith("~") and not script.startswith("~/")):
+        return False
+    real = os.path.realpath(os.path.join(home, "bin", "spud"))
+    want = (file_identity(real), file_identity(os.path.dirname(real)))
+    if None in want:
+        return False
+    p = os.path.expanduser(script) if script.startswith("~/") else script
+    if os.path.isabs(p):
+        paths = [p]
+    elif cwds:
+        paths = [os.path.join(c, p) for c in cwds]
+    else:
+        return False
+    return all((file_identity(x), file_identity(os.path.dirname(os.path.realpath(x)))) == want for x in paths)
+
+
+def spud_home_vouched(value, home):
+    """A SPUD_HOME assignment names the ledger root itself: an absolute path to the same directory."""
+    if not value or unresolvable_word(value) or not os.path.isabs(value):
+        return False
+    ident = file_identity(value)
+    return ident is not None and ident == file_identity(home)
+
+
+def vouched_spud_call(a, interpreter, options, script, prefixed):
+    """True when the hook may allow this python spud call without the harness's prompt (SPD-032)."""
+    if prefixed or a.home is None or not python_options_vouched(options):
+        return False
+    for name, value in a.vars.items():
+        if name != "SPUD_HOME" or not spud_home_vouched(value, a.home):
+            return False
+    return interpreter_vouched(interpreter, a.cwds) and launcher_vouched(script, a.cwds, a.home)
+
+
+QUIET_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
+
+
 def actor_is_self(con, actor, caller_member, caller_agent_id):
     if actor == caller_agent_id:
         return True
@@ -5687,7 +5795,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
     db_reason = DB_REASON
     if DB_PATH_RE.search(command):
         return db_reason % "the command names ledger.db or .spud/", None
-    analysis = analyse_command(command, ShellAnalysis(cwd=cwd))
+    analysis = analyse_command(command, ShellAnalysis(cwd=cwd, home=str(ctx.home)))
     if analysis.unparseable:
         return None, analysis
     who = ("%s (agent_id %s)" % (member_ref(con, caller_member["id"]), caller_agent_id)) if caller_member else ("agent_id %s" % caller_agent_id if caller_agent_id else "Spud")
@@ -5881,9 +5989,14 @@ def hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member)
     reason, analysis = bash_reason(ctx, con, caller_agent_id, caller_member, command, payload.get("cwd") or None)
     if reason:
         return deny_and_record(con, at, payload, reason, caller_agent_id, caller_member, extra={"command": command[:2000]})
-    if analysis is not None and analysis.all_spud and all(d["command"] in SPUD_COMMANDS or (d["command"] is None and d["help"]) for k, d in analysis.findings if k == "spud"):
+    # The allow skips the harness's prompt, so it needs more than recognition (SPD-032): every spud call runs the ledger root's
+    # launcher through an interpreter, options and environment the hook vouches for (vouched_spud_call), and the line writes
+    # no file by redirection, which the prompt would otherwise ask about.  Anything else recognized stays silent.
+    if analysis is not None and analysis.all_spud \
+            and all((d["command"] in SPUD_COMMANDS or (d["command"] is None and d["help"])) and d.get("vouched") for k, d in analysis.findings if k == "spud") \
+            and all(target in QUIET_TARGETS for target, _cwds in analysis.redirects):
         who = member_ref(con, caller_member["id"]) if caller_member else ("agent_id %s" % caller_agent_id if caller_agent_id else "Spud")
-        return pre_decision("allow", "a well-formed spud call by %s, checked by the ledger hook" % who)
+        return pre_decision("allow", "a well-formed spud call by %s through the ledger root's own launcher, checked by the ledger hook" % who)
     return SILENT
 
 

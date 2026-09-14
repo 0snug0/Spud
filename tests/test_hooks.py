@@ -12,13 +12,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import unicodedata
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from helpers import EXIT_ERROR, EXIT_USAGE, SpudTestCase, load_spud_module, real_config
+from helpers import EXIT_ERROR, EXIT_USAGE, PROGRAM, SPUD, SpudTestCase, load_spud_module, real_config
 
 
 def case_insensitive_fs(path):
@@ -76,6 +77,10 @@ class HookCase(SpudTestCase):
     def setUp(self):
         super().setUp()
         self.cwd = str(self.home.path)
+        # The ledger root's own launcher, which the Bash hook's allow is for (SPD-032).  A copy, never a link: a test that
+        # writes it must not write through to the repository's.
+        (self.home.path / "bin").mkdir(exist_ok=True)
+        shutil.copyfile(SPUD, self.home.path / "bin" / "spud")
         self.t = self.new_ticket("Hooks", status="active")
         self.team = self.t["team_key"]
         # Spud's Bash runs in the session the payloads name, and `member new` records it (SPD-018).
@@ -1501,6 +1506,246 @@ class PreBashTest(BashHookCase):
         self.assertAllowed("cd %s && %s --as %s member log hi" % (self.home.path, self.spud_cli, AGENT_A))
         self.assertAllowed("cd /tmp; %s board" % self.spud_cli)
         self.assertSilent("cd /tmp && ls")
+
+
+class SpudAllowIdentityTest(BashHookCase):
+    """SPD-032: PreToolUse(Bash) allows a spud call only when the hook can vouch for everything that runs: the ledger root's
+    own launcher by file identity, from its own directory (the launcher loads spud_ledger.py beside its real path), under the
+    interpreter the hook itself runs on, with exactly -I and -S, no wrapper, no variable assigned anywhere earlier in the line
+    but SPUD_HOME naming the root, and no redirection into a file.  A call it recognizes by name but cannot vouch for is still
+    refused for Laws 5 and 6 and otherwise stays silent, so the harness's permission rules and prompt decide."""
+
+    def setUp(self):
+        super().setUp()
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.launcher = self.home.path / "bin" / "spud"
+        self.log = "--as %s member log hi" % AGENT_A
+
+    def assertSilentForBoth(self, spelled, cwd=None):
+        """`spelled` is a command line with {tail} where the spud arguments go: silent for the lead and for Spud."""
+        self.assertSilent(spelled.format(tail=self.log), AGENT_A, cwd)
+        self.assertSilent(spelled.format(tail="--as spud board"), None, cwd)
+
+    def assertAllowedForBoth(self, spelled, cwd=None):
+        self.assertAllowed(spelled.format(tail=self.log), AGENT_A, cwd)
+        self.assertAllowed(spelled.format(tail="--as spud board"), None, cwd)
+
+    def assertStillRefused(self, spelled, cwd=None):
+        """Name recognition is unchanged: Law 6 refuses the lead's `--as spud` and `ticket new` however the call is spelled."""
+        self.assertRefused(spelled.format(tail="--as spud board"), "Law 6", AGENT_A, cwd)
+        self.assertRefused(spelled.format(tail="ticket new --title x"), "Law 6", AGENT_A, cwd)
+
+    def test_the_tickets_evidence_a_script_merely_named_spud_is_silent(self):
+        any_dir = self.out / "any"
+        any_dir.mkdir()
+        (any_dir / "spud").write_text("print('not the ledger')\n", encoding="utf-8")
+        copy = self.out / "copy" / "bin"  # a real copy of the launcher and its program: another ledger program, not the root's
+        copy.mkdir(parents=True)
+        shutil.copyfile(SPUD, copy / "spud")
+        shutil.copyfile(PROGRAM, copy / "spud_ledger.py")
+        for script in ("/tmp/any/spud", any_dir / "spud", copy / "spud"):
+            with self.subTest(script=str(script)):
+                self.assertSilentForBoth("python3.14 %s board" % script)
+                self.assertSilentForBoth("python3.14 -I -S %s {tail}" % script)
+                self.assertStillRefused("python3.14 -I -S %s {tail}" % script)
+        self.assertAllowedForBoth("python3.14 -I -S %s {tail}" % self.launcher)
+
+    def test_a_hard_link_to_the_launcher_elsewhere_runs_another_program(self):
+        """The same file in another directory: the launcher loads spud_ledger.py beside its own real path, so identity of the
+        file alone does not fix the program.  A symlink resolves into bin/, so it does."""
+        (self.home.path / "tests").mkdir(exist_ok=True)
+        for where in (self.out / "spud", self.home.path / "tests" / "spud"):
+            try:
+                os.link(self.launcher, where)
+            except OSError as e:
+                self.skipTest("no hard link from %s to %s: %s" % (self.launcher, where, e))
+            with self.subTest(where=str(where)):
+                self.assertSilentForBoth("python3.14 -I -S %s {tail}" % where)
+                self.assertStillRefused("python3.14 -I -S %s {tail}" % where)
+        (self.out / "link").symlink_to(self.launcher)
+        self.assertAllowedForBoth("python3.14 -I -S %s {tail}" % (self.out / "link"))
+
+    def test_a_worktrees_launcher_is_not_the_ledgers(self):
+        """Root only: a worktree's bin/spud_ledger.py is a member's deliverable on a code ticket (bin/**), so its launcher runs
+        code a member may just have written.  The prescribed spelling names the root's launcher, from any directory."""
+        wt = self.home.path / ".claude" / "worktrees" / "spd-999-x"
+        (wt / "bin").mkdir(parents=True)
+        shutil.copyfile(SPUD, wt / "bin" / "spud")
+        shutil.copyfile(PROGRAM, wt / "bin" / "spud_ledger.py")
+        root = "python3.14 -I -S %s {tail}" % self.launcher
+        self.assertAllowedForBoth(root, cwd=str(wt))
+        self.assertAllowedForBoth("cd %s && %s" % (wt, root))
+        for spelled, cwd in (("python3.14 -I -S bin/spud {tail}", str(wt)), ("python3.14 -I -S %s/bin/spud {tail}" % wt, None),
+                             ("cd %s && python3.14 -I -S bin/spud {tail}" % wt, None), ("python3.14 -I -S ./bin/spud {tail}", str(wt))):
+            with self.subTest(spelled=spelled, cwd=cwd):
+                self.assertSilentForBoth(spelled, cwd)
+                self.assertStillRefused(spelled, cwd)
+
+    def test_the_interpreter_must_be_the_one_the_hook_runs_on(self):
+        """The same file in the same directory as the hook's own interpreter (a symlink elsewhere is a file anyone who can
+        write that directory swaps, and its pyvenv.cfg moves sys.prefix).  A bare name is looked up on the hook's PATH, which
+        the Bash tool shares, and a PATH the line changes, or a relative PATH entry ahead of the match, cannot be vouched for."""
+        exe = sys.executable
+        launcher = self.launcher
+        self.assertAllowedForBoth("python3.14 -I -S %s {tail}" % launcher)
+        self.assertAllowedForBoth("%s -I -S %s {tail}" % (exe, launcher))
+        links = self.out / "links"
+        links.mkdir()
+        (links / "python3.14").symlink_to(exe)
+        other = self.out / "other"
+        other.mkdir()
+        (other / "python3.14").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        (other / "python3.14").chmod(0o755)
+        for interpreter, cwd in (("%s/python3.14" % links, None), ("./python3.14", str(links)), ("links/python3.14", str(self.out)),
+                                 ("%s/python3.14" % other, None), ("cd %s && ./python3.14" % other, None)):
+            with self.subTest(interpreter=interpreter, cwd=cwd):
+                spelled = "%s -I -S %s {tail}" % (interpreter, launcher)
+                self.assertSilentForBoth(spelled, cwd)
+                self.assertStillRefused(spelled, cwd)
+        for prefix in ("PATH=%s:$PATH " % other, "PATH=%s; " % other, "export PATH=%s:$PATH; " % other, "path=(%s $path); " % other,
+                       "hash -p %s/python3.14 python3.14; " % other, "alias python3.14=%s/python3.14; " % other,
+                       "python3.14() {{ %s/python3.14 \"$@\"; }}; " % other):
+            with self.subTest(prefix=prefix):
+                self.assertSilentForBoth("%spython3.14 -I -S %s {tail}" % (prefix, launcher))
+        path = self.home.env["PATH"]
+        try:
+            for changed in (".:" + path, ":" + path, "%s:%s" % (links, path), "%s:%s" % (other, path)):
+                with self.subTest(hook_path=changed.split(":")[0]):
+                    self.home.env["PATH"] = changed
+                    self.assertSilentForBoth("python3.14 -I -S %s {tail}" % launcher)
+                    self.assertAllowedForBoth("%s -I -S %s {tail}" % (exe, launcher))
+        finally:
+            self.home.env["PATH"] = path
+
+    def test_exactly_dash_I_and_dash_S(self):
+        """-I keeps PYTHONPATH and the user site out (probed: a PYTHONPATH json.py runs under -S alone, a PYTHONUSERBASE .pth
+        under neither flag); -S keeps site-packages .pth files out; -X pycache_prefix reads bytecode from anywhere (probed: an
+        unchecked-hash pyc of json runs under -I -S).  Any other option is not the prescribed call, and -c, -m and - run other code."""
+        launcher = self.launcher
+        for opts in ("-I -S", "-IS", "-SI", "-S -I"):
+            self.assertAllowedForBoth("python3.14 %s %s {tail}" % (opts, launcher))
+        for opts in ("", "-I", "-S", "-E -s -S", "-I -S -X pycache_prefix=%s" % self.out, "-I -S -Xpycache_prefix=%s" % self.out,
+                     "-I -S -i", "-I -S -u", "-I -S -W error", "-I -S -B", "-I -S -X importtime", "-I -S --"):
+            with self.subTest(opts=opts):
+                spelled = "python3.14 %s %s {tail}" % (opts, launcher)
+                self.assertSilentForBoth(spelled)
+                self.assertStillRefused(spelled)
+        self.assertSilentForBoth("python3.14 -I -S -c 'import runpy' %s {tail}" % launcher)
+        self.assertSilentForBoth("python3.14 -I -S -m spud_ledger {tail}")
+        self.assertSilentForBoth("python3.14 -I -S - %s {tail} < %s" % (launcher, launcher))
+
+    def test_the_launcher_alone_runs_without_dash_I_or_dash_S(self):
+        """The #! line runs /opt/homebrew/bin/python3.14 with no flags, so the environment's PYTHONPATH and the site .pth files
+        load code before the program (probed).  Silent; the native rule for that exact spelling is the harness's."""
+        for spelled in ("%s {tail}" % self.launcher, "cd %s && bin/spud {tail}" % self.home.path, "spud {tail}"):
+            with self.subTest(spelled=spelled):
+                self.assertSilentForBoth(spelled)
+                self.assertStillRefused(spelled)
+
+    def test_no_wrapper_and_no_assignment_before_the_call(self):
+        """An assignment reaches the interpreter's environment when it prefixes the call, and when it assigns a variable
+        the shell already exports (probed: DYLD_INSERT_LIBRARIES loads a dylib under -I -S).  Wrappers change the
+        environment, argv[0] or the user."""
+        launcher = self.launcher
+        for prefix in ("PYTHONPATH=%s " % self.out, "DYLD_INSERT_LIBRARIES=%s/x.dylib " % self.out, "FOO=1 ", "FOO=1; ", "FOO=1 && ",
+                       "export FOO=1; ", "env ", "env -i ", "env PYTHONPATH=%s " % self.out, "ENV ", "command ", "exec ", "exec -a x ",
+                       "nohup ", "time ", "nice ", "noglob ", "sudo ", "xargs ", "- "):
+            with self.subTest(prefix=prefix):
+                spelled = "%spython3.14 -I -S %s {tail}" % (prefix, launcher)
+                self.assertSilentForBoth(spelled)
+                self.assertStillRefused(spelled)
+        self.assertAllowedForBoth("python3.14 -I -S %s {tail}; FOO=1" % launcher)  # an assignment after the call reaches nothing it runs
+
+    def test_spud_home_must_name_the_ledger_root(self):
+        """The launcher caches its program's bytecode under <SPUD_HOME>/.spud/pycache when that directory exists, and loads
+        it from there (probed: an unchecked-hash pyc in another home's state directory runs under -I -S); the CLI would also
+        write another ledger.  Not refused: members probe scratch homes, and the prompt decides."""
+        home = self.home.path
+        launcher = self.launcher
+        self.assertAllowedForBoth("SPUD_HOME=%s python3.14 -I -S %s {tail}" % (home, launcher))
+        self.assertAllowedForBoth("SPUD_HOME=%s/ python3.14 -I -S %s {tail}" % (home, launcher))
+        if case_insensitive_fs(home):
+            self.assertAllowedForBoth("SPUD_HOME=%s python3.14 -I -S %s {tail}" % (str(home).swapcase(), launcher))
+        for value in (self.out, "%s/elsewhere" % home, "$HOME/x", "", "'%s'x" % home, "~"):
+            with self.subTest(value=str(value)):
+                spelled = "SPUD_HOME=%s python3.14 -I -S %s {tail}" % (value, launcher)
+                self.assertSilentForBoth(spelled)
+                self.assertStillRefused(spelled)
+                self.assertSilentForBoth("SPUD_HOME=%s; python3.14 -I -S %s {tail}" % (value, launcher))
+
+    def test_relative_and_indirect_spellings_by_identity(self):
+        """A relative launcher is the root's from every directory the shell may be in (SPD-030's candidates), or silent."""
+        home = self.home.path
+        (home / "tests").mkdir(exist_ok=True)
+        (home / "tests" / "tool").symlink_to(self.launcher)
+        for spelled, cwd in (("python3.14 -I -S bin/spud {tail}", str(home)), ("python3.14 -I -S ./bin/spud {tail}", str(home)),
+                             ("cd %s && python3.14 -I -S bin/spud {tail}" % home, None), ("cd %s/tests && python3.14 -I -S ../bin/spud {tail}" % home, None),
+                             ("pushd %s && python3.14 -I -S bin/spud {tail}" % home, None), ("python3.14 -I -S tests/tool {tail}", str(home)),
+                             ("python3.14 -I -S %s/tests/../bin/spud {tail}" % home, None)):
+            with self.subTest(spelled=spelled, cwd=cwd):
+                self.assertAllowedForBoth(spelled, cwd)
+        if case_insensitive_fs(home):
+            self.assertAllowedForBoth("python3.14 -I -S %s/BIN/SPUD {tail}" % str(home).upper())
+            self.assertAllowedForBoth("cd %s && python3.14 -I -S Bin/Spud {tail}" % str(home).swapcase())
+        (self.out / "bin").mkdir()
+        (self.out / "bin" / "spud").write_text("print('not the ledger')\n", encoding="utf-8")
+        for spelled, cwd in (("python3.14 -I -S bin/spud {tail}", str(self.out)), ("cd %s && python3.14 -I -S bin/spud {tail}" % self.out, None),
+                             ("cd $X && python3.14 -I -S bin/spud {tail}", None), ("cd %s/not-yet; python3.14 -I -S bin/spud {tail}" % home, None),
+                             ("true | cd %s; python3.14 -I -S bin/spud {tail}" % self.out, str(home)),
+                             ("command cd %s; python3.14 -I -S bin/spud {tail}" % self.out, str(home))):
+            with self.subTest(spelled=spelled, cwd=cwd):
+                self.assertSilentForBoth(spelled, cwd)
+                self.assertStillRefused(spelled, cwd)
+
+    def test_an_allowed_call_redirects_into_no_file(self):
+        """The allow skips the prompt a write outside the repository would get; a spud call's output written into a file (a
+        shell profile, a .pth file) is not the prescribed call.  Descriptor duplication and /dev/null stay allowed."""
+        cli = "python3.14 -I -S %s" % self.launcher
+        for tail in (" > /dev/null", " 2>&1", " 2>/dev/null", " >&2", " < %s" % self.launcher, " &>/dev/null"):
+            with self.subTest(tail=tail):
+                self.assertAllowedForBoth(cli + " {tail}" + tail)
+        for tail in (" > %s/board.txt" % self.out, " >> %s/board.txt" % self.out, " 2> %s/err.txt" % self.out, " &> %s/all.txt" % self.out,
+                     " > ~/x.pth", " >| %s/x" % self.out):
+            with self.subTest(tail=tail):
+                self.assertSilentForBoth(cli + " {tail}" + tail)
+        self.assertRefused(cli + " board > ledger/tickets/SPD-001.md", "generated")
+
+    def test_every_prescribed_spelling_stays_allowed(self):
+        """CLAUDE.md's `spud` and the brief template's: Spud's and a member's, --json, @- heredocs, @file, a worktree's cwd."""
+        wt = self.home.path / ".claude" / "worktrees" / "spd-999-x"
+        wt.mkdir(parents=True)
+        cli = "python3.14 -I -S %s" % self.launcher
+        lead = self.lead["ref"]
+        for cmd, cwd in (
+            ("%s --as %s member log 'Read the brief; probed -I'" % (cli, AGENT_A), None),
+            ("%s --as %s member show %s" % (cli, AGENT_A, lead), None),
+            ("%s --json --as %s member show %s" % (cli, AGENT_A, lead), None),
+            ("%s --as %s --json member show %s" % (cli, AGENT_A, lead), None),
+            ("%s --as %s member result @- <<'EOF'\nProduced x; the suite is green.\nEOF" % (cli, AGENT_A), None),
+            ("%s --as %s member block \"which one?\"" % (cli, AGENT_A), None),
+            ("%s --as %s proposal file --title x --why y --evidence z --priority P2" % (cli, AGENT_A), None),
+            ("%s --as %s member new --persona scout --model haiku --brief @- --deliverable 'tests/x/**' <<'EOF'\nLook it up.\nEOF" % (cli, AGENT_A), None),
+            ("cd %s && %s --as %s member log hi" % (wt, cli, AGENT_A), None),
+            ("%s --as %s member log hi" % (cli, AGENT_A), str(wt)),
+            ("%s -I -S %s --as %s member log hi" % (sys.executable, self.launcher, AGENT_A), str(wt)),
+        ):
+            with self.subTest(cmd=cmd, cwd=cwd):
+                self.assertAllowed(cmd, AGENT_A, cwd)
+        for cmd, cwd in (
+            ("%s --as spud ticket new --title x --priority P1 --status active --brief @- --sizing s <<'EOF'\nBrief.\nEOF" % cli, None),
+            ("%s --as spud member new --ticket SPD-001 --persona engineer --model opus --brief @brief.md --deliverable 'bin/**'" % cli, None),
+            ("%s --as spud member finish %s --status done --outcome x --summary y --next z" % (cli, lead), None),
+            ("%s --as spud proposal decide 1 --decision create --priority P2" % cli, None),
+            ("%s --as spud render" % cli, None),
+            ("%s board --brief" % cli, str(wt)),
+            ("%s card SPD-001" % cli, None),
+            ("%s events --ticket SPD-001 --limit 50" % cli, None),
+            ("cd %s && %s --as spud render" % (self.home.path, cli), str(wt)),
+            ("%s -I -S %s --as spud board" % (sys.executable, self.launcher), None),
+        ):
+            with self.subTest(cmd=cmd, cwd=cwd):
+                self.assertAllowed(cmd, None, cwd)
 
 
 # The wrappers the Bash hook strips before it names a command, as bin/spud_ledger.py WRAPPERS holds them since SPD-030
