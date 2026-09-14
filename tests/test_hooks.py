@@ -10,6 +10,8 @@ open: exit 0 whatever happens, the gap spooled and drained later as a `hook.erro
 
 import json
 import os
+import shutil
+import subprocess
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1480,12 +1482,8 @@ class PreBashTest(HookCase):
 # =============================================================================
 
 
-class PreEditTest(HookCase):
-    def setUp(self):
-        super().setUp()
-        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud", "docs/x/*.md", "notes/"]), AGENT_A)
-        self.wt = self.home.path / ".claude" / "worktrees" / "spd-099-thing"
-        self.wt.mkdir(parents=True)
+class PathRuleAsserts:
+    """A Write (or another edit tool) to a path, and what the path rule answers."""
 
     def edit(self, path, agent_id=AGENT_A, tool="Write"):
         return self.home.hook("PreToolUse", self.pre_edit(path, agent_id=agent_id, tool=tool))
@@ -1499,6 +1497,14 @@ class PreEditTest(HookCase):
     def assertSilent(self, path, agent_id=AGENT_A, tool="Write"):
         r = self.edit(path, agent_id, tool)
         self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""), (str(path), r))
+
+
+class PreEditTest(PathRuleAsserts, HookCase):
+    def setUp(self):
+        super().setUp()
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud", "docs/x/*.md", "notes/"]), AGENT_A)
+        self.wt = self.home.path / ".claude" / "worktrees" / "spd-099-thing"
+        self.wt.mkdir(parents=True)
 
     def test_member_paths_follow_the_deliverable_globs(self):
         home = self.home.path
@@ -1603,6 +1609,79 @@ class PreEditTest(HookCase):
         r = self.home.hook("PreToolUse", p)
         self.assertEqual((r.code, r.decision), (0, "deny"))
         self.assertIn("file_path", r.reason)
+
+
+class WorktreeElsewhereTest(PathRuleAsserts, HookCase):
+    """SPD-016: every worktree `git worktree list --porcelain` names for the home maps to repository-relative paths,
+    wherever `git worktree add` put it, so the deliverable globs and the generated roots bind there too.  The home is
+    a real repository here; the list is cached under .spud/ until a worktree is added, moved or removed, and a list
+    that cannot be read fails the enforcing hook closed."""
+
+    def setUp(self):
+        super().setUp()
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud"]), AGENT_A)
+        self.git("init", "-q", "-b", "main")
+        self.git("commit", "-q", "--allow-empty", "-m", "root")
+        self.elsewhere = self.add_worktree("elsewhere")
+
+    def git(self, *args):
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
+        proc = subprocess.run(["git", "-C", str(self.home.path), "-c", "user.name=Spud", "-c", "user.email=spud@example.invalid", "-c", "commit.gpgsign=false", *args],
+                              capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc)
+        return proc.stdout
+
+    def add_worktree(self, name):
+        path = self.home.path.parent / ("%s-%s" % (self.home.path.name, name))
+        self.addCleanup(shutil.rmtree, path, True)
+        self.git("worktree", "add", "-q", "-b", name, str(path))
+        return path
+
+    def test_a_worktree_outside_claude_worktrees_maps_to_the_repository(self):
+        wt = self.elsewhere
+        self.assertIn("worktree %s\n" % wt, self.git("worktree", "list", "--porcelain"))
+        self.assertSilent(wt / "tests" / "x.py")
+        self.assertSilent(wt / "bin" / "spud")
+        self.assertRefused(wt / "CLAUDE.md", "deliverables")
+        self.assertRefused(wt / "ledger" / "tickets" / "SPD-001.md", "generated")
+        self.assertRefused(wt / "reports" / "2026-09-13.md", "generated", agent_id=None)
+        self.assertRefused(wt / "bin" / "spud", "Law 1", agent_id=None)
+        self.assertSilent(wt / "CLAUDE.md", agent_id=None)
+        r = self.home.hook("PreToolUse", self.pre_bash("echo x > %s" % (wt / "ledger" / "x.md"), agent_id=AGENT_A))
+        self.assertEqual((r.code, r.decision), (0, "deny"), r)
+        self.assertIn("generated", r.reason)
+        # a sibling directory that is no worktree stays outside every project root, and the home still maps
+        self.assertSilent(self.home.path.parent / ("%s-elsewhere-not" % self.home.path.name) / "ledger" / "x.md")
+        self.assertRefused(self.home.path / "ledger" / "x.md", "generated")
+
+    def test_a_worktree_added_later_is_mapped_at_once(self):
+        later = self.home.path.parent / ("%s-later" % self.home.path.name)
+        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated")
+        self.assertSilent(later / "ledger" / "x.md")
+        self.add_worktree("later")
+        self.assertRefused(later / "ledger" / "x.md", "generated")
+        self.git("worktree", "remove", "--force", str(later))
+        self.assertSilent(later / "ledger" / "x.md")
+
+    def test_the_list_is_cached_until_the_worktrees_change(self):
+        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated")
+        path = self.home.env["PATH"]
+        self.home.env["PATH"] = "/nonexistent"  # no git to run: the answer comes from the cache
+        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated")
+        self.home.env["PATH"] = path
+        self.add_worktree("third")
+        self.home.env["PATH"] = "/nonexistent"  # the worktrees changed and git cannot list them: fail closed
+        r = self.edit(self.elsewhere / "tests" / "x.py")
+        self.assertEqual((r.code, r.stdout), (2, ""), r)
+        self.assertIn("failing closed", r.stderr)
+
+    def test_a_list_git_cannot_give_fails_the_enforcing_hook_closed(self):
+        (self.home.path / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")  # no longer a repository to git
+        r = self.edit(self.home.path / "tests" / "x.py")
+        self.assertEqual((r.code, r.stdout), (2, ""), r)
+        self.assertIn("worktree", r.stderr)
+        self.assertIn("failing closed", r.stderr)
 
 
 class DeliverableGlobTest(SpudTestCase):
