@@ -450,6 +450,8 @@ class PreAgentTest(HookCase):
         self.assertIn("toolu_a", r2.reason)
         self.assertIn("not yet bound", r2.reason)
         self.assertIn("member finish", r2.reason)
+        # SPD-028: Spud is the caller here (no agent_id), so the way out is --as spud with [--next]
+        self.assertIn("`spud --as spud member finish %s --status failed --outcome '<why>' [--next '<what happens next>']`" % m["ref"], r2.reason)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM spawn_requests WHERE decision = 'allow'"), 1)
         # the same tool_use_id again (a deferred call resumed) is the same request, not a second spawn
         r3 = self.home.hook("PreToolUse", self.pre_agent(self.description(m), tool_use_id="toolu_a"))
@@ -459,6 +461,23 @@ class PreAgentTest(HookCase):
         m2 = self.plan()
         r4 = self.home.hook("PreToolUse", self.pre_agent(self.description(m2), tool_use_id="toolu_c"))
         self.assertEqual(r4.decision, "allow", r4)
+
+    def test_the_pending_reservation_refusal_names_a_spudagent_callers_own_actor(self):
+        """SPD-028: a lead cannot run `spud --as spud` (Law 6 refuses it inside a subagent), so its
+        own second spawn of a reserved child must be refused under its own agent_id, with no --next
+        (a nested `member finish` refuses that option)."""
+        lead = self.plan(persona="engineer", model="opus")
+        lead = self.spawn(lead, AGENT_A)
+        child = self.plan(actor=lead["ref"])
+        r1 = self.home.hook("PreToolUse", self.pre_agent(self.description(child), agent_id=AGENT_A, tool_use_id="toolu_x"))
+        self.assertEqual(r1.decision, "allow", r1)
+        r2 = self.home.hook("PreToolUse", self.pre_agent(self.description(child), agent_id=AGENT_A, tool_use_id="toolu_y"))
+        self.assertEqual(r2.decision, "deny", r2)
+        self.assertIn("toolu_x", r2.reason)
+        self.assertIn("not yet bound", r2.reason)
+        self.assertIn("`spud --as %s member finish %s --status failed --outcome '<why>'`" % (AGENT_A, child["ref"]), r2.reason)
+        self.assertNotIn("--next", r2.reason)
+        self.assertNotIn("--as spud", r2.reason)
 
     def test_limits_are_recomputed_inside_the_hook(self):
         kids = [self.plan() for _ in range(3)]
@@ -1137,6 +1156,12 @@ class LeadHoldTest(HookCase):
         self.assertIn("%s (01.01, scout), planned %s and never spawned" % (child["ref"], child["planned_at"][11:16]), reason)
         self.assertIn("`spud --as %s member finish %s --status failed --outcome '<why>'`" % (AGENT_A, child["ref"]), reason)
         self.assertNotIn("Wait inside this turn", reason)  # nothing to wait for: it never started
+        # SPD-028: a child with no reservation keeps today's words byte for byte
+        expected = ("Law 9: 1 child you planned is still alive: %s (01.01, scout), planned %s and never spawned."
+                    " The planned child never started: spawn it now, or record it with `spud --as %s member finish %s --status failed --outcome '<why>'`"
+                    " so the row stops counting against your limits. Then return your summary."
+                    % (child["ref"], child["planned_at"][11:16], AGENT_A, child["ref"]))
+        self.assertEqual(reason, expected)
         self.assertEqual(self.stopped_events(lead["ref"])[-1]["data"]["alive_children"], [child["ref"]])
         out = self.home.json("member", "finish", child["ref"], "--status", "failed", "--outcome", "Never spawned.", actor=AGENT_A)
         self.assertEqual(out["member"]["status"], "failed")
@@ -1150,8 +1175,51 @@ class LeadHoldTest(HookCase):
         self.assertEqual(pre.decision, "allow", pre)
         r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
         self.assertEqual(r.json["decision"], "block", r)
-        self.assertIn(child["ref"], r.json["reason"])
+        reason = r.json["reason"]
+        self.assertIn(child["ref"], reason)
         self.assertEqual(self.stopped_events(lead["ref"])[-1]["data"]["alive_children"], [child["ref"]])
+        # SPD-028: a reserved child is not "never spawned" and is never offered "spawn it now" (the
+        # reservation would refuse it); its item names the reservation, and its way out is the
+        # hook.error check, polling inside this turn, and the lead's own actor, no grace period.
+        req_at = self.home.scalar("SELECT at FROM spawn_requests WHERE tool_use_id = 'toolu_reserved'")
+        self.assertIn("%s (01.01, scout), spawn allowed %s (tool_use_id toolu_reserved), never bound" % (child["ref"], req_at[11:16]), reason)
+        self.assertNotIn("spawn it now", reason)
+        self.assertNotIn("and never spawned", reason)
+        self.assertIn("`spud events --kind hook.error --json`", reason)
+        self.assertIn("wait inside this turn", reason)
+        self.assertIn("`spud member show %s`" % child["ref"], reason)
+        self.assertIn("`spud --as %s member finish %s --status failed --outcome '<why>'`" % (AGENT_A, child["ref"]), reason)
+        self.assertIn("plan a new member", reason)
+        self.assertIn("reservation refuses a second spawn", reason)
+        self.assertNotIn("--next", reason)  # a nested finish refuses it
+        self.assertNotIn("--as spud", reason)  # the lead cannot run this
+        # the way out works: record it failed under the lead's own actor, then the hold clears
+        out = self.home.json("member", "finish", child["ref"], "--status", "failed", "--outcome", "Harness failed the spawn.", actor=AGENT_A)
+        self.assertEqual(out["member"]["status"], "failed")
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+
+    def test_one_block_names_a_plain_planned_child_and_a_reserved_one_in_their_own_words(self):
+        lead = self.lead()
+        plain = self.plan(actor=lead["ref"])
+        reserved = self.plan(actor=lead["ref"])
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(reserved), agent_id=AGENT_A, tool_use_id="toolu_reserved2"))
+        self.assertEqual(pre.decision, "allow", pre)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A))
+        self.assertEqual(r.json["decision"], "block", r)
+        reason = r.json["reason"]
+        self.assertTrue(reason.startswith("Law 9: 2 children you planned are still alive: "), reason)
+        self.assertLess(reason.index(plain["ref"]), reason.index(reserved["ref"]), reason)  # planned first
+        self.assertIn("%s (01.01, scout), planned %s and never spawned" % (plain["ref"], plain["planned_at"][11:16]), reason)
+        req_at = self.home.scalar("SELECT at FROM spawn_requests WHERE tool_use_id = 'toolu_reserved2'")
+        self.assertIn("%s (01.02, scout), spawn allowed %s (tool_use_id toolu_reserved2), never bound" % (reserved["ref"], req_at[11:16]), reason)
+        self.assertIn("The planned child never started: spawn it now, or record it with `spud --as %s member finish %s --status failed --outcome '<why>'`"
+                      % (AGENT_A, plain["ref"]), reason)
+        self.assertIn("The planned child was allowed to spawn and never bound: first look for its tool_use_id in `spud events --kind hook.error --json`", reason)
+        self.assertIn("`spud --as %s member finish %s --status failed --outcome '<why>'` and plan a new member" % (AGENT_A, reserved["ref"]), reason)
+        self.assertNotIn("spawn %s now" % reserved["ref"], reason)
+        held = self.stopped_events(lead["ref"])[-1]
+        self.assertEqual(held["data"]["alive_children"], [plain["ref"], reserved["ref"]])
 
     def test_one_block_covers_a_returned_child_and_a_running_one(self):
         lead = self.lead()
