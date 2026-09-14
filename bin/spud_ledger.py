@@ -5602,7 +5602,14 @@ _ZSH_SENTINELS = {c: chr(0xE010 + i) for i, c in enumerate(_ZSH_PATTERN_CHARS)}
 ZSH_OPEN, ZSH_BAR, ZSH_CLOSE, ZSH_RANGE_OPEN, ZSH_RANGE_CLOSE = (_ZSH_SENTINELS[c] for c in "(|)<>")
 _ZSH_UNSENTINEL = {v: k for k, v in _ZSH_SENTINELS.items()}
 _LITERAL_EQUALS = chr(0xE020)  # a word's leading `=` that zsh's EQUALS is not to expand again (SPD-041: literalize)
-_SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **{_LITERAL_EQUALS: "="})
+# SPD-043: marks neutralize_quoted_globs leaves beside a `$`, so an expansion is told from a literal dollar once shlex has taken
+# the quotes away.  `$` then _LITERAL_DOLLAR: single-quoted or escaped, no expansion.  `$` then _QUOTED_DOLLAR: `$'...'` (ANSI-C
+# quoting, both shells) or `$"..."` (bash's locale string), whose text the hook does not decode.  _NAME_END: a quote or an escape
+# right after `$name` ends the name (`$X"t"` is $X then t, which shlex joins as $Xt).  _ARRAY_VALUE opens the value ShellWalk
+# joins for `name=(a b)`: bash reads `$name` as its first element, zsh as all of them.  deglob removes all four.
+_LITERAL_DOLLAR, _QUOTED_DOLLAR, _ARRAY_VALUE, _NAME_END = chr(0xE021), chr(0xE022), chr(0xE023), chr(0xE024)
+_SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **{_LITERAL_EQUALS: "=", _LITERAL_DOLLAR: "", _QUOTED_DOLLAR: "", _ARRAY_VALUE: "",
+                                                              _NAME_END: ""})
 _LITERALIZE = str.maketrans(dict(_GLOB_SENTINELS, **_ZSH_UNSENTINEL))
 _GLOB_SENTINEL_RE = re.compile("[" + "".join(_SENTINEL_TEXT) + "]")
 GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}|[" + ZSH_OPEN + ZSH_RANGE_OPEN + "]")
@@ -5615,7 +5622,25 @@ SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"}
 PYTHON_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?$")
 JS_RUNTIMES = {"node", "nodejs", "bun", "deno"}
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-VARREF_RE = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
+VARREF_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})\Z")  # a bare `$X` or `${X}`, whole
+# SPD-043: a `$` that expands (not one neutralize_quoted_globs marked literal, and not the last character of the word).
+_EXPANDING_DOLLAR_RE = re.compile("\\$(?!" + _LITERAL_DOLLAR + ")")  # a word-final `$` too: `$((1))` reaches a word as `$` alone
+# `${X=v}`, `${X:=v}` and zsh's `${X::=v}` (flags and a subscript allowed) assign X wherever they are expanded.
+_ASSIGNING_EXPANSION_RE = re.compile(r"\$\{(?:\([^)]*\))?[#!]?([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?:{0,2}=")
+_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_NAME_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
+_BARE_NAME_TAIL_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*\Z")
+_IFS_BLANKS_RE = re.compile(r"[ \t\n]+")
+# Builtins that assign a shell variable named by an argument (SPD-043: `read X`, `printf -v X`, `getopts o X`, `unset X`, zsh's
+# `print -v X`, `vared X`, `zparseopts -A X`, `set -A X` ...): a variable any of their words names may no longer hold what the line
+# assigned it.  `trap`, `source` and `.` run code the hook does not read, so after them no variable is certain.
+ASSIGNING_COMMANDS = {"read", "getopts", "printf", "print", "mapfile", "readarray", "unset", "let", "wait", "vared", "zparseopts", "zstyle",
+                      "zformat", "zregexparse", "strftime", "zstat", "stat", "sysread", "getln", "select", "foreach", "zle", "zcurses",
+                      "zsocket", "ztcp", "zpty", "zselect", "zsystem", "private", "integer", "float", "set", "compadd", "compset"}
+# Variables the shells change themselves (the last argument, the directory, a match, a reply): never certain.
+DYNAMIC_VARIABLES = {"_", "PWD", "OLDPWD", "REPLY", "OPTARG", "OPTIND", "MATCH", "MBEGIN", "MEND", "match", "mbegin", "mend", "BASH_REMATCH",
+                     "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "LINENO", "BASH_COMMAND", "FUNCNAME", "DIRSTACK",
+                     "dirstack", "PIPESTATUS", "pipestatus", "status", "argv", "BASHPID", "COLUMNS", "LINES", "HISTCMD", "psvar", "reply"}
 HEREDOC_RE = re.compile(r"<<-?\s*(?:'([^']*)'|\"([^\"]*)\"|(\\?[A-Za-z_][\w.-]*))")
 GIT_WRITE_VERBS = {"commit", "add", "checkout", "switch", "rebase", "reset", "push", "merge", "cherry-pick", "pull", "am",
                    "apply", "revert", "restore", "rm", "mv", "clean", "notes", "replace", "update-ref", "symbolic-ref",
@@ -6204,6 +6229,13 @@ class ShellAnalysis:
         self.loop_depth = 0  # inside a loop or a function body, where a relative cd may repeat
         self.cd_uncertain = False  # the last directory change may not happen (a target that does not exist now)
         self.isolated_done = set()  # (command, depth, starting state) of every body analysed in its own process (SPD-039)
+        # SPD-043: `doubt`, the variables whose value in `vars` the shell may not hold when a later word reads it (an assignment that
+        # may not run or does not persist, or a builtin that assigns it); `sticky`, those no later assignment settles (a function
+        # body's, a loop's, `${X:=v}`); `assigned`, every name assigned so far, in order; `unsure`, the simple command being read may
+        # not run in the shell (after && or ||, a pipeline element, a background job); `all_doubt`, after code the hook does not read
+        self.doubt, self.sticky, self.assigned = set(), set(), []
+        self.unsure = 0
+        self.all_doubt = False
 
     @property
     def all_spud(self):
@@ -6338,34 +6370,61 @@ def neutralize_quoted_globs(text):
     sentinel, so filename generation and brace expansion are read only from the unquoted metacharacters (SPD-034: zsh 5.9
     and bash 3.2 both expand an unquoted glob in a redirection target, and both leave a quoted one literal).  The quotes and
     backslashes are kept for shlex to strip; deglob restores the literal character.  Word boundaries are untouched, so other
-    words are read exactly as before."""
+    words are read exactly as before.
+
+    SPD-043: beside a `$` it leaves the marks the expansion check reads once shlex has removed the quotes: _LITERAL_DOLLAR after a
+    `$` that is single-quoted, escaped, or last in double quotes (no expansion in either shell), _QUOTED_DOLLAR after the `$` of
+    `$'...'` and `$"..."` (text the hook does not decode), and _NAME_END where a quote or an escape continues a word right after a
+    bare `$name` (`$X"t"` and `$X\\t` read $X, then t)."""
     out = []
     i, n = 0, len(text)
     state = None  # None, "'" or '"'
+
+    def end_name(k):
+        # the word goes on after the quotes from text[k] with a name character: a `$name` just written ends here
+        while k < n and text[k] in "'\"":
+            k += 1
+        if k < n and _NAME_CHAR_RE.match(text[k]) and _BARE_NAME_TAIL_RE.search("".join(out[-64:])):
+            out.append(_NAME_END)
+
     while i < n:
         c = text[i]
         if state == "'":
             out.append(_GLOB_SENTINELS.get(c, c))
             if c == "'":
                 state = None
+            elif c == "$":
+                out.append(_LITERAL_DOLLAR)
             i += 1
         elif c == "\\" and i + 1 < n and state != "'":
             nxt = text[i + 1]
+            if _NAME_CHAR_RE.match(nxt) and _BARE_NAME_TAIL_RE.search("".join(out[-64:])):
+                out.append(_NAME_END)
             if state == '"' and nxt not in '$`"\\\n':
                 out.append(c)  # inside "" a backslash before an ordinary character stays literal
                 out.append(_GLOB_SENTINELS.get(nxt, nxt))
             else:
                 out.append(c)
                 out.append(_GLOB_SENTINELS.get(nxt, nxt))
+            if nxt == "$":
+                out.append(_LITERAL_DOLLAR)
             i += 2
         elif state == '"':
-            out.append(_GLOB_SENTINELS.get(c, c))
             if c == '"':
+                if out and out[-1] == "$":
+                    out.append(_LITERAL_DOLLAR)  # `"cost $"`: a dollar last in double quotes is literal
+                end_name(i + 1)
                 state = None
+            out.append(_GLOB_SENTINELS.get(c, c))
             i += 1
         elif c in "'\"":
+            end_name(i)
             state = c
             out.append(c)
+            i += 1
+        elif c == "$" and i + 1 < n and text[i + 1] in "'\"":
+            out.append(c)
+            out.append(_QUOTED_DOLLAR)
             i += 1
         else:
             out.append(c)
@@ -7098,6 +7157,9 @@ def analyse_command(command, analysis=None, depth=0):
     a = analysis or ShellAnalysis()
     if depth > 6:
         return a
+    for m in _ASSIGNING_EXPANSION_RE.finditer(command):  # `${X:=git}` assigns X wherever it is expanded (SPD-043, probed)
+        a.doubt.add(m.group(1))
+        a.sticky.add(m.group(1))
     text, bodies = strip_heredocs(command)
     outer, inner = split_substitutions(newlines_as_separators(text))
     plain = neutralize_quoted_globs(outer)
@@ -7123,23 +7185,28 @@ def analyse_command(command, analysis=None, depth=0):
     a.cwds, a.vars, a.loop_depth, a.cd_uncertain = cwds, variables, loop_depth, False
     ShellWalk(a, inner, bodies, depth).walk(shell_tokens(other) or [])
     a.cwds = union_dirs(zsh_cwds, a.cwds)
+    a.doubt.update(set(zsh_vars) ^ set(a.vars))  # a variable only one reading assigns (SPD-043)
     for name, value in zsh_vars.items():
         a.vars[name] = value if a.vars.get(name, value) == value else SUBST  # readings that disagree: a value the hook cannot know
     return a
 
 
 def isolated(a, run):
-    """Run an analysis whose directory changes stay in its own process (a substitution, `sh -c`, a shell fed a body)."""
-    before = a.cwds
+    """Run an analysis whose directory changes stay in its own process (a substitution, `sh -c`, a shell fed a body).  Its variables
+    do not persist either: certain inside it, doubted after it (SPD-043)."""
+    before, mark, unsure = a.cwds, len(a.assigned), a.unsure
+    a.unsure = 0
     run()
     a.cwds = before
     a.cd_uncertain = False
+    a.unsure = unsure
+    a.doubt.update(a.assigned[mark:])
 
 
 def analyse_isolated(a, command, depth):
     """analyse_command on a body that runs in its own process, once per body and starting state: both readings of a line walk
     its substitutions (SPD-039), and a nested line must not double its work at every level."""
-    key = (command, depth, a.cwds, a.loop_depth, tuple(sorted(a.vars.items())))
+    key = (command, depth, a.cwds, a.loop_depth, tuple(sorted(a.vars.items())), frozenset(a.doubt), frozenset(a.sticky), a.all_doubt)
     if key in a.isolated_done:
         return
     a.isolated_done.add(key)
@@ -7202,11 +7269,12 @@ class ShellFrame:
     """An open compound command: its kind, the word that closes it, the directories it started in, the directories any of
     its branches ended in so far, and the enclosing list's state to restore."""
 
-    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern")
+    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark")
 
-    def __init__(self, kind, closer, saved, outer):
+    def __init__(self, kind, closer, saved, outer, mark=0):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
         self.pattern = kind == "case"  # a case command reads a pattern first, and again after each ;;
+        self.mark = mark  # how many assignments the line had made when it opened (SPD-043)
 
 
 _CURRENT = object()  # analyse_segment: redirections open in the directories in force
@@ -7236,6 +7304,7 @@ class ShellWalk:
     def start_list(self):
         self.list_start = self.list_seen = self.pipeline_start = self.a.cwds
         self.uncertain = self.conditional = self.piped = False
+        self.list_mark = len(self.a.assigned)  # the assignments before this and-or list (SPD-043)
 
     def end_pipeline(self):
         if self.piped:
@@ -7252,7 +7321,7 @@ class ShellWalk:
     # -- compound commands --------------------------------------------------------------
     def push(self, kind, closer):
         outer = (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words, self.skip)
-        self.stack.append(ShellFrame(kind, closer, self.a.cwds, outer))
+        self.stack.append(ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned)))
         if kind in ("loop", "func"):
             self.a.loop_depth += 1
         self.words, self.skip = [], False
@@ -7264,6 +7333,10 @@ class ShellWalk:
         frame = self.stack.pop()
         if frame.kind in ("loop", "func"):
             self.a.loop_depth -= 1
+        assigned = self.a.assigned[frame.mark :]
+        self.a.doubt.update(assigned)  # what a compound command assigned may not have run, or may not persist (SPD-043)
+        if frame.kind == "func":
+            self.a.sticky.update(assigned)  # a function body assigns again whenever it is called
         inner = self.a.cwds
         after = frame.saved if frame.kind == "sub" else (inner if frame.kind == "group" else union_dirs(frame.seen, inner))
         (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words, self.skip) = frame.outer
@@ -7281,6 +7354,7 @@ class ShellWalk:
         if self.stack and self.stack[-1].kind in ("cond", "case", "loop"):
             top = self.stack[-1]
             top.seen = union_dirs(top.seen, self.a.cwds)  # where the branch before this one ended
+            self.a.doubt.update(self.a.assigned[top.mark :])  # a branch may run without what an earlier one assigned (SPD-043)
             self.a.cwds = union_dirs(top.saved, self.a.cwds)
         self.start_list()
 
@@ -7317,17 +7391,23 @@ class ShellWalk:
         self.consume(self.words)
         self.words = []
 
-    def finish(self):
+    def finish(self, unsure=False):
+        """Analyse the simple command read so far.  `unsure`: it runs in its own process (a pipeline element, a background job)."""
         words, self.words = self.words, []
         skip, self.skip = self.skip, False
         redirect_cwds, self.redirect_cwds = self.redirect_cwds, _CURRENT
         if not words:
             return
         cleaned, bodies = self.consume(words)
-        if skip:
-            return
         a = self.a
+        if skip:
+            for w in cleaned:  # a for or select header assigns its name (SPD-043)
+                a.doubt.update(_NAME_RE.findall(deglob(w)))
+            return
         before = a.cwds
+        # SPD-043: an assignment in a command that may not run (after && or ||) or runs in its own process may not hold after it
+        unsure = unsure or self.conditional or self.piped
+        a.unsure += unsure
         if self.function_next:  # zsh's `name () command`: a body that runs when called, perhaps more than once
             self.function_next = False
             a.loop_depth += 1
@@ -7336,6 +7416,7 @@ class ShellWalk:
             a.cwds = union_dirs(before, a.cwds)
         else:
             analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds)
+        a.unsure -= unsure
         if a.cd_uncertain or (a.cwds != before and self.conditional):
             self.uncertain = True
         a.cd_uncertain = False
@@ -7391,7 +7472,7 @@ class ShellWalk:
                 j = i + 1
                 while j < len(toks) and toks[j] != ")":
                     j += 1
-                self.words[-1] += " ".join(toks[i + 1 : j])  # name=(a b), name=(): one assignment word
+                self.words[-1] += _ARRAY_VALUE + " ".join(toks[i + 1 : j])  # name=(a b), name=(): one assignment word, marked an array
                 i = j
             elif t == "(" and i + 1 < len(toks) and toks[i + 1] == ")":
                 self.discard()  # name (): a function definition's header
@@ -7423,11 +7504,12 @@ class ShellWalk:
                 self.conditional = True
                 self.pipeline_start = self.a.cwds
             elif t in ("|", "|&"):
-                self.finish()
+                self.finish(unsure=True)
                 self.a.cwds = self.pipeline_start  # that element ran in its own process
                 self.piped = True
             elif t == "&":
-                self.finish()
+                self.finish(unsure=True)
+                self.a.doubt.update(self.a.assigned[self.list_mark :])  # a background list assigns in its own process (SPD-043)
                 self.end_pipeline()
                 self.a.cwds = self.list_start  # the whole and-or list ran in the background
                 self.start_list()
@@ -7454,9 +7536,9 @@ def cdpath_entries(a):
     the environment the hook runs in; None when a value holds something the hook cannot read."""
     raw = []
     if "CDPATH" in a.vars:
-        raw += a.vars["CDPATH"].split(":")
+        raw += a.vars["CDPATH"].replace(_ARRAY_VALUE, "").split(":")
     if "cdpath" in a.vars:
-        raw += a.vars["cdpath"].split()
+        raw += a.vars["cdpath"].replace(_ARRAY_VALUE, "").split()
     if "CDPATH" not in a.vars and "cdpath" not in a.vars and os.environ.get("CDPATH"):
         raw = os.environ["CDPATH"].split(":")
     if any("$" in e or "`" in e or SUBST in e for e in raw):
@@ -7660,7 +7742,7 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False)
     return unique, ambiguous or len(names) >= 2
 
 
-def resolve_glob(words, i, kind, bodies, a, depth, budget, effect, prefixed):
+def resolve_glob(words, i, kind, bodies, a, depth, budget, effect, prefixed, fresh=0):
     """Read words[i], a word the shell expands first, as each reading glob_readings gives (SPD-041).  One reading replaces it in
     place and the caller reads on (False).  Several are each analysed from the start of `words`, with the directories and
     variables after them those of every reading, as ShellWalk merges branches, and the caller stops (True).  An ambiguous word
@@ -7679,85 +7761,221 @@ def resolve_glob(words, i, kind, bodies, a, depth, budget, effect, prefixed):
     if len(readings) == 1:
         words[i : i + 1] = readings[0]
     else:
-        cwds, variables, uncertain = a.cwds, dict(a.vars), a.cd_uncertain
-        outcomes = []
-        for reading in readings:
-            a.cwds, a.vars, a.cd_uncertain = cwds, dict(variables), uncertain
-            analyse_words(words[:i] + reading + words[i + 1 :], bodies, a, depth, budget, effect, prefixed)
-            outcomes.append((a.cwds, a.vars, a.cd_uncertain))
-        a.cwds, a.vars, a.cd_uncertain = outcomes[0]
-        for other_cwds, other_vars, other_uncertain in outcomes[1:]:
-            a.cwds = union_dirs(a.cwds, other_cwds)
-            for name, value in other_vars.items():
-                a.vars[name] = value if a.vars.get(name, value) == value else SUBST  # readings that disagree: a value the hook cannot know
-            a.cd_uncertain = a.cd_uncertain or other_uncertain
+        analyse_readings(words, i, readings, bodies, a, depth, budget, effect, prefixed, fresh)
     if ambiguous:
         a.kinds.append("glob")
         a.findings.append(("glob", spelled))
     return len(readings) > 1
 
 
-def first_glob_index(words, start):
-    return next((j for j in range(start, len(words)) if active_glob_word(words[j])), None)
+def analyse_readings(words, i, readings, bodies, a, depth, budget, effect, prefixed, fresh, expanded=False):
+    """Analyse `words` once for each reading of words[i], from the start, with the directories, variables and doubts after them
+    those of every reading, as ShellWalk merges branches (SPD-041).  `expanded`: the readings are an expansion's words, so in the
+    command word none of the words from it on is an assignment or a reserved word (SPD-043)."""
+    cwds, variables, uncertain, doubt = a.cwds, dict(a.vars), a.cd_uncertain, set(a.doubt)
+    outcomes = []
+    for reading in readings:
+        a.cwds, a.vars, a.cd_uncertain, a.doubt = cwds, dict(variables), uncertain, set(doubt)
+        spliced = words[:i] + reading + words[i + 1 :]
+        analyse_words(spliced, bodies, a, depth, budget, effect, prefixed, len(spliced) if expanded and i == 0 else fresh)
+        outcomes.append((a.cwds, a.vars, a.cd_uncertain, a.doubt))
+    a.cwds, a.vars, a.cd_uncertain, a.doubt = outcomes[0]
+    for other_cwds, other_vars, other_uncertain, other_doubt in outcomes[1:]:
+        a.cwds = union_dirs(a.cwds, other_cwds)
+        a.doubt |= other_doubt | (set(a.vars) ^ set(other_vars))  # a variable only some readings assign (SPD-043)
+        for name, value in other_vars.items():
+            a.vars[name] = value if a.vars.get(name, value) == value else SUBST  # readings that disagree: a value the hook cannot know
+        a.cd_uncertain = a.cd_uncertain or other_uncertain
 
 
-def git_glob_index(words):
-    """The index of the first word git's option scan, its verb or the arguments git_refused reads holds a glob, or None."""
+# What reading one word leaves its caller to do (SPD-043): read on from where the word was (its readings replaced it in place),
+# stop (its readings were each analysed whole, or the command word cannot be read), or read on past it (it stays as spelled).
+_AGAIN, _STOP, _FLAGGED = "again", "stop", "flagged"
+_ACTIVATE_GLOBS = str.maketrans({_GLOB_SENTINELS[c]: c for c in "*?[]"})  # bash globs an unquoted expansion, however it was assigned
+_ZSH_PLAIN = str.maketrans(_ZSH_UNSENTINEL)
+_BRACES_PLAIN = str.maketrans({_GLOB_SENTINELS["{"]: "{", _GLOB_SENTINELS["}"]: "}"})
+
+
+def expansion_word(word, command=False):
+    """True when the shell expands a parameter, arithmetic or a substitution in this word (SPD-043): a `$` neutralize_quoted_globs
+    did not mark literal, or a lifted `$(...)` or backtick body.  In the command word a bare `$X` is read as one whatever its
+    quoting, as it was before SPD-043 (`'$X' push` stays refused)."""
+    if SUBST in word or _EXPANDING_DOLLAR_RE.search(word):
+        return True
+    return command and variable_reference(word, command) is not None
+
+
+def variable_reference(word, command=False):
+    """The name of a bare `$X` or `${X}` the word is, quoted or not (`"${X}"`'s braces reach it as quoted glob sentinels); in the
+    command word a literal-marked dollar counts too, as before SPD-043; else None."""
+    text = word.translate(_BRACES_PLAIN)
+    if command:
+        text = text.replace(_LITERAL_DOLLAR, "")
+    ref = VARREF_RE.match(text)
+    return ref and (ref.group(1) or ref.group(2))
+
+
+def active_read_word(word):
+    """A word the dispatch reads by name that must be resolved before it is read: an expansion (SPD-043) or a glob (SPD-041)."""
+    return expansion_word(word) or active_glob_word(word)
+
+
+def assign_variable(a, name, value, append=False):
+    """Record `name=value` (or `name+=value`) where the shell runs it (SPD-043).  An appended value is not known (CDPATH's reads as
+    `$`, which cd_target does not follow; any other as a substitution).  The value is certain unless the assignment may not run
+    or persist here (a.unsure) or runs in a loop or function body, which may assign again later (sticky); a certain assignment
+    settles an earlier doubt."""
+    a.vars[name] = ("$" if name in ("CDPATH", "cdpath") else SUBST) if append else value
+    a.assigned.append(name)
+    if a.unsure or a.loop_depth:
+        a.doubt.add(name)
+        if a.loop_depth:
+            a.sticky.add(name)
+    elif name not in a.sticky:
+        a.doubt.discard(name)
+
+
+def variable_readings(a, name):
+    """(readings, doubtful) for a bare `$name` whose value the line assigned (SPD-043, probed in zsh 5.9 -f and bash 3.2 with a fake
+    git): the words bash gives (the value split on blanks, each field's glob characters active even if quoted in the assignment,
+    `X='g?t'; $X push` pushed; an array's first element) and the words zsh gives (the value as one word, never globbed, when it
+    holds a blank, `X='/a b/git'; $X push` ran that git; every element of an array).  (None, False) when the value is not known
+    exactly: it holds an expansion or a substitution, was appended to, or IFS was assigned (`IFS=_; X=git_push; $X` pushed in
+    bash).  Doubtful when the shell may not hold that value here (ShellAnalysis.doubt), inside a loop or function body, for a
+    variable the shells set themselves, and for an array (the shells disagree)."""
+    value = a.vars[name]
+    if SUBST in value or "$" in value or "IFS" in a.vars or "IFS" in a.doubt:
+        return None, False
+    doubtful = name in a.doubt or name in a.sticky or name in DYNAMIC_VARIABLES or a.all_doubt or a.loop_depth > 0
+    plain = value.translate(_ZSH_PLAIN)
+    fields = [f.translate(_ACTIVATE_GLOBS) for f in _IFS_BLANKS_RE.split(plain.lstrip(_ARRAY_VALUE)) if f]
+    if plain.startswith(_ARRAY_VALUE):
+        readings, doubtful = [fields, fields[:1]], True
+    else:
+        readings = [fields]
+        if _IFS_BLANKS_RE.search(plain):
+            readings.append([literalize(plain)])
+    unique = []
+    for r in readings:
+        if r not in unique:
+            unique.append(r)
+    return unique, doubtful
+
+
+def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fresh, wrapper_command=False):
+    """Read words[i], a word the dispatch reads by name that holds an expansion (SPD-043).  A bare `$X` or `${X}` whose value the
+    line assigned is read as the words the shells give it (variable_readings): one reading replaces it in place (_AGAIN), several
+    are each analysed from the start (_STOP), and a doubtful value adds a "var-doubt" finding.  Anything else is not resolved: an
+    operator form (`${X:-git}`), zsh's flags and modifiers (`${(L)X}`, `$~X`, `$X:t`), a subscript, a concatenation (`$X$Y`,
+    `g$X`), arithmetic, `$'...'`, a substitution, a variable the line did not assign, or an empty value outside the command word.
+    The command word is then a "var" finding, which ends the analysis for a bare variable or a substitution (_STOP) and leaves a
+    partial expansion to be dispatched as spelled (_FLAGGED); another word is a "var-word" finding left as spelled (_FLAGGED); a
+    wrapper's command word is left for the loop to read once the wrapper is stripped (_FLAGGED, no finding).  Each finding refuses
+    a member; Spud reads on."""
+    w = words[i]
+    name = variable_reference(w, command=i == 0)
+    readings = doubtful = None
+    if name and name in a.vars and budget[0] > 0:
+        readings, doubtful = variable_readings(a, name)
+        if readings is not None and i > 0 and not all(readings):
+            readings = None  # an empty value drops the word: read as spelled (a member is refused, Spud's reading is kept)
+    spelled = "$(...)" if SUBST in w else deglob(w)
+    if readings is None:
+        if wrapper_command:
+            return _FLAGGED
+        a.findings.append(("var" if i == 0 else "var-word", spelled))
+        if i > 0:
+            return _FLAGGED
+        a.kinds.append("var")
+        # a bare variable or a substitution names nothing; a partial expansion (`${HOME}/bin/spud`, `$D/git`) is dispatched as
+        # spelled, as it was before SPD-043, so Spud's checks still read it
+        return _STOP if name is not None or SUBST in w else _FLAGGED
+    if doubtful:
+        a.findings.append(("var-doubt", spelled))
+    budget[0] -= len(readings)
+    if len(readings) == 1:
+        words[i : i + 1] = readings[0]
+        return _AGAIN
+    analyse_readings(words, i, readings, bodies, a, depth, budget, effect, prefixed, fresh, expanded=True)
+    return _STOP
+
+
+def first_read_index(words, start):
+    return next((j for j in range(start, len(words)) if active_read_word(words[j])), None)
+
+
+def git_read_index(words, start=1):
+    """The index, from `start`, of the first word git's option scan, its verb or the arguments git_refused reads that holds a glob or
+    an expansion, or None."""
     i = 1
     while i < len(words):
         w = words[i]
-        if active_glob_word(w):
+        if i >= start and active_read_word(w):
             return i
         if w in GIT_GLOBAL_VALUE_FLAGS:
-            if i + 1 < len(words) and active_glob_word(words[i + 1]):
+            if i + 1 < len(words) and i + 1 >= start and active_read_word(words[i + 1]):
                 return i + 1
             i += 2
             continue
         if w.startswith("-"):
             i += 1
             continue
-        args = words[i + 1 :]
         if w in ("stash", "worktree", "remote", "reflog"):
-            return i + 1 if args and active_glob_word(args[0]) else None
+            return i + 1 if i + 1 < len(words) and i + 1 >= start and active_read_word(words[i + 1]) else None
         if w in ("branch", "tag", "config"):
-            k = first_glob_index(args, 0)
-            return None if k is None else i + 1 + k
+            return first_read_index(words, max(i + 1, start))
         return None
     return None
 
 
-def shell_glob_index(words):
-    """The index of the first option a shell's `-c` scan reads that holds a glob, or None (the string itself is read as code)."""
+def shell_read_index(words, start=1):
+    """The index, from `start`, of the first option a shell's `-c` scan reads that holds a glob or an expansion, or None (the string
+    itself is read as code)."""
     for i in range(1, len(words)):
         w = words[i]
-        if active_glob_word(w):
+        if i >= start and active_read_word(w):
             return i
         if not w.startswith("-") or (not w.startswith("--") and "c" in w[1:]):
             return None
     return None
 
 
-def python_glob_index(words, a):
-    """(index, is the script) of the first word python_interpreter_args reads, or a spud launcher's arguments, that holds a glob; or None."""
+def python_read_index(words, a, start=1):
+    """(index, is the script), from `start`, of the first word python_interpreter_args reads, or a spud launcher's arguments, that
+    holds a glob or an expansion; or None."""
     i = 1
     while i < len(words):
         w = words[i]
-        if active_glob_word(w):
+        if i >= start and active_read_word(w):
             return i, not w.startswith("-")
         if w in ("-c", "-m", "-"):
-            return (i + 1, False) if w == "-m" and i + 1 < len(words) and active_glob_word(words[i + 1]) else None
+            j = i + 1
+            return (j, False) if w == "-m" and j < len(words) and j >= start and active_read_word(words[j]) else None
         if w.startswith("-"):
             if w in ("-X", "-W", "-Q"):
-                if i + 1 < len(words) and active_glob_word(words[i + 1]):
+                if i + 1 < len(words) and i + 1 >= start and active_read_word(words[i + 1]):
                     return i + 1, False
                 i += 1
             i += 1
             continue
         if any_spud_launcher(w, a.cwds):
-            k = first_glob_index(words, i + 1)
+            k = first_read_index(words, max(i + 1, start))
             return None if k is None else (k, False)
         return None
     return None
+
+
+def option_point(k):
+    """A read point for an option, a verb or an argument: a glob there may start with `-` or be skipped as an option's value."""
+    return None if k is None else (k, {"dash": True, "shift": True})
+
+
+def script_point(found):
+    """A read point python_read_index found: a script is matched as a path, an option like any other."""
+    if found is None:
+        return None
+    k, is_script = found
+    return k, {"script": is_script, "dash": True, "shift": not is_script}
 
 
 def analyse_segment(tokens, bodies, a, depth, redirect_cwds=_CURRENT):
@@ -7767,52 +7985,83 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=_CURRENT):
     analyse_words(words, bodies, a, depth, [GLOB_READING_BUDGET], "shell", False)
 
 
-def analyse_words(words, bodies, a, depth, budget, effect, prefixed):
+def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
     """A simple command's words, its redirections taken: the prefixes, then what the command word dispatches on.  `effect` is
     where a builtin behind the prefixes runs (prefix_effect); `prefixed`, a wrapper, zsh's `-` or coproc runs the command
     (SPD-032: no spud call behind one is allowed).  A word the dispatch reads by name that the shell expands first (the command
     word, a wrapper's options and command, git's options, verb and the arguments git_refused reads, a shell's options, python's
-    options and script, a spud call's arguments) is read as each word it can become (SPD-041, resolve_glob)."""
+    options and script, a spud call's arguments) is read as each word it can become (SPD-041, resolve_glob), an expansion in it
+    before a glob (SPD-043, resolve_expansion).  `fresh`: the leading words an expansion in the command word gave, none of which
+    the shell reads as an assignment or a reserved word, since it finds those before it expands."""
 
-    def glob(i, **kind):
-        return resolve_glob(words, i, kind, bodies, a, depth, budget, effect, prefixed)
+    def read(i, wrapper_command=False, **kind):
+        nonlocal fresh
+        if expansion_word(words[i], command=i == 0):
+            outcome = resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fresh, wrapper_command)
+            if outcome == _AGAIN and i == 0:
+                fresh = len(words)  # past the command position, no word is an assignment
+            return outcome
+        return _STOP if resolve_glob(words, i, kind, bodies, a, depth, budget, effect, prefixed, fresh) else _AGAIN
 
+    def read_points(index_of):
+        """Read each word index_of(words, start) finds, in order; False when a reading analysed the command whole."""
+        start = 1
+        while (found := index_of(words, start)) is not None:
+            k, kind = found
+            outcome = read(k, **kind)
+            if outcome == _STOP:
+                return False
+            start = k + 1 if outcome == _FLAGGED else k
+        return True
+
+    prefix_names, wrapper_from, spelled_command = [], 1, False
     while words:
         w = words[0]
-        m = ASSIGNMENT_WORD_RE.match(w)
-        if not (m or w in RESERVED_WORDS) and active_glob_word(w):  # an assignment's value is not expanded (probed: X=g?t kept g?t)
-            if glob(0, command=True):
-                return
-            continue
-        if w in RESERVED_WORDS:
+        m = None if fresh else ASSIGNMENT_WORD_RE.match(w)
+        reserved = not fresh and w in RESERVED_WORDS
+        if not (m or reserved):
+            a.doubt.update(prefix_names)  # a prefix assignment is the command's environment; the shell's variable keeps its value (SPD-043)
+            prefix_names = []
+            # an assignment's value is not expanded (probed: X=g?t kept g?t); a command word left as spelled is read once
+            if not spelled_command and (expansion_word(w, command=True) or active_glob_word(w)):
+                outcome = read(0, command=True)
+                if outcome == _STOP:
+                    return
+                spelled_command = outcome == _FLAGGED
+                continue
+        spelled_command = False
+        if reserved:
             if w == "coproc":
                 effect = "process"
                 prefixed = True
             words = words[1:]
         elif m:
             name, append, value = m.groups()
-            if not append:
-                a.vars[name] = value
-            elif name in ("CDPATH", "cdpath"):
-                a.vars[name] = "$"  # appended to a value the hook may not know
+            assign_variable(a, name, value, bool(append))
+            prefix_names.append(name)
             words = words[1:]
         elif w == "-":
             effect = max(effect, "either", key=EFFECT_ORDER.get)  # zsh's `-` precommand modifier; bash finds no `-`
             prefixed = True
             words = words[1:]
+            fresh = max(fresh - 1, 0)
         elif os.path.basename(w).casefold() in WRAPPERS and w not in a.vars:
             rest, strings, consumed, env_assignments = strip_wrapper(words)
+            k = first_read_index(words[: consumed + 1], wrapper_from)  # its options, their values, and the command word it runs
+            if k is not None:
+                outcome = read(k, wrapper_command=k == consumed, command=k == consumed, dash=True, shift=k < consumed)
+                if outcome == _STOP:
+                    return
+                wrapper_from = k + 1 if outcome == _FLAGGED else k
+                continue
+            wrapper_from = 1
             for aname, avalue in env_assignments:
                 if is_git_config_var(aname) or is_git_program_var(aname):  # `env GIT_CONFIG_*/GIT_PAGER/GIT_SSH_COMMAND=... git ...` (SPD-044, SPD-046)
                     a.vars[aname] = avalue
-            k = first_glob_index(words[: consumed + 1], 1)  # its options, their values, and the command word it runs
-            if k is not None:
-                if glob(k, command=k == consumed, dash=True, shift=k < consumed):
-                    return
-                continue
+                    a.doubt.add(aname)  # the command's environment, not the shell's (SPD-043)
             prefixed = True
             effect = max(effect, prefix_effect(w, words[1] if len(words) > 1 else None), key=EFFECT_ORDER.get)
-            words = rest
+            words, fresh = rest, 0
             for s in strings:
                 analyse_isolated(a, deglob(s), depth + 1)  # a shell reads the string with its own quotes (SPD-041)
         else:
@@ -7820,33 +8069,17 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed):
     if not words:
         return
     cmd = words[0]
-    if VARREF_RE.match(cmd):
-        name = cmd.strip("${}")
-        if name in a.vars:
-            expanded = shell_tokens(a.vars[name]) or []
-            if not expanded:
-                return
-            words = expanded + words[1:]
-            if active_glob_word(words[0]):  # bash expands a glob an unquoted variable holds (SPD-041)
-                analyse_words(words, bodies, a, depth, budget, effect, prefixed)
-                return
-            cmd = words[0]
-        else:
-            a.kinds.append("var")
-            a.findings.append(("var", cmd))
-            return
-    if SUBST in cmd:
-        # The command word comes out of `$(...)` or backticks (Rooster's MEDIUM-3): unresolvable, like a bare variable.
-        a.kinds.append("var")
-        a.findings.append(("var", "$(...)"))
-        return
+    if cmd in ASSIGNING_COMMANDS:
+        for x in words[1:]:  # `read X`, `printf -v X`, `unset X`, `getopts o X`: X may now hold anything (SPD-043, probed)
+            a.doubt.update(_NAME_RE.findall(deglob(x)))
+    if cmd in ("source", ".", "trap"):
+        a.all_doubt = True  # code the hook does not read may assign any variable (SPD-043)
     base = os.path.basename(cmd).casefold()
     if base != "spud" and "/" in cmd and any_spud_launcher(cmd, a.cwds):
         base = "spud"  # a symlink to bin/spud run by its path, whatever its own name (SPD-029)
     if base == "git":
-        while (k := git_glob_index(words)) is not None:
-            if glob(k, dash=True, shift=True):
-                return
+        if not read_points(lambda ws, start: option_point(git_read_index(ws, start))):
+            return
         a.kinds.append("git")
         alias = git_line_defines_alias(words) or git_env_defines_alias(a.vars)
         if alias is not None:  # a defined alias/include or GIT_CONFIG_* injection: the verb the hook reads is not what runs (SPD-044)
@@ -7859,9 +8092,8 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed):
                 verb, args = git_verb(words)
                 a.findings.append(("git", (verb, git_refused(verb, args))))
     elif base in SHELLS:
-        while (k := shell_glob_index(words)) is not None:
-            if glob(k, dash=True, shift=True):
-                return
+        if not read_points(lambda ws, start: option_point(shell_read_index(ws, start))):
+            return
         a.kinds.append("shell")
         i = 1
         while i < len(words):
@@ -7887,10 +8119,8 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed):
         a.kinds.append("db")
         a.findings.append(("db", cmd))
     elif PYTHON_RE.match(base):
-        while (found := python_glob_index(words, a)) is not None:
-            k, is_script = found
-            if glob(k, script=is_script, dash=True, shift=not is_script):
-                return
+        if not read_points(lambda ws, start: script_point(python_read_index(ws, a, start))):
+            return
         code, module, stdin_script, script, script_args = python_interpreter_args(words[1:])
         if (code and "sqlite" in code.lower()) or (module and "sqlite" in module.lower()) or (stdin_script and any("sqlite" in b.lower() for b in bodies)):
             a.kinds.append("db")
@@ -7909,9 +8139,8 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed):
         else:
             a.kinds.append("other")
     elif base == "spud":
-        while (k := first_glob_index(words, 1)) is not None:
-            if glob(k, dash=True, shift=True):
-                return
+        if not read_points(lambda ws, start: option_point(first_read_index(ws, start))):
+            return
         a.kinds.append("spud")
         call = parse_spud_call(words[1:])
         call["vouched"] = False  # its #! line runs python3.14 with neither -I nor -S (SPD-032)
@@ -7928,8 +8157,11 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed):
         a.kinds.append("other")
         for w in words[1:]:
             m = ASSIGNMENT_WORD_RE.match(w)
-            if m and not m.group(2):
-                a.vars[m.group(1)] = m.group(3)
+            if m:
+                assign_variable(a, m.group(1), m.group(3), bool(m.group(2)))
+        if any(w.startswith(("-", "+")) for w in words[1:]):
+            for w in words[1:]:  # an attribute (`declare -n X=Y`, `typeset -i`, `local -a`) changes what the name reads (SPD-043)
+                a.doubt.update(_NAME_RE.findall(deglob(w)))
     else:
         a.kinds.append("other")  # CD, /usr/bin/cd, env cd: /usr/bin/cd in its own process, and the shell stays
 
@@ -8063,7 +8295,9 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
     plain = mode == "plain"
     strict = bool(caller_agent_id) and not (plain and caller_member is None)
     who = ("%s (agent_id %s)" % (member_ref(con, caller_member["id"]), caller_agent_id)) if caller_member else ("agent_id %s" % caller_agent_id if caller_agent_id else "Spud")
-    for kind, detail in analysis.findings:
+    # An expansion the hook cannot resolve in a word it reads by name (SPD-043) refuses a member last, so a refusal the words as
+    # spelled already earn (Law 7's verb, a program config key, Law 6, an actor) keeps its own reason.
+    for kind, detail in sorted(analysis.findings, key=lambda f: f[0] in ("var-word", "var-doubt")):
         if kind == "db":
             return db_reason % ("`%s`" % detail), analysis
         if kind == "spud" and detail["command"] == "hook":
@@ -8071,7 +8305,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
         if not strict:
             if kind == "spud" and detail["actor"] not in (None, "spud") and (detail["command"], detail["subcommand"]) in MEMBER_OWN_COMMANDS:
                 return ("Law 5: `--as %s` from Spud's own session would write a member's own sections (log, result, block, proposals) in its name;"
-                        " members record themselves (the SubagentStop hold sees to it), Spud records verdicts with `spud --as spud member finish`" % detail["actor"]), analysis
+                        " members record themselves (the SubagentStop hold sees to it), Spud records verdicts with `spud --as spud member finish`" % deglob(detail["actor"])), analysis
             if plain and kind == "spud" and detail["actor"] == "spud" and spud_call_writes(detail) and (detail["command"], detail["subcommand"]) != ("session", "claim"):
                 what = " ".join(w for w in (detail["command"], detail["subcommand"]) if w)
                 return ("Law 6: this session is not Spud; /spud claims it. `spud --as spud %s` writes the ledger, and outside Spud's home a session"
@@ -8095,6 +8329,15 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                     " commits, after the outcome is recorded" % detail), analysis
         elif kind == "var":
             return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
+        elif kind == "var-word":
+            return ("the word %s holds a parameter expansion, arithmetic or a substitution the hook cannot resolve, where the command is"
+                    " read by name (a wrapper's options, git's options, verb and the arguments it checks, a shell's or python's options and"
+                    " script, a spud call's words); spell the words out" % detail), analysis
+        elif kind == "var-doubt":
+            return ("the variable %s may not hold the value this line assigned it (the assignment may not run or does not persist: a"
+                    " condition, a compound command, a loop or function body, a pipeline, a background job, a subshell or substitution,"
+                    " a command's prefix, or a builtin that assigns it), so the hook cannot resolve the words it becomes; spell them out"
+                    % detail), analysis
         elif kind == "glob":
             return ("the word %s is a glob the shell expands before it runs the command, and it can become more than one command,"
                     " option or verb the hook checks at once, or more than the hook reads; spell the words out" % detail), analysis
