@@ -2268,6 +2268,169 @@ class ZshGlobOperatorTest(BashHookCase):
         self.assertAllowed("%s --as %s member log 'a (b|c) <1-2>'" % (self.spud_cli, AGENT_A))
 
 
+class GlobCommandWordTest(BashHookCase):
+    """SPD-041: both shells expand an unquoted glob, a brace list and zsh's `(a|b)` and `<n-m>` in every word before running a
+    command, the command word and git's verb included, and zsh replaces a leading `=name` with the command's path (EQUALS).
+    Probed in zsh 5.9 (-f, and -o nobareglobqual as this Mac's Bash tool runs it) and bash 3.2 with a fake git on a scratch
+    PATH: `$FAKE/bin/g?t push`, `touch push; git p?sh`, `{git,push}` (bash), `=git push` (zsh), `git [-]p push` with a file
+    named -p, `sh [-]c 'git push'`, `spud t?cket new` all ran the hidden command.  The hook reads such a word, where it
+    dispatches on it, as every checked name it can match (its literal spelling too, which bash runs when nothing matches), so
+    the refusal does not wait for the file a line may create; a word that can become two checked names at once (`(env|git)`)
+    is refused for a member.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **; Spud is never refused for git."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        home = self.home.path
+        for rel in ("ledger/tickets/SPD-001.md", "tests/keep.py", "docs/x.md"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+        (home / "tests" / "tool").symlink_to(home / "bin" / "spud")  # a launcher by another name (SPD-029)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+
+    def refused_for_members(self, command, needle, cwd=None):
+        return_value = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                return_value = self.assertRefused(command, needle, agent_id, cwd)
+        return return_value
+
+    def test_the_tickets_evidence_commands(self):
+        for cmd in ("/usr/bin/g?t push", "/usr/bin/g(i|x)t push"):
+            r = self.refused_for_members(cmd, "Law 7")
+            self.assertIn("git push", r.reason)
+            self.assertSilent(cmd, agent_id=None)
+
+    def test_a_glob_in_the_command_word_is_every_command_it_can_become(self):
+        for cmd in ("/usr/bin/gi[t] commit -m x", "/usr/bin/g*t push", "g?t push", "./g?t push", "~/bin/g?t push", "/usr/b?n/g?t push",
+                    "/usr/bin/G?T push", "g(i|x)t push", "gi(t|x) reset --hard", "/usr/bin/git(N) push", "g?t(.) push", "touch git; g?t push",
+                    "true && /usr/bin/g[a-z]t add .", "X=g?t; $X push", "timeout 5 g?t push", "- g?t push", "f() { g?t push; }; f"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 7")
+                self.assertSilent(cmd, agent_id=None)
+        self.assertSilent("X=g?t; echo $X")  # an assignment's value is not expanded, and the variable is only echoed
+
+    def test_a_verb_glob_matching_a_file_the_line_creates(self):
+        """Decision: the verb is read as every write verb its pattern can match, whether or not a file matches now (the line may
+        create it), and a pattern that can match no write verb is read as spelled."""
+        for cmd in ("touch push; git p?sh", "touch push && git p*", "git p?sh", "git pu[s]h", "git p(u|x)sh", "touch commit; git c?mmit -m x",
+                    "git ch?ckout main", "git st?sh", "git re[s]et --hard", "git st(a|x)sh pop", "git worktree a?d ../x", "git branch -[D] x"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 7")
+        self.assertIn("git push", self.assertRefused("touch push; git p?sh", "Law 7").reason)
+        for ok in ("git st?tus", "git l?g --oneline", "git d[i]ff", "git sh(o|x)w HEAD", "touch status; git st*tus"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+
+    def test_brace_lists_in_the_command_word_and_the_verb(self):
+        for cmd in ("{git,push}", "{/usr/bin/git,push}", "git {push,status}", "command {git,push}", "{env,git} push", "git {-C,.} push",
+                    "{/usr/bin/g?t,push}"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 7")
+                self.assertSilent(cmd, agent_id=None)
+        # git status push; git gxt push; git x push; git /usr/bin/x push (probed: the second word is the verb)
+        for ok in ("git {status,push}", "g{i,x}t push", "{git,x} push", "/usr/bin/{git,x} push"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+
+    def test_zsh_equals_expansion(self):
+        """zsh replaces `=git` with git's path (EQUALS, on by default and in the Bash tool); bash runs a command named =git.
+        `=(...)` is zsh's process substitution, which runs its command: read as one again, as before SPD-039."""
+        for cmd in ("=git push", "command =git push", "nice =git push", "env =git push", "exec =git commit -m x", "echo =(git push)",
+                    "cat =(git commit -m x)", "diff =(git push) tests/keep.py"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 7")
+        self.refused_for_members("python3.14 -I -S =spud ticket new --title x", "Law 6")
+        for ok in ("echo a=b c==d", "[ a = b ] && echo y", "test x = y", "echo =git"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+
+    def test_a_wrappers_command_word_and_options(self):
+        for cmd in ("env g?t push", "command g?t push", "exec g?t push", "nice -n 5 g?t push", "NOHUP g?t push", "sudo -u root g?t push",
+                    "xargs g?t push", "time g?t push", "env -u X g?t push", "e?v git push", "n?hup git push", "/usr/bin/e[n]v git push",
+                    "nice -[n] 5 git push", "sudo -[u] root git push", "env {-u,X} git push"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 7")
+
+    def test_git_global_options_before_a_glob_verb(self):
+        for cmd in ("git -C . p?sh", "git -c k=v c?mmit -m x", "git --no-pager p?sh", "git -C /tmp -c k=v p?sh", "git [-]p push",
+                    "git -[C] . push", "git -C [.p]ush status", "git nomatch(N) push", "git -C tests/(keep|x) p?sh"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 7")
+
+    def test_a_glob_in_a_spud_invocation(self):
+        home = self.home.path
+        for cmd in ("python3.14 -I -S %s/bin/sp?d ticket new --title x" % home, "%s/bin/sp[u]d --as spud board" % home,
+                    "python3.14 -I -S %s/bin/sp(u|x)d init" % home, "cd %s && python3.14 -I -S bin/sp?d render" % home,
+                    "python3.14 -I -S %s/t*s/tool --as spud board" % home, "%s t?cket new --title x" % self.spud_cli,
+                    "%s --a[s] spud board" % self.spud_cli, "%s ticket {new,show} --title x" % self.spud_cli, "python3.1[4] -I -S %s/bin/spud init" % home):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 6")
+        self.assertRefused("python3.14 -I -S %s/bin/sp?d --as %s member log hi" % (home, AGENT_A), "Law 5", agent_id=None)
+        self.assertRefused("%s/bin/sp?d hook PreToolUse" % home, "hook", agent_id=None)
+        self.assertSilent("python3.14 -I -S %s/bin/sp?d --as %s member log hi" % (home, AGENT_A))  # recognized, never allowed
+
+    def test_a_tee_or_cd_behind_a_glob(self):
+        home, out = self.home.path, self.out
+        self.assertRefused("printf x | t?e ledger/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertRefused("printf x | t?e ledger/tickets/SPD-001.md", "Law 1", agent_id=None)
+        self.assertRefused("printf x | /usr/bin/t(e|x)e docs/x.md", "deliverables", AGENT_A)
+        cmd = "c? %s/ledger && echo x > tickets/SPD-001.md" % home
+        self.assertRefused(cmd, "generated", AGENT_C, cwd=str(out))
+        self.assertRefused(cmd, "Law 1", agent_id=None, cwd=str(out))
+        self.assertSilent("cd %s && echo x > tickets/SPD-001.md" % out, AGENT_C, cwd=str(out))
+
+    def test_shell_strings_read_their_own_globs(self):
+        """A glob quoted for the outer shell is unquoted in the string a shell or eval runs (probed: `sh -c 'g?t push'` and
+        `eval 'g?t push'` pushed): the string is read with its quotes, the hook's quoting marks cleared."""
+        for cmd in ("sh -c 'g?t push'", "bash -c \"/usr/bin/g?t push\"", "eval 'g?t push'", "zsh -c 'git p?sh'", "sh [-]c 'git push'",
+                    "script -c 'g?t push' typescript"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 7")
+        for cmd in ("sh -c 'echo x > ledg*/tickets/SPD-00?.md'", "eval 'echo x > ledg*/tickets/SPD-001.md'"):
+            with self.subTest(cmd):
+                self.assertRefused(cmd, "generated", AGENT_C)
+                self.assertRefused(cmd, "Law 1", agent_id=None)
+        self.assertSilent("sh -c \"echo 'g?t push'\"")
+
+    def test_a_glob_that_can_become_two_checked_words_is_refused_for_a_member(self):
+        """`* x` ran `git push x` with files git and push, `* push` ran `env git push` with files env and git (probed): one
+        glob that can match two checked names can put both on the line, so a member is refused whatever each reading finds."""
+        for cmd in ("[gp][iu][st]* x", "/usr/bin/(env|git) status","%s member log *" % self.spud_cli, "git -C * status", "/usr/bin/" + "*" * 3 + "g*t*x*y push"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "glob")
+                self.assertSilent(cmd, agent_id=None)
+        self.refused_for_members("* push", "Law 7")  # one reading is git push
+
+    def test_pathological_glob_words_are_read_in_bounded_time(self):
+        m = load_spud_module()
+        home = str(self.home.path)
+        for command in ("*" * 5000 + "x push", "?" * 3000 + " push", "git " + "*a" * 2000, "/usr/bin/" + "*a" * 50 + "b push",
+                        "git " + "{a,b}" * 20, "spud " + " ".join("a%d*" % i for i in range(3000)), "(" + "a|" * 3000 + "b)x push",
+                        "git " + "[ab]" * 2000 + "*" * 3 + "c"):
+            with self.subTest(command[:24]):
+                start = datetime.now()
+                m.analyse_command(command, m.ShellAnalysis(cwd=home))
+                self.assertLess((datetime.now() - start).total_seconds(), 10)
+
+    def test_controls_keep_todays_reading(self):
+        out = self.out
+        for ok in ("'g?t' push", "g\\?t push", '"g*t" push', "ls *.py", "ls tests/*", "grep 'a*' tests/keep.py", "grep -n x tests/*.py",
+                   "git log -- '*.py'", "git diff HEAD -- tests/*", "git log --oneline -- tests/*.py", "git show HEAD:tests/*.py",
+                   "[[ x == g?t ]] && echo y", "case g?t in g?t) echo y;; esac", "arr=(g?t push); echo $arr", "echo $((1*2))",
+                   "x=$((2*3)); echo $x", "[ -f tests/keep.py ] && echo y", "for f in tests/*.py; do echo $f; done", "echo g?t push",
+                   "git branch --list 'feat*'", "git tag -l v1.*", "python3.14 -I -S -m unittest discover -s tests -t tests",
+                   "command -v g?t", "find . -name '*.py'", "(cd %s && echo x > note.txt)" % out, "bash tests/*.sh",
+                   "python3 tests/k*.py", "env FOO=1 ls *.py", "git -C tests/* status", "/usr/bin/nomatch-spd-041* push"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+        self.assertRefused("(cd %s) && echo x > note.txt" % out, "deliverables")
+        self.assertAllowed("%s --as %s member log 'a*b (c|d) =e {f,g}'" % (self.spud_cli, AGENT_A))
+        self.assertRefused("git push", "Law 7")
+
+
 # =============================================================================
 # PreToolUse / Write|Edit|MultiEdit|NotebookEdit
 # =============================================================================
