@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import unicodedata
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1471,6 +1472,25 @@ class PreBashTest(HookCase):
         self.assertAllowed("%s --as spud member finish %s --status done --outcome x" % (self.spud_cli, lead["ref"]), agent_id=None)
         self.assertAllowed("%s --as spud member log hi" % self.spud_cli, agent_id=None)  # the CLI refuses it (exit 3); not the hook's call
 
+    def test_a_spud_call_is_recognized_however_its_script_is_spelled(self):
+        """SPD-029: Law 6's refusals depend on seeing a spud call.  A case variant or a fold of bin/spud's name is the
+        same file on macOS, and a symlink by any name runs the launcher (it finds its program from its real path)."""
+        home = self.home.path
+        (home / "bin").mkdir(exist_ok=True)
+        (home / "bin" / "spud").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        (home / "tests").mkdir(exist_ok=True)
+        (home / "tests" / "tool").symlink_to(home / "bin" / "spud")
+        (home / "tests" / "other.py").write_text("print(1)\n", encoding="utf-8")
+        for script in (str(home).upper() + "/BIN/SPUD", "%s/bin/Spud" % home, "%s/bin/ſpud" % home, "%s/tests/tool" % home):
+            self.assertRefused("python3.14 -I -S %s --as spud board" % script, "Law 6")
+            self.assertRefused("python3.14 -I -S %s ticket new --title x" % script, "Law 6")
+        self.assertRefused("%s/tests/tool --as spud board" % home, "Law 6")
+        self.assertRefused("%s/bin/ſpud --as spud board" % home, "Law 6")
+        self.assertRefused("cd %s && python3.14 -I -S tests/tool init" % home, "Law 6")
+        self.assertRefused("cd %s/tests && ./tool --as spud board" % home, "Law 6")
+        self.assertAllowed("python3.14 -I -S %s/tests/tool --as %s member log hi" % (home, AGENT_A))
+        self.assertSilent("python3.14 -I -S %s/tests/other.py --as spud board" % home)
+
     def test_cd_before_a_spud_call_keeps_the_allow(self):
         self.assertAllowed("cd %s && %s --as %s member log hi" % (self.home.path, self.spud_cli, AGENT_A))
         self.assertAllowed("cd /tmp; %s board" % self.spud_cli)
@@ -1497,6 +1517,54 @@ class PathRuleAsserts:
     def assertSilent(self, path, agent_id=AGENT_A, tool="Write"):
         r = self.edit(path, agent_id, tool)
         self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""), (str(path), r))
+
+
+FIRMLINK = "/System/Volumes/Data"  # macOS: the Data volume's own mount path; /Users, /private ... are firmlinks into it
+
+
+def same_directory(a, b):
+    try:
+        return os.path.samefile(str(a), str(b))
+    except OSError:
+        return False
+
+
+def mixed_case(text):
+    return "".join(c.upper() if i % 2 else c.lower() for i, c in enumerate(text))
+
+
+class PathAliasAsserts(PathRuleAsserts):
+    """SPD-029: a project root (the home, a worktree) spelled another way the filesystem honours is the same root, so the
+    path rule answers there as it does at the root: through the edit tools and through a shell redirection, for a member
+    whose deliverables are tests/** and bin/spud (self.lead, AGENT_A) and for Spud."""
+
+    def alias_or_skip(self, root, spelled, what):
+        if spelled == str(root) or not same_directory(root, spelled):
+            self.skipTest("%s: this filesystem does not treat %s as the directory %s" % (what, spelled, root))
+        return spelled
+
+    def assertBashRefused(self, command, needle, agent_id=AGENT_A):
+        r = self.home.hook("PreToolUse", self.pre_bash(command, agent_id=agent_id))
+        self.assertEqual((r.code, r.decision), (0, "deny"), (command, r))
+        self.assertIn(needle, r.reason, (command, r.reason))
+
+    def assertBashSilent(self, command, agent_id=AGENT_A):
+        r = self.home.hook("PreToolUse", self.pre_bash(command, agent_id=agent_id))
+        self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""), (command, r))
+
+    def assertRootHolds(self, spelled):
+        a = str(spelled)
+        self.assertRefused("%s/ledger/tickets/SPD-001.md" % a, "generated")
+        self.assertRefused("%s/ledger/tickets/SPD-001.md" % a, "generated", agent_id=None)
+        self.assertRefused("%s/CLAUDE.md" % a, "deliverables")
+        self.assertRefused("%s/bin/spud" % a, "Law 1", agent_id=None)
+        self.assertSilent("%s/tests/x.py" % a)
+        self.assertSilent("%s/CLAUDE.md" % a, agent_id=None)
+        self.assertBashRefused("echo x > %s/ledger/tickets/SPD-001.md" % a, "generated")
+        self.assertBashRefused("printf x | tee %s/reports/2026-09-13.md" % a, "generated", agent_id=None)
+        self.assertBashRefused("cd %s && echo x > ledger/x.md" % a, "generated")
+        self.assertBashRefused("echo x > %s/bin/spud" % a, "Law 1", agent_id=None)
+        self.assertBashSilent("echo x > %s/tests/out.txt" % a)
 
 
 class PreEditTest(PathRuleAsserts, HookCase):
@@ -1611,7 +1679,7 @@ class PreEditTest(PathRuleAsserts, HookCase):
         self.assertIn("file_path", r.reason)
 
 
-class WorktreeElsewhereTest(PathRuleAsserts, HookCase):
+class WorktreeElsewhereTest(PathAliasAsserts, HookCase):
     """SPD-016: every worktree `git worktree list --porcelain` names for the home maps to repository-relative paths,
     wherever `git worktree add` put it, so the deliverable globs and the generated roots bind there too.  The home is
     a real repository here; the list is cached under .spud/ until a worktree is added, moved or removed, and a list
@@ -1682,6 +1750,90 @@ class WorktreeElsewhereTest(PathRuleAsserts, HookCase):
         self.assertEqual((r.code, r.stdout), (2, ""), r)
         self.assertIn("worktree", r.stderr)
         self.assertIn("failing closed", r.stderr)
+
+    def test_a_worktree_elsewhere_in_upper_case(self):
+        """SPD-029: git names the worktree by one spelling; a case variant of it is the same checkout."""
+        self.assertRootHolds(self.alias_or_skip(self.elsewhere, str(self.elsewhere).upper(), "upper case"))
+
+    def test_a_worktree_elsewhere_in_mixed_case(self):
+        self.assertRootHolds(self.alias_or_skip(self.elsewhere, mixed_case(str(self.elsewhere)), "mixed case"))
+
+    def test_a_worktree_elsewhere_under_the_data_volume_firmlink(self):
+        self.assertRootHolds(self.alias_or_skip(self.elsewhere, FIRMLINK + str(self.elsewhere), "the %s firmlink prefix" % FIRMLINK))
+
+
+class PathAliasTest(PathAliasAsserts, HookCase):
+    """SPD-029 (proposal 24): the path rule found a root by comparing spellings, so on macOS a target spelled with a case
+    variant of the home, under the /System/Volumes/Data firmlink, or with a component the filesystem folds, counted as
+    outside every project root and Laws 1 and 5 said nothing.  A root is found by file identity now."""
+
+    def setUp(self):
+        super().setUp()
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud"]), AGENT_A)
+        self.wt = self.home.path / ".claude" / "worktrees" / "spd-099-thing"
+        self.wt.mkdir(parents=True)
+
+    def test_the_exact_spellings_hold(self):
+        self.assertRootHolds(self.home.path)
+        self.assertRootHolds(self.wt)
+
+    def test_the_home_in_upper_case(self):
+        self.assertRootHolds(self.alias_or_skip(self.home.path, str(self.home.path).upper(), "upper case"))
+
+    def test_the_home_in_mixed_case(self):
+        self.assertRootHolds(self.alias_or_skip(self.home.path, mixed_case(str(self.home.path)), "mixed case"))
+
+    def test_the_home_under_the_data_volume_firmlink(self):
+        self.assertRootHolds(self.alias_or_skip(self.home.path, FIRMLINK + str(self.home.path), "the %s firmlink prefix" % FIRMLINK))
+
+    def test_a_claude_worktree_in_upper_and_mixed_case(self):
+        home, wt = str(self.home.path), str(self.wt)
+        for what, spelled in (("upper case", wt.upper()), ("mixed case", mixed_case(wt)),
+                              ("upper-case .claude/worktrees", home + "/.CLAUDE/WORKTREES/spd-099-thing"),
+                              ("Kelvin sign in worktrees", home + "/.claude/worKtrees/spd-099-thing")):
+            with self.subTest(what):
+                self.assertRootHolds(self.alias_or_skip(wt, spelled, what))
+
+    def test_a_claude_worktree_under_the_data_volume_firmlink(self):
+        self.assertRootHolds(self.alias_or_skip(self.wt, FIRMLINK + str(self.wt), "the %s firmlink prefix" % FIRMLINK))
+
+    def test_a_generated_root_spelled_with_a_simple_case_fold(self):
+        """APFS folds U+017F (long s) to s, as Unicode simple case folding does; str.lower() does not."""
+        self.spawn(self.plan(deliverable=["**"]), AGENT_B)
+        spelled = str(self.home.path / "reportſ" / "2026-09-13.md")
+        self.assertRefused(spelled, "generated", agent_id=AGENT_B)
+        self.assertBashRefused("echo x > %s" % spelled, "generated", agent_id=AGENT_B)
+        self.assertSilent(self.home.path / "docs" / "x.md", agent_id=AGENT_B)
+
+    def test_dot_dot_after_a_symlink_is_resolved_as_the_filesystem_does(self):
+        """tests/sub/.. is the parent of the link's target, not tests: the kernel resolves the link first."""
+        home = self.home.path
+        (home / "ledger" / "tickets").mkdir(parents=True, exist_ok=True)
+        (home / "tests").mkdir(exist_ok=True)
+        (home / "tests" / "sub").symlink_to(home / "ledger" / "tickets")
+        spelled = "%s/tests/sub/../SPD-001.md" % home
+        self.assertRefused(spelled, "generated")
+        self.assertBashRefused("echo x > %s" % spelled, "generated")
+        self.assertSilent(home / "tests" / "sub2" / ".." / "x.py")
+
+
+class NonAsciiHomeTest(PathAliasAsserts, HookCase):
+    """SPD-029: APFS is normalization-insensitive, so the NFD spelling of a home named in NFC is the same directory."""
+
+    home_name = "Spüd"
+
+    def setUp(self):
+        super().setUp()
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud"]), AGENT_A)
+
+    def test_the_nfc_home_holds(self):
+        self.assertTrue(unicodedata.is_normalized("NFC", str(self.home.path)))
+        self.assertRootHolds(self.home.path)
+
+    def test_the_home_spelled_nfd(self):
+        nfd = unicodedata.normalize("NFD", str(self.home.path))
+        self.assertNotEqual(nfd, str(self.home.path))
+        self.assertRootHolds(self.alias_or_skip(self.home.path, nfd, "NFD normalization"))
 
 
 class DeliverableGlobTest(SpudTestCase):

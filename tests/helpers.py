@@ -67,9 +67,12 @@ def load_spud_module():
 class Home:
     """A temporary SPUD_HOME with a config file; runs the CLI against it."""
 
-    def __init__(self, config=None):
+    def __init__(self, config=None, name=None):
         self._tmp = tempfile.TemporaryDirectory(prefix="spud-test-")
         self.path = Path(self._tmp.name).resolve()
+        if name is not None:  # a home whose own directory has this name (SPD-029: a non-ASCII home, spelled NFC)
+            self.path = self.path / name
+            self.path.mkdir()
         self.config = config if config is not None else real_config()
         with open(self.path / "spud.config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=2)
@@ -192,9 +195,10 @@ class SpudTestCase(unittest.TestCase):
     """A test case with a fresh initialised Home per test."""
 
     config = None
+    home_name = None
 
     def setUp(self):
-        self.home = Home(config=self.config)
+        self.home = Home(config=self.config, name=self.home_name)
         self.addCleanup(self.home.cleanup)
         self.home.init()
 
