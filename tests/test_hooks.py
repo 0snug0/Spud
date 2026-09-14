@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import subprocess
+import tempfile
 import unicodedata
 import unittest
 from datetime import datetime, timedelta
@@ -1262,29 +1263,34 @@ class LeadHoldTest(HookCase):
 # =============================================================================
 
 
-class PreBashTest(HookCase):
+class BashHookCase(HookCase):
+    """Two engineers planned with tests/** and bin/spud (AGENT_A the lead, AGENT_B the other), and PreToolUse(Bash) asserts."""
+
     def setUp(self):
         super().setUp()
         self.lead = self.spawn(self.plan(persona="engineer", model="opus"), AGENT_A)
         self.other = self.spawn(self.plan(persona="engineer", model="opus"), AGENT_B)
         self.spud_cli = "python3.14 -I -S %s/bin/spud" % self.home.path
 
-    def bash(self, command, agent_id=AGENT_A):
-        return self.home.hook("PreToolUse", self.pre_bash(command, agent_id=agent_id))
+    def bash(self, command, agent_id=AGENT_A, cwd=None):
+        return self.home.hook("PreToolUse", self.pre_bash(command, agent_id=agent_id, cwd=cwd))
 
-    def assertRefused(self, command, needle, agent_id=AGENT_A):
-        r = self.bash(command, agent_id)
+    def assertRefused(self, command, needle, agent_id=AGENT_A, cwd=None):
+        r = self.bash(command, agent_id, cwd)
         self.assertEqual((r.code, r.decision), (0, "deny"), (command, r))
         self.assertIn(needle, r.reason, (command, r.reason))
         return r
 
-    def assertSilent(self, command, agent_id=AGENT_A):
-        r = self.bash(command, agent_id)
+    def assertSilent(self, command, agent_id=AGENT_A, cwd=None):
+        r = self.bash(command, agent_id, cwd)
         self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""), (command, r))
 
-    def assertAllowed(self, command, agent_id=AGENT_A):
-        r = self.bash(command, agent_id)
+    def assertAllowed(self, command, agent_id=AGENT_A, cwd=None):
+        r = self.bash(command, agent_id, cwd)
         self.assertEqual((r.code, r.decision), (0, "allow"), (command, r))
+
+
+class PreBashTest(BashHookCase):
 
     def test_law_7_git_verbs_for_members(self):
         for verb in ("commit -m x", "add .", "stash", "stash pop", "checkout main", "switch -c x", "rebase main", "reset --hard", "push", "merge x", "cherry-pick abc", "worktree add ../x", "branch -D x", "branch new", "pull", "tag v1", "am x.patch", "apply x.patch", "revert HEAD", "restore f", "rm f", "mv a b", "clean -fd"):
@@ -1495,6 +1501,195 @@ class PreBashTest(HookCase):
         self.assertAllowed("cd %s && %s --as %s member log hi" % (self.home.path, self.spud_cli, AGENT_A))
         self.assertAllowed("cd /tmp; %s board" % self.spud_cli)
         self.assertSilent("cd /tmp && ls")
+
+
+# The wrappers the Bash hook strips before it names a command, as bin/spud_ledger.py WRAPPERS holds them since SPD-030
+# (zsh's noglob and nocorrect precommand modifiers added), and the arguments each needs before its command.
+SHELL_WRAPPERS = ("builtin", "caffeinate", "chronic", "command", "doas", "env", "exec", "ionice", "nice", "nocorrect", "noglob",
+                  "nohup", "script", "setsid", "stdbuf", "sudo", "time", "timeout", "unbuffer", "xargs")
+WRAPPER_ARGS = {"timeout": "5 ", "script": "-q /dev/null "}
+
+
+def spellings(word):
+    """A word as the shell sees it and as a case-insensitive PATH lookup finds it (SPD-030): lower, upper, mixed."""
+    return (word, word.upper(), "".join(c.upper() if i % 2 == 0 else c for i, c in enumerate(word)))
+
+
+class ShellModelTest(BashHookCase):
+    """SPD-030: PreToolUse(Bash) reads wrappers and the working directory as zsh 5.9 and bash 3.2 do (the Bash tool runs the
+    user's shell: zsh on this Mac, bash elsewhere), erring toward refusal where the two could disagree.  macOS PATH lookup is
+    case-insensitive, so ENV and NOHUP are env and nohup, and CD, /usr/bin/cd and a cd behind an external wrapper run
+    /usr/bin/cd in their own process: the shell's directory stays.  A directory the shell may or may not be in is checked
+    too; one the hook cannot know refuses a member's relative redirection and leaves Spud's unchecked.  AGENT_A plans
+    tests/** and bin/spud; AGENT_C plans **; note.txt is refused to AGENT_A at the home and silent outside it."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs/inner", "tests/zzone", "bin"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+
+    def test_the_tickets_evidence_commands_are_refused(self):
+        home = self.home.path
+        redirections = ("CD /tmp && echo x > ledger/tickets/SPD-001.md", "/usr/bin/cd /tmp && echo x > ledger/tickets/SPD-001.md",
+                        "pushd %s/ledger && echo x > tickets/SPD-001.md" % home)
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(agent_id=agent_id):
+                for cmd in redirections:
+                    self.assertRefused(cmd, "generated", agent_id)
+                self.assertRefused("ENV git commit -m x", "Law 7", agent_id)
+                self.assertRefused("NOHUP git push", "Law 7", agent_id)
+        for cmd in redirections:
+            self.assertRefused(cmd, "Law 1", agent_id=None)
+
+    def test_every_wrapper_in_any_case_before_a_git_write(self):
+        for name in SHELL_WRAPPERS:
+            for spelled in spellings(name) + ("/usr/bin/" + name.upper(),):
+                with self.subTest(spelled):
+                    self.assertRefused("%s %sgit push" % (spelled, WRAPPER_ARGS.get(name, "")), "Law 7")
+        self.assertRefused("NOHUP nice -n 5 ENV -u X git commit -m x", "Law 7")
+        for ok in ("ENV FOO=1 ls", "NOHUP git status", "TIMEOUT 5 git log", "Env -u X git diff", "COMMAND -v git"):
+            self.assertSilent(ok)
+
+    def test_a_wrappers_value_options_do_not_hide_its_command(self):
+        for cmd in ("timeout -s KILL 5 git push", "timeout --signal KILL 5 git push", "TIMEOUT -k 1 5 git push", "env -u HOME git push",
+                    "env -C /tmp git push", "ENV -S 'git push'", "env --split-string='git push'", "exec -a name git push", "nice -n 5 git push",
+                    "NICE -5 git push", "ionice -c 3 git push", "caffeinate -t 5 git push", "Caffeinate -w 1 git push", "xargs -J % git push",
+                    "xargs -I {} git push", "XARGS -n 1 git push", "stdbuf -o 0 git push", "stdbuf -oL git push", "sudo -g staff git push",
+                    "sudo -Eu root git push", "sudo --user root git push", "doas -u root git push", "script -q /dev/null git push",
+                    "script -c 'git push' typescript", "time -o /dev/null git push", "- git push"):
+            with self.subTest(cmd):
+                self.assertRefused(cmd, "Law 7")
+
+    def test_only_the_builtin_cd_moves_the_directory(self):
+        out = self.out
+        for what, dir_command in (("builtin", "cd %s"), ("builtin keyword", "builtin cd %s"), ("assignment prefix", "FOO=1 cd %s"),
+                                  ("negated", "! cd %s"), ("brace group", "{ cd %s; }"), ("time reserved word", "time cd %s"),
+                                  ("--", "cd -- %s"), ("-L", "cd -L %s"), ("-P", "cd -P %s"), ("-LP", "cd -LP %s"),
+                                  ("pushd", "pushd %s"), ("pushd --", "pushd -- %s"), ("eval", "eval 'cd %s'")):
+            with self.subTest("followed: " + what):
+                self.assertSilent((dir_command % out) + " && echo x > note.txt")
+        self.assertSilent("cd %s; echo x > note.txt" % out)
+        self.assertSilent("arr=(); cd %s; echo x > note.txt" % out)  # an empty array, not a function header
+        self.assertSilent("cd %s\necho x > note.txt" % out)
+        self.assertSilent("(cd %s && echo x > note.txt)" % out)
+        for what, dir_command in (("upper case", "CD %s"), ("mixed case", "Cd %s"), ("cD", "cD %s"), ("/usr/bin/cd", "/usr/bin/cd %s"),
+                                  ("/usr/bin/CD", "/usr/bin/CD %s"), ("env", "env cd %s"), ("ENV", "ENV cd %s"), ("nohup", "nohup cd %s"),
+                                  ("nice", "nice cd %s"), ("timeout", "timeout 5 cd %s"), ("sudo", "sudo cd %s"), ("xargs", "xargs cd %s"),
+                                  ("COMMAND runs /usr/bin/COMMAND", "COMMAND cd %s"), ("BUILTIN is not found", "BUILTIN cd %s"),
+                                  ("TIME runs /usr/bin/time", "TIME cd %s"), ("exec", "exec cd %s"), ("coproc", "coproc cd %s"),
+                                  ("subshell", "(cd %s)"), ("command substitution", "echo $(cd %s)"), ("backticks", "echo `cd %s`"),
+                                  ("process substitution", "cat <(cd %s)"), ("sh -c", "sh -c 'cd %s'"), ("bash -c", "bash -c \"cd %s\""),
+                                  ("first pipeline element", "cd %s | cat"), ("group as pipeline element", "{ cd %s; } | cat"),
+                                  ("background", "cd %s &")):
+            with self.subTest("not moved: " + what):
+                sep = " " if what == "background" else "; "
+                self.assertRefused((dir_command % out) + sep + "echo x > note.txt", "deliverables")
+        self.assertRefused("cd %s > note.txt" % out, "deliverables")
+        self.assertRefused("{ cd %s; } > note.txt" % out, "deliverables")
+        for what, dir_command in (("command runs the external in zsh", "command cd %s"), ("command -p", "command -p cd %s"),
+                                  ("noglob is zsh's", "noglob cd %s"), ("nocorrect is zsh's", "nocorrect cd %s"), ("zsh's - precommand", "- cd %s"),
+                                  ("time -p: zsh runs -p", "time -p cd %s"), ("chdir is zsh's", "chdir %s"),
+                                  ("last pipeline element: zsh's shell, bash's subshell", "true | cd %s"),
+                                  ("builtin command", "builtin command cd %s"), ("command builtin", "command builtin cd %s")):
+            with self.subTest("one shell moves: " + what):
+                self.assertRefused((dir_command % out) + " && echo x > note.txt", "deliverables")
+        self.assertRefused("true | cd %s; echo x > ledger/tickets/SPD-001.md" % out, "Law 1", agent_id=None)
+        self.assertSilent("cd %s && echo x > ledger/tickets/SPD-001.md" % out, agent_id=None)
+        self.assertSilent("CD %s && echo x > CLAUDE.md" % out, agent_id=None)
+
+    def test_a_cd_that_may_not_run_or_may_fail_leaves_either_directory(self):
+        out = self.out
+        for cmd in ("true && cd %s; echo x > note.txt", "false || cd %s; echo x > note.txt", "if true; then cd %s; fi; echo x > note.txt",
+                    "if false; then true; else cd %s; fi; echo x > note.txt", "case x in x) cd %s;; esac; echo x > note.txt",
+                    "case x in\n  x) cd %s ;;\nesac\necho x > note.txt", "while false; do cd %s; done; echo x > note.txt",
+                    "f() { cd %s; }; f; echo x > note.txt", "function f { cd %s; }; echo x > note.txt", "cd %s/nonexistent; echo x > note.txt",
+                    "cd %s/nonexistent || echo x > note.txt", "case x in (x) cd %s;; esac; echo x > note.txt"):
+            with self.subTest(cmd):
+                self.assertRefused(cmd % out, "deliverables")
+        ledger = self.home.path / "ledger"
+        for cmd in ("if true; then cd %s; else cd %s; fi; echo x > tickets/SPD-001.md" % (ledger, out),
+                    "if false; then cd %s; elif true; then cd %s; else cd %s; fi; echo x > tickets/SPD-001.md" % (out, ledger, out),
+                    "case x in a) cd %s;; b) cd %s;; esac; echo x > tickets/SPD-001.md" % (ledger, out)):
+            with self.subTest("every branch's directory: " + cmd):
+                self.assertRefused(cmd, "generated", AGENT_C)  # ** : only the ledger branch's target is refused
+        self.assertRefused("case x in (x) git push;; esac", "Law 7")
+        for cmd in ("true && cd %s && echo x > note.txt", "if true; then cd %s; echo x > note.txt; fi", "mkdir -p %s/new && cd %s/new && echo x > note.txt",
+                    "cd %s/nonexistent && echo x > note.txt", "cd %s || exit 1; echo x > note.txt"):
+            with self.subTest(cmd):
+                self.assertSilent(cmd.replace("%s", str(out)))
+
+    def test_directories_the_hook_cannot_follow(self):
+        """Refused for a member's relative redirection or tee target; Spud's relative target is left unchecked (the hook cannot
+        know the directory), an absolute one is checked for both."""
+        out = self.out
+        for dir_command in ("popd", "popd -n", "pushd", "pushd +1", "pushd -1", "pushd -q %s", "pushd -n %s", "cd -q %s", "cd -s %s", "cd -e %s",
+                            "cd -@ %s", "cd -x %s", "cd +1", "cd -1", "cd -", "cd ~-", "cd ~root", "cd ~nosuchuser-spd-030", "cd $DIR",
+                            "cd %s/*", "cd /{tmp,var}", "cd a b c", "source x.sh", ". x.sh", "for d in a b; do cd ..; done",
+                            "CDPATH=$HOME; cd sub"):
+            command = (dir_command.replace("%s", str(out))) + "; echo x > note.txt"
+            with self.subTest(command):
+                self.assertRefused(command, "cannot follow")
+                self.assertRefused(command.replace("echo x > note.txt", "echo x | tee note.txt"), "cannot follow")
+                self.assertSilent(command.replace("note.txt", "ledger/tickets/SPD-001.md"), agent_id=None)
+        home = self.home.path
+        self.assertRefused("popd; echo x > %s/docs/x.md" % home, "deliverables")
+        self.assertRefused("popd; echo x > %s/ledger/tickets/SPD-001.md" % home, "Law 1", agent_id=None)
+        self.assertRefused("echo x > ~-/note.txt", "cannot follow")
+        self.assertRefused("echo x > ~root/note.txt", "cannot follow")
+        self.assertAllowed("pushd %s && %s --as %s member log hi" % (home, self.spud_cli, AGENT_A))
+        self.assertSilent("CD %s && %s --as %s member log hi" % (home, self.spud_cli, AGENT_A))
+
+    def test_cd_physical_and_tilde_targets(self):
+        home, out = self.home.path, self.out
+        (home / "tests" / "link").symlink_to(home / "docs" / "inner")
+        self.assertRefused("cd -P tests/link/.. && echo x > note.txt", "deliverables")  # the kernel's parent of docs/inner
+        self.assertSilent("cd -L tests/link/.. && echo x > note.txt")  # tests, lexically
+        self.assertSilent("cd tests/link/.. && echo x > note.txt")
+        self.assertRefused("cd %s/docs && echo x > ~+/note.txt" % home, "deliverables")
+        self.assertRefused("cd ~+/docs && echo x > note.txt", "deliverables")
+        self.assertSilent("cd %s && cd ~+/tests && echo x > note.txt" % home)
+        self.assertSilent("cd ~ && echo x > ledger/tickets/SPD-001.md")
+        self.assertRefused("cd %s && echo x > ~+/ledger/tickets/SPD-001.md" % home, "Law 1", agent_id=None)
+
+    def test_cdpath_sends_a_relative_cd_elsewhere(self):
+        """bash tries CDPATH before the current directory, zsh after it; a target starting with / ./ or ../ skips it."""
+        home, out = self.home.path, str(self.out)
+        for setting in ("CDPATH=%s cd ledger", "CDPATH=%s; cd ledger", "export CDPATH=%s; cd ledger", "cdpath=(%s); cd ledger",
+                        "CDPATH=/nowhere:%s; cd ledger"):
+            with self.subTest(setting):
+                self.assertRefused((setting % home) + " && echo x > tickets/SPD-001.md", "generated", AGENT_C, cwd=out)
+        self.assertSilent("CDPATH=%s; cd ./ledger && echo x > tickets/SPD-001.md" % home, AGENT_C, cwd=out)
+        self.assertRefused("CDPATH=%s; cd ledger && echo x > tickets/SPD-001.md" % home, "Law 1", agent_id=None, cwd=out)
+        self.home.env["CDPATH"] = str(home)
+        try:
+            self.assertRefused("cd ledger && echo x > tickets/SPD-001.md", "generated", AGENT_C, cwd=out)
+            self.assertSilent("cd /tmp && echo x > tickets/SPD-001.md", AGENT_C, cwd=out)
+        finally:
+            del self.home.env["CDPATH"]
+
+    def test_zsh_two_argument_cd(self):
+        """zsh replaces the first occurrence of the first argument in the current directory with the second; bash 3.2 takes the first."""
+        home = self.home.path
+        self.assertRefused("cd %s/tests/zzone && cd tests/zzone docs && echo x > note.txt" % home, "deliverables")
+        self.assertRefused("cd %s/tests/zzone && cd zzone ../docs && echo x > note.txt" % home, "deliverables")
+
+    def test_newlines_comments_and_joined_operators(self):
+        out, home = self.out, self.home.path
+        for cmd in ("ls\ngit push", "ls # don't\ngit push", "ls \\\n&& git push", "cat <(git push)", "tee >(git commit -m x) < /dev/null",
+                    "echo ok;\n\ngit push", "for f in a; do\n  git add $f\ndone"):
+            with self.subTest(cmd):
+                self.assertRefused(cmd, "Law 7")
+        self.assertRefused("(true)>ledger/tickets/SPD-001.md", "generated")
+        self.assertRefused("(true)>ledger/tickets/SPD-001.md", "Law 1", agent_id=None)
+        self.assertRefused("(cd %s)&&echo x > note.txt" % out, "deliverables")
+        self.assertRefused("cd %s/docs\necho x > note.txt" % home, "deliverables")
+        for ok in ("git status # before git push", "echo 'a\ngit push'", "echo a \\\ngit push", "x=$((1 + 2)); echo $x", "ls *(.)"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
 
 
 # =============================================================================
