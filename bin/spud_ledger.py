@@ -4334,6 +4334,16 @@ LIST_TERMINATORS = {";", ";;", ";&", ";;&"}
 DIRECTORY_COMMANDS = {"cd", "chdir", "pushd", "popd"}  # the builtins, spelled exactly: CD and /usr/bin/cd are programs
 SHELL_DECLARATIONS = {"export", "typeset", "declare", "local", "readonly"}
 GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}")
+# A redirection or tee target the shell expands is checked as every file it opens, not as its literal spelling (SPD-034).
+# neutralize_quoted_globs replaces a quoted or escaped metacharacter with a sentinel so filename generation is read only
+# from the unquoted ones; deglob restores the literal character.  The sentinels are private-use characters shlex keeps in
+# a word (they are not whitespace, quotes or the operator punctuation).
+_GLOB_META = "*?[]{},"
+_GLOB_SENTINELS = {c: chr(0xE000 + i) for i, c in enumerate(_GLOB_META)}
+_GLOB_UNSENTINEL = {v: k for k, v in _GLOB_SENTINELS.items()}
+_GLOB_SENTINEL_RE = re.compile("[" + "".join(_GLOB_SENTINELS.values()) + "]")
+GLOB_MATCH_CAP = 500   # the most files a redirection glob is expanded to before the hook refuses a member (SPD-034)
+GLOB_SCAN_CAP = 5000   # the most directory entries scanned expanding one glob, so `**` never walks a large tree unbounded
 ARRAY_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=$")
 ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)\Z", re.S)
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"}
@@ -4915,6 +4925,53 @@ def newlines_as_separators(text):
     return "".join(out)
 
 
+def neutralize_quoted_globs(text):
+    """Replace a glob metacharacter (`* ? [ ] { } ,`) that is single-quoted, double-quoted or backslash-escaped with a
+    sentinel, so filename generation and brace expansion are read only from the unquoted metacharacters (SPD-034: zsh 5.9
+    and bash 3.2 both expand an unquoted glob in a redirection target, and both leave a quoted one literal).  The quotes and
+    backslashes are kept for shlex to strip; deglob restores the literal character.  Word boundaries are untouched, so other
+    words are read exactly as before."""
+    out = []
+    i, n = 0, len(text)
+    state = None  # None, "'" or '"'
+    while i < n:
+        c = text[i]
+        if state == "'":
+            out.append(_GLOB_SENTINELS.get(c, c))
+            if c == "'":
+                state = None
+            i += 1
+        elif c == "\\" and i + 1 < n and state != "'":
+            nxt = text[i + 1]
+            if state == '"' and nxt not in '$`"\\\n':
+                out.append(c)  # inside "" a backslash before an ordinary character stays literal
+                out.append(_GLOB_SENTINELS.get(nxt, nxt))
+            else:
+                out.append(c)
+                out.append(_GLOB_SENTINELS.get(nxt, nxt))
+            i += 2
+        elif state == '"':
+            out.append(_GLOB_SENTINELS.get(c, c))
+            if c == '"':
+                state = None
+            i += 1
+        elif c in "'\"":
+            state = c
+            out.append(c)
+            i += 1
+        else:
+            out.append(c)
+            i += 1
+    return "".join(out)
+
+
+def deglob(text):
+    """Restore the glob metacharacters neutralize_quoted_globs replaced with sentinels (a no-op for text that has none)."""
+    if not text:
+        return text
+    return _GLOB_SENTINEL_RE.sub(lambda m: _GLOB_UNSENTINEL[m.group()], text)
+
+
 def shell_tokens(text):
     lx = shlex.shlex(text, posix=True, punctuation_chars=True)
     lx.whitespace_split = True
@@ -5201,7 +5258,7 @@ def analyse_command(command, analysis=None, depth=0):
         return a
     text, bodies = strip_heredocs(command)
     outer, inner = split_substitutions(newlines_as_separators(text))
-    tokens = shell_tokens(outer)
+    tokens = shell_tokens(neutralize_quoted_globs(outer))
     if tokens is None:
         for sub in inner:
             isolated(a, lambda: analyse_command(sub, a, depth + 1))
@@ -5474,7 +5531,7 @@ def cdpath_entries(a):
         raw = os.environ["CDPATH"].split(":")
     if any("$" in e or "`" in e or SUBST in e for e in raw):
         return None
-    return raw
+    return [deglob(e) for e in raw]
 
 
 def cd_target(word, a, physical=False):
@@ -5486,6 +5543,7 @@ def cd_target(word, a, physical=False):
         return a.cwds  # both shells stay
     if word == "-" or "$" in word or "`" in word or SUBST in word or GLOB_RE.search(word) or re.fullmatch(r"[+-]\d+", word):
         return None
+    word = deglob(word)  # a quoted or escaped metacharacter (the GLOB_RE above sees only unquoted ones) is a literal path char
     if word.startswith("~"):
         head, _, tail = word.partition("/")
         if head == "~":
@@ -5540,6 +5598,7 @@ def cd_destinations(name, args, a):
         first = cd_target(old, a, physical)
         if first is None or not old or "$" in new or "`" in new or SUBST in new:
             return None
+        old, new = deglob(old), deglob(new)  # the replacement is on literal path text
         substituted = {os.path.normpath(c.replace(old, new, 1)) for c in a.cwds if old in c}
         return first | a.cwds | frozenset(substituted)
     return None
@@ -5832,23 +5891,60 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
                 if not actor_is_self(con, call["actor"], caller_member, caller_agent_id):
                     return ("`--as %s` does not resolve to the caller's own member %s; use `--as %s`"
                             % (call["actor"], who, caller_agent_id)), analysis
+    def redirect_reason(spelled, path):
+        """edit_reason for one concrete file a redirection or tee may open, phrased for the redirect."""
+        reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd)
+        if not reason:
+            return None
+        law_1 = not caller_agent_id and not (rel is not None and in_state_dir(rel))  # the state directory is refused in the database's words, not Law 1's
+        return ("Law 1: a redirection or tee into %s: %s" if law_1 else "a redirection or tee into %s: %s") % (spelled, reason)
+
     for target, target_cwds in analysis.redirects:
         if "$" in target or "`" in target or SUBST in target:
             if caller_agent_id:
-                return "the redirection target %s holds a variable or substitution the hook cannot resolve; spell the path out" % target, analysis
+                return "the redirection target %s holds a variable or substitution the hook cannot resolve; spell the path out" % deglob(target), analysis
             continue
-        paths = redirection_paths(target, target_cwds)
+        spelled = deglob(target)
+        if target_has_active_glob(target):
+            # The shell expands the target before opening it (SPD-034): check every file it opens from every candidate
+            # directory, not the literal spelling that maps under no root.
+            expansion = expand_redirect_target(target, target_cwds)
+            if expansion is None:  # a directory the hook cannot follow
+                if caller_agent_id:
+                    return ("the redirection target %s is relative to a directory the hook cannot follow (a cd into a variable, `cd -`, popd,"
+                            " a directory stack entry or ~name, an option or a CDPATH it cannot read, a relative cd in a loop, a sourced file);"
+                            " use an absolute path" % spelled), analysis
+                continue
+            matches, capped = expansion
+            for path in matches:
+                reason = redirect_reason(spelled, path)
+                if reason:
+                    return reason, analysis
+            if caller_agent_id:  # a member: the hook cannot know what the glob opens beyond what it matches now
+                if capped:
+                    return ("the redirection or tee target %s is a glob whose expansion reaches the hook's match budget of %d files;"
+                            " write to explicit paths instead" % (spelled, GLOB_MATCH_CAP)), analysis
+                if not matches:
+                    return ("the redirection or tee target %s is a glob that matches no file now, so the hook cannot know what the shell"
+                            " would open (a matching file may appear before the command runs, or the shell may write the name literally);"
+                            " write to an explicit path" % spelled), analysis
+            else:  # Spud: also the literal name a shell writes when a glob matches nothing
+                for path in redirection_paths(spelled, target_cwds) or []:
+                    reason = redirect_reason(spelled, path)
+                    if reason:
+                        return reason, analysis
+            continue
+        paths = redirection_paths(spelled, target_cwds)
         if paths is None:  # a member is refused; Spud's target stays unchecked, since the hook cannot know where it lands
             if caller_agent_id:
                 return ("the redirection target %s is relative to a directory the hook cannot follow (a cd into a variable, `cd -`, popd,"
                         " a directory stack entry or ~name, an option or a CDPATH it cannot read, a relative cd in a loop, a sourced file);"
-                        " use an absolute path" % target), analysis
+                        " use an absolute path" % spelled), analysis
             continue
         for path in paths:  # every directory the shell may be in (SPD-030)
-            reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd)
+            reason = redirect_reason(spelled, path)
             if reason:
-                law_1 = not caller_agent_id and not (rel is not None and in_state_dir(rel))  # the state directory is refused in the database's words, not Law 1's
-                return ("Law 1: a redirection or tee into %s: %s" if law_1 else "a redirection or tee into %s: %s") % (target, reason), analysis
+                return reason, analysis
     return None, analysis
 
 
@@ -5867,6 +5963,206 @@ def redirection_paths(target, cwds):
     if cwds is None:
         return None
     return [os.path.join(c, target) for c in sorted(cwds)]
+
+
+def target_has_active_glob(target):
+    """True when a masked redirection or tee target holds an unquoted glob metacharacter the shell would expand (a quoted
+    one is a sentinel, so GLOB_RE, which looks for bare `* ? [` or a brace list, does not see it)."""
+    return GLOB_RE.search(target) is not None
+
+
+def _split_brace(body):
+    """The alternatives a bare brace group's body expands to (a comma list, or a numeric or single-letter range), or None
+    when it is neither (so the braces are literal, as `{1}` and `{a}` are in both shells)."""
+    parts, depth, buf = [], 0, []
+    for c in body:
+        if c == "{":
+            depth += 1
+            buf.append(c)
+        elif c == "}":
+            depth -= 1
+            buf.append(c)
+        elif c == "," and depth == 0:
+            parts.append("".join(buf))
+            buf = []
+        else:
+            buf.append(c)
+    parts.append("".join(buf))
+    if len(parts) > 1:
+        return parts
+    m = re.fullmatch(r"(-?\d+)\.\.(-?\d+)(?:\.\.-?(\d+))?", body)
+    if m:
+        lo, hi = int(m.group(1)), int(m.group(2))
+        step = int(m.group(3)) if m.group(3) else 1
+        step = step or 1
+        width = max(len(m.group(1).lstrip("-")), len(m.group(2).lstrip("-"))) if (m.group(1).lstrip("-").startswith("0") or m.group(2).lstrip("-").startswith("0")) else 0
+        seq = range(lo, hi + 1, step) if lo <= hi else range(lo, hi - 1, -step)
+        return [("-" if v < 0 else "") + str(abs(v)).zfill(width) for v in seq]
+    m = re.fullmatch(r"([A-Za-z])\.\.([A-Za-z])(?:\.\.-?(\d+))?", body)
+    if m:
+        lo, hi = ord(m.group(1)), ord(m.group(2))
+        step = int(m.group(3)) if m.group(3) else 1
+        step = step or 1
+        seq = range(lo, hi + 1, step) if lo <= hi else range(lo, hi - 1, -step)
+        return [chr(v) for v in seq]
+    return None
+
+
+def _expand_one_brace(pattern):
+    """Expand the leftmost bare brace list or range in a masked pattern; return the list of patterns (just [pattern] when
+    there is none).  A brace with no top-level comma or range is left literal, and scanning goes on past it."""
+    depth, start = 0, -1
+    for i, c in enumerate(pattern):
+        if c == "{":
+            if depth == 0:
+                start = i
+            depth += 1
+        elif c == "}" and depth > 0:
+            depth -= 1
+            if depth == 0:
+                items = _split_brace(pattern[start + 1:i])
+                if items is not None:
+                    return [pattern[:start] + it + pattern[i + 1:] for it in items]
+    return [pattern]
+
+
+def brace_expand(pattern):
+    """Every pattern a masked pattern's bare brace expansions produce, and whether the count reached the match budget
+    (SPD-034: zsh writes each; bash calls a multi-word target an ambiguous redirect, so expanding is the safe reading)."""
+    done, queue, capped = [], [pattern], False
+    while queue:
+        p = queue.pop(0)
+        expanded = _expand_one_brace(p)
+        if expanded == [p]:
+            done.append(p)
+        else:
+            queue = expanded + queue
+        if len(done) + len(queue) > GLOB_MATCH_CAP:
+            return done + queue, True
+    return done, capped
+
+
+def _has_bare_glob(seg):
+    """True when a masked path segment holds an unquoted `* ? [` (a sentinel is a literal character)."""
+    return any(c in "*?[" for c in seg)
+
+
+def _segment_regex(seg):
+    """A regex matching one filename against a masked glob segment: bare `*` `?` `[...]` glob, a sentinel or any other
+    character is literal.  An unbalanced `[` is a literal bracket, as the shells read it (probed)."""
+    out, i, n = [], 0, len(seg)
+    while i < n:
+        c = seg[i]
+        if c in _GLOB_UNSENTINEL:
+            out.append(re.escape(_GLOB_UNSENTINEL[c]))
+            i += 1
+        elif c == "*":
+            out.append("[^/]*")
+            i += 1
+        elif c == "?":
+            out.append("[^/]")
+            i += 1
+        elif c == "[":
+            j = i + 1
+            if j < n and seg[j] in "!^":
+                j += 1
+            if j < n and seg[j] == "]":
+                j += 1
+            while j < n and seg[j] != "]":
+                j += 1
+            if j >= n:
+                out.append(re.escape("["))
+                i += 1
+            else:
+                inner = "".join(_GLOB_UNSENTINEL.get(ch, ch) for ch in seg[i + 1:j])
+                if inner.startswith(("!", "^")):
+                    inner = "^" + inner[1:]
+                out.append("[" + inner.replace("\\", "\\\\") + "]")
+                i = j + 1
+        else:
+            out.append(re.escape(c))
+            i += 1
+    return re.compile("".join(out) + r"\Z")
+
+
+def bounded_glob(pattern):
+    """The existing files a masked absolute glob pattern names, and whether the scan budget was reached.  `**` matches
+    directories recursively; the scan is bounded by GLOB_SCAN_CAP entries and GLOB_MATCH_CAP matches so a recursive glob
+    never walks a large tree without limit (SPD-034), and stops reporting the bound was hit instead."""
+    parts = [p for p in pattern.split("/") if p != ""]
+    frontier = {"/" if pattern.startswith("/") else os.getcwd()}
+    scanned, capped = 0, False
+    for idx, part in enumerate(parts):
+        if capped:
+            break
+        last = idx == len(parts) - 1
+        if not _has_bare_glob(part) and part != "**":
+            lit = deglob(part)
+            frontier = {os.path.join(d, lit) for d in frontier if last or os.path.isdir(os.path.join(d, lit))}
+            continue
+        if part == "**":
+            seen, stack = set(), list(frontier)
+            while stack and not capped:
+                d = stack.pop()
+                if d in seen:
+                    continue
+                seen.add(d)
+                try:
+                    with os.scandir(d) as it:
+                        for e in it:
+                            scanned += 1
+                            if scanned > GLOB_SCAN_CAP:
+                                capped = True
+                                break
+                            if e.is_dir(follow_symlinks=False):
+                                stack.append(e.path)
+                except OSError:
+                    pass
+            frontier = seen
+            continue
+        rx = _segment_regex(part)
+        nf = set()
+        for d in frontier:
+            if capped:
+                break
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        scanned += 1
+                        if scanned > GLOB_SCAN_CAP:
+                            capped = True
+                            break
+                        if rx.match(e.name) and (last or e.is_dir(follow_symlinks=False)):
+                            nf.add(e.path)
+            except OSError:
+                pass
+        frontier = nf
+        if len(frontier) > GLOB_MATCH_CAP:
+            capped = True
+    matches = sorted(m for m in frontier if os.path.lexists(m))
+    if len(matches) > GLOB_MATCH_CAP:
+        return matches[:GLOB_MATCH_CAP], True
+    return matches, capped
+
+
+def expand_redirect_target(target, cwds):
+    """Every existing file the masked glob `target` opens from each candidate directory, and whether the scan budget was
+    reached; None when the directory is unknown (the caller cannot follow it)."""
+    bases = redirection_paths(target, cwds)
+    if bases is None:
+        return None
+    bases = [os.path.expanduser(b) if b.startswith("~") else b for b in bases]
+    matches, capped = set(), False
+    for base in bases:
+        patterns, c = brace_expand(base)
+        capped = capped or c
+        for pat in patterns:
+            m, c2 = bounded_glob(pat)
+            matches.update(m)
+            capped = capped or c2
+            if len(matches) > GLOB_MATCH_CAP:
+                return sorted(matches)[:GLOB_MATCH_CAP], True
+    return sorted(matches), capped
 
 
 # -- the PreToolUse handlers ---------------------------------------------------------
