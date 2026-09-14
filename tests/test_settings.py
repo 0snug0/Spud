@@ -25,6 +25,12 @@ EVENTS = {
 }
 
 
+def prescribed_allow_rules(home):
+    """The allow rules settings sync writes for a home since SPD-038: the prescribed call, `python3.14 -I -S <home>/bin/spud`,
+    by the documented interpreter name and by the absolute interpreter.  No rule for the launcher run by its own path."""
+    return ["Bash(python3.14 -I -S %s/bin/spud *)" % home, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, home)]
+
+
 def spud_hooks(data):
     """[(event, matcher, hook)] for every hook entry whose command runs `bin/spud hook`."""
     out = []
@@ -102,13 +108,38 @@ class SettingsSyncTest(SpudTestCase):
         self.assertEqual([g["matcher"] for g in ours], ["startup|resume|clear|compact"])
 
     def test_allow_rules_for_the_cli(self):
+        # SPD-038: exactly the two prescribed `-I -S` spellings.  The launcher run by its own path goes through its #! line,
+        # an interpreter with neither -I nor -S, so PYTHONPATH and user-site .pth files load code first: no rule, a prompt.
         path = self.home.path / ".claude" / "settings.json"
         out = self.home.json("settings", "sync", "--path", path)
         allow = out["settings"]["permissions"]["allow"]
-        self.assertIn("Bash(python3.14 -I -S %s/bin/spud *)" % self.home.path, allow)
-        self.assertIn("Bash(%s -I -S %s/bin/spud *)" % (sys.executable, self.home.path), allow)
-        self.assertIn("Bash(%s/bin/spud *)" % self.home.path, allow)
-        self.assertEqual(len(allow), len(set(allow)))
+        self.assertEqual(allow, prescribed_allow_rules(self.home.path))
+        self.assertNotIn("Bash(%s/bin/spud *)" % self.home.path, allow)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"], allow)
+
+    def test_sync_removes_the_direct_launcher_rule_and_keeps_unrelated_rules(self):
+        # SPD-038: a settings file an older sync wrote holds `Bash(<home>/bin/spud *)`.  The rule of the ledger's own shape
+        # (ALLOW_RULE_MARK, as for a stale home) is dropped and not written back; every other rule keeps its place.
+        home = self.home.path
+        unrelated = ["Bash(date:*)", "Bash(git status *)", "Read(./notes/**)", "Bash(%s/bin/spud_ledger.py *)" % home, "Bash(cat %s/bin/spud)" % home]
+        old = ["Bash(python3.14 -I -S %s/bin/spud *)" % home, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, home), "Bash(%s/bin/spud *)" % home]
+        legacy = "Bash(%s/bin/spud:*)" % home
+        path = self.home.write_settings({"permissions": {"allow": unrelated[:2] + old + [legacy] + unrelated[2:], "deny": ["Bash(rm -rf *)"]}})
+        out = self.home.json("settings", "sync", "--path", path)
+        self.assertTrue(out["written"])
+        allow = json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"]
+        self.assertEqual(allow, unrelated + prescribed_allow_rules(home))
+        self.assertFalse(any(a in allow for a in ("Bash(%s/bin/spud *)" % home, legacy)), allow)
+        again = self.home.json("settings", "sync", "--path", path)
+        self.assertFalse(again["written"])
+
+    def test_a_ledger_shaped_rule_for_another_home_is_replaced_like_a_stale_one(self):
+        # What the merge does with another home's rules (SPD-038 brief item 2): every `Bash(... bin/spud *)` rule is the
+        # ledger's, whatever home it names, so the direct and prescribed rules of a moved or other home both go, as the
+        # /old case below pins; rules of any other shape stay.
+        path = self.home.write_settings({"permissions": {"allow": ["Bash(/other/bin/spud *)", "Bash(python3.14 -I -S /other/bin/spud *)", "Bash(/other/bin/tool *)"]}})
+        out = self.home.json("settings", "sync", "--path", path)
+        self.assertEqual(out["settings"]["permissions"]["allow"], ["Bash(/other/bin/tool *)"] + prescribed_allow_rules(self.home.path))
 
     def test_deny_rules_for_the_agent_parameters_law_3_forbids(self):
         # SPD-016: the permission system itself refuses these spawns, even when the PreToolUse(Agent) hook is removed or
@@ -151,7 +182,7 @@ class SettingsSyncTest(SpudTestCase):
         foreign = [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"] if "bin/spud hook" not in h["command"]]
         self.assertEqual(foreign, ["echo foreign", "echo also-mine"])
         self.assertEqual(data["permissions"]["deny"], ["Bash(rm -rf *)", "Agent(isolation:*)", "Agent(model:inherit)"])
-        self.assertIn("Bash(date:*)", data["permissions"]["allow"])
+        self.assertEqual(data["permissions"]["allow"], ["Bash(date:*)"] + prescribed_allow_rules(self.home.path))
         self.assertFalse(any("/old/" in a for a in data["permissions"]["allow"]))
 
     def test_malformed_input_is_coerced_not_copied(self):

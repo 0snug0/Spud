@@ -1637,7 +1637,8 @@ class SpudAllowIdentityTest(BashHookCase):
 
     def test_the_launcher_alone_runs_without_dash_I_or_dash_S(self):
         """The #! line runs /opt/homebrew/bin/python3.14 with no flags, so the environment's PYTHONPATH and the site .pth files
-        load code before the program (probed).  Silent; the native rule for that exact spelling is the harness's."""
+        load code before the program (probed).  Silent, and since SPD-038 settings sync writes no native allow rule for that
+        spelling, so the harness prompts."""
         for spelled in ("%s {tail}" % self.launcher, "cd %s && bin/spud {tail}" % self.home.path, "spud {tail}"):
             with self.subTest(spelled=spelled):
                 self.assertSilentForBoth(spelled)
