@@ -4298,13 +4298,44 @@ DB_REASON = ("direct access to the ledger database is refused (%s); the inspecti
 SUBST = "__SPUD_SUBST__"  # what a lifted `$(...)` or backtick body leaves behind in the outer line
 
 # Shell analysis for PreToolUse(Bash).
-SEPARATOR_RE = re.compile(r"^[;|&()]+$")
 OUT_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&"}
 IN_REDIRECTS = {"<", "<<", "<<<", "<<-", "<&", "<>"}
 RESERVED_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "select", "case", "esac",
                   "in", "function", "!", "{", "}", "coproc"}
+# Matched case-folded (SPD-030): macOS PATH lookup is case-insensitive, so ENV runs /usr/bin/env.  noglob and nocorrect are
+# zsh's precommand modifiers.
 WRAPPERS = {"env", "command", "exec", "builtin", "nohup", "nice", "time", "timeout", "caffeinate", "sudo", "doas",
-            "xargs", "stdbuf", "chronic", "ionice", "setsid", "unbuffer", "script"}
+            "xargs", "stdbuf", "chronic", "ionice", "setsid", "unbuffer", "script", "noglob", "nocorrect"}
+# Per wrapper, the options whose value is the next word unless attached (macOS and GNU spellings): a value taken for the
+# command word hides the command (`timeout -s KILL 5 git push`), a command word taken for a value hides it too.
+WRAPPER_VALUE_OPTIONS = {
+    "env": {"-u", "-P", "-S", "-C", "-L", "-U", "--unset", "--chdir", "--split-string"},
+    "exec": {"-a"},
+    "nice": {"-n", "--adjustment"},
+    "time": {"-o", "-f", "--output", "--format"},
+    "timeout": {"-k", "-s", "--kill-after", "--signal"},
+    "caffeinate": {"-t", "-w"},
+    "sudo": {"-u", "-g", "-C", "-D", "-h", "-p", "-r", "-t", "-U", "-T", "-a", "-c", "-R", "--user", "--group", "--close-from",
+             "--chdir", "--host", "--prompt", "--role", "--type", "--other-user", "--command-timeout", "--auth-type", "--login-class", "--chroot"},
+    "doas": {"-u", "-C"},
+    "xargs": {"-E", "-I", "-J", "-L", "-n", "-P", "-R", "-S", "-s", "-a", "-d", "--arg-file", "--delimiter", "--eof", "--max-lines",
+              "--max-args", "--max-procs", "--max-chars", "--process-slot-var"},
+    "stdbuf": {"-i", "-o", "-e", "--input", "--output", "--error"},
+    "ionice": {"-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid", "--pgid", "--uid"},
+    "script": {"-t", "-T", "-c", "-O", "-I", "-B", "-E", "-o", "-m", "--command", "--log-out", "--log-in", "--log-io", "--log-timing",
+               "--echo", "--output-limit", "--logging-format"},
+}
+DURATION_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?|\.\d+[smhd]?")
+# The shell's operators, longest first: shlex (punctuation_chars) returns a run of them such as `)>` or `;;&` as one token.
+SHELL_OPERATORS = (";;&", "&>>", "<<<", "<<-", ";;", ";&", "&&", "||", "|&", "&>", ">>", ">|", ">&", "<&", "<>", "<<", "<(", ">(",
+                   ";", "&", "|", "(", ")", "<", ">")
+SHELL_PUNCTUATION = frozenset("();<>|&")
+LIST_TERMINATORS = {";", ";;", ";&", ";;&"}
+DIRECTORY_COMMANDS = {"cd", "chdir", "pushd", "popd"}  # the builtins, spelled exactly: CD and /usr/bin/cd are programs
+SHELL_DECLARATIONS = {"export", "typeset", "declare", "local", "readonly"}
+GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}")
+ARRAY_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=$")
+ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)\Z", re.S)
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"}
 PYTHON_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?$")
 JS_RUNTIMES = {"node", "nodejs", "bun", "deno"}
@@ -4736,17 +4767,22 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd):
 
 
 class ShellAnalysis:
-    """What a command line would run: (kind, detail) findings per simple command, the output
-    redirection targets with the working directory in force, and whether every simple
-    command is a spud call."""
+    """What a command line would run: (kind, detail) findings per simple command, the output redirection targets with the
+    directories the shell may be in when each is opened, and whether every simple command is a spud call.
+
+    `cwds` (SPD-030) is the set of absolute directories the shell may be in at this point of the line, every one of them
+    checked, or None when the hook cannot know it: where zsh and bash disagree, or a cd may not run or may fail, the hook
+    keeps both the old directory and the new one rather than guess."""
 
     def __init__(self, cwd=None):
         self.findings = []
         self.kinds = []
         self.redirects = []
         self.vars = {}
-        self.cwd = cwd
+        self.cwds = frozenset([cwd]) if cwd else None
         self.unparseable = False
+        self.loop_depth = 0  # inside a loop or a function body, where a relative cd may repeat
+        self.cd_uncertain = False  # the last directory change may not happen (a target that does not exist now)
 
     @property
     def all_spud(self):
@@ -4829,27 +4865,80 @@ def split_substitutions(command):
     return "".join(out), inner
 
 
+def newlines_as_separators(text):
+    """An unquoted newline ends a command as `;` does, but shlex reads it as a blank (SPD-030: `ls<newline>git push` hid the
+    push).  A backslash-newline outside single quotes joins the lines.  A comment keeps its words (a word the shell ignores
+    is at worst read as one more command) with its quote characters blanked, so an apostrophe in it cannot unbalance
+    shlex, which gets no commenters."""
+    out = []
+    i, n = 0, len(text)
+    state = None  # None, "'", '"' or "#"
+    while i < n:
+        c = text[i]
+        if state == "#":
+            if c == "\n":
+                state = None
+                out.append(" ; ")
+            else:
+                out.append(" " if c in "'\"`\\" else c)
+            i += 1
+            continue
+        if state == "'":
+            out.append(c)
+            if c == "'":
+                state = None
+            i += 1
+            continue
+        if c == "\\" and i + 1 < n:
+            if text[i + 1] != "\n":
+                out.append(text[i : i + 2])
+            i += 2
+            continue
+        if state == '"':
+            out.append(c)
+            if c == '"':
+                state = None
+        elif c in "'\"":
+            state = c
+            out.append(c)
+        elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()<>"):
+            state = "#"
+            out.append(c)
+        elif c == "\n":
+            out.append(" ; ")
+        else:
+            out.append(c)
+        i += 1
+    return "".join(out)
+
+
 def shell_tokens(text):
     lx = shlex.shlex(text, posix=True, punctuation_chars=True)
     lx.whitespace_split = True
+    lx.commenters = ""  # newlines_as_separators has read the comments; shlex would eat the rest of the line
     try:
         return list(lx)
     except ValueError:
         return None
 
 
-def split_segments(tokens):
-    segments, current = [], []
-    for t in tokens:
-        if SEPARATOR_RE.match(t):
-            if current:
-                segments.append(current)
-            current = []
-        else:
-            current.append(t)
-    if current:
-        segments.append(current)
-    return segments
+def operator_parts(token):
+    """A run of shell punctuation split into the operators it holds (`)>` is `)` then `>`; `;;&` stays one)."""
+    if not token or any(c not in SHELL_PUNCTUATION for c in token):
+        return [token]
+    parts, i = [], 0
+    while i < len(token):
+        op = next(o for o in SHELL_OPERATORS if token.startswith(o, i))
+        parts.append(op)
+        i += len(op)
+    return parts
+
+
+def union_dirs(a, b):
+    """The directories the shell may be in when it may be in either set; None (not known) absorbs everything."""
+    if a is None or b is None:
+        return None
+    return a | b
 
 
 def separate_redirects(tokens):
@@ -4876,24 +4965,85 @@ def separate_redirects(tokens):
 
 
 def strip_wrapper(words):
-    """`env`, `nohup`, `xargs`, `timeout 10`, `sudo -u x`, ...: drop the wrapper and its options."""
-    name = os.path.basename(words[0])
-    rest = words[1:]
-    if name == "timeout" and rest and re.fullmatch(r"\d+(?:\.\d+)?[smhd]?", rest[0]):
-        rest = rest[1:]
+    """`env`, `nohup`, `xargs`, `timeout 10`, `sudo -u x`, ...: drop the wrapper, its options and their values; return (the
+    words it runs, the command strings it hands a shell).  The name is matched case-folded (SPD-030: ENV runs /usr/bin/env
+    on macOS); `env -S` splits its string into the words it runs, GNU `script -c` hands its string to a shell."""
+    name = os.path.basename(words[0]).casefold()
+    values = WRAPPER_VALUE_OPTIONS.get(name, set())
+    rest, strings = words[1:], []
+
+    def take(opt, value):
+        nonlocal rest
+        if name == "env" and opt in ("-S", "--split-string"):
+            rest = (shell_tokens(value) or []) + rest
+        elif name == "script" and opt in ("-c", "--command"):
+            strings.append(value)
+
     while rest:
         w = rest[0]
-        if w.startswith("-"):
-            if w in ("-u", "-n", "-I", "-L", "-P", "-s", "-k", "-C", "-d", "-a", "-g", "-i") and len(rest) > 1 and name in ("sudo", "nice", "xargs", "timeout", "doas", "ionice", "stdbuf"):
+        if w == "--":
+            rest = rest[1:]
+            break
+        if w.startswith("--"):
+            opt, eq, value = w.partition("=")
+            if opt in values and not eq:
+                value = rest[1] if len(rest) > 1 else ""
                 rest = rest[2:]
             else:
                 rest = rest[1:]
+            take(opt, value)
             continue
-        if name == "env" and ASSIGNMENT_RE.match(w):
-            rest = rest[1:]
+        if w.startswith("-") and len(w) > 1:
+            consumed, opt, value = 1, None, None
+            for k in range(1, len(w)):  # a cluster such as -Eu root: the first letter that takes a value ends it
+                if "-" + w[k] in values:
+                    opt = "-" + w[k]
+                    if k + 1 < len(w):
+                        value = w[k + 1 :]
+                    else:
+                        value = rest[1] if len(rest) > 1 else ""
+                        consumed = 2
+                    break
+            rest = rest[consumed:]
+            if opt:
+                take(opt, value)
             continue
         break
-    return rest
+    if name == "env":
+        while rest and ASSIGNMENT_RE.match(rest[0]):
+            rest = rest[1:]
+    elif name == "timeout" and rest and DURATION_RE.fullmatch(rest[0]):
+        rest = rest[1:]
+    elif name == "script" and rest:
+        rest = rest[1:]  # the typescript file; what follows it is the command
+    return rest, strings
+
+
+def prefix_effect(word, following):
+    """Whether a builtin behind this prefix still runs in the shell that reads the line (SPD-030, probed in zsh 5.9 and bash
+    3.2): "shell" for `builtin` and the `time` reserved word; "either" where one shell runs the builtin and the other an
+    external or nothing (`command` is the builtin in bash and the external in zsh, noglob and nocorrect are zsh's, zsh
+    takes the option in `time -p` for the command); "process" for anything else, spelled in any other case or with a path
+    included: an external program, or a name no shell finds (BUILTIN)."""
+    if word == "builtin":
+        return "shell"
+    if word == "time":
+        return "either" if following and following.startswith("-") else "shell"
+    if word in ("command", "noglob", "nocorrect"):
+        return "either"
+    return "process"
+
+
+EFFECT_ORDER = {"shell": 0, "either": 1, "process": 2}
+
+
+def settle(effect, before, after):
+    """The directories after a command that changed them from `before` to `after` when it runs in the shell, run with `effect`."""
+    if effect == "shell":
+        return after
+    if effect == "either":
+        return union_dirs(before, after)
+    return before
 
 
 def git_verb(words):
@@ -5047,44 +5197,388 @@ def analyse_command(command, analysis=None, depth=0):
     if depth > 6:
         return a
     text, bodies = strip_heredocs(command)
-    outer, inner = split_substitutions(text)
-    for sub in inner:
-        analyse_command(sub, a, depth + 1)
+    outer, inner = split_substitutions(newlines_as_separators(text))
     tokens = shell_tokens(outer)
     if tokens is None:
+        for sub in inner:
+            isolated(a, lambda: analyse_command(sub, a, depth + 1))
         a.unparseable = True
         return a
-    body_index = 0
-    for seg in split_segments(tokens):
-        seg_bodies, cleaned = [], []
-        k = 0
-        while k < len(seg):
-            if seg[k] in ("<<", "<<-"):
-                if body_index < len(bodies):
-                    seg_bodies.append(bodies[body_index])
-                    body_index += 1
-                k += 2
-                continue
-            cleaned.append(seg[k])
-            k += 1
-        analyse_segment(cleaned, seg_bodies, a, depth)
+    ShellWalk(a, inner, bodies, depth).walk(tokens)
     return a
 
 
-def analyse_segment(tokens, bodies, a, depth):
+def isolated(a, run):
+    """Run an analysis whose directory changes stay in its own process (a substitution, `sh -c`, a shell fed a body)."""
+    before = a.cwds
+    run()
+    a.cwds = before
+    a.cd_uncertain = False
+
+
+class ShellFrame:
+    """An open compound command: its kind, the word that closes it, the directories it started in, the directories any of
+    its branches ended in so far, and the enclosing list's state to restore."""
+
+    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern")
+
+    def __init__(self, kind, closer, saved, outer):
+        self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
+        self.pattern = kind == "case"  # a case command reads a pattern first, and again after each ;;
+
+
+_CURRENT = object()  # analyse_segment: redirections open in the directories in force
+
+
+class ShellWalk:
+    """One pass over a command line's tokens (SPD-030).  Simple commands go to analyse_segment; the grammar around them
+    decides which directories the shell may be in when each runs, as zsh 5.9 and bash 3.2 do (probed):
+
+    - a subshell, a command or process substitution, a background job and every pipeline element but the last run in their
+      own process, so a cd there does not carry out; the last element runs in zsh's own shell and in bash's subshell, so
+      either directory follows it;
+    - a cd that may not run (after && or ||, in an if, case or loop body, in a function body) or may fail (its target does
+      not exist now) leaves either directory for what runs after its and-or list; what runs after `cd x &&` is in x;
+    - a relative cd in a loop or a function body may repeat, so the hook cannot follow it;
+    - a compound command's redirections open where it started."""
+
+    def __init__(self, a, inner, bodies, depth):
+        self.a, self.inner, self.bodies, self.depth = a, list(inner), list(bodies), depth
+        self.words, self.stack = [], []
+        self.skip = False  # the words are a for, select or case header or a function's name, not a command
+        self.function_next = False  # `name ()` or `function name` was read: the next body is a function's
+        self.redirect_cwds = _CURRENT
+        self.start_list()
+
+    # -- lists and pipelines ------------------------------------------------------------
+    def start_list(self):
+        self.list_start = self.list_seen = self.pipeline_start = self.a.cwds
+        self.uncertain = self.conditional = self.piped = False
+
+    def end_pipeline(self):
+        if self.piped:
+            self.a.cwds = union_dirs(self.pipeline_start, self.a.cwds)
+            self.list_seen = union_dirs(self.list_seen, self.a.cwds)
+            self.piped = False
+
+    def end_list(self):
+        self.end_pipeline()
+        if self.uncertain:
+            self.a.cwds = union_dirs(self.list_seen, self.a.cwds)
+        self.start_list()
+
+    # -- compound commands --------------------------------------------------------------
+    def push(self, kind, closer):
+        outer = (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words, self.skip)
+        self.stack.append(ShellFrame(kind, closer, self.a.cwds, outer))
+        if kind in ("loop", "func"):
+            self.a.loop_depth += 1
+        self.words, self.skip = [], False
+        self.start_list()
+
+    def pop(self):
+        self.finish()
+        self.end_list()
+        frame = self.stack.pop()
+        if frame.kind in ("loop", "func"):
+            self.a.loop_depth -= 1
+        inner = self.a.cwds
+        after = frame.saved if frame.kind == "sub" else (inner if frame.kind == "group" else union_dirs(frame.seen, inner))
+        (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words, self.skip) = frame.outer
+        self.a.cwds = after
+        if after != frame.saved and self.conditional:
+            self.uncertain = True
+        self.list_seen = union_dirs(self.list_seen, after)
+        if frame.kind != "sub":
+            self.redirect_cwds = union_dirs(frame.saved, after)
+
+    def branch(self):
+        """then, else, elif, do, a case arm: the body may start from the directories the compound command started in."""
+        self.finish()
+        self.end_list()
+        if self.stack and self.stack[-1].kind in ("cond", "case", "loop"):
+            top = self.stack[-1]
+            top.seen = union_dirs(top.seen, self.a.cwds)  # where the branch before this one ended
+            self.a.cwds = union_dirs(top.saved, self.a.cwds)
+        self.start_list()
+
+    # -- simple commands ----------------------------------------------------------------
+    def consume(self, words):
+        """Analyse the substitutions in these words (expanded before the command runs, each in its own process) and take the
+        here-document bodies their `<<` operators read; return the words without the operators and their delimiters."""
+        for w in words:
+            for _ in range(w.count(SUBST)):
+                if self.inner:
+                    body = self.inner.pop(0)
+                    isolated(self.a, lambda: analyse_command(body, self.a, self.depth + 1))
+        cleaned, bodies, k = [], [], 0
+        while k < len(words):
+            if words[k] in ("<<", "<<-"):
+                if self.bodies:
+                    bodies.append(self.bodies.pop(0))
+                k += 2
+                continue
+            cleaned.append(words[k])
+            k += 1
+        return cleaned, bodies
+
+    def discard(self):
+        self.consume(self.words)
+        self.words = []
+
+    def finish(self):
+        words, self.words = self.words, []
+        skip, self.skip = self.skip, False
+        redirect_cwds, self.redirect_cwds = self.redirect_cwds, _CURRENT
+        if not words:
+            return
+        cleaned, bodies = self.consume(words)
+        if skip:
+            return
+        a = self.a
+        before = a.cwds
+        if self.function_next:  # zsh's `name () command`: a body that runs when called, perhaps more than once
+            self.function_next = False
+            a.loop_depth += 1
+            analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds)
+            a.loop_depth -= 1
+            a.cwds = union_dirs(before, a.cwds)
+        else:
+            analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds)
+        if a.cd_uncertain or (a.cwds != before and self.conditional):
+            self.uncertain = True
+        a.cd_uncertain = False
+        self.list_seen = union_dirs(self.list_seen, a.cwds)
+
+    def add_word(self, t):
+        if not self.words and not self.skip:
+            if t == "{":
+                self.push("func" if self.function_next else "group", "}")
+                self.function_next = False
+                return
+            if t in ("}", "fi", "done", "esac"):
+                if self.stack and self.stack[-1].closer == t:
+                    self.pop()
+                return
+            if t in ("if", "while", "until"):
+                self.push("cond" if t == "if" else "loop", "fi" if t == "if" else "done")
+                return
+            if t in ("for", "select", "repeat"):
+                self.push("loop", "done")
+                self.skip = True
+                return
+            if t == "case":  # its subject and `in` are read with the first pattern and discarded at the pattern's `)`
+                self.push("case", "esac")
+                return
+            if t in ("then", "else", "elif", "do"):
+                self.branch()
+                return
+            if t == "function":
+                self.function_next = self.skip = True
+                return
+        if self.skip and self.function_next and t == "{":  # function name {
+            self.discard()
+            self.skip = False
+            self.push("func", "}")
+            self.function_next = False
+            return
+        self.words.append(t)
+
+    def walk(self, tokens):
+        toks = [p for t in tokens for p in operator_parts(t)]
+        i = 0
+        while i < len(toks):
+            t = toks[i]
+            case = self.stack[-1] if self.stack and self.stack[-1].kind == "case" else None
+            if t == ")" and case:
+                self.discard()  # the end of a case pattern (with the subject and `in` before the first)
+                case.pattern = False
+                self.branch()
+            elif t == "(" and case and case.pattern:
+                pass  # a pattern's optional opening parenthesis
+            elif t == "(" and self.words and ARRAY_ASSIGNMENT_RE.match(self.words[-1]) and not self.skip:
+                j = i + 1
+                while j < len(toks) and toks[j] != ")":
+                    j += 1
+                self.words[-1] += " ".join(toks[i + 1 : j])  # name=(a b), name=(): one assignment word
+                i = j
+            elif t == "(" and i + 1 < len(toks) and toks[i + 1] == ")":
+                self.discard()  # name (): a function definition's header
+                self.function_next = True
+                i += 1
+            elif t == "(" and self.skip:
+                depth, j = 0, i  # for (( ... )): the loop's header, not a subshell
+                while j < len(toks):
+                    depth += toks[j] in ("(", "<(", ">(")
+                    depth -= toks[j] == ")"
+                    if depth == 0:
+                        break
+                    j += 1
+                self.words.append("".join(toks[i : j + 1]))
+                i = j
+            elif t in ("(", "<(", ">("):
+                self.function_next = False
+                self.push("sub", ")")
+            elif t == ")":
+                if self.stack and self.stack[-1].closer == ")":
+                    self.pop()
+                else:
+                    self.finish()
+            elif t in ("&&", "||"):
+                self.finish()
+                self.end_pipeline()
+                if t == "||" and self.uncertain:
+                    self.a.cwds = union_dirs(self.list_seen, self.a.cwds)
+                self.conditional = True
+                self.pipeline_start = self.a.cwds
+            elif t in ("|", "|&"):
+                self.finish()
+                self.a.cwds = self.pipeline_start  # that element ran in its own process
+                self.piped = True
+            elif t == "&":
+                self.finish()
+                self.end_pipeline()
+                self.a.cwds = self.list_start  # the whole and-or list ran in the background
+                self.start_list()
+            elif t in LIST_TERMINATORS:
+                self.finish()
+                if t != ";" and case:
+                    self.branch()
+                    case.pattern = True
+                else:
+                    self.end_list()
+            else:
+                self.add_word(t)
+            i += 1
+        self.finish()
+        while self.stack:
+            self.pop()
+        self.end_list()
+        while self.inner:  # a substitution no word held (a malformed line): still analysed
+            body = self.inner.pop(0)
+            isolated(self.a, lambda: analyse_command(body, self.a, self.depth + 1))
+
+
+def cdpath_entries(a):
+    """CDPATH's entries as the shell reads them: assigned in the line (CDPATH, or zsh's cdpath array), else inherited from
+    the environment the hook runs in; None when a value holds something the hook cannot read."""
+    raw = []
+    if "CDPATH" in a.vars:
+        raw += a.vars["CDPATH"].split(":")
+    if "cdpath" in a.vars:
+        raw += a.vars["cdpath"].split()
+    if "CDPATH" not in a.vars and "cdpath" not in a.vars and os.environ.get("CDPATH"):
+        raw = os.environ["CDPATH"].split(":")
+    if any("$" in e or "`" in e or SUBST in e for e in raw):
+        return None
+    return raw
+
+
+def cd_target(word, a, physical=False):
+    """The directories one cd argument may lead to from the directories in force, or None when the hook cannot know:
+    `-` and `~-` (OLDPWD), a stack entry (+N, -N, ~N), `~name` (a user, or a zsh named directory), a variable, a glob or a
+    brace expansion, a CDPATH it cannot read, a relative target in a loop or a function body.  A bare relative target
+    may also land under a CDPATH entry (bash tries those first, zsh after the current directory)."""
+    if word == "":
+        return a.cwds  # both shells stay
+    if word == "-" or "$" in word or "`" in word or SUBST in word or GLOB_RE.search(word) or re.fullmatch(r"[+-]\d+", word):
+        return None
+    if word.startswith("~"):
+        head, _, tail = word.partition("/")
+        if head == "~":
+            paths = [os.path.expanduser(word)]
+        elif head == "~+" and a.cwds is not None and not (tail and a.loop_depth):
+            paths = [os.path.join(c, tail) for c in sorted(a.cwds)]
+        else:
+            return None
+    elif os.path.isabs(word):
+        paths = [word]
+    else:
+        if a.cwds is None or a.loop_depth:
+            return None
+        bases = sorted(a.cwds)
+        if not (word in (".", "..") or word.startswith(("./", "../"))):
+            entries = cdpath_entries(a)
+            if entries is None:
+                return None
+            for e in entries:
+                e = os.path.expanduser(e) if e.startswith("~") else e
+                bases += [e] if os.path.isabs(e) else [os.path.join(c, e) for c in sorted(a.cwds)]
+        paths = [os.path.join(b, word) for b in bases]
+    resolve = os.path.realpath if physical else os.path.normpath
+    return frozenset(resolve(p) for p in paths)
+
+
+def cd_destinations(name, args, a):
+    """Where cd, chdir, pushd or popd with these arguments may leave the shell; None when the hook cannot follow.  Options:
+    -L and -P (and --) are read alike by zsh and bash for cd, -P resolving symlinks first; every other option (-q, -s, -e,
+    -@, -N) is refused as unfollowable, since zsh reads an option it does not know as the first string of `cd old new`
+    and bash 3.2 rejects it, and pushd takes none but -- in both.  popd, and pushd with no directory, go where the stack
+    says.  Two arguments: zsh replaces the first occurrence of the first in the current directory with the second, bash 3.2
+    changes to the first, a later bash stays."""
+    if name == "popd":
+        return None
+    physical = False
+    while args and args[0].startswith("-") and args[0] != "-":
+        if args[0] == "--":
+            args = args[1:]
+            break
+        if name != "pushd" and re.fullmatch(r"-[LP]+", args[0]):
+            physical = args[0].endswith("P")
+            args = args[1:]
+            continue
+        return None
+    if not args:
+        return None if name == "pushd" else frozenset([os.path.expanduser("~")])
+    if len(args) == 1:
+        return cd_target(args[0], a, physical)
+    if len(args) == 2 and a.cwds is not None:
+        old, new = args
+        first = cd_target(old, a, physical)
+        if first is None or not old or "$" in new or "`" in new or SUBST in new:
+            return None
+        substituted = {os.path.normpath(c.replace(old, new, 1)) for c in a.cwds if old in c}
+        return first | a.cwds | frozenset(substituted)
+    return None
+
+
+def directory_change(words, a, effect):
+    """Apply cd, chdir, pushd or popd, spelled exactly (the shell's builtins), to the directories the shell may be in."""
+    if words[0] == "chdir":
+        effect = max(effect, "either", key=EFFECT_ORDER.get)  # zsh's synonym for cd; bash has no chdir
+    new = cd_destinations(words[0], words[1:], a)
+    if new is not None and not all(os.path.isdir(d) for d in new):
+        a.cd_uncertain = True
+    a.cwds = settle(effect, a.cwds, new)
+
+
+def analyse_segment(tokens, bodies, a, depth, redirect_cwds=_CURRENT):
     words, targets = separate_redirects(tokens)
     for t in targets:
-        a.redirects.append((t, a.cwd))
+        a.redirects.append((t, a.cwds if redirect_cwds is _CURRENT else redirect_cwds))
+    effect = "shell"  # where a builtin behind the prefixes runs (prefix_effect)
     while words:
         w = words[0]
+        m = ASSIGNMENT_WORD_RE.match(w)
         if w in RESERVED_WORDS:
+            if w == "coproc":
+                effect = "process"
             words = words[1:]
-        elif ASSIGNMENT_RE.match(w):
-            name, value = w.split("=", 1)
-            a.vars[name] = value
+        elif m:
+            name, append, value = m.groups()
+            if not append:
+                a.vars[name] = value
+            elif name in ("CDPATH", "cdpath"):
+                a.vars[name] = "$"  # appended to a value the hook may not know
             words = words[1:]
-        elif os.path.basename(w) in WRAPPERS and w not in a.vars:
-            words = strip_wrapper(words)
+        elif w == "-":
+            effect = max(effect, "either", key=EFFECT_ORDER.get)  # zsh's `-` precommand modifier; bash finds no `-`
+            words = words[1:]
+        elif os.path.basename(w).casefold() in WRAPPERS and w not in a.vars:
+            effect = max(effect, prefix_effect(w, words[1] if len(words) > 1 else None), key=EFFECT_ORDER.get)
+            words, strings = strip_wrapper(words)
+            for s in strings:
+                isolated(a, lambda: analyse_command(s, a, depth + 1))
         else:
             break
     if not words:
@@ -5108,7 +5602,7 @@ def analyse_segment(tokens, bodies, a, depth):
         a.findings.append(("var", "$(...)"))
         return
     base = os.path.basename(cmd).casefold()
-    if base != "spud" and "/" in cmd and spud_launcher(cmd, a.cwd):
+    if base != "spud" and "/" in cmd and any_spud_launcher(cmd, a.cwds):
         base = "spud"  # a symlink to bin/spud run by its path, whatever its own name (SPD-029)
     if base == "git":
         verb, args = git_verb(words)
@@ -5121,16 +5615,21 @@ def analyse_segment(tokens, bodies, a, depth):
             w = words[i]
             if w.startswith("-") and "c" in w[1:] and not w.startswith("--"):
                 if i + 1 < len(words):
-                    analyse_command(words[i + 1], a, depth + 1)
+                    isolated(a, lambda: analyse_command(words[i + 1], a, depth + 1))
                 break
             if not w.startswith("-"):
                 break
             i += 1
         for body in bodies:
-            analyse_command(body, a, depth + 1)
+            isolated(a, lambda: analyse_command(body, a, depth + 1))
     elif base == "eval":
         a.kinds.append("eval")
+        before = a.cwds
         analyse_command(" ".join(words[1:]), a, depth + 1)
+        a.cwds = settle(effect, before, a.cwds)
+    elif cmd in ("source", ".") and effect != "process":
+        a.kinds.append("other")
+        a.cwds = None  # the file may change directory anywhere
     elif base in ("sqlite3", "sqlite"):
         a.kinds.append("db")
         a.findings.append(("db", cmd))
@@ -5139,7 +5638,7 @@ def analyse_segment(tokens, bodies, a, depth):
         if (code and "sqlite" in code.lower()) or (module and "sqlite" in module.lower()) or (stdin_script and any("sqlite" in b.lower() for b in bodies)):
             a.kinds.append("db")
             a.findings.append(("db", cmd))
-        elif script and spud_launcher(script, a.cwd):
+        elif script and any_spud_launcher(script, a.cwds):
             a.kinds.append("spud")
             a.findings.append(("spud", parse_spud_call(script_args)))
         else:
@@ -5157,22 +5656,23 @@ def analyse_segment(tokens, bodies, a, depth):
         a.kinds.append("tee")
         for w in words[1:]:
             if not w.startswith("-"):
-                a.redirects.append((w, a.cwd))
-    elif base == "cd":
+                a.redirects.append((w, a.cwds))
+    elif cmd in DIRECTORY_COMMANDS and effect != "process":
         a.kinds.append("cd")
-        target = words[1] if len(words) > 1 else "~"
-        if "$" in target or "`" in target or target == "-":
-            a.cwd = None
-        elif target.startswith("~"):
-            a.cwd = os.path.expanduser(target)
-        elif os.path.isabs(target):
-            a.cwd = os.path.normpath(target)
-        elif a.cwd:
-            a.cwd = os.path.normpath(os.path.join(a.cwd, target))
-        else:
-            a.cwd = None
-    else:
+        directory_change(words, a, effect)
+    elif cmd in SHELL_DECLARATIONS:
         a.kinds.append("other")
+        for w in words[1:]:
+            m = ASSIGNMENT_WORD_RE.match(w)
+            if m and not m.group(2):
+                a.vars[m.group(1)] = m.group(3)
+    else:
+        a.kinds.append("other")  # CD, /usr/bin/cd, env cd: /usr/bin/cd in its own process, and the shell stays
+
+
+def any_spud_launcher(script, cwds):
+    """spud_launcher against each directory the shell may be in (a relative script is a launcher from any of them)."""
+    return any(spud_launcher(script, c) for c in (sorted(cwds) if cwds else [None]))
 
 
 def actor_is_self(con, actor, caller_member, caller_agent_id):
@@ -5224,20 +5724,41 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
                 if not actor_is_self(con, call["actor"], caller_member, caller_agent_id):
                     return ("`--as %s` does not resolve to the caller's own member %s; use `--as %s`"
                             % (call["actor"], who, caller_agent_id)), analysis
-    for target, target_cwd in analysis.redirects:
+    for target, target_cwds in analysis.redirects:
         if "$" in target or "`" in target or SUBST in target:
             if caller_agent_id:
                 return "the redirection target %s holds a variable or substitution the hook cannot resolve; spell the path out" % target, analysis
             continue
-        if target_cwd is None and not os.path.isabs(os.path.expanduser(target)):
+        paths = redirection_paths(target, target_cwds)
+        if paths is None:  # a member is refused; Spud's target stays unchecked, since the hook cannot know where it lands
             if caller_agent_id:
-                return "the redirection target %s is relative to a directory the hook cannot follow (`cd` into a variable); use an absolute path" % target, analysis
+                return ("the redirection target %s is relative to a directory the hook cannot follow (a cd into a variable, `cd -`, popd,"
+                        " a directory stack entry or ~name, an option or a CDPATH it cannot read, a relative cd in a loop, a sourced file);"
+                        " use an absolute path" % target), analysis
             continue
-        reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, target, target_cwd or cwd)
-        if reason:
-            law_1 = not caller_agent_id and not (rel is not None and in_state_dir(rel))  # the state directory is refused in the database's words, not Law 1's
-            return ("Law 1: a redirection or tee into %s: %s" if law_1 else "a redirection or tee into %s: %s") % (target, reason), analysis
+        for path in paths:  # every directory the shell may be in (SPD-030)
+            reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd)
+            if reason:
+                law_1 = not caller_agent_id and not (rel is not None and in_state_dir(rel))  # the state directory is refused in the database's words, not Law 1's
+                return ("Law 1: a redirection or tee into %s: %s" if law_1 else "a redirection or tee into %s: %s") % (target, reason), analysis
     return None, analysis
+
+
+def redirection_paths(target, cwds):
+    """The paths a redirection or tee target may name, one per directory the shell may be in; None when it is relative to a
+    directory the hook cannot know (`~+` is that directory; `~-` and `~name` are OLDPWD, a user or a zsh named directory)."""
+    if target.startswith("~"):
+        head, _, tail = target.partition("/")
+        if head == "~":
+            return [target]
+        if head == "~+" and cwds is not None:
+            return [os.path.join(c, tail) for c in sorted(cwds)]
+        return None
+    if os.path.isabs(target):
+        return [target]
+    if cwds is None:
+        return None
+    return [os.path.join(c, target) for c in sorted(cwds)]
 
 
 # -- the PreToolUse handlers ---------------------------------------------------------
