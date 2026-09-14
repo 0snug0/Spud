@@ -81,6 +81,12 @@ class Home:
         # `member new` records the session its Bash runs in (SPD-018): a suite run from a Claude Code session must
         # not stamp that live session on scratch rows, so a test that wants a session names it.
         self.env.pop("CLAUDE_CODE_SESSION_ID", None)
+        # SPD-014: the hooks read the session's launch directory from CLAUDE_PROJECT_DIR, which a suite run from a Claude
+        # Code session inherits; a test that wants one sets it.  `project install` writes user-scope files and the home
+        # pointer: both go under this scratch home, never into ~/.claude or ~/.config/spud.
+        self.env.pop("CLAUDE_PROJECT_DIR", None)
+        self.env["SPUD_USER_CLAUDE_DIR"] = str(self.path / ".user-claude")
+        self.env["SPUD_CONFIG_DIR"] = str(self.path / ".user-config")
         self.db = self.path / ".spud" / "ledger.db"
 
     def cleanup(self):
@@ -152,6 +158,79 @@ class Home:
     @property
     def spool(self):
         return self.path / ".spud" / "hook-errors.jsonl"
+
+
+GIT_IDENTITY = {"GIT_AUTHOR_NAME": "Spud", "GIT_AUTHOR_EMAIL": "spud@example.invalid", "GIT_COMMITTER_NAME": "Spud", "GIT_COMMITTER_EMAIL": "spud@example.invalid"}
+
+
+def isolated_git_env(base=None):
+    """An environment in which git reads none of this machine's configuration (SPD-014): no global or system config, no
+    global excludes file (Claude Code adds `**/.claude/settings.local.json` there), no signing, a fixed identity."""
+    env = {k: v for k, v in (os.environ if base is None else base).items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="2",
+               GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0="/dev/null",
+               GIT_CONFIG_KEY_1="commit.gpgsign", GIT_CONFIG_VALUE_1="false", **GIT_IDENTITY)
+    return env
+
+
+def git(repo, *args, check=True):
+    proc = subprocess.run(["git", "-C", str(repo), *[str(a) for a in args]], capture_output=True, text=True, env=isolated_git_env())
+    if check and proc.returncode != 0:
+        raise AssertionError("git %s in %s exited %d: %s" % (" ".join(str(a) for a in args), repo, proc.returncode, proc.stderr))
+    return proc.stdout
+
+
+class RepoMixin:
+    """Scratch git repositories beside a SpudTestCase's home (SPD-014), and the CLI run from a directory in a session."""
+
+    def scratch_dir(self, prefix="spud-repo-"):
+        path = Path(tempfile.mkdtemp(prefix=prefix)).resolve()  # /var is /private/var: roots are compared resolved
+        self.addCleanup(shutil.rmtree, path, True)
+        return path
+
+    def make_repo(self, prefix="other-", branch="main", origin=False):
+        repo = self.scratch_dir(prefix)
+        git(repo, "init", "-q", "-b", branch)
+        git(repo, "commit", "-q", "--allow-empty", "-m", "root")
+        if origin:
+            bare = self.scratch_dir(prefix + "origin-")
+            git(bare, "init", "-q", "--bare", "-b", branch)
+            git(repo, "remote", "add", "origin", bare)
+            git(repo, "push", "-q", "origin", branch)
+            git(repo, "remote", "set-head", "origin", branch)
+            self.origin = bare
+        return repo
+
+    def add_worktree(self, repo, name, inside=False):
+        path = repo / ".claude" / "worktrees" / name if inside else repo.parent / ("%s-%s" % (repo.name, name))
+        self.addCleanup(shutil.rmtree, path, True)
+        git(repo, "worktree", "add", "-q", "-b", ("worktree-" + name) if inside else name, path)
+        return path
+
+    def cli(self, *args, actor=None, cwd=None, session=None, check=True, stdin=None, env=None):
+        """bin/spud against the scratch home from `cwd` (default the home), in `session` (None: outside every session), with
+        git isolated from this machine's configuration."""
+        e = isolated_git_env(self.home.env)
+        e.pop("CLAUDE_CODE_SESSION_ID", None)
+        if session is not None:
+            e["CLAUDE_CODE_SESSION_ID"] = session
+        e.update(env or {})
+        cmd = [sys.executable, "-I", "-S", str(SPUD)] + (["--as", actor] if actor else []) + [str(a) for a in args]
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=e, cwd=str(cwd or self.home.path), input=stdin)
+        if check and proc.returncode != 0:
+            raise AssertionError("spud %s (cwd %s) exited %d\nstdout: %s\nstderr: %s" % (" ".join(cmd[4:]), cwd or self.home.path, proc.returncode, proc.stdout, proc.stderr))
+        return proc
+
+    def cli_json(self, *args, **kw):
+        proc = self.cli("--json", *args, **kw)
+        try:
+            return json.loads(proc.stdout)
+        except json.JSONDecodeError as e:
+            raise AssertionError("not JSON: %r (stderr %r)" % (proc.stdout, proc.stderr)) from e
+
+    def add_project(self, root, key="badtakes", ticket_prefix="BAD", team_prefix="BADS", landing="pr", *extra, check=True):
+        return self.cli("project", "add", root, "--key", key, "--ticket-prefix", ticket_prefix, "--team-prefix", team_prefix, "--landing", landing,
+                        *extra, actor="spud", check=check)
 
 
 class HookResult:

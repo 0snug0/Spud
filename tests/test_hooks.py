@@ -2967,7 +2967,7 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
         directory, refused to a member whose glob is ** and to Spud."""
         self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_B)
         self.assertSilent(self.elsewhere / "tests" / "x.py", agent_id=AGENT_B)  # lists the worktrees, writing the cache
-        cache = self.home.path / STATE / "worktrees.json"
+        cache = self.home.path / STATE / "worktrees" / "spud.json"  # one cache per project since SPD-014
         self.assertTrue(cache.is_file())
         agents = (AGENT_B, None)
         self.assertStateHolds(cache, agents)
@@ -3748,7 +3748,7 @@ class SqlTest(SpudTestCase):
             proc = self.home.run("sql", "--readonly", stmt, check=False)
             self.assertEqual(proc.returncode, EXIT_ERROR, stmt)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM name_pool WHERE name = 'X'"), 0)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 1)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), 2)
 
     def test_one_statement_no_flag_no_actor_needed(self):
         proc = self.home.run("sql", "SELECT 1", check=False)

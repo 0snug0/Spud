@@ -422,7 +422,7 @@ class UsageKeysTest(TeamCardCase):
     def test_pompadours_frontmatter(self):
         self.assertEqual(
             frontmatter(self.member_note("Pompadour")),
-            ['id: "01"', "name: Pompadour", "persona: engineer", "model: opus", 'parent: "[[Spud]]"', 'ticket: "[[SPD-001]]"',
+            ['id: "01"', "name: Pompadour", "persona: engineer", "model: opus", 'parent: "[[Spud]]"', 'ticket: "[[SPD-001]]"', "project: spud",
              "status: done", "spawned: 2026-09-12T20:01", "finished: 2026-09-12T20:41", "duration_ms: 2127776", "tool_uses: 105",
              "tokens_out: 160812", "tokens_in: 2888805", "tokens_cached: 44345065", "tags: [spudagent]"],
         )
@@ -678,6 +678,7 @@ persona: scout
 model: haiku
 parent: "{parent}"
 ticket: "[[{ticket}]]"
+project: spud
 status: done
 spawned: 2026-09-01T10:00
 finished: 2026-09-01T11:00

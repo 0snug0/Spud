@@ -12,6 +12,7 @@ title: "Synthetic"
 priority: P2
 status: active
 origin: eric
+project: spud
 lead: "[[SPUD-001/Russet]]"
 created: 2026-09-01
 tags: [ticket]
@@ -41,6 +42,7 @@ persona: scout
 model: haiku
 parent: "[[Spud]]"
 ticket: "[[SPD-001]]"
+project: spud
 status: active
 spawned: ""
 finished: ""

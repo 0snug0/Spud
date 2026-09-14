@@ -37,6 +37,7 @@ class RenderShapeTest(SpudTestCase):
                 "priority: P2",
                 "status: queued",
                 "origin: eric",
+                "project: spud",  # SPD-014
                 'proposed_by: ""',
                 'lead: "[[SPUD-001/Russet]]"',
                 "created: " + t["created_at"][:10],
@@ -88,6 +89,7 @@ class RenderShapeTest(SpudTestCase):
                 "model: haiku",
                 'parent: "[[Spud]]"',
                 'ticket: "[[SPD-001]]"',
+                "project: spud",  # SPD-014
                 "status: planned",
                 'spawned: ""',
                 'finished: ""',
@@ -168,7 +170,8 @@ class RenderConflictTest(SpudTestCase):
         ticket_path = self.home.path / "ledger" / "tickets" / "SPD-001.md"
         member_path = self.home.path / "ledger" / "teams" / "SPUD-001" / "Russet.md"
         # and the day file of the report entry ticket new wrote (SPD-011), stamped with the ticket's clock read
-        self.assertEqual(sorted(out["written"]), ["ledger/teams/SPUD-001/Russet.md", "ledger/tickets/SPD-001.md", "reports/%s.md" % t["created_at"][:10]])
+        # ledger/Projects.md since SPD-014
+        self.assertEqual(sorted(out["written"]), ["ledger/Projects.md", "ledger/teams/SPUD-001/Russet.md", "ledger/tickets/SPD-001.md", "reports/%s.md" % t["created_at"][:10]])
         self.assertTrue(ticket_path.exists() and member_path.exists())
         rows = {r["path"]: r for r in self.home.rows("SELECT path, sha256, through_event_id FROM renders")}
         self.assertEqual(rows["ledger/tickets/SPD-001.md"]["sha256"], hashlib.sha256(ticket_path.read_bytes()).hexdigest())
@@ -295,7 +298,7 @@ class StyleOnlyRewriteTest(SpudTestCase):
         restyled = self.rewrite(self.member_path, ('finished: ""', "finished:"), ("tags: [spudagent]", "tags:\n  - spudagent"))
         proc = self.home.run("render")
         # unchanged: the ticket and the day file of its report entry (SPD-011)
-        self.assertIn(": 1 written, 2 unchanged, 1 style-only rewrite re-rendered\n", proc.stdout)
+        self.assertIn(": 1 written, 3 unchanged, 1 style-only rewrite re-rendered\n", proc.stdout)  # ledger/Projects.md among the unchanged
         self.assertIn("  re-rendered %s over a style-only frontmatter rewrite\n" % self.MEMBER, proc.stdout)
         self.assertEqual(self.member_path.read_text(encoding="utf-8"), rendered)
         self.assertEqual([(e["path"], e["text"]) for e in self.render_events("style_only")], [(self.MEMBER, restyled)])

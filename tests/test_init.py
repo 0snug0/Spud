@@ -27,20 +27,22 @@ TABLES = {
     "name_pool",
     "renders",
     "imported_sections",
+    "sessions",  # SPD-014, migration 0002_projects
 }
+SCHEMA = 2  # user_version since SPD-014
 
 
 class InitTest(SpudTestCase):
     def test_init_creates_a_wal_database_under_spud_home(self):
         self.assertTrue(self.home.db.exists())
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 1)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), SCHEMA)
         self.assertEqual(self.home.scalar("PRAGMA journal_mode"), "wal")
 
     def test_init_is_idempotent(self):
         again = self.home.init()
         self.assertTrue(again["ok"])
         self.assertFalse(again["created"])
-        self.assertEqual(again["user_version"], 1)
+        self.assertEqual(again["user_version"], SCHEMA)
         self.assertEqual(again["applied"], [])
 
     def test_init_refuses_a_database_written_by_a_newer_cli(self):
@@ -58,7 +60,7 @@ class InitTest(SpudTestCase):
         out = self.home.json("migrate")
         self.assertTrue(out["ok"])
         self.assertEqual(out["applied"], [])
-        self.assertEqual(out["user_version"], 1)
+        self.assertEqual(out["user_version"], SCHEMA)
 
     def test_schema_tables_are_strict_and_complete(self):
         rows = self.home.rows("SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
@@ -115,7 +117,7 @@ class InitTest(SpudTestCase):
         self.assertEqual(path.parent, self.home.path / ".spud" / "backups")
         self.assertRegex(path.name, r"^ledger-\d{8}T\d{6}\.db$")
         con = sqlite3.connect(path)
-        self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], 1)
+        self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], SCHEMA)
         con.close()
 
     def test_doctor_reports_interpreter_sqlite_and_pragmas(self):
@@ -129,7 +131,7 @@ class InitTest(SpudTestCase):
         db = out["database"]
         self.assertEqual(db["path"], str(self.home.db))
         self.assertTrue(db["exists"])
-        self.assertEqual(db["user_version"], 1)
+        self.assertEqual(db["user_version"], SCHEMA)
         self.assertEqual(db["journal_mode"], "wal")
         self.assertEqual(db["foreign_keys"], 1)
         self.assertEqual(db["busy_timeout"], 5000)

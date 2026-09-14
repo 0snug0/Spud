@@ -90,10 +90,14 @@ EVENT_KINDS = (
     "member.log", "member.result", "member.blocked", "member.outcome", "member.status", "member.edited",
     "handoff", "proposal.filed", "proposal.decided", "hook.denied", "hook.error", "render",
     "report.entry", "commit", "import", "config.synced",
+    # cross-repository projects (SPD-014, migration 0002_projects)
+    "project.added", "project.edited", "project.installed", "project.uninstalled", "project.removed",
+    "session.claimed", "session.released",
 )
 
-# The markdown-v0 templates (ledger/_templates/) as the renderer's default layout.
-TICKET_FM_KEYS = ["id", "title", "priority", "status", "origin", "proposed_by", "lead", "created", "tags"]
+# The markdown-v0 templates (ledger/_templates/) as the renderer's default layout.  `project` since SPD-014: every
+# note names its project, the home's included, so the Obsidian views group and filter without an empty bucket.
+TICKET_FM_KEYS = ["id", "title", "priority", "status", "origin", "project", "proposed_by", "lead", "created", "tags"]
 TICKET_SECTIONS = ["Brief", "Size, persona and model decision", "Team", "Handoffs", "Proposals received", "Outcome"]
 MEMBER_SECTIONS = ["Brief", "Log", "Sub-agents", "Ticket proposals", "Result", "Blocked", "Outcome"]
 TICKET_COLUMN_SECTIONS = {"Brief": "brief", "Size, persona and model decision": "sizing", "Outcome": "outcome"}
@@ -165,7 +169,7 @@ def resolve_home(env, script_path):
             return Path(common).resolve().parent, "git common dir"
     except (OSError, subprocess.CalledProcessError):
         pass
-    pointer = Path("~/.config/spud/home").expanduser()
+    pointer = spud_config_dir(env) / "home"
     if pointer.is_file():
         target = pointer.read_text(encoding="utf-8").strip()
         if target:
@@ -182,6 +186,7 @@ class Ctx:
         self.json = json_mode
         self.db_path = home / ".spud" / "ledger.db"
         self._config = None
+        self.hook_project = None  # `spud hook <event> --project <key>`: the failure policy of a project's hook line (SPD-014)
 
     @property
     def config_path(self):
@@ -440,7 +445,8 @@ DROP TRIGGER IF EXISTS events_no_update;
 DROP TRIGGER IF EXISTS events_no_delete;
 
 CREATE VIEW v_board AS                            -- what Board.base shows, for the CLI and for rendering
-SELECT t.key, t.status, t.priority, t.title, l.name AS lead, t.origin,
+SELECT t.key, (SELECT pr.key FROM projects pr WHERE pr.id = t.project_id) AS project,
+       t.status, t.priority, t.title, l.name AS lead, t.origin,
        (SELECT t2.team_key || '/' || m.name
           FROM proposals p JOIN members m ON m.id = p.origin_member_id JOIN tickets t2 ON t2.id = m.ticket_id
          WHERE p.id = t.proposal_id) AS proposed_by,
@@ -450,7 +456,8 @@ SELECT t.key, t.status, t.priority, t.title, l.name AS lead, t.origin,
           t.priority, t.id DESC;
 
 CREATE VIEW v_fleet AS                            -- what Fleet.base shows
-SELECT t.key AS ticket, t.team_key, m.lineage AS id, m.name, m.persona, m.agent_type, m.model,
+SELECT t.key AS ticket, (SELECT pr.key FROM projects pr WHERE pr.id = t.project_id) AS project,
+       t.team_key, m.lineage AS id, m.name, m.persona, m.agent_type, m.model,
        m.resolved_model, m.status, COALESCE(p.name, 'Spud') AS parent,
        m.spawned_at, m.finished_at, m.total_tokens, m.duration_ms, m.tool_uses
   FROM members m JOIN tickets t ON t.id = m.ticket_id LEFT JOIN members p ON p.id = m.parent_id
@@ -471,7 +478,55 @@ BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;
 CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;
 """
 
-MIGRATIONS = [("0001_init", DDL_0001)]
+# Cross-repository projects (SPD-014, docs/design/2026-09-14-cross-repository-projects.md section 8): five columns on
+# projects, the sessions a /spud claim makes Spud's, and seven event kinds.  SQLite cannot alter a CHECK, so events is
+# rebuilt with the kind list widened; its triggers are dropped first and VIEWS_AND_TRIGGERS re-creates them after.
+DDL_0002 = """
+ALTER TABLE projects ADD COLUMN default_branch TEXT NOT NULL DEFAULT 'main';
+ALTER TABLE projects ADD COLUMN landing  TEXT NOT NULL DEFAULT 'merge'  CHECK (landing  IN ('merge','pr'));
+ALTER TABLE projects ADD COLUMN sessions TEXT NOT NULL DEFAULT 'always' CHECK (sessions IN ('always','claim'));
+ALTER TABLE projects ADD COLUMN installed TEXT CHECK (installed IS NULL OR json_valid(installed));
+ALTER TABLE projects ADD COLUMN archived_at TEXT;
+
+CREATE TABLE sessions (                           -- claims (/spud); a home session needs none
+  session_id  TEXT    PRIMARY KEY,
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  claimed_at  TEXT    NOT NULL,
+  released_at TEXT,
+  cwd         TEXT
+) STRICT;
+
+DROP TRIGGER IF EXISTS events_no_update;
+DROP TRIGGER IF EXISTS events_no_delete;
+CREATE TABLE events_new (
+  id        INTEGER PRIMARY KEY,
+  at        TEXT    NOT NULL,
+  actor     TEXT    NOT NULL,
+  ticket_id INTEGER REFERENCES tickets(id),
+  member_id INTEGER REFERENCES members(id),
+  agent_id  TEXT,
+  kind      TEXT    NOT NULL CHECK (kind IN (
+              'ticket.created','ticket.status','ticket.priority','ticket.edited',
+              'member.planned','member.spawn_denied','member.spawned','member.started','member.stopped',
+              'member.log','member.result','member.blocked','member.outcome','member.status','member.edited',
+              'handoff','proposal.filed','proposal.decided','hook.denied','hook.error','render',
+              'report.entry','commit','import','config.synced',
+              'project.added','project.edited','project.installed','project.uninstalled','project.removed',
+              'session.claimed','session.released')),
+  body      TEXT    NOT NULL DEFAULT '',
+  data      TEXT    CHECK (data IS NULL OR json_valid(data))
+) STRICT;
+INSERT INTO events_new (id, at, actor, ticket_id, member_id, agent_id, kind, body, data)
+  SELECT id, at, actor, ticket_id, member_id, agent_id, kind, body, data FROM events;
+DROP TABLE events;
+ALTER TABLE events_new RENAME TO events;
+CREATE INDEX events_ticket ON events(ticket_id, id);
+CREATE INDEX events_member ON events(member_id, id);
+CREATE INDEX events_agent  ON events(agent_id, id);
+CREATE INDEX events_kind   ON events(kind, id);
+"""
+
+MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002)]
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -632,7 +687,37 @@ def sync_config_rows(ctx, con, at):
             "UPDATE projects SET ticket_prefix = ?, team_prefix = ? WHERE id = 1",
             (ticket_prefix, team_prefix),
         )
+    if con.execute("SELECT remote FROM projects WHERE id = 1").fetchone()["remote"] is None:  # SPD-014: informational
+        remote = git_remote_url(ctx.home)
+        if remote:
+            con.execute("UPDATE projects SET remote = ? WHERE id = 1 AND remote IS NULL", (remote,))
     return {"pool": len(pool), "ticket_prefix": ticket_prefix, "team_prefix": team_prefix}
+
+
+def git_env():
+    """The environment for a git call the CLI or a hook makes: without the variables that could point it away from the
+    repository it names (GIT_REDIRECTS)."""
+    return {k: v for k, v in os.environ.items() if k not in GIT_REDIRECTS}
+
+
+def run_git(root, *args, input=None, timeout=60):
+    """`git -C <root> <args>` with git_env(): the CompletedProcess (text), or SpudError when git cannot run at all."""
+    try:
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, errors="replace", env=git_env(),
+                              input=input, timeout=timeout)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise SpudError(EXIT_ERROR, "cannot run git in %s: %s" % (root, e))
+
+
+def git_remote_url(root):
+    """`git remote get-url origin` for a repository root, or None (no .git, no origin, git missing)."""
+    if not os.path.lexists(os.path.join(str(root), ".git")):
+        return None
+    try:
+        proc = run_git(root, "remote", "get-url", "origin", timeout=10)
+    except SpudError:
+        return None
+    return proc.stdout.strip() or None if proc.returncode == 0 else None
 
 
 def write_event(con, at, actor, kind, body="", ticket_id=None, member_id=None, agent_id=None, data=None):
@@ -1039,6 +1124,7 @@ def member_dict(con, m):
         "finished_at": m["finished_at"],
         "agent_id": m["agent_id"],
         "resolved_model": m["resolved_model"],
+        "project": project_key_of(con, ticket),
         "total_tokens": m["total_tokens"],
         "duration_ms": m["duration_ms"],
         "tool_uses": m["tool_uses"],
@@ -1115,9 +1201,42 @@ def resolve_actor(con, text):
     raise SpudError(EXIT_ERROR, "unknown actor %r: use spud, SPUD-nnn/<Name>, or an agent_id" % text)
 
 
+ACTIVE_CTX = []  # the Ctx main() runs a command with: require_spud's session check needs the home and its projects
+
+
 def require_spud(con, actor, what):
     if actor.kind != "spud":
         raise SpudError(EXIT_OWNERSHIP, "%s is Spud's; %s may not (use --as spud)" % (what, actor.ref(con)))
+    unclaimed = unclaimed_session_project(ACTIVE_CTX[0] if ACTIVE_CTX else None, con)
+    if unclaimed is not None:
+        raise SpudError(EXIT_OWNERSHIP, "%s is Spud's, and this session is not Spud: it runs in project %s, where a session is Spud only after it"
+                        " claims (type /spud, or run `spud --as spud session claim`)" % (what, unclaimed["key"]))
+
+
+def claim_of(con, session_id):
+    """The unreleased claim of a Claude Code session (SPD-014), or None."""
+    if not session_id:
+        return None
+    return con.execute("SELECT * FROM sessions WHERE session_id = ? AND released_at IS NULL", (session_id,)).fetchone()
+
+
+def unclaimed_session_project(ctx, con):
+    """The project a CLI command runs in when that makes its session not Spud (design section 6.1): CLAUDE_CODE_SESSION_ID
+    is set, the working directory is in a `claim` project other than the home, and the session holds no claim.  None
+    otherwise, and always outside a Claude Code session (tests, a terminal)."""
+    session = planning_session(os.environ)
+    if ctx is None or session is None:
+        return None
+    if con.execute("SELECT 1 FROM projects WHERE archived_at IS NULL AND sessions = 'claim' AND id != 1 LIMIT 1").fetchone() is None:
+        return None
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        return None
+    mapped = cli_project_of(ctx, con, cwd)
+    if mapped is None or mapped[0]["id"] == 1 or mapped[0]["sessions"] != "claim" or claim_of(con, session) is not None:
+        return None
+    return mapped[0]
 
 
 def require_member(con, actor, what):
@@ -1198,10 +1317,35 @@ def draw_name(con, ticket_id, wanted=None):
     return row["name"]
 
 
+QUALIFIED_GLOB = re.compile(r"([a-z][a-z0-9-]*):(.*)\Z", re.S)
+
+
+def glob_scope(glob):
+    """(project key or None, the glob): `<key>:<glob>` names another project's checkout (SPD-014), a bare glob the ticket's."""
+    m = QUALIFIED_GLOB.match(glob)
+    return (m.group(1), m.group(2)) if m else (None, glob)
+
+
+def check_deliverable_projects(con, globs):
+    """A qualified deliverable must name an active project."""
+    keys = {r["key"] for r in con.execute("SELECT key FROM projects WHERE archived_at IS NULL").fetchall()}
+    for g in globs:
+        key = glob_scope(g)[0]
+        if key is not None and key not in keys:
+            raise SpudError(EXIT_ERROR, "deliverable %r names project %r, which is no active project (spud project list)" % (g, key))
+
+
 def normalize_deliverable(glob):
     """A deliverable is a repository-relative path glob: no leading slash, no `..`,
-    `**` allowed; a trailing slash means everything under that directory."""
-    g = (glob or "").strip().replace("\\", "/")
+    `**` allowed; a trailing slash means everything under that directory.  An optional
+    `<key>:` in front names the project whose checkout it is relative to (SPD-014)."""
+    key, rest = glob_scope((glob or "").strip())
+    g = normalize_bare_deliverable(glob, rest)
+    return "%s:%s" % (key, g) if key else g
+
+
+def normalize_bare_deliverable(glob, rest):
+    g = (rest or "").strip().replace("\\", "/")
     while g.startswith("./"):
         g = g[2:]
     if not g:
@@ -1255,6 +1399,7 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
                 raise SpudError(EXIT_ERROR, "%s is %s and cannot plan children" % (member_ref(con, parent["id"]), parent["status"]))
         else:
             ticket = get_ticket(con, ticket_key)
+        check_deliverable_projects(con, deliverables)
         if ticket["status"] not in ("queued", "active"):
             raise SpudError(EXIT_ERROR, "%s is %s; no member can be planned on it" % (ticket["key"], ticket["status"]))
         depth = (parent["depth"] if parent else 0) + 1
@@ -2031,7 +2176,9 @@ def body_with_sections(heading, sections):
 
 def render_ticket(con, t, pricing=None):
     layout = json.loads(t["layout"]) if t["layout"] else {}
-    keys = layout.get("fm_keys") or TICKET_FM_KEYS
+    keys = list(layout.get("fm_keys") or TICKET_FM_KEYS)
+    if "project" not in keys:  # an imported ticket's stored order, from before SPD-014: the key goes right after origin
+        keys.insert(keys.index("origin") + 1 if "origin" in keys else len(keys), "project")
     d = ticket_dict(con, t)
     values = {
         "id": ("plain", t["key"]),
@@ -2039,6 +2186,7 @@ def render_ticket(con, t, pricing=None):
         "priority": ("plain", t["priority"]),
         "status": ("plain", t["status"]),
         "origin": ("plain", t["origin"]),
+        "project": ("plain", d["project"]),
         "proposed_by": ("quoted", "[[%s]]" % d["proposed_by"] if d["proposed_by"] else ""),
         "lead": ("quoted", "[[%s]]" % d["lead"] if d["lead"] else ""),
         "created": ("plain", fm_date(t["created_at"])),
@@ -2063,6 +2211,7 @@ def render_member(con, m, pricing=None):
         ("model", ("plain", m["model"])),
         ("parent", ("quoted", parent)),
         ("ticket", ("quoted", "[[%s]]" % ticket["key"])),
+        ("project", ("plain", project_key_of(con, ticket))),
         ("status", ("plain", m["status"])),
         ("spawned", ("stamp", fm_minute(m["spawned_at"]))),
         ("finished", ("stamp", fm_minute(m["finished_at"]))),
@@ -2075,6 +2224,80 @@ def render_member(con, m, pricing=None):
         names = [n for n in MEMBER_SECTIONS if n != "Blocked" or m["blocked"] is not None]
     sections = [(name, member_section_text(con, m, ticket, name)) for name in names]
     return emit_frontmatter(pairs) + body_with_sections(heading, sections)
+
+
+def project_key_of(con, ticket):
+    row = con.execute("SELECT key FROM projects WHERE id = ?", (ticket["project_id"],)).fetchone()
+    return row["key"] if row else None
+
+
+# ledger/Projects.md (SPD-014): the projects table, generated, and the disaster-recovery import source for it.
+PROJECTS_NOTE = "ledger/Projects.md"
+PROJECTS_COLUMNS = ("Key", "Name", "Ticket prefix", "Team prefix", "Root", "Default branch", "Landing", "Sessions", "Remote", "Archived")
+
+
+def table_cell(value):
+    return ("" if value is None else str(value)).replace("\\", "\\\\").replace("|", "\\|").replace("\r", " ").replace("\n", " ")
+
+
+def table_cells(line):
+    """A markdown table row's cells, `\\|` and `\\\\` read back; None for a line that is no row."""
+    s = line.strip()
+    if not s.startswith("|") or not s.endswith("|") or len(s) < 2:
+        return None
+    cells, cur, i = [], [], 1
+    while i < len(s) - 1:
+        c = s[i]
+        if c == "\\" and i + 1 < len(s) - 1 and s[i + 1] in "|\\":
+            cur.append(s[i + 1])
+            i += 2
+            continue
+        if c == "|":
+            cells.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(c)
+        i += 1
+    cells.append("".join(cur).strip())
+    return cells
+
+
+def render_projects(con):
+    rows = con.execute("SELECT * FROM projects ORDER BY id").fetchall()
+    lines = [MARKER, "# Projects", "", "| %s |" % " | ".join(PROJECTS_COLUMNS), "|%s" % ("---|" * len(PROJECTS_COLUMNS))]
+    for p in rows:
+        cells = (p["key"], p["name"], p["ticket_prefix"], p["team_prefix"], p["root_path"], p["default_branch"], p["landing"], p["sessions"],
+                 p["remote"], fm_date(p["archived_at"]))
+        lines.append("| %s |" % " | ".join(table_cell(c) for c in cells))
+    return emit_frontmatter([("tags", ("list", ["projects"]))]) + "\n".join(lines) + "\n"
+
+
+def import_projects_file(con, at, path, rel):
+    """Projects.md into the projects table, before any ticket (a ticket finds its project by its prefix): every row but the
+    home's, which config sync keeps, and any key already in the ledger.  Returns how many rows it inserted."""
+    table_rows = [cells for cells in (table_cells(line) for line in path.read_text(encoding="utf-8").split("\n")) if cells is not None]
+    if not table_rows or tuple(table_rows[0]) != PROJECTS_COLUMNS:
+        raise SpudError(EXIT_ERROR, "%s: the table's header is not %s" % (rel, " | ".join(PROJECTS_COLUMNS)))
+    inserted = 0
+    for cells in table_rows[1:]:
+        if all(re.fullmatch(r":?-+:?", c) for c in cells):
+            continue
+        if len(cells) != len(PROJECTS_COLUMNS):
+            raise SpudError(EXIT_ERROR, "%s: a row has %d cells, not %d" % (rel, len(cells), len(PROJECTS_COLUMNS)))
+        row = dict(zip(PROJECTS_COLUMNS, cells))
+        if row["Key"] == "spud" or con.execute("SELECT 1 FROM projects WHERE key = ?", (row["Key"],)).fetchone():
+            continue
+        if row["Landing"] not in ("merge", "pr") or row["Sessions"] not in ("always", "claim"):
+            raise SpudError(EXIT_ERROR, "%s: project %s has landing %r and sessions %r, outside the schema's values" % (rel, row["Key"], row["Landing"], row["Sessions"]))
+        con.execute(
+            "INSERT INTO projects (key, name, root_path, remote, ticket_prefix, team_prefix, created_at, default_branch, landing, sessions, archived_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (row["Key"], row["Name"] or row["Key"], row["Root"], row["Remote"] or None, row["Ticket prefix"], row["Team prefix"], at,
+             row["Default branch"] or "main", row["Landing"], row["Sessions"], row["Archived"] or None),
+        )
+        inserted += 1
+    write_event(con, at, "import", "import", "imported %s" % rel, data={"source": rel, "projects": inserted})
+    return inserted
 
 
 def render_report(day, entries):
@@ -2096,6 +2319,7 @@ def render_targets(con, pricing=None):
     for m in con.execute("SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id ORDER BY t.id, m.lineage").fetchall():
         ticket = get_ticket_by_id(con, m["ticket_id"])
         targets.append(("ledger/teams/%s/%s.md" % (ticket["team_key"], m["name"]), render_member(con, m, pricing)))
+    targets.append((PROJECTS_NOTE, render_projects(con)))
     days = {}
     for e in con.execute("SELECT * FROM events WHERE kind = 'report.entry' ORDER BY id").fetchall():
         days.setdefault(e["at"][:10], []).append(e)
@@ -2183,6 +2407,8 @@ def import_ticket_file(ctx, con, at, path, rel):
     project = con.execute("SELECT * FROM projects WHERE ticket_prefix = ?", (m.group(1),)).fetchone()
     if project is None:
         raise SpudError(EXIT_ERROR, "%s: no project has ticket prefix %s" % (rel, m.group(1)))
+    if "project" in fm and fm["project"] != project["key"]:
+        raise SpudError(EXIT_ERROR, "%s: project %r, but the prefix %s is project %s's" % (rel, fm["project"], m.group(1), project["key"]))
     if con.execute("SELECT 1 FROM tickets WHERE key = ?", (key,)).fetchone():
         raise SpudError(EXIT_ERROR, "%s is already in the ledger (imported before); `spud import --file` accepts edits to a rendered file" % key)
     if fm["priority"] not in PRIORITIES or fm["status"] not in TICKET_STATUSES or fm["origin"] not in ("eric", "proposal"):
@@ -2256,6 +2482,8 @@ def import_member_file(ctx, con, at, path, rel, team_key):
         raise SpudError(EXIT_ERROR, "%s: no ticket has team key %s (import the tickets first)" % (rel, team_key))
     if parse_link(fm["ticket"]) != ticket["key"]:
         raise SpudError(EXIT_ERROR, "%s: ticket %s does not match folder %s" % (rel, fm["ticket"], team_key))
+    if "project" in fm and fm["project"] != project_key_of(con, ticket):
+        raise SpudError(EXIT_ERROR, "%s: project %r, but %s is project %s's" % (rel, fm["project"], ticket["key"], project_key_of(con, ticket)))
     lineage = fm["id"]
     if not re.fullmatch(r"\d+(\.\d+)*", lineage):
         raise SpudError(EXIT_ERROR, "%s: id %r is not a lineage" % (rel, lineage))
@@ -2404,11 +2632,15 @@ def bulk_import(ctx, con, paths):
                 report_dirs.append((p / "reports", p))
         else:
             raise SpudError(EXIT_ERROR, "%s holds no ledger/ or reports/ tree" % p)
-    counts = {"tickets": 0, "members": 0, "reports": 0, "report_entries": 0, "prose_sections": 0}
+    counts = {"tickets": 0, "members": 0, "reports": 0, "report_entries": 0, "prose_sections": 0, "projects": 0}
     at = now()
     with write_txn(con):
         imported_tickets = []
         imported_members = []
+        for ledger, base in ledger_dirs:  # SPD-014: the projects first, since a ticket finds its project by its prefix
+            if (ledger / "Projects.md").is_file():
+                path = ledger / "Projects.md"
+                counts["projects"] += import_projects_file(con, at, path, path.relative_to(base).as_posix())
         for ledger, base in ledger_dirs:
             for path in sorted((ledger / "tickets").glob("*.md")) if (ledger / "tickets").is_dir() else []:
                 rel = path.relative_to(base).as_posix()
@@ -2487,6 +2719,8 @@ def classify_path(ctx, path):
         rel = path.relative_to(ctx.home).as_posix()
     except ValueError:
         rel = None
+    if len(parts) >= 2 and parts[-2] == "ledger" and path.name == "Projects.md":
+        return ("projects",), rel or PROJECTS_NOTE
     if len(parts) >= 3 and parts[-3] == "ledger" and parts[-2] == "tickets" and path.suffix == ".md":
         return ("ticket", path.stem), rel or "ledger/tickets/%s" % path.name
     if len(parts) >= 4 and parts[-4] == "ledger" and parts[-3] == "teams" and path.suffix == ".md":
@@ -2546,7 +2780,7 @@ def accept_ticket_edit(ctx, con, at, t, base, doc, rel):
     for key in keys:
         if key not in TICKET_FM_KEYS:
             refuse(rel, "property %r has no column; the ledger keeps only %s" % (key, ", ".join(TICKET_FM_KEYS)))
-        if key in ("id", "origin", "proposed_by"):
+        if key in ("id", "origin", "proposed_by", "project"):
             refuse(rel, "%s is not editable by hand" % key)
         if key == "lead":
             refuse(rel, "lead is not editable by hand; the first member planned with `spud member new` is the lead")
@@ -2615,7 +2849,7 @@ def accept_member_edit(ctx, con, at, m, ticket, base, doc, rel):
             refuse(rel, "model is not editable by hand; use `spud member edit --model` with `--tier-reason`")
         if key in ("spawned", "finished"):
             refuse(rel, "%s is not editable by hand; timestamps come from the clock" % key)
-        if key in ("id", "name", "parent", "ticket", "persona", "agent_type", "tags"):
+        if key in ("id", "name", "parent", "ticket", "project", "persona", "agent_type", "tags"):
             refuse(rel, "%s is not editable by hand" % key)
         if key in ("duration_ms", "tool_uses"):
             refuse(rel, "%s is not editable by hand; the hooks record it, and `spud member resum` recomputes it" % key)
@@ -2694,6 +2928,9 @@ def accept_file(ctx, con, actor, path):
     if not path.is_file():
         raise SpudError(EXIT_ERROR, "no such file: %s" % path)
     kind, rel = classify_path(ctx, path)
+    if kind[0] == "projects":
+        raise SpudError(EXIT_ERROR, "%s is generated from the projects table and never accepted by hand; it changes with `spud project add|edit|remove`"
+                        " (`spud render --discard %s` restores it)" % (rel, rel))
     raw = path.read_bytes()
     text = raw.decode("utf-8")
     at = now()
@@ -3057,10 +3294,12 @@ HOOK_MARK = "bin/spud hook"  # what marks a hook entry as the ledger's, whatever
 ALLOW_RULE_MARK = re.compile(r"^Bash\(.*bin/spud(?: \*|:\*)\)$")
 
 
-def hook_command(ctx, event):
-    """`SPUD_HOME=<home> <interpreter> -I -S <home>/bin/spud hook <event>`, absolute, resolved at sync time."""
+def hook_command(ctx, event, project_key=None):
+    """`SPUD_HOME=<home> <interpreter> -I -S <home>/bin/spud hook <event>`, absolute, resolved at sync time; a project's
+    line (SPD-014) ends in `--project <key>`, which sets the failure policy of the design's section 6.4."""
     home = str(ctx.home)
-    return "SPUD_HOME=%s %s -I -S %s hook %s" % (shlex.quote(home), shlex.quote(sys.executable), shlex.quote(str(ctx.home / "bin" / "spud")), event)
+    line = "SPUD_HOME=%s %s -I -S %s hook %s" % (shlex.quote(home), shlex.quote(sys.executable), shlex.quote(str(ctx.home / "bin" / "spud")), event)
+    return line + (" --project %s" % shlex.quote(project_key) if project_key else "")
 
 
 def cli_allow_rules(ctx):
@@ -3081,7 +3320,7 @@ def is_ledger_hook(entry):
     return isinstance(entry, dict) and HOOK_MARK in str(entry.get("command", ""))
 
 
-def merge_hooks(ctx, settings):
+def merge_hooks(ctx, settings, project_key=None):
     """Keep every hook that is not the ledger's, replace the ledger's own entries, one
     group per row of the hook table, appended in table order."""
     hooks = settings.get("hooks")
@@ -3102,7 +3341,7 @@ def merge_hooks(ctx, settings):
         for ev, matcher in HOOK_TABLE:
             if ev != event:
                 continue
-            entry = {"type": "command", "command": hook_command(ctx, event), "timeout": HOOK_TIMEOUT}
+            entry = {"type": "command", "command": hook_command(ctx, event, project_key), "timeout": HOOK_TIMEOUT}
             kept.append({"matcher": matcher, "hooks": [entry]} if matcher else {"hooks": [entry]})
         hooks[event] = kept
     return sum(len(v) for e, v in hooks.items() if e in dict(HOOK_TABLE))
@@ -3149,6 +3388,42 @@ def merge_deny_rules(settings):
     return kept
 
 
+def merge_additional_dirs(settings, dirs):
+    """permissions.additionalDirectories gains each of `dirs` it lacks, every other entry kept; returns those it added."""
+    permissions = settings.get("permissions")
+    if not isinstance(permissions, dict):
+        permissions = {}
+        settings["permissions"] = permissions
+    current = permissions.get("additionalDirectories")
+    current = [d for d in current if isinstance(d, str)] if isinstance(current, list) else []
+    added = [d for d in dirs if d not in current]
+    permissions["additionalDirectories"] = current + added
+    return added
+
+
+def merge_settings(ctx, settings, *, env, deny, additional_dirs=(), project_key=None):
+    """One merge for both writers (SPD-014): `settings sync` for the home (env=True, deny=True) and `project install` for
+    another repository's local settings (env=False, deny=False, the home as an additional directory, the project's key on
+    every hook line).  Keeps every key and entry that is not the ledger's; returns what it set."""
+    out = {}
+    if env:
+        limits = ctx.limits
+        block = settings.get("env")
+        if not isinstance(block, dict):
+            block = {}
+            settings["env"] = block
+        block["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] = str(limits["max_depth"])
+        block["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] = str(limits["max_concurrent_total"])
+        out["env"] = block
+    out["allow"] = merge_allow_rules(ctx, settings)
+    if deny:
+        out["deny"] = merge_deny_rules(settings)
+    if additional_dirs:
+        out["additional_dirs_added"] = merge_additional_dirs(settings, list(additional_dirs))
+    out["hooks"] = merge_hooks(ctx, settings, project_key)
+    return out
+
+
 def cmd_settings_sync(ctx, args):
     limits = ctx.limits
     path = Path(args.path).expanduser().resolve() if args.path else (ctx.home / ".claude" / "settings.json")
@@ -3161,15 +3436,8 @@ def cmd_settings_sync(ctx, args):
             raise SpudError(EXIT_ERROR, "%s is not a JSON object" % path)
     else:
         settings = {}
-    env = settings.get("env")
-    if not isinstance(env, dict):
-        env = {}
-        settings["env"] = env
-    env["CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH"] = str(limits["max_depth"])
-    env["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] = str(limits["max_concurrent_total"])
-    allow = merge_allow_rules(ctx, settings)
-    deny = merge_deny_rules(settings)
-    hook_count = merge_hooks(ctx, settings)
+    merged = merge_settings(ctx, settings, env=True, deny=True)
+    env, allow, deny, hook_count = merged["env"], merged["allow"], merged["deny"], merged["hooks"]
     rendered = json.dumps(settings, indent=2) + "\n"
     current = path.read_text(encoding="utf-8") if path.is_file() else None
     written = False
@@ -3406,9 +3674,18 @@ def cmd_ticket_new(ctx, args):
         actor = resolve_actor(con, args.actor)
         require_spud(con, actor, "creating a ticket (Law 6)")
         check_next(con, actor, args)
-        project = con.execute("SELECT * FROM projects WHERE key = ?", (args.project or "spud",)).fetchone()
-        if project is None:
-            raise SpudError(EXIT_ERROR, "no project %r" % args.project)
+        if args.project:
+            project = con.execute("SELECT * FROM projects WHERE key = ?", (args.project,)).fetchone()
+            if project is None:
+                raise SpudError(EXIT_ERROR, "no project %r" % args.project)
+        else:  # SPD-014: the project of the working directory, else the home
+            try:
+                mapped = cli_project_of(ctx, con, os.getcwd())
+            except OSError:
+                mapped = None
+            project = mapped[0] if mapped else con.execute("SELECT * FROM projects WHERE id = 1").fetchone()
+        if project["archived_at"]:
+            raise SpudError(EXIT_ERROR, "project %s is archived (%s); no ticket is created in it" % (project["key"], fm_date(project["archived_at"])))
         tags = ["ticket"] + [t for t in (args.tag or []) if t != "ticket"]
         at = now()
         with write_txn(con):
@@ -3421,7 +3698,8 @@ def cmd_ticket_new(ctx, args):
         d = ticket_dict(con, t)
     finally:
         con.close()
-    return with_report_entry({"ticket": d}, "%s (%s) created: %s [%s]" % (d["key"], d["team_key"], d["title"], d["status"]), entry)
+    keys = "%s, %s" % (d["team_key"], d["project"]) if d["project"] != "spud" else d["team_key"]
+    return with_report_entry({"ticket": d}, "%s (%s) created: %s [%s]" % (d["key"], keys, d["title"], d["status"]), entry)
 
 
 def cmd_ticket_move(ctx, args):
@@ -3613,6 +3891,7 @@ def cmd_member_edit(ctx, args):
             if args.brief is not None and args.brief != m["brief"]:
                 updates["brief"] = args.brief
             if args.deliverable is not None and json.dumps(normalize_deliverables(args.deliverable)) != m["deliverables"]:
+                check_deliverable_projects(con, normalize_deliverables(args.deliverable))
                 updates["deliverables"] = json.dumps(normalize_deliverables(args.deliverable))
             if args.summary is not None and args.summary != m["summary"]:
                 updates["summary"] = args.summary
@@ -4013,6 +4292,11 @@ def cmd_events(ctx, args):
         if args.kind:
             clauses.append("kind = ?")
             params.append(args.kind)
+        if args.project:  # SPD-014: its tickets' events, and the project and session events that name it
+            get_project(con, args.project)
+            clauses.append("(ticket_id IN (SELECT t.id FROM tickets t JOIN projects p ON p.id = t.project_id WHERE p.key = ?)"
+                           " OR json_extract(data, '$.project') = ?)")
+            params += [args.project, args.project]
         sql = "SELECT * FROM events" + ((" WHERE " + " AND ".join(clauses)) if clauses else "") + " ORDER BY id"
         rows = con.execute(sql, params).fetchall()
         if args.limit:
@@ -4057,12 +4341,18 @@ def cmd_board(ctx, args):
     con = connect(ctx)
     try:
         rows = [dict(r) for r in con.execute("SELECT * FROM v_board").fetchall()]
+        if args.project:
+            get_project(con, args.project)
+            rows = [r for r in rows if r["project"] == args.project]
         if args.brief:
             text = board_brief_text(con, rows)
         else:
             for r in rows:
                 r["created"] = fm_date(r["created_at"])
-            text = table(rows, [("ticket", "key"), ("status", "status"), ("P", "priority"), ("title", "title"), ("lead", "lead"), ("origin", "origin"), ("proposed by", "proposed_by"), ("created", "created")])
+            columns = [("ticket", "key"), ("status", "status"), ("P", "priority"), ("title", "title"), ("lead", "lead"), ("origin", "origin"), ("proposed by", "proposed_by"), ("created", "created")]
+            if con.execute("SELECT count(*) FROM projects").fetchone()[0] > 1:  # SPD-014: the project column once there is more than one
+                columns.insert(1, ("project", "project"))
+            text = table(rows, columns)
     finally:
         con.close()
     return Result({"tickets": rows}, text)
@@ -4141,6 +4431,9 @@ def cmd_card(ctx, args):
     try:
         t = get_ticket(con, args.key)
         d = ticket_dict(con, t)
+        if args.project and d["project"] != args.project:
+            get_project(con, args.project)
+            raise SpudError(EXIT_ERROR, "%s is project %s's, not %s's" % (d["key"], d["project"], args.project))
         pricing = ctx.pricing
         tree = team_tree(con, t, pricing)
         totals = team_totals(con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (t["id"],)).fetchall(), pricing)
@@ -4236,6 +4529,9 @@ def cmd_doctor(ctx, args):
     # a Mac switched off for a weekend misses its daily copies and is not at fault.
     daily, other = backup_listing(backups_dir(ctx))
     report["backups"] = {"dir": str(backups_dir(ctx)), "daily": {"count": len(daily), "newest": daily[-1] if daily else None, "oldest": daily[0] if daily else None}, "other": other}
+    notes = []
+    report["projects"] = doctor_projects(ctx, problems, notes) if db["exists"] and db.get("user_version") == SCHEMA_VERSION else []
+    report["notes"] = notes
     report["problems"] = problems
     lines = [
         "python      %s (%s; isolated=%s, no_site=%s)" % (report["interpreter"]["path"], report["interpreter"]["version"], report["interpreter"]["flags"]["isolated"], report["interpreter"]["flags"]["no_site"]),
@@ -4259,11 +4555,954 @@ def cmd_doctor(ctx, args):
         lines.extend("            not priced: %s (%s)" % (x["ref"], "; ".join(x["reasons"])) for x in p["not_priced"])
     elif config is not None:
         lines.append("pricing     %s" % ("%s: every cost shows —" % NO_TABLE if not price_table(config)[1] else "no usable price table: see problems"))
+    for p in report["projects"]:
+        lines.append("project     %s at %s: %s" % (p["key"], p["root"], ", ".join(p["checks"]) or "no check passed"))
+    lines.extend("note        %s" % n for n in notes)
     lines.append("problems    %s" % (("\n            ".join(problems)) if problems else "none"))
     result = Result(report, "\n".join(lines))
     if problems:
         raise SpudError(EXIT_ERROR, "doctor found %d problem(s): %s" % (len(problems), "; ".join(problems)), data=report)
     return result
+
+
+def doctor_projects(ctx, problems, notes):
+    """doctor's projects section (SPD-014): each active project but the home, its root a main checkout, and when it is
+    installed its local settings carrying this home's hooks, the file ignored, the user-scope agent matching the home's
+    and the /spud skill present.  The home pointer and the superseded worktree cache are notes, never problems."""
+    out = []
+    con = open_connection(ctx.db_path)
+    try:
+        rows = con.execute("SELECT * FROM projects WHERE id != 1 AND archived_at IS NULL ORDER BY id").fetchall()
+    finally:
+        con.close()
+    home_agent = ctx.home / ".claude" / "agents" / "spudagent.md"
+    for p in rows:
+        root, checks, bad = p["root_path"], [], []
+        if not os.path.isdir(root):
+            bad.append("root %s is not a directory" % root)
+        else:
+            try:
+                proc = run_git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", timeout=10)
+                lines = proc.stdout.strip().split("\n") if proc.returncode == 0 else []
+                if len(lines) == 2 and file_identity(lines[0]) == file_identity(root) and file_identity(lines[1]) == file_identity(os.path.join(root, ".git")):
+                    checks.append("main checkout")
+                else:
+                    bad.append("root %s is not the main checkout of a git repository" % root)
+            except SpudError as e:
+                bad.append(e.message)
+        if p["installed"]:
+            files = install_files(ctx, p)
+            if settings_hold_hooks(ctx, files["settings"], p["key"]):
+                checks.append("hooks")
+            else:
+                bad.append("%s lacks this home's ledger hooks; run `spud --as spud project sync %s`" % (files["settings"], p["key"]))
+            if os.path.isdir(root) and run_git(root, "check-ignore", "-q", "--", SETTINGS_LOCAL, timeout=10).returncode == 0:
+                checks.append("ignored")
+            else:
+                bad.append("%s is not ignored by git in %s" % (SETTINGS_LOCAL, root))
+            if files["agent"].is_file() and home_agent.is_file() and sha256_bytes(files["agent"].read_bytes()) == sha256_bytes(home_agent.read_bytes()):
+                checks.append("agent")
+            else:
+                bad.append("%s differs from %s; run `spud --as spud project sync --all`" % (files["agent"], home_agent))
+            if files["skill"].is_file():
+                checks.append("skill")
+            else:
+                bad.append("no /spud skill at %s; run `spud --as spud project sync %s`" % (files["skill"], p["key"]))
+            if not files["pointer"].is_file():
+                notes.append("no home pointer at %s (a launcher copied outside every checkout cannot find the home)" % files["pointer"])
+        else:
+            checks.append("not installed")
+        problems.extend("project %s: %s" % (p["key"], b) for b in bad)
+        out.append({"key": p["key"], "root": root, "installed": bool(p["installed"]), "checks": checks, "problems": bad})
+    if (ctx.home / STATE_DIR / "worktrees.json").exists():
+        notes.append(".spud/worktrees.json is superseded by .spud/worktrees/<key>.json and ignored")
+    return out
+
+
+# ----------------------------------------------------------------------------
+# Projects, sessions and the ledger commit (SPD-014)
+# ----------------------------------------------------------------------------
+#
+# docs/design/2026-09-14-cross-repository-projects.md.  A project is a registered repository; the home is project 1.
+# A session launched in another project is Spud only after `/spud` claims it (projects.sessions = 'claim', the default
+# for `project add`, Eric 2026-09-14), or when its project is 'always', as the home is.
+
+PROJECT_KEY_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
+PREFIX_RE = re.compile(r"[A-Z][A-Z0-9]*")
+SETTINGS_LOCAL = ".claude/settings.local.json"
+EXCLUDE_COMMENT = "# spud project %s"
+CLAIM_CARD_CAP = 1536        # bytes: what `session claim` prints
+SESSION_CONTEXT_CAP = 2048   # bytes: a project session's SessionStart context (the design's probe P2)
+PLAIN_NOTICE_CAP = 300       # bytes: the one line a session that is not Spud gets
+SUBJECT_TICKET_KEY = re.compile(r"[A-Z][A-Z0-9]*-\d{3}")
+SKILL_TEMPLATE = """---
+name: spud
+description: Make this session Spud, Eric's second brain, in a repository registered as a Spud project. Only when Eric types /spud or asks for Spud in this session.
+disable-model-invocation: true
+---
+You are becoming Spud in this session.
+
+1. Read {home}/CLAUDE.md in full, then {home}/spud.config.json. They bind you from now on, with the rule in step 3.
+2. Run `python3.14 -I -S {home}/bin/spud --as spud session claim`. If it refuses, quote the refusal, say this session is not Spud, and stop following these steps.
+3. The claim names the project. This repository's own CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed. Spud's laws govern delegation, the ledger, and who writes what. In a conflict about the first, the project wins; about the second, Spud's laws win.
+4. Run the session ritual of CLAUDE.md from step 2.
+"""
+
+
+def user_claude_dir():
+    """~/.claude, where install puts the user-scope spudagent and /spud skill; SPUD_USER_CLAUDE_DIR overrides it, for tests."""
+    return Path(os.path.abspath(os.path.expanduser(os.environ.get("SPUD_USER_CLAUDE_DIR") or "~/.claude")))
+
+
+def spud_config_dir(env=None):
+    """~/.config/spud, which holds the home pointer; SPUD_CONFIG_DIR overrides it, for tests."""
+    env = os.environ if env is None else env
+    return Path(os.path.abspath(os.path.expanduser(env.get("SPUD_CONFIG_DIR") or "~/.config/spud")))
+
+
+def get_project(con, key):
+    row = con.execute("SELECT * FROM projects WHERE key = ?", (key,)).fetchone()
+    if row is None:
+        raise SpudError(EXIT_ERROR, "no project %r (spud project list)" % key)
+    return row
+
+
+def spudagent_shaped(tool_input):
+    """A spawn the PreToolUse(Agent) check is for in any session: subagent_type spudagent, or a member description."""
+    description = tool_input.get("description") if isinstance(tool_input.get("description"), str) else ""
+    return tool_input.get("subagent_type") == "spudagent" or DESCRIPTION.match(description) is not None
+
+
+def pending_spawn(con, session_id):
+    """Whether the session has an allowed spawn still waiting to bind: a subagent starting now may be that member."""
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    return con.execute("SELECT 1 FROM spawn_requests WHERE session_id = ? AND decision = 'allow' AND member_id IS NOT NULL AND agent_id IS NULL LIMIT 1",
+                       (session_id,)).fetchone() is not None
+
+
+def session_mode(ctx, con, payload, env=None):
+    """(mode, launch project row or None, claim row or None), once per hook call (design section 6.1).  The launch project
+    is the project of CLAUDE_PROJECT_DIR, which stays at the launch directory after EnterWorktree (probe P5), else of the
+    payload's cwd.  `outside`: it is in no active project, and a hook behaves as `spud` there, today's strict behaviour.
+    `spud`: the session holds a claim, or its project's sessions is `always` (the home's is).  `plain` otherwise."""
+    env = os.environ if env is None else env
+    session = payload.get("session_id")
+    claim = claim_of(con, session) if isinstance(session, str) and session else None
+    if con.execute("SELECT 1 FROM projects WHERE archived_at IS NULL AND id != 1 LIMIT 1").fetchone() is None:
+        return "spud", None, claim  # the home alone: launched in it or outside it, every session behaves as Spud's
+    launch = env.get("CLAUDE_PROJECT_DIR") or payload.get("cwd")
+    if not isinstance(launch, str) or not launch:
+        return "outside", None, claim
+    mapped = project_of_path(ctx, con, launch)
+    if mapped is None:
+        return "outside", None, claim
+    project = mapped[0]
+    if claim is not None or project["sessions"] == "always":
+        return "spud", project, claim
+    return "plain", project, None
+
+
+def fit_bytes(head, body, cap, note="(cut to fit; run `spud board --brief` for the rest)"):
+    """head, then as many whole lines of body as fit in cap bytes of UTF-8 with the note after them."""
+    text = head + ("\n" + body if body else "")
+    if len(text.encode("utf-8")) <= cap:
+        return text
+    tail = "\n" + note
+    budget = cap - len(head.encode("utf-8")) - len(tail.encode("utf-8"))
+    if budget <= 0:
+        return head.encode("utf-8")[:cap].decode("utf-8", "ignore")
+    kept, used = [], 0
+    for line in body.split("\n"):
+        n = len(("\n" + line).encode("utf-8"))
+        if used + n > budget:
+            break
+        kept.append(line)
+        used += n
+    return head + "".join("\n" + line for line in kept) + tail
+
+
+def plain_session_notice(ctx, project):
+    root = project_root(ctx, project)
+    text = ""
+    for shown in (root, os.path.basename(root.rstrip("/")) or root):
+        text = "`%s` is Spud project `%s` (`%s-nnn` tickets). This session is not Spud; type /spud to make it Spud." % (shown, project["key"], project["ticket_prefix"])
+        if len(text.encode("utf-8")) <= PLAIN_NOTICE_CAP:
+            return text
+    return text.encode("utf-8")[:PLAIN_NOTICE_CAP].decode("utf-8", "ignore")
+
+
+def project_session_context(ctx, con, project, claim, payload):
+    root = project_root(ctx, project)
+    if claim is not None:
+        head = ("Ledger: this session is Spud in project `%s` (%s), claimed %s; root %s; tickets %s-nnn, teams %s-nnn; landing %s."
+                " This session is Spud: you are Spud here; re-read %s/CLAUDE.md now." % (project["key"], project["name"], fm_minute(claim["claimed_at"]), root,
+                                                                    project["ticket_prefix"], project["team_prefix"], project["landing"], ctx.home))
+    else:
+        head = ("Ledger: `%s` is Spud project `%s` (sessions always; tickets %s-nnn). This session is Spud: run /spud now to load his instructions."
+                % (root, project["key"], project["ticket_prefix"]))
+    board = "Ledger board (`spud board --brief` at %s, source %s):\n%s" % (now(), payload.get("source"), board_brief_text(con))
+    return fit_bytes(head, board, SESSION_CONTEXT_CAP)
+
+
+def identity_chain(path):
+    """The file identities of a path and every ancestor of it that exists."""
+    out, cur = set(), os.path.abspath(str(path))
+    while True:
+        ident = file_identity(cur)
+        if ident is not None:
+            out.add(ident)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            return out
+        cur = parent
+
+
+def validate_project_root(ctx, con, path, exclude_id=None):
+    """The rules 1 to 3 of `project add` (design section 1.2): an existing directory, the root of a git repository's main
+    checkout, not the home, not inside an active project's root and not containing one.  Returns the resolved root."""
+    try:
+        root = Path(os.path.expanduser(str(path))).resolve(strict=True)
+    except (OSError, RuntimeError):
+        raise SpudError(EXIT_ERROR, "%s is not an existing directory" % path)
+    if not root.is_dir():
+        raise SpudError(EXIT_ERROR, "%s is not a directory" % root)
+    proc = run_git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", timeout=30)
+    lines = proc.stdout.strip().split("\n") if proc.returncode == 0 else []
+    if len(lines) != 2:
+        raise SpudError(EXIT_ERROR, "%s is not a git repository with a work tree (git rev-parse: %s)" % (root, (proc.stderr or proc.stdout).strip() or "no output"))
+    toplevel, common = lines
+    if file_identity(toplevel) != file_identity(root):
+        raise SpudError(EXIT_ERROR, "%s is inside the repository %s, not its root; register the root" % (root, toplevel))
+    if file_identity(common) != file_identity(os.path.join(toplevel, ".git")):
+        raise SpudError(EXIT_ERROR, "%s is a linked worktree; register the main checkout, %s" % (root, os.path.dirname(common.rstrip("/"))))
+    ident = file_identity(root)
+    if ident == file_identity(ctx.home):
+        raise SpudError(EXIT_ERROR, "%s is Spud's home, project spud" % root)
+    chain = identity_chain(root)
+    for other in con.execute("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall():
+        if other["id"] == exclude_id:
+            continue
+        other_root = project_root(ctx, other)
+        other_ident = file_identity(other_root)
+        if other_ident is None:
+            continue
+        if other_ident in chain:
+            raise SpudError(EXIT_ERROR, "%s is inside project %s's root %s; nested roots would make the nearest root ambiguous" % (root, other["key"], other_root))
+        if ident in identity_chain(other_root):
+            raise SpudError(EXIT_ERROR, "%s contains project %s's root %s; nested roots would make the nearest root ambiguous" % (root, other["key"], other_root))
+    return str(root)
+
+
+def check_project_key(con, key):
+    if not PROJECT_KEY_RE.fullmatch(key or ""):
+        raise SpudError(EXIT_ERROR, "--key %r must be lower-case letters, digits and hyphens, starting with a letter, at most 32 characters" % key)
+    if key == "spud":
+        raise SpudError(EXIT_ERROR, "the key spud is the home's")
+    if con.execute("SELECT 1 FROM projects WHERE key = ?", (key,)).fetchone():
+        raise SpudError(EXIT_ERROR, "project %s exists already" % key)
+
+
+def check_prefixes(con, ticket_prefix, team_prefix, exclude_id=None):
+    """Rule 5: upper-case letters and digits, the two different, and neither equal to any prefix of any other project,
+    archived ones included, so no ticket key can ever equal a team key."""
+    for option, value in (("--ticket-prefix", ticket_prefix), ("--team-prefix", team_prefix)):
+        if not PREFIX_RE.fullmatch(value or ""):
+            raise SpudError(EXIT_ERROR, "%s %r must be upper-case letters and digits, starting with a letter" % (option, value))
+    if ticket_prefix == team_prefix:
+        raise SpudError(EXIT_ERROR, "the ticket and team prefixes must differ (both %s)" % ticket_prefix)
+    for other in con.execute("SELECT * FROM projects ORDER BY id").fetchall():
+        if other["id"] == exclude_id:
+            continue
+        for value in (ticket_prefix, team_prefix):
+            if value in (other["ticket_prefix"], other["team_prefix"]):
+                raise SpudError(EXIT_ERROR, "prefix %s is project %s's already; prefixes are unique across every project, archived ones included,"
+                                            " so no ticket key equals a team key" % (value, other["key"]))
+
+
+def origin_head_branch(root):
+    proc = run_git(root, "rev-parse", "--abbrev-ref", "origin/HEAD", timeout=10)
+    value = proc.stdout.strip() if proc.returncode == 0 else ""
+    return value[len("origin/"):] if value.startswith("origin/") and len(value) > len("origin/") else None
+
+
+def settings_hold_hooks(ctx, path, key=None):
+    """Whether a settings file carries every ledger hook of HOOK_TABLE for this home (and, for a project, with its key)."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return False
+    prefix = "SPUD_HOME=%s " % shlex.quote(str(ctx.home))
+    suffix = (" --project %s" % shlex.quote(key)) if key else None
+    found = set()
+    for event, groups in hooks.items():
+        for group in groups if isinstance(groups, list) else []:
+            for h in (group.get("hooks") if isinstance(group, dict) and isinstance(group.get("hooks"), list) else []):
+                command = h.get("command") if isinstance(h, dict) else None
+                if isinstance(command, str) and HOOK_MARK in command and command.startswith(prefix) and (suffix is None or command.endswith(suffix)):
+                    found.add(event)
+    return found >= {e for e, _ in HOOK_TABLE}
+
+
+def project_dict(ctx, con, p):
+    root = project_root(ctx, p)
+    settings = os.path.join(root, ".claude", "settings.json" if p["id"] == 1 else "settings.local.json")
+    record = json.loads(p["installed"]) if p["installed"] else None
+    return {
+        "key": p["key"], "name": p["name"], "ticket_prefix": p["ticket_prefix"], "team_prefix": p["team_prefix"], "root": root,
+        "default_branch": p["default_branch"], "landing": p["landing"], "sessions": p["sessions"], "remote": p["remote"],
+        "tickets": con.execute("SELECT count(*) FROM tickets WHERE project_id = ?", (p["id"],)).fetchone()[0],
+        "settings_file": settings, "installed": settings_hold_hooks(ctx, settings, None if p["id"] == 1 else p["key"]),
+        "install_record": None if record is None else {k: v for k, v in record.items() if k != "original"},
+        "created_at": p["created_at"], "archived_at": p["archived_at"],
+    }
+
+
+def format_project(d):
+    lines = [
+        "%s: %s%s" % (d["key"], d["name"], " (archived %s)" % fm_date(d["archived_at"]) if d["archived_at"] else ""),
+        "root            %s" % d["root"],
+        "prefixes        %s-nnn tickets, %s-nnn teams (%d ticket%s)" % (d["ticket_prefix"], d["team_prefix"], d["tickets"], "" if d["tickets"] == 1 else "s"),
+        "default branch  %s" % d["default_branch"],
+        "landing         %s" % d["landing"],
+        "sessions        %s" % d["sessions"],
+        "remote          %s" % (d["remote"] or "-"),
+        "installed       %s (%s)" % ("yes" if d["installed"] else "no", d["settings_file"]),
+    ]
+    return "\n".join(lines)
+
+
+def cmd_project_add(ctx, args):
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        require_spud(con, actor, "adding a project")
+        check_next(con, actor, args)
+        root = validate_project_root(ctx, con, args.path)
+        check_project_key(con, args.key)
+        check_prefixes(con, args.ticket_prefix, args.team_prefix)
+        if con.execute("SELECT key FROM projects WHERE root_path = ?", (root,)).fetchone():
+            raise SpudError(EXIT_ERROR, "%s is already the root of project %s (archived); `spud --as spud project edit` changes a root"
+                            % (root, con.execute("SELECT key FROM projects WHERE root_path = ?", (root,)).fetchone()["key"]))
+        remote = git_remote_url(root)
+        branch = args.default_branch or origin_head_branch(root) or "main"
+        name = args.name or os.path.basename(root)
+        at = now()
+        with write_txn(con):
+            check_project_key(con, args.key)
+            check_prefixes(con, args.ticket_prefix, args.team_prefix)
+            con.execute(
+                "INSERT INTO projects (key, name, root_path, remote, ticket_prefix, team_prefix, created_at, default_branch, landing, sessions)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (args.key, name, root, remote, args.ticket_prefix, args.team_prefix, at, branch, args.landing, args.sessions),
+            )
+            data = {"project": args.key, "root": root, "ticket_prefix": args.ticket_prefix, "team_prefix": args.team_prefix, "landing": args.landing,
+                    "sessions": args.sessions, "default_branch": branch, "remote": remote}
+            write_event(con, at, actor.label, "project.added", "project %s added: %s" % (args.key, root), data=data)
+            entry = write_report_entry(con, at, "Project %s added: %s (%s-nnn tickets, landing %s, sessions %s)" % (args.key, root, args.ticket_prefix, args.landing, args.sessions),
+                                       "project add", None, next_line=args.next)
+            d = project_dict(ctx, con, get_project(con, args.key))
+    finally:
+        con.close()
+    return with_report_entry({"project": d}, "project %s added: %s (%s-nnn tickets, %s-nnn teams, landing %s, sessions %s); nothing installed yet:"
+                             " `spud --as spud project install %s`" % (d["key"], d["root"], d["ticket_prefix"], d["team_prefix"], d["landing"], d["sessions"], d["key"]), entry)
+
+
+def cmd_project_list(ctx, args):
+    con = connect(ctx)
+    try:
+        rows = [project_dict(ctx, con, p) for p in con.execute("SELECT * FROM projects ORDER BY id").fetchall()]
+    finally:
+        con.close()
+    shown = [dict(r, installed_text="yes" if r["installed"] else "no", archived=fm_date(r["archived_at"])) for r in rows]
+    return Result({"projects": rows}, table(shown, [("key", "key"), ("name", "name"), ("tickets", "ticket_prefix"), ("teams", "team_prefix"), ("root", "root"),
+                                                    ("branch", "default_branch"), ("landing", "landing"), ("sessions", "sessions"), ("installed", "installed_text"),
+                                                    ("archived", "archived")]))
+
+
+def cmd_project_show(ctx, args):
+    con = connect(ctx)
+    try:
+        d = project_dict(ctx, con, get_project(con, args.key))
+    finally:
+        con.close()
+    return Result({"project": d}, format_project(d))
+
+
+def cmd_project_edit(ctx, args):
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        require_spud(con, actor, "editing a project")
+        at = now()
+        with write_txn(con):
+            p = get_project(con, args.key)
+            home = p["id"] == 1
+            updates = {}
+            if args.name is not None:
+                if home:
+                    raise SpudError(EXIT_ERROR, "the home's name comes from spud.config.json (identity.name)")
+                updates["name"] = args.name
+            if args.landing is not None:
+                updates["landing"] = args.landing
+            if args.sessions is not None:
+                if home and args.sessions != "always":
+                    raise SpudError(EXIT_ERROR, "every session in the home is Spud: the home's sessions stays always")
+                updates["sessions"] = args.sessions
+            if args.default_branch is not None:
+                updates["default_branch"] = args.default_branch
+            if args.root is not None:
+                if home:
+                    raise SpudError(EXIT_ERROR, "the home's root is the home itself (SPUD_HOME)")
+                root = validate_project_root(ctx, con, args.root, exclude_id=p["id"])
+                clash = con.execute("SELECT key FROM projects WHERE root_path = ? AND id != ?", (root, p["id"])).fetchone()
+                if clash:
+                    raise SpudError(EXIT_ERROR, "%s is already the root of project %s" % (root, clash["key"]))
+                updates["root_path"] = root
+            if args.ticket_prefix is not None or args.team_prefix is not None:
+                if home:
+                    raise SpudError(EXIT_ERROR, "the home's prefixes come from spud.config.json (`spud config sync`)")
+                if con.execute("SELECT 1 FROM tickets WHERE project_id = ? LIMIT 1", (p["id"],)).fetchone():
+                    raise SpudError(EXIT_ERROR, "project %s has tickets, so its prefixes are fixed: they are in rendered file names and wikilinks" % p["key"])
+                tp, tm = args.ticket_prefix or p["ticket_prefix"], args.team_prefix or p["team_prefix"]
+                check_prefixes(con, tp, tm, exclude_id=p["id"])
+                updates.update(ticket_prefix=tp, team_prefix=tm)
+            updates = {k: v for k, v in updates.items() if v != p[k]}
+            if updates:
+                con.execute("UPDATE projects SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), p["id"]))
+                write_event(con, at, actor.label, "project.edited", "project %s edited: %s" % (p["key"], ", ".join(sorted(updates))),
+                            data={"project": p["key"], "fields": sorted(updates), "from": {k: p[k] for k in updates}, "to": updates})
+            d = project_dict(ctx, con, get_project(con, args.key))
+    finally:
+        con.close()
+    return Result({"project": d, "changed": sorted(updates)}, "project %s edited: %s" % (d["key"], ", ".join(sorted(updates)) or "nothing to change"))
+
+
+def install_files(ctx, p):
+    """Where install writes for a project (design section 2.1)."""
+    user = user_claude_dir()
+    return {
+        "settings": Path(project_root(ctx, p)) / ".claude" / "settings.local.json",
+        "agent": user / "agents" / "spudagent.md",
+        "skill": user / "skills" / "spud" / "SKILL.md",
+        "pointer": spud_config_dir() / "home",
+        "source_agent": ctx.home / ".claude" / "agents" / "spudagent.md",
+    }
+
+
+def read_json_object(path):
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise SpudError(EXIT_ERROR, "%s is not a readable JSON file: %s" % (path, e))
+    if not isinstance(data, dict):
+        raise SpudError(EXIT_ERROR, "%s is not a JSON object" % path)
+    return data
+
+
+def git_common_dir(root):
+    proc = run_git(root, "rev-parse", "--path-format=absolute", "--git-common-dir", timeout=30)
+    if proc.returncode != 0 or not proc.stdout.strip():
+        raise SpudError(EXIT_ERROR, "cannot find the git common dir of %s: %s" % (root, proc.stderr.strip()))
+    return Path(proc.stdout.strip())
+
+
+def ensure_ignored(root, key):
+    """Make sure git ignores the local settings file (design section 2.3): True when it appended the path to the common
+    dir's info/exclude under its comment line, False when git already ignored it."""
+    proc = run_git(root, "check-ignore", "-q", "--", SETTINGS_LOCAL, timeout=30)
+    if proc.returncode == 0:
+        return False
+    if proc.returncode != 1:
+        raise SpudError(EXIT_ERROR, "git check-ignore failed in %s: %s" % (root, proc.stderr.strip()))
+    exclude = git_common_dir(root) / "info" / "exclude"
+    text = exclude.read_text(encoding="utf-8") if exclude.is_file() else ""
+    if text and not text.endswith("\n"):
+        text += "\n"
+    write_whole(exclude, text + "%s\n%s\n" % (EXCLUDE_COMMENT % key, SETTINGS_LOCAL))
+    return True
+
+
+def remove_exclude_block(root, key):
+    """Take back the two lines ensure_ignored appended; True when they were there."""
+    try:
+        exclude = git_common_dir(root) / "info" / "exclude"
+    except SpudError:
+        return False
+    if not exclude.is_file():
+        return False
+    lines = exclude.read_text(encoding="utf-8").split("\n")
+    out, i, removed = [], 0, False
+    while i < len(lines):
+        if lines[i] == EXCLUDE_COMMENT % key and i + 1 < len(lines) and lines[i + 1] == SETTINGS_LOCAL:
+            i += 2
+            removed = True
+            continue
+        out.append(lines[i])
+        i += 1
+    if removed:
+        write_whole(exclude, "\n".join(out))
+    return removed
+
+
+def install_project(ctx, con, p):
+    """Write what project install writes (design section 2.1), each file only when its content changes: the ledger hooks,
+    the CLI allow rules and the home as an additional directory in the project's untracked local settings; the exclude
+    line when git does not already ignore that file; the spudagent copy and the /spud skill at user scope; the home
+    pointer when absent.  Returns (the install record for projects.installed, the paths written, whether the user
+    agents directory held no agent before)."""
+    root = Path(project_root(ctx, p))
+    if not root.is_dir():
+        raise SpudError(EXIT_ERROR, "project %s's root %s is not a directory; `spud --as spud project edit %s --root <path>`" % (p["key"], root, p["key"]))
+    files = install_files(ctx, p)
+    if not files["source_agent"].is_file():
+        raise SpudError(EXIT_ERROR, "no %s to install at user scope: the home's spudagent definition is the source" % files["source_agent"])
+    if run_git(root, "ls-files", "--error-unmatch", "--", SETTINGS_LOCAL, timeout=30).returncode == 0:
+        raise SpudError(EXIT_ERROR, "%s is tracked in %s's git; install writes nothing in the tracked tree" % (SETTINGS_LOCAL, p["key"]))
+    previous = json.loads(p["installed"]) if p["installed"] else {}
+    settings_path = files["settings"]
+    current = settings_path.read_text(encoding="utf-8") if settings_path.is_file() else None
+    settings = read_json_object(settings_path) if current is not None else {}
+    merged = merge_settings(ctx, settings, env=False, deny=False, additional_dirs=[str(ctx.home)], project_key=p["key"])
+    rendered = json.dumps(settings, indent=2) + "\n"
+    written = []
+    if rendered != current:
+        write_whole(settings_path, rendered)
+        written.append(str(settings_path))
+    added_exclude = ensure_ignored(root, p["key"])
+    if added_exclude:
+        written.append(str(git_common_dir(root) / "info" / "exclude"))
+    agents = files["agent"].parent
+    first_agent = not (agents.is_dir() and any(agents.glob("*.md")))
+    agent_text = files["source_agent"].read_text(encoding="utf-8")
+    skill_text = SKILL_TEMPLATE.format(home=ctx.home)
+    for path, text in ((files["agent"], agent_text), (files["skill"], skill_text)):
+        if not path.is_file() or path.read_text(encoding="utf-8") != text:
+            write_whole(path, text)
+            written.append(str(path))
+    wrote_pointer = False
+    if not files["pointer"].exists():
+        write_whole(files["pointer"], str(ctx.home) + "\n")
+        written.append(str(files["pointer"]))
+        wrote_pointer = True
+    record = {
+        "path": str(settings_path),
+        "created_file": previous.get("created_file", current is None),
+        "original": previous["original"] if "original" in previous else current,
+        "added_additional_dir": previous.get("added_additional_dir", bool(merged.get("additional_dirs_added"))),
+        "added_exclude": bool(previous.get("added_exclude")) or added_exclude,
+        "agent_sha256": sha256_bytes(agent_text.encode("utf-8")),
+        "skill_sha256": sha256_bytes(skill_text.encode("utf-8")),
+        "wrote_pointer": bool(previous.get("wrote_pointer")) or wrote_pointer,
+        "at": previous.get("at") or now(),
+    }
+    return record, written, first_agent
+
+
+def strip_ledger_settings(ctx, settings, original, home_added):
+    """Settings with the ledger's hooks and allow rules taken out, and the home out of additionalDirectories when install
+    put it there; containers left empty are dropped when the original file did not have them."""
+    orig = original if isinstance(original, dict) else {}
+    hooks = settings.get("hooks")
+    if isinstance(hooks, dict):
+        orig_hooks = orig.get("hooks") if isinstance(orig.get("hooks"), dict) else {}
+        for event in list(hooks):
+            groups = hooks[event]
+            if not isinstance(groups, list):
+                continue
+            kept = []
+            for group in groups:
+                if isinstance(group, dict) and isinstance(group.get("hooks"), list):
+                    entries = [h for h in group["hooks"] if not is_ledger_hook(h)]
+                    if not entries:
+                        continue
+                    if len(entries) != len(group["hooks"]):
+                        group = dict(group, hooks=entries)
+                kept.append(group)
+            hooks[event] = kept
+            if not kept and event not in orig_hooks:
+                del hooks[event]
+        if not hooks and "hooks" not in orig:
+            del settings["hooks"]
+    permissions = settings.get("permissions")
+    if isinstance(permissions, dict):
+        orig_permissions = orig.get("permissions") if isinstance(orig.get("permissions"), dict) else {}
+        if isinstance(permissions.get("allow"), list):
+            permissions["allow"] = [a for a in permissions["allow"] if not (isinstance(a, str) and ALLOW_RULE_MARK.match(a))]
+        if home_added and isinstance(permissions.get("additionalDirectories"), list):
+            permissions["additionalDirectories"] = [d for d in permissions["additionalDirectories"] if d != str(ctx.home)]
+        for key in ("allow", "additionalDirectories"):
+            if permissions.get(key) == [] and key not in orig_permissions:
+                del permissions[key]
+        if not permissions and "permissions" not in orig:
+            del settings["permissions"]
+    return settings
+
+
+def uninstall_project(ctx, con, p):
+    """Undo what install recorded (design section 2.7): (what it changed, warnings).  The settings file gets its original
+    bytes back when what is left equals what was there, is removed when install created it and nothing else is left,
+    and is otherwise written without the ledger's entries.  The user-scope files go only with the last installed project,
+    and only while they still match what install wrote."""
+    record = json.loads(p["installed"]) if p["installed"] else {}
+    files = install_files(ctx, p)
+    settings_path = Path(record.get("path") or files["settings"])
+    changed, warnings = [], []
+    if settings_path.is_file():
+        text = settings_path.read_text(encoding="utf-8")
+        settings = read_json_object(settings_path)
+        original_text = record.get("original")
+        try:
+            original = json.loads(original_text) if original_text is not None else None
+        except ValueError:
+            original = None
+        strip_ledger_settings(ctx, settings, original, record.get("added_additional_dir", False))
+        if original_text is not None and original == settings:
+            new_text = original_text
+        elif record.get("created_file") and settings == {}:
+            new_text = None
+        else:
+            new_text = json.dumps(settings, indent=2) + "\n"
+        if new_text is None:
+            settings_path.unlink()
+            changed.append("removed %s" % settings_path)
+        elif new_text != text:
+            write_whole(settings_path, new_text)
+            changed.append("wrote %s" % settings_path)
+    if record.get("added_exclude") and os.path.isdir(project_root(ctx, p)) and remove_exclude_block(project_root(ctx, p), p["key"]):
+        changed.append("removed the exclude line for %s" % SETTINGS_LOCAL)
+    others = con.execute("SELECT count(*) FROM projects WHERE id NOT IN (1, ?) AND installed IS NOT NULL", (p["id"],)).fetchone()[0]
+    if others == 0:
+        for name, path, sha in (("agent", files["agent"], record.get("agent_sha256")), ("skill", files["skill"], record.get("skill_sha256"))):
+            if not path.is_file():
+                continue
+            if sha and sha256_bytes(path.read_bytes()) == sha:
+                path.unlink()
+                changed.append("removed %s" % path)
+                if name == "skill":
+                    with contextlib.suppress(OSError):
+                        path.parent.rmdir()
+            else:
+                warnings.append("%s differs from what install wrote, so it is left in place" % path)
+    return changed, warnings
+
+
+def cmd_project_install(ctx, args):
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        require_spud(con, actor, "installing a project")
+        check_next(con, actor, args)
+        p = get_project(con, args.key)
+        if p["id"] == 1:
+            raise SpudError(EXIT_ERROR, "the home's hooks come from `spud --as spud settings sync`, not project install")
+        if p["archived_at"]:
+            raise SpudError(EXIT_ERROR, "project %s is archived" % p["key"])
+        record, written, first_agent = install_project(ctx, con, p)
+        at = now()
+        entry = None
+        with write_txn(con):
+            con.execute("UPDATE projects SET installed = ? WHERE id = ?", (json.dumps(record), p["id"]))
+            if written or not p["installed"] or args.next is not None:
+                write_event(con, at, actor.label, "project.installed", "project %s installed: %d file%s written" % (p["key"], len(written), "" if len(written) == 1 else "s"),
+                            data={"project": p["key"], "written": written, "sync": False})
+                entry = write_report_entry(con, at, "Project %s installed: %s" % (p["key"], project_root(ctx, p)), "project install", None, next_line=args.next)
+            d = project_dict(ctx, con, get_project(con, args.key))
+    finally:
+        con.close()
+    lines = ["project %s installed%s" % (d["key"], "" if written else ": unchanged, nothing written")] + ["  wrote %s" % w for w in written]
+    if first_agent:
+        lines.append("restart open sessions in %s to see spudagent (the first agent file in a scope is seen only after a restart)" % d["key"])
+    return with_report_entry({"project": d, "written": written, "restart": first_agent}, "\n".join(lines), entry)
+
+
+def cmd_project_uninstall(ctx, args):
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        require_spud(con, actor, "uninstalling a project")
+        check_next(con, actor, args)
+        p = get_project(con, args.key)
+        if p["id"] == 1:
+            raise SpudError(EXIT_ERROR, "the home is not uninstalled: its hooks are Spud's own settings")
+        if not p["installed"]:
+            if args.next is not None:
+                raise no_entry_for_next("project %s is not installed" % p["key"])
+            return Result({"project": project_dict(ctx, con, p), "changed": [], "warnings": []}, "project %s is not installed; nothing to do" % p["key"])
+        changed, warnings = uninstall_project(ctx, con, p)
+        at = now()
+        with write_txn(con):
+            con.execute("UPDATE sessions SET released_at = ? WHERE project_id = ? AND released_at IS NULL", (at, p["id"]))
+            con.execute("UPDATE projects SET installed = NULL WHERE id = ?", (p["id"],))
+            write_event(con, at, actor.label, "project.uninstalled", "project %s uninstalled" % p["key"], data={"project": p["key"], "changed": changed, "warnings": warnings})
+            entry = write_report_entry(con, at, "Project %s uninstalled" % p["key"], "project uninstall", None, lines=warnings, next_line=args.next)
+            d = project_dict(ctx, con, get_project(con, args.key))
+    finally:
+        con.close()
+    lines = ["project %s uninstalled" % d["key"]] + ["  " + c for c in changed] + ["  warning: " + w for w in warnings]
+    return with_report_entry({"project": d, "changed": changed, "warnings": warnings}, "\n".join(lines), entry)
+
+
+def cmd_project_sync(ctx, args):
+    if bool(args.key) == bool(args.all):
+        raise SpudError(EXIT_USAGE, "project sync takes a project key or --all, one of the two")
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        require_spud(con, actor, "syncing a project's installation")
+        if args.key:
+            p = get_project(con, args.key)
+            if p["id"] == 1 or not p["installed"]:
+                raise SpudError(EXIT_ERROR, "project %s is not installed; `spud --as spud project install %s`" % (p["key"], p["key"]))
+            rows = [p]
+        else:
+            rows = con.execute("SELECT * FROM projects WHERE id != 1 AND archived_at IS NULL AND installed IS NOT NULL ORDER BY id").fetchall()
+        results = []
+        for p in rows:
+            record, written, first_agent = install_project(ctx, con, p)
+            at = now()
+            with write_txn(con):
+                con.execute("UPDATE projects SET installed = ? WHERE id = ?", (json.dumps(record), p["id"]))
+                if written:
+                    write_event(con, at, actor.label, "project.installed", "project %s synced: %d file%s written" % (p["key"], len(written), "" if len(written) == 1 else "s"),
+                                data={"project": p["key"], "written": written, "sync": True})
+            results.append({"project": p["key"], "written": written, "restart": first_agent})
+    finally:
+        con.close()
+    lines = []
+    for r in results:
+        lines.append("project %s %s" % (r["project"], "synced" if r["written"] else "unchanged"))
+        lines += ["  wrote %s" % w for w in r["written"]]
+    return Result({"projects": results}, "\n".join(lines) or "no installed project to sync")
+
+
+def cmd_project_remove(ctx, args):
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        require_spud(con, actor, "removing a project")
+        check_next(con, actor, args)
+        p = get_project(con, args.key)
+        if p["id"] == 1:
+            raise SpudError(EXIT_ERROR, "the home is project 1 and is never removed")
+        open_tickets = [r["key"] for r in con.execute("SELECT key FROM tickets WHERE project_id = ? AND status IN ('queued','active') ORDER BY id", (p["id"],)).fetchall()]
+        if open_tickets:
+            raise SpudError(EXIT_ERROR, "project %s has open tickets (%s); move them to done or declined first" % (p["key"], ", ".join(open_tickets)))
+        changed, warnings = uninstall_project(ctx, con, p) if p["installed"] else ([], [])
+        at = now()
+        with write_txn(con):
+            tickets = con.execute("SELECT count(*) FROM tickets WHERE project_id = ?", (p["id"],)).fetchone()[0]
+            con.execute("UPDATE sessions SET released_at = ? WHERE project_id = ? AND released_at IS NULL", (at, p["id"]))
+            if tickets == 0:
+                con.execute("DELETE FROM sessions WHERE project_id = ?", (p["id"],))
+                con.execute("DELETE FROM projects WHERE id = ?", (p["id"],))
+            else:
+                con.execute("UPDATE projects SET archived_at = ?, installed = NULL WHERE id = ?", (at, p["id"]))
+            archived = tickets > 0
+            write_event(con, at, actor.label, "project.removed", "project %s %s" % (p["key"], "archived" if archived else "removed"),
+                        data={"project": p["key"], "archived": archived, "tickets": tickets, "uninstalled": changed, "warnings": warnings})
+            entry = write_report_entry(con, at, "Project %s %s" % (p["key"], "archived (it has %d ticket%s)" % (tickets, "" if tickets == 1 else "s") if archived else "removed"),
+                                       "project remove", None, lines=warnings, next_line=args.next)
+    finally:
+        con.close()
+    text = "project %s %s" % (p["key"], "archived: its %d ticket%s keep%s it in the ledger" % (tickets, "" if tickets == 1 else "s", "s" if tickets == 1 else "") if archived else "removed")
+    return with_report_entry({"project": p["key"], "archived": archived, "changed": changed, "warnings": warnings},
+                             "\n".join([text] + ["  " + c for c in changed] + ["  warning: " + w for w in warnings]), entry)
+
+
+def claim_card(ctx, con, project, session, at):
+    root = project_root(ctx, project)
+    head = "\n".join([
+        "Session %s is Spud in project %s (%s), claimed %s." % (session, project["key"], project["name"], fm_minute(at)),
+        "home: %s" % ctx.home,
+        "project: %s; tickets %s-nnn, teams %s-nnn; default branch %s; landing %s; sessions %s" % (
+            root, project["ticket_prefix"], project["team_prefix"], project["default_branch"], project["landing"], project["sessions"]),
+        "rule: this repository's CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed; Spud's laws"
+        " govern delegation, the ledger, and who writes what.",
+        "ledger commit: python3.14 -I -S %s/bin/spud --as spud ledger commit --message '%s-nnn: <what>' (from a main checkout, never a worktree)"
+        % (ctx.home, project["ticket_prefix"]),
+        "board (%s):" % project["key"],
+    ])
+    rows = [dict(r) for r in con.execute("SELECT * FROM v_board WHERE project = ?", (project["key"],)).fetchall()]
+    return fit_bytes(head, board_brief_text(con, rows), CLAIM_CARD_CAP)
+
+
+def cmd_session_claim(ctx, args):
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        if actor.kind != "spud":
+            raise SpudError(EXIT_OWNERSHIP, "claiming a session is Spud's; %s may not (use --as spud)" % actor.ref(con))
+        session = planning_session(os.environ)
+        if session is None:
+            raise SpudError(EXIT_ERROR, "outside a Claude Code session there is nothing to claim (CLAUDE_CODE_SESSION_ID is not set)")
+        try:
+            cwd = os.getcwd()
+        except OSError:
+            cwd = None
+        if args.project:
+            project = get_project(con, args.project)
+        else:
+            mapped = cli_project_of(ctx, con, cwd) if cwd else None
+            if mapped is None:
+                raise SpudError(EXIT_ERROR, "not a registered project: %s is in no project's checkout (spud project list; --project <key>)" % cwd)
+            project = mapped[0]
+        if project["archived_at"]:
+            raise SpudError(EXIT_ERROR, "project %s is archived" % project["key"])
+        if project["id"] == 1:
+            return Result({"session_id": session, "project": project["key"], "claimed": False}, "every session in the home is Spud; nothing to claim")
+        at = now()
+        with write_txn(con):
+            con.execute(
+                "INSERT INTO sessions (session_id, project_id, claimed_at, released_at, cwd) VALUES (?, ?, ?, NULL, ?)"
+                " ON CONFLICT(session_id) DO UPDATE SET project_id = excluded.project_id, claimed_at = excluded.claimed_at, released_at = NULL, cwd = excluded.cwd",
+                (session, project["id"], at, cwd),
+            )
+            write_event(con, at, actor.label, "session.claimed", "session %s claimed in project %s" % (session, project["key"]),
+                        data={"session_id": session, "project": project["key"], "cwd": cwd})
+            card = claim_card(ctx, con, project, session, at)
+    finally:
+        con.close()
+    return Result({"session_id": session, "project": project["key"], "claimed": True, "claimed_at": at, "card": card}, card)
+
+
+def cmd_session_release(ctx, args):
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        if actor.kind != "spud":
+            raise SpudError(EXIT_OWNERSHIP, "releasing a session is Spud's; %s may not (use --as spud)" % actor.ref(con))
+        session = planning_session(os.environ)
+        if session is None:
+            raise SpudError(EXIT_ERROR, "outside a Claude Code session there is nothing to release (CLAUDE_CODE_SESSION_ID is not set)")
+        at = now()
+        with write_txn(con):
+            claim = claim_of(con, session)
+            if claim is None:
+                return Result({"session_id": session, "released": False}, "session %s holds no claim; nothing to release" % session)
+            project = con.execute("SELECT key FROM projects WHERE id = ?", (claim["project_id"],)).fetchone()
+            con.execute("UPDATE sessions SET released_at = ? WHERE session_id = ?", (at, session))
+            write_event(con, at, actor.label, "session.released", "session %s released in project %s" % (session, project["key"]),
+                        data={"session_id": session, "project": project["key"]})
+    finally:
+        con.close()
+    return Result({"session_id": session, "released": True, "project": project["key"]}, "session %s released: it is not Spud in %s any more" % (session, project["key"]))
+
+
+def cmd_session_show(ctx, args):
+    """The ritual's first step outside the home (design section 6.3): the home, the working directory's project and
+    checkout, the session and its mode."""
+    session = planning_session(os.environ)
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = None
+    con = connect(ctx)
+    try:
+        mapped = cli_project_of(ctx, con, cwd) if cwd else None
+        try:
+            mode, launch, claim = session_mode(ctx, con, {"session_id": session, "cwd": cwd})
+        except HookError as e:
+            raise SpudError(EXIT_ERROR, str(e))
+        project = checkout = None
+        if mapped is not None:
+            p, checkout_root, _rel = mapped
+            project = {"key": p["key"], "root": project_root(ctx, p), "ticket_prefix": p["ticket_prefix"], "team_prefix": p["team_prefix"],
+                       "landing": p["landing"], "sessions": p["sessions"]}
+            branch = run_git(checkout_root, "symbolic-ref", "--quiet", "--short", "HEAD", timeout=10) if os.path.isdir(os.path.join(checkout_root, ".git")) or os.path.isfile(os.path.join(checkout_root, ".git")) else None
+            checkout = {"path": checkout_root, "kind": "root" if file_identity(checkout_root) == file_identity(project["root"]) else "worktree",
+                        "branch": branch.stdout.strip() if branch is not None and branch.returncode == 0 else None}
+    finally:
+        con.close()
+    data = {"home": str(ctx.home), "cwd": cwd, "project": project, "checkout": checkout, "session_id": session, "mode": mode,
+            "launch_project": launch["key"] if launch is not None else None, "claimed_at": claim["claimed_at"] if claim is not None else None}
+    lines = ["home      %s" % ctx.home]
+    if project:
+        lines.append("project   %s: %s (%s-nnn tickets, %s-nnn teams; landing %s, sessions %s)" % (
+            project["key"], project["root"], project["ticket_prefix"], project["team_prefix"], project["landing"], project["sessions"]))
+        lines.append("checkout  %s (%s%s)" % (checkout["path"], checkout["kind"], ", branch %s" % checkout["branch"] if checkout["branch"] else ""))
+    else:
+        lines.append("project   none: %s is in no registered project's checkout" % cwd)
+    lines.append("session   %s" % (session or "none (outside a Claude Code session)"))
+    lines.append("mode      %s" % {"spud": "spud" + (" (claimed %s)" % fm_minute(claim["claimed_at"]) if claim is not None else ""),
+                                   "plain": "plain: this session is not Spud; type /spud to make it Spud",
+                                   "outside": "outside every project (behaves as Spud)"}[mode])
+    return Result(data, "\n".join(lines))
+
+
+def cmd_ledger_commit(ctx, args):
+    """spud --as spud ledger commit (design section 5.3): render, stage only ledger/ and reports/ at the home, commit on the
+    home's default branch and push.  Refused from a linked worktree of any repository, off the default branch, with other
+    paths already staged, and (a usage error, checked first) with a subject that names no ticket."""
+    message = args.message or ""
+    subject = message.strip().split("\n", 1)[0] if message.strip() else ""
+    if not SUBJECT_TICKET_KEY.search(subject):
+        raise SpudError(EXIT_USAGE, "the commit subject must name its ticket (a key such as SPD-014): %r" % subject)
+    con = connect(ctx)
+    try:
+        actor = resolve_actor(con, args.actor)
+        require_spud(con, actor, "committing the ledger")
+        home_row = con.execute("SELECT * FROM projects WHERE id = 1").fetchone()
+    finally:
+        con.close()
+    home = str(ctx.home)
+    try:
+        cwd = os.getcwd()
+    except OSError:
+        cwd = None
+    if cwd:
+        proc = run_git(cwd, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", timeout=30)
+        lines = proc.stdout.strip().split("\n") if proc.returncode == 0 else []
+        if len(lines) == 2 and file_identity(lines[0]) != file_identity(lines[1]):
+            raise SpudError(EXIT_ERROR, "ledger commit refuses from a linked worktree (%s): run it from a main checkout: ExitWorktree (keep) first" % cwd)
+    if not os.path.lexists(os.path.join(home, ".git")):
+        raise SpudError(EXIT_ERROR, "the home %s is not a git repository" % home)
+    branch_proc = run_git(home, "symbolic-ref", "--quiet", "--short", "HEAD", timeout=30)
+    branch = branch_proc.stdout.strip() if branch_proc.returncode == 0 else None
+    if branch != home_row["default_branch"]:
+        raise SpudError(EXIT_ERROR, "the home is on %s, not its default branch %s; the ledger is committed on %s" % (branch or "a detached HEAD", home_row["default_branch"], home_row["default_branch"]))
+
+    def staged():
+        proc = run_git(home, "diff", "--cached", "--name-only", "-z", timeout=60)
+        if proc.returncode != 0:
+            raise SpudError(EXIT_ERROR, "git diff --cached failed in %s: %s" % (home, proc.stderr.strip()))
+        return [f for f in proc.stdout.split("\0") if f]
+
+    elsewhere = [f for f in staged() if not (f.startswith("ledger/") or f.startswith("reports/"))]
+    if elsewhere:
+        raise SpudError(EXIT_ERROR, "already staged outside ledger/ and reports/: %s; commit those with plain git, or unstage them, before a ledger commit" % ", ".join(elsewhere))
+    rendered = cmd_render(ctx, argparse.Namespace(out=None, discard=None, actor=args.actor))  # a hand edit exits 6 and commits nothing
+    paths = [d for d in GENERATED_ROOTS if (ctx.home / d).exists()]
+    if paths:
+        proc = run_git(home, "add", "--", *paths, timeout=120)
+        if proc.returncode != 0:
+            raise SpudError(EXIT_ERROR, "git add failed in %s: %s" % (home, proc.stderr.strip()))
+    files = staged()
+    if not files:
+        return Result({"committed": False, "rendered": rendered.data, "branch": branch}, "nothing to commit")
+    proc = run_git(home, "commit", "-q", "-F", "-", input=message if message.endswith("\n") else message + "\n", timeout=120)
+    if proc.returncode != 0:
+        raise SpudError(EXIT_ERROR, "git commit failed in %s: %s" % (home, (proc.stderr or proc.stdout).strip()))
+    sha = run_git(home, "rev-parse", "HEAD", timeout=30).stdout.strip()
+    pushed, push_error = False, None
+    if not args.no_push:
+        proc = run_git(home, "push", "origin", branch, timeout=600)
+        pushed = proc.returncode == 0
+        push_error = None if pushed else (proc.stderr or proc.stdout).strip()
+    con = connect(ctx)
+    try:
+        at = now()
+        with write_txn(con):
+            write_event(con, at, "spud", "commit", subject, data={"sha": sha, "files": files, "branch": branch, "pushed": pushed, "push_error": push_error})
+    finally:
+        con.close()
+    data = {"committed": True, "sha": sha, "files": files, "branch": branch, "pushed": pushed}
+    if push_error is not None:
+        raise SpudError(EXIT_ERROR, "committed %s on %s, but the push failed (the commit is kept): %s" % (sha[:12], branch, push_error), data=data)
+    return Result(data, "committed %s on %s: %d file%s%s" % (sha[:12], branch, len(files), "" if len(files) == 1 else "s", ", pushed" if pushed else ", not pushed (--no-push)"))
 
 
 # ----------------------------------------------------------------------------
@@ -4290,9 +5529,15 @@ GENERATED_ROOTS = ("ledger", "reports")
 DESCRIPTION = re.compile(r"^\s*(?P<team>[A-Z][A-Z0-9]*-\d+)/(?P<name>[A-Za-z][\w-]*)\s*\(\s*(?P<lineage>\d+(?:\.\d+)*)\s*,\s*(?P<persona>[a-z]+)\s*\)\s*$")
 AGENT_ID_RE = re.compile(r"^[0-9a-f]{17}$")
 SPUD_COMMANDS = ("init", "migrate", "backup", "schedule", "doctor", "config", "settings", "import", "render", "ticket", "member",
-                 "proposal", "handoff", "report", "board", "fleet", "card", "events", "sql", "hook")
+                 "proposal", "handoff", "report", "board", "fleet", "card", "events", "sql", "hook", "project", "session", "ledger")
 SPUD_ONLY_COMMANDS = ("init", "migrate", "import", "render", "backup", "schedule")
-SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"), ("member", "resum"))
+SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"), ("member", "resum"),
+                         ("project", "add"), ("project", "edit"), ("project", "install"), ("project", "uninstall"), ("project", "sync"),
+                         ("project", "remove"), ("session", "claim"), ("session", "release"), ("ledger", "commit"))
+# The spud calls that write nothing (SPD-014): a plain session in another project may run them with `--as spud`.
+READ_ONLY_COMMANDS = ("board", "fleet", "card", "events", "sql", "doctor")
+READ_ONLY_SUBCOMMANDS = (("ticket", "show"), ("member", "show"), ("member", "list"), ("proposal", "list"), ("project", "list"), ("project", "show"),
+                         ("session", "show"), ("schedule", "show"))
 MEMBER_OWN_COMMANDS = (("member", "log"), ("member", "result"), ("member", "block"), ("proposal", "file"))
 DB_PATH_RE = re.compile(r"ledger\.db|(?:^|[\s/'\"=])\.spud(?:/|$|[\s'\"])", re.IGNORECASE)
 # The ledger state directory at a project root: the database, its WAL and shm files, the worktree list cache, the backups
@@ -4624,39 +5869,72 @@ def git_worktree_list(home):
     return [os.fsdecode(field[len(b"worktree "):]) for field in proc.stdout.split(b"\0") if field.startswith(b"worktree ")]
 
 
-def home_worktrees(home):
-    """Every worktree git names for the home ([] when the home has no .git of its own), kept in <home>/.spud/worktrees.json
-    under the fingerprint it was listed at, so a hook runs git only after the worktrees change (about 8 ms with the
-    subprocess import).  A cache that is missing, unreadable or stale is listed anew; one that cannot be written is
-    left unwritten."""
-    key = str(home)
-    if key in _WORKTREES:
-        return _WORKTREES[key]
-    if not os.path.lexists(os.path.join(key, ".git")):
-        _WORKTREES[key] = []
+def project_root(ctx, project):
+    """A project's main checkout: the home for project 1, whatever path its row recorded, else the row's root_path."""
+    return str(ctx.home) if project["id"] == 1 else project["root_path"]
+
+
+def checkout_worktrees(ctx, project):
+    """Every worktree git names for a project's root ([] when the root has no .git of its own, or is gone), kept in
+    <home>/.spud/worktrees/<key>.json under the fingerprint it was listed at, so a hook runs git only after the
+    worktrees change (about 8 ms with the subprocess import).  A cache that is missing, unreadable, stale or listed for
+    another root is listed anew; one that cannot be written is left unwritten (SPD-016, per project since SPD-014)."""
+    root = project_root(ctx, project)
+    if root in _WORKTREES:
+        return _WORKTREES[root]
+    if not os.path.lexists(os.path.join(root, ".git")):
+        _WORKTREES[root] = []
         return []
-    fingerprint = worktrees_fingerprint(home)
-    cache = os.path.join(key, ".spud", "worktrees.json")
+    fingerprint = worktrees_fingerprint(root)
+    state = os.path.join(str(ctx.home), STATE_DIR)
+    cache = os.path.join(state, "worktrees", "%s.json" % project["key"])
     listed = None
     if fingerprint is not None:
         with contextlib.suppress(OSError, ValueError):
             with open(cache, encoding="utf-8") as f:
                 stored = json.load(f)
-            if isinstance(stored, dict) and stored.get("fingerprint") == fingerprint and isinstance(stored.get("worktrees"), list) \
-                    and all(isinstance(w, str) for w in stored["worktrees"]):
+            if isinstance(stored, dict) and stored.get("root") == root and stored.get("fingerprint") == fingerprint \
+                    and isinstance(stored.get("worktrees"), list) and all(isinstance(w, str) for w in stored["worktrees"]):
                 listed = stored["worktrees"]
     if listed is None:
-        listed = git_worktree_list(home)
-        if fingerprint is not None and os.path.isdir(os.path.dirname(cache)):
+        listed = git_worktree_list(root)
+        if fingerprint is not None and os.path.isdir(state):
             tmp = "%s.%d.tmp" % (cache, os.getpid())
             with contextlib.suppress(OSError):
+                os.makedirs(os.path.dirname(cache), exist_ok=True)
                 with open(tmp, "w", encoding="utf-8") as f:
-                    json.dump({"fingerprint": fingerprint, "worktrees": listed}, f)
+                    json.dump({"root": root, "fingerprint": fingerprint, "worktrees": listed}, f)
                 os.replace(tmp, cache)
             with contextlib.suppress(OSError):
                 os.unlink(tmp)
-    _WORKTREES[key] = listed
+    _WORKTREES[root] = listed
     return listed
+
+
+def project_checkouts(ctx, con):
+    """[(project row, [root, *worktrees])] for every active project, the home first."""
+    return [(p, [project_root(ctx, p), *checkout_worktrees(ctx, p)])
+            for p in con.execute("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall()]
+
+
+def project_of_path(ctx, con, path, roots=None):
+    """(project row, checkout root, repository-relative path) for the project a path is in, by its lexical and then its
+    real reading; None outside every active project."""
+    roots = project_checkouts(ctx, con) if roots is None else roots
+    p = os.path.abspath(os.path.expanduser(path))
+    for candidate in (os.path.normpath(p), os.path.realpath(p)):
+        mapped = map_into_checkouts(roots, candidate)
+        if mapped:
+            return mapped
+    return None
+
+
+def cli_project_of(ctx, con, path):
+    """project_of_path for a command: a worktree list git cannot give is the command's error, not a hook's."""
+    try:
+        return project_of_path(ctx, con, path)
+    except HookError as e:
+        raise SpudError(EXIT_ERROR, str(e))
 
 
 def file_identity(path):
@@ -4682,64 +5960,66 @@ def same_entry(base, spelled, canonical):
     return case_insensitive_fs(base) and [s.casefold() for s in spelled] == [c.casefold() for c in canonical]
 
 
-def map_into_repository(home, path, worktrees=()):
-    """(root, repository-relative path) when `path` (absolute, normalized) lies in Spud's home or in one of its
-    worktrees: one git names (SPD-016), wherever it is, or a directory under .claude/worktrees/<name>/; None when
-    outside.  The root nearest the path wins, so a worktree inside the home maps to itself, not to the home.
+def map_into_checkouts(roots, path):
+    """(project row, checkout root, repository-relative path) when `path` (absolute, normalized) lies in a checkout of an
+    active project: its root or a worktree git names for it (SPD-016), wherever it is, or a directory under
+    .claude/worktrees/<name>/ of one; None when outside.  `roots` is project_checkouts().  The root nearest the path wins,
+    so a worktree inside a root maps to itself, not to that root (SPD-014: every project's roots in one search).
 
     A root is found by file identity, not by spelling (SPD-029): the nearest existing ancestor of the path whose
     (st_dev, st_ino) is a root's, the components below it being the repository-relative path, so any spelling of the
     root the filesystem honours is the root.  A root with nothing to stat (a worktree git still lists after its
-    directory went) is matched by spelling as before.  A generated root spelled another way (Ledger, reportſ) is
-    named ledger or reports when it is the same directory."""
-    roots, spelled = {}, []
-    for root in (str(home), *worktrees):
-        ident = file_identity(root)
-        if ident is not None:
-            roots.setdefault(ident, root)
-        else:
-            for b in (root, os.path.realpath(root)):
-                if b not in spelled:
-                    spelled.append(b)
+    directory went) is matched by spelling as before.  A generated root of the home spelled another way (Ledger,
+    reportſ) is named ledger or reports when it is the same directory; the state directory is named so under every root."""
+    idents, spelled = {}, []
+    for project, checkouts in roots:
+        for root in checkouts:
+            ident = file_identity(root)
+            if ident is not None:
+                idents.setdefault(ident, (project, root))
+            else:
+                for b in (root, os.path.realpath(root)):
+                    if all(b != s for _, s in spelled):
+                        spelled.append((project, b))
     best = None
     below, cur = [], path
     while True:
         ident = file_identity(cur)
-        if ident is not None and ident in roots:
-            best = (roots[ident], below[::-1])
+        if ident is not None and ident in idents:
+            best = idents[ident] + (below[::-1],)
             break
         parent, name = os.path.split(cur)
         if parent == cur:
             break
         below.append(name)
         cur = parent
-    for base in spelled:
+    for project, base in spelled:
         rel = os.path.relpath(path, base)
         if rel == ".." or rel.startswith(".." + os.sep):
             continue
         parts = [] if rel == "." else rel.split(os.sep)
-        if best is None or len(parts) < len(best[1]):
-            best = (base, parts)
+        if best is None or len(parts) < len(best[2]):
+            best = (project, base, parts)
     if best is None:
         return None
-    base, parts = best
+    project, base, parts = best
     if len(parts) > 3 and same_entry(base, parts[:2], [".claude", "worktrees"]):
         base, parts = os.path.join(base, ".claude", "worktrees", parts[2]), parts[3:]
-    named = GENERATED_ROOTS + (STATE_DIR,)
+    named = (GENERATED_ROOTS + (STATE_DIR,)) if project["id"] == 1 else (STATE_DIR,)
     if parts and parts[0] not in named:
         for canonical in named:
             if same_entry(base, parts[:1], [canonical]):
                 parts = [canonical] + parts[1:]
                 break
-    return base, "/".join(parts)
+    return project, base, "/".join(parts)
 
 
-def repository_paths(ctx, path, cwd):
-    """Every reading of `path` that lands inside the repository: the lexical path and, when
-    a symlink changes it, the real one.  Relative paths resolve against the payload's cwd.
-    The real path is taken of the path as given too, since the kernel resolves a symlink
-    before a `..` after it (tests/link/.. is the link target's parent) where normpath drops
-    the pair (SPD-029)."""
+def project_paths(ctx, con, path, cwd):
+    """Every reading of `path` that lands inside a project's checkout: the lexical path and, when
+    a symlink changes it, the real one, as (project row, root, repository-relative path).  Relative
+    paths resolve against the payload's cwd.  The real path is taken of the path as given too, since
+    the kernel resolves a symlink before a `..` after it (tests/link/.. is the link target's parent)
+    where normpath drops the pair (SPD-029)."""
     p = os.path.expanduser(path) if path.startswith("~") else path
     if not os.path.isabs(p):
         p = os.path.join(cwd or os.getcwd(), p)
@@ -4748,22 +6028,31 @@ def repository_paths(ctx, path, cwd):
     for real in (os.path.realpath(lexical), os.path.realpath(p)):
         if real not in candidates:
             candidates.append(real)
-    worktrees = home_worktrees(ctx.home)
+    roots = project_checkouts(ctx, con)
     out = []
     for c in candidates:
-        mapped = map_into_repository(ctx.home, c, worktrees)
-        if mapped and mapped not in out:
+        mapped = map_into_checkouts(roots, c)
+        if mapped and all((mapped[0]["id"], mapped[1], mapped[2]) != (o[0]["id"], o[1], o[2]) for o in out):
             out.append(mapped)
     return out
 
 
-def path_reason(rel, member, ref, fold=False):
-    """None when the actor may write the repository path `rel`, else the reason.  The
-    generated roots are matched whatever the case (a case variant is refused on every
+NOT_SPUD_HOME = ("a session that is not Spud does not write in Spud's home (%s is there); type /spud to make this session Spud,"
+                 " or work in a session opened in the home")
+
+
+def path_reason(rel, member, ref, fold=False, project_key="spud", ticket_project_key="spud", home=True):
+    """None when the actor may write the repository path `rel` of project `project_key`, else the reason.  The
+    generated roots are the home's alone and are matched whatever the case (a case variant is refused on every
     filesystem), case-folded rather than lower-cased so that the simple folds APFS honours
-    (reportſ is reports) count too (SPD-029); globs fold case only where the filesystem does."""
-    generated = rel.split("/")[0].casefold() in GENERATED_ROOTS
+    (reportſ is reports) count too (SPD-029); globs fold case only where the filesystem does.  In another project
+    Spud has no own files (SPD-014): every path there is a deliverable, and a member's bare glob is relative to its
+    ticket's project, a `<key>:<glob>` to that project's."""
+    generated = home and rel.split("/")[0].casefold() in GENERATED_ROOTS
     if member is None:
+        if not home:
+            return ("Law 1: Spud never produces a deliverable; %s is in project %s, where every path is a deliverable (Spud keeps no own"
+                    " files there), so a spudagent writes it" % (rel, project_key))
         if any(path_matches_glob(rel, g, fold) for g in SPUD_PATHS):
             return None
         if generated:
@@ -4775,9 +6064,12 @@ def path_reason(rel, member, ref, fold=False):
         return ("Law 5: %s is outside every member's deliverables; ledger/** and reports/** are generated from the ledger database"
                 " (rendered by `spud render`), so record through the CLI: spud member log | result | block, spud proposal file" % rel)
     globs = json.loads(member["deliverables"]) if member["deliverables"] else []
-    if any(path_matches_glob(rel, g, fold) for g in globs):
-        return None
-    return "Law 5: %s is not among %s's deliverables (%s); write only there, or ask your parent to extend them" % (rel, ref, ", ".join(globs) or "none")
+    for g in globs:
+        key, bare = glob_scope(g)
+        if (key or ticket_project_key) == project_key and path_matches_glob(rel, bare, fold):
+            return None
+    shown = rel if project_key == ticket_project_key else "%s:%s" % (project_key, rel)
+    return "Law 5: %s is not among %s's deliverables (%s); write only there, or ask your parent to extend them" % (shown, ref, ", ".join(globs) or "none")
 
 
 def in_state_dir(rel):
@@ -4793,9 +6085,11 @@ def state_dir_reason(rel):
                         " list cache, the backups and the launcher's cached bytecode; only the CLI writes there, whatever the deliverables" % rel)
 
 
-def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd):
-    """The path rule for a Write/Edit target (and for a shell redirection target).  A path in the ledger state directory
-    at any project root, by any reading of it, is refused to everyone before the binding, Law 1 and glob checks (SPD-031)."""
+def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"):
+    """The path rule for a Write/Edit target (and for a shell redirection target), the table of the design's section 3.2
+    (SPD-014).  A path in the ledger state directory at any project root, by any reading of it, is refused to everyone
+    before the binding, Law 1 and glob checks (SPD-031).  A bound member is held to its globs in any session; a session
+    that is not Spud (`mode` plain), and an unbound subagent of one, writes freely in other projects and nowhere in the home."""
     p = os.path.expanduser(path) if path.startswith("~") else path
     if not os.path.isabs(p):
         p = os.path.join(cwd or os.getcwd(), p)
@@ -4803,21 +6097,41 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd):
         if harness_file(candidate):
             return ("%s is one of the harness's subagent files (<project>/<session>/subagents/...): the ledger binds identities from them,"
                     " so nothing but Claude Code writes them" % candidate), None
-    inside = repository_paths(ctx, path, cwd)
+    inside = project_paths(ctx, con, path, cwd)
     if not inside:
         return None, None
-    for _root, rel in inside:
+    for _project, _root, rel in inside:
         if in_state_dir(rel):
             return state_dir_reason(rel), rel
-    if caller_agent_id and caller_member is None:
+    first = inside[0][2]
+    if caller_member is not None:
+        ref = member_ref(con, caller_member["id"])
+        ticket_project = project_key_of(con, get_ticket_by_id(con, caller_member["ticket_id"]))
+        for project, root, rel in inside:
+            reason = path_reason(rel, caller_member, ref, folds_case(root), project["key"], ticket_project, project["id"] == 1)
+            if reason:
+                return reason, rel
+        return None, first
+    plain = mode == "plain"
+    if caller_agent_id:  # the home's generated roots are Law 5's for every caller, bound or not, before the binding matters
+        for project, _root, rel in inside:
+            if project["id"] == 1 and rel.split("/")[0].casefold() in GENERATED_ROOTS:
+                return path_reason(rel, {"deliverables": "[]"}, "agent_id %s" % caller_agent_id), rel
+    if caller_agent_id and not plain:
         return ("your agent_id %s is not bound to a member yet (the PostToolUse(Agent) hook binds a background spawn right after launch;"
-                " a foreground spawn is bound at its first tool call or at its stop), so %s cannot be checked against your deliverables" % (caller_agent_id, inside[0][1])), inside[0][1]
-    ref = member_ref(con, caller_member["id"]) if caller_member else "Spud"
-    for root, rel in inside:
-        reason = path_reason(rel, caller_member, ref, folds_case(root))
+                " a foreground spawn is bound at its first tool call or at its stop), so %s cannot be checked against your deliverables" % (caller_agent_id, first)), first
+    for project, root, rel in inside:
+        home = project["id"] == 1
+        if plain:
+            if not home:
+                continue
+            generated = rel.split("/")[0].casefold() in GENERATED_ROOTS
+            reason = (path_reason(rel, None, "Spud", folds_case(root)) if generated else None) or NOT_SPUD_HOME % rel
+        else:
+            reason = path_reason(rel, None, "Spud", folds_case(root), project["key"], "spud", home)
         if reason:
             return reason, rel
-    return None, inside[0][1]
+    return None, first
 
 
 # -- shell analysis for PreToolUse(Bash) ---------------------------------------------
@@ -5593,7 +6907,8 @@ def parse_spud_call(words):
             continue
         if call["command"] is None:
             call["command"] = w
-        elif call["subcommand"] is None and call["command"] in ("config", "settings", "ticket", "member", "proposal", "handoff", "report"):
+        elif call["subcommand"] is None and call["command"] in ("config", "settings", "ticket", "member", "proposal", "handoff", "report",
+                                                                  "project", "session", "ledger", "schedule"):
             call["subcommand"] = w
         else:
             call["rest"].append(w)
@@ -6583,24 +7898,39 @@ def actor_is_self(con, actor, caller_member, caller_agent_id):
     return actor in ("%s/%s" % (ticket["team_key"], caller_member["name"]), "%s/%s" % (ticket["team_key"], caller_member["lineage"]))
 
 
-def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
-    """(reason or None, analysis) for a Bash command line."""
+def spud_call_writes(call):
+    """Whether a recognized spud call writes the ledger: everything but the read commands and --help (SPD-014)."""
+    if call["help"] or call["command"] is None:
+        return False
+    return call["command"] not in READ_ONLY_COMMANDS and (call["command"], call["subcommand"]) not in READ_ONLY_SUBCOMMANDS
+
+
+def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="spud"):
+    """(reason or None, analysis) for a Bash command line.  In a session that is not Spud (`mode` plain, SPD-014) a caller
+    with no agent_id, or an unbound one (Eric's own subagents), keeps the database, `spud hook`, `--as spud` and member-own
+    refusals and the path rule, and gets no Law 7 refusal; a bound member gets every refusal, in any session."""
     db_reason = DB_REASON
     if DB_PATH_RE.search(command):
         return db_reason % "the command names ledger.db or .spud/", None
     analysis = analyse_command(command, ShellAnalysis(cwd=cwd, home=str(ctx.home)))
     if analysis.unparseable:
         return None, analysis
+    plain = mode == "plain"
+    strict = bool(caller_agent_id) and not (plain and caller_member is None)
     who = ("%s (agent_id %s)" % (member_ref(con, caller_member["id"]), caller_agent_id)) if caller_member else ("agent_id %s" % caller_agent_id if caller_agent_id else "Spud")
     for kind, detail in analysis.findings:
         if kind == "db":
             return db_reason % ("`%s`" % detail), analysis
         if kind == "spud" and detail["command"] == "hook":
             return "`spud hook` is the harness's: hooks run from .claude/settings.json (spud settings sync), never from Bash", analysis
-        if not caller_agent_id:
+        if not strict:
             if kind == "spud" and detail["actor"] not in (None, "spud") and (detail["command"], detail["subcommand"]) in MEMBER_OWN_COMMANDS:
                 return ("Law 5: `--as %s` from Spud's own session would write a member's own sections (log, result, block, proposals) in its name;"
                         " members record themselves (the SubagentStop hold sees to it), Spud records verdicts with `spud --as spud member finish`" % detail["actor"]), analysis
+            if plain and kind == "spud" and detail["actor"] == "spud" and spud_call_writes(detail) and (detail["command"], detail["subcommand"]) != ("session", "claim"):
+                what = " ".join(w for w in (detail["command"], detail["subcommand"]) if w)
+                return ("Law 6: this session is not Spud; /spud claims it. `spud --as spud %s` writes the ledger, and outside Spud's home a session"
+                        " is Spud only after `spud --as spud session claim` (the /spud skill runs it)" % what), analysis
             continue
         if kind == "git":
             verb, refused = detail
@@ -6634,15 +7964,16 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
                             % (deglob(call["actor"]), who, caller_agent_id)), analysis
     def redirect_reason(spelled, path):
         """edit_reason for one concrete file a redirection or tee may open, phrased for the redirect."""
-        reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd)
+        reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode)
         if not reason:
             return None
-        law_1 = not caller_agent_id and not (rel is not None and in_state_dir(rel))  # the state directory is refused in the database's words, not Law 1's
+        # the state directory is refused in the database's words, not Law 1's; a session that is not Spud is not held to Law 1
+        law_1 = not caller_agent_id and not plain and not (rel is not None and in_state_dir(rel))
         return ("Law 1: a redirection or tee into %s: %s" if law_1 else "a redirection or tee into %s: %s") % (spelled, reason)
 
     for target, target_cwds in analysis.redirects:
         if "$" in target or "`" in target or SUBST in target:
-            if caller_agent_id:
+            if strict:
                 return "the redirection target %s holds a variable or substitution the hook cannot resolve; spell the path out" % deglob(target), analysis
             continue
         spelled = deglob(target)
@@ -6651,7 +7982,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
             # directory, not the literal spelling that maps under no root.
             expansion = expand_redirect_target(target, target_cwds)
             if expansion is None:  # a directory the hook cannot follow
-                if caller_agent_id:
+                if strict:
                     return ("the redirection target %s is relative to a directory the hook cannot follow (a cd into a variable, `cd -`, popd,"
                             " a directory stack entry or ~name, an option or a CDPATH it cannot read, a relative cd in a loop, a sourced file);"
                             " use an absolute path" % spelled), analysis
@@ -6661,7 +7992,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
                 reason = redirect_reason(spelled, path)
                 if reason:
                     return reason, analysis
-            if caller_agent_id:  # a member: the hook cannot know what the glob opens beyond what it matches now
+            if strict:  # a member: the hook cannot know what the glob opens beyond what it matches now
                 if capped:
                     return ("the redirection or tee target %s is a glob whose expansion reaches the hook's match budget of %d files;"
                             " write to explicit paths instead" % (spelled, GLOB_MATCH_CAP)), analysis
@@ -6677,7 +8008,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd):
             continue
         paths = redirection_paths(spelled, target_cwds)
         if paths is None:  # a member is refused; Spud's target stays unchecked, since the hook cannot know where it lands
-            if caller_agent_id:
+            if strict:
                 return ("the redirection target %s is relative to a directory the hook cannot follow (a cd into a variable, `cd -`, popd,"
                         " a directory stack entry or ~name, an option or a CDPATH it cannot read, a relative cd in a loop, a sourced file);"
                         " use an absolute path" % spelled), analysis
@@ -6997,7 +8328,7 @@ def deny_and_record(con, at, payload, reason, caller_agent_id, caller_member, ti
     return pre_decision("deny", reason)
 
 
-def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_member):
+def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_member, mode="spud"):
     tool_use_id = payload.get("tool_use_id")
     description = tool_input.get("description") if isinstance(tool_input.get("description"), str) else ""
     model = tool_input.get("model")
@@ -7027,7 +8358,10 @@ def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_
             "SELECT tool_use_id, at FROM spawn_requests WHERE member_id = ? AND decision = 'allow' AND agent_id IS NULL AND tool_use_id != ? ORDER BY at, rowid LIMIT 1",
             (member["id"], tool_use_id),
         ).fetchone()
-        if member["status"] != "planned":
+        if mode == "plain" and caller_member is None:  # SPD-014: the full check refuses a spudagent-shaped spawn in a session that is not Spud
+            reason = ("this session is not Spud: a spudagent is spawned by the Spud session that planned it, and %s was not planned here"
+                      " (type /spud to claim this session first)" % ref)
+        elif member["status"] != "planned":
             reason = "%s is %s, not planned; a spawned member is never spawned twice, a re-spawn is a new member row (spud member new)" % (ref, member["status"])
         elif pending is not None:
             # The first allow reserves the row (Rooster's HIGH-1): until that spawn binds, a second
@@ -7098,11 +8432,11 @@ def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_
     return deny_and_record(con, at, payload, reason, caller_agent_id, caller_member, ticket_id=ticket["id"] if ticket else None, extra={"description": description})
 
 
-def hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member):
+def hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member, mode="spud"):
     command = tool_input.get("command")
     if not isinstance(command, str) or not command.strip():
         return deny_and_record(con, at, payload, "malformed PreToolUse(Bash) payload: tool_input.command is missing", caller_agent_id, caller_member)
-    reason, analysis = bash_reason(ctx, con, caller_agent_id, caller_member, command, payload.get("cwd") or None)
+    reason, analysis = bash_reason(ctx, con, caller_agent_id, caller_member, command, payload.get("cwd") or None, mode)
     if reason:
         return deny_and_record(con, at, payload, reason, caller_agent_id, caller_member, extra={"command": command[:2000]})
     # The allow skips the harness's prompt, so it needs more than recognition (SPD-032): every spud call runs the ledger root's
@@ -7116,13 +8450,13 @@ def hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member)
     return SILENT
 
 
-def hook_edit(ctx, con, at, payload, tool_input, caller_agent_id, caller_member):
+def hook_edit(ctx, con, at, payload, tool_input, caller_agent_id, caller_member, mode="spud"):
     tool = payload.get("tool_name")
     field = "notebook_path" if tool == "NotebookEdit" else "file_path"
     path = tool_input.get(field)
     if not isinstance(path, str) or not path:
         return deny_and_record(con, at, payload, "malformed PreToolUse(%s) payload: tool_input.%s is missing" % (tool, field), caller_agent_id, caller_member)
-    reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, path, payload.get("cwd") or None)
+    reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, path, payload.get("cwd") or None, mode)
     if reason:
         return deny_and_record(con, at, payload, reason, caller_agent_id, caller_member, extra={"path": rel if rel is not None else path})
     return SILENT
@@ -7184,6 +8518,8 @@ def hook_pre_tool_use(ctx, payload):
     if tool not in ENFORCED_TOOLS:
         return SILENT
     if not ctx.db_path.is_file():
+        if ctx.hook_project and not payload.get("agent_id"):
+            return SILENT  # a project's hook with no ledger to read fails open for a caller with no agent_id (design section 6.4)
         return pre_decision("deny", "no ledger database at %s; run `spud init` (the enforcing hooks refuse until the ledger exists)" % ctx.db_path)
     con = connect(ctx)
     try:
@@ -7196,11 +8532,14 @@ def hook_pre_tool_use(ctx, payload):
                 caller_member = late_bind(con, at, payload, caller_agent_id)
             if not isinstance(tool_input, dict):
                 return deny_and_record(con, at, payload, "malformed PreToolUse(%s) payload: tool_input is not an object" % tool, caller_agent_id, caller_member)
+            mode = session_mode(ctx, con, payload)[0]
             if tool == "Agent":
-                return hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_member)
+                if mode == "plain" and caller_member is None and not spudagent_shaped(tool_input):
+                    return SILENT  # Eric's own subagent in a session that is not Spud: no check, no spawn_requests row (SPD-014)
+                return hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_member, mode)
             if tool == "Bash":
-                return hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member)
-            return hook_edit(ctx, con, at, payload, tool_input, caller_agent_id, caller_member)
+                return hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member, mode)
+            return hook_edit(ctx, con, at, payload, tool_input, caller_agent_id, caller_member, mode)
     finally:
         con.close()
 
@@ -7314,6 +8653,8 @@ def hook_post_tool_use(ctx, payload):
         with write_txn(con):
             req = con.execute("SELECT * FROM spawn_requests WHERE tool_use_id = ?", (tool_use_id,)).fetchone() if isinstance(tool_use_id, str) else None
             gap = None
+            if req is None and session_mode(ctx, con, payload)[0] == "plain":
+                return SILENT  # Eric's own subagent in a session that is not Spud: PreToolUse wrote no row, and that is no gap (SPD-014)
             if req is None:
                 gap = "PostToolUse(Agent) for tool_use_id %s (agentId %s) has no spawn_requests row: the spawn was not seen by PreToolUse" % (tool_use_id, agent_id)
             elif req["decision"] != "allow":
@@ -7350,14 +8691,35 @@ def hook_subagent_start(ctx, payload):
         at = now()
         with write_txn(con):
             member = con.execute("SELECT * FROM members WHERE agent_id = ?", (agent_id,)).fetchone()
+            if member is None and not pending_spawn(con, payload.get("session_id")) and session_mode(ctx, con, payload)[0] == "plain":
+                return SILENT  # Eric's own subagent in a session that is not Spud (SPD-014)
             write_event(con, at, "hook:SubagentStart", "member.started", "subagent %s started (%s)" % (agent_id, payload.get("agent_type")),
                         ticket_id=member["ticket_id"] if member else None, member_id=member["id"] if member else None, agent_id=agent_id,
                         data={"agent_type": payload.get("agent_type"), "session_id": payload.get("session_id"), "cwd": payload.get("cwd")})
             context = "Ledger: your agent_id is `%s`; every `spud` command you run takes `--as %s`." % (agent_id, agent_id)
-            if member:
+            named = member
+            if named is None:
+                # A background spawn starts before PostToolUse(Agent) binds it: when the session has exactly one spawn waiting
+                # to bind (of this agent type), that is the member starting, and it is named here without being bound.
+                params = [payload.get("session_id")]
+                narrowing = ""
+                if isinstance(payload.get("agent_type"), str) and payload.get("agent_type"):
+                    narrowing = " AND (subagent_type IS NULL OR subagent_type = ?)"
+                    params.append(payload["agent_type"])
+                waiting = con.execute("SELECT member_id FROM spawn_requests WHERE session_id = ? AND decision = 'allow' AND member_id IS NOT NULL"
+                                      " AND agent_id IS NULL" + narrowing, params).fetchall()
+                if len(waiting) == 1:
+                    named = get_member_by_id(con, waiting[0]["member_id"])
+            if named:
+                member = named
                 ticket = get_ticket_by_id(con, member["ticket_id"])
                 context += " You are %s/%s (%s, %s) on %s; your deliverables: %s." % (
                     ticket["team_key"], member["name"], member["lineage"], member["persona"], ticket["key"], ", ".join(json.loads(member["deliverables"])) or "none")
+                if ticket["project_id"] != 1:
+                    project = con.execute("SELECT * FROM projects WHERE id = ?", (ticket["project_id"],)).fetchone()
+                    context += (" Your ticket's project is `%s`; bare deliverables are relative to `%s` or a worktree of it, and `<key>:<glob>` names"
+                                " another project's checkout; that repository's CLAUDE.md and skills govern how you build and verify."
+                                % (project["key"], project_root(ctx, project)))
     finally:
         con.close()
     return HookOutput({"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": context}})
@@ -7662,6 +9024,8 @@ def hook_subagent_stop(ctx, payload):
                         bound_by = None
             base = {"agent_type": agent_type, "stop_hook_active": stop_hook_active, "bound_by": bound_by}
             if member is None:
+                if not pending_spawn(con, payload.get("session_id")) and session_mode(ctx, con, payload)[0] == "plain":
+                    return SILENT  # Eric's own subagent in a session that is not Spud, with no spawn to bind: no event (SPD-014)
                 write_event(con, at, "hook:SubagentStop", "member.stopped", "subagent %s stopped unbound (%s)" % (agent_id, agent_type), agent_id=agent_id, data=base)
                 return SILENT
             ref = member_ref(con, member["id"])
@@ -7721,14 +9085,22 @@ def hook_subagent_stop(ctx, payload):
 
 
 def hook_session_start(ctx, payload):
+    """The board for a Spud session in the home (and outside every project); in another project (SPD-014) the one-line
+    notice for a session that is not Spud, and for a Spud one a header naming the project with the board, at most 2 KB
+    in all, since a larger additionalContext reaches the model only as a preview (the design's probe, P2)."""
     if not ctx.db_path.is_file():
         return SILENT
     con = connect(ctx)
     try:
-        text = board_brief_text(con)
+        mode, project, claim = session_mode(ctx, con, payload)
+        if mode == "plain":
+            context = plain_session_notice(ctx, project)
+        elif project is not None and project["id"] != 1:
+            context = project_session_context(ctx, con, project, claim, payload)
+        else:
+            context = "Ledger board (`spud board --brief` at %s, source %s):\n%s" % (now(), payload.get("source"), board_brief_text(con))
     finally:
         con.close()
-    context = "Ledger board (`spud board --brief` at %s, source %s):\n%s" % (now(), payload.get("source"), text)
     return HookOutput({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}})
 
 
@@ -7919,6 +9291,8 @@ def hook_stop(ctx, payload):
     try:
         at = now()
         with write_txn(con):
+            if session_mode(ctx, con, payload)[0] == "plain":
+                return SILENT  # a session that is not Spud owes the ledger nothing (SPD-014)
             returned, planned, unbound, running = stop_owed(con, session, at)
             if not (returned or planned or unbound or running):
                 return SILENT
@@ -7944,6 +9318,7 @@ HOOK_HANDLERS = {
 def cmd_hook(ctx, args):
     """The harness's entry point.  Exit codes are 0 or 2 only, whatever happens."""
     event = args.event
+    ctx.hook_project = getattr(args, "project", None)
     raw = sys.stdin.read()
     payload = None
     try:
@@ -7964,6 +9339,10 @@ def cmd_hook(ctx, args):
         with contextlib.suppress(Exception):
             spool_write(ctx, record)
         enforcing = event == "PreToolUse" or (event == "Stop" and not fields.get("stop_hook_active"))
+        if enforcing and ctx.hook_project and not (isinstance(fields.get("agent_id"), str) and fields.get("agent_id")):
+            # A project's hook line (design section 6.4): a failure with no agent_id to hold fails open, so a ledger outage
+            # never stalls a session in that repository; a subagent's call still fails closed.
+            return Result(None, raw="", exit_code=EXIT_OK, stderr="spud hook %s --project %s: %s (failing open: no agent_id)" % (event, ctx.hook_project, e))
         if enforcing:
             return Result(None, raw="", exit_code=2, stderr="spud hook %s: %s (failing closed)" % (event, e))
         return Result(None, raw="", exit_code=EXIT_OK)
@@ -8099,7 +9478,73 @@ def build_parser():
 
     p = sub.add_parser("hook", help="run one harness hook event: the payload on stdin, the answer on stdout (installed by settings sync)")
     p.add_argument("event", choices=HOOK_EVENTS)
+    p.add_argument("--project", help="the project whose local settings carry this line (project install): a failure with no agent_id fails open")
     p.set_defaults(func=cmd_hook)
+
+    p = sub.add_parser("project", help="repositories Spud works in besides his home (SPD-014)")
+    ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
+    ps.required = True
+    q = ps.add_parser("add", help="register a repository's main checkout as a project; installs nothing (Spud's)")
+    q.add_argument("path", help="the repository's main checkout")
+    q.add_argument("--key", required=True, help="lower-case key, [a-z][a-z0-9-]{0,31}, not spud")
+    q.add_argument("--ticket-prefix", required=True, help="upper-case ticket prefix (BAD gives BAD-001)")
+    q.add_argument("--team-prefix", required=True, help="upper-case team prefix (BADS gives BADS-001)")
+    q.add_argument("--landing", required=True, choices=("merge", "pr"), help="how a verified branch lands: merge into the default branch, or a pull request")
+    q.add_argument("--name", help="display name (default: the root's directory name)")
+    q.add_argument("--sessions", choices=("claim", "always"), default="claim", help="claim (default): a session there is Spud only after /spud claims it; always: every session is")
+    q.add_argument("--default-branch", help="default: origin/HEAD's branch, else main")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes")
+    q.set_defaults(func=cmd_project_add)
+    q = ps.add_parser("list", help="every project, with its install state computed now")
+    q.set_defaults(func=cmd_project_list)
+    q = ps.add_parser("show", help="one project")
+    q.add_argument("key")
+    q.set_defaults(func=cmd_project_show)
+    q = ps.add_parser("edit", help="change a project's name, landing, sessions, default branch, root, or its prefixes before its first ticket (Spud's)")
+    q.add_argument("key")
+    q.add_argument("--name")
+    q.add_argument("--landing", choices=("merge", "pr"))
+    q.add_argument("--sessions", choices=("claim", "always"))
+    q.add_argument("--default-branch")
+    q.add_argument("--root", help="the repository moved on disk: validated like add")
+    q.add_argument("--ticket-prefix")
+    q.add_argument("--team-prefix")
+    q.set_defaults(func=cmd_project_edit)
+    q = ps.add_parser("install", help="write the ledger hooks into the project's untracked .claude/settings.local.json, spudagent and the /spud skill at user scope (Spud's)")
+    q.add_argument("key")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes")
+    q.set_defaults(func=cmd_project_install)
+    q = ps.add_parser("uninstall", help="take back what install wrote (Spud's)")
+    q.add_argument("key")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes")
+    q.set_defaults(func=cmd_project_uninstall)
+    q = ps.add_parser("sync", help="rewrite an installed project's files from the home's current ones, e.g. after spudagent.md changes (Spud's)")
+    q.add_argument("key", nargs="?")
+    q.add_argument("--all", action="store_true", help="every installed project")
+    q.set_defaults(func=cmd_project_sync)
+    q = ps.add_parser("remove", help="uninstall, then delete a project without tickets or archive one with them; refused with an open ticket (Spud's)")
+    q.add_argument("key")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes")
+    q.set_defaults(func=cmd_project_remove)
+
+    p = sub.add_parser("session", help="this Claude Code session: claim it for Spud in another project, release it, show it (SPD-014)")
+    ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
+    ps.required = True
+    q = ps.add_parser("claim", help="make this session Spud in its project (what /spud runs); needs CLAUDE_CODE_SESSION_ID")
+    q.add_argument("--project", help="project key (default: the project of the working directory)")
+    q.set_defaults(func=cmd_session_claim)
+    q = ps.add_parser("release", help="end this session's claim")
+    q.set_defaults(func=cmd_session_release)
+    q = ps.add_parser("show", help="the home, the working directory's project and checkout, the session and its mode (any actor)")
+    q.set_defaults(func=cmd_session_show)
+
+    p = sub.add_parser("ledger", help="the rendered ledger in git (SPD-014)")
+    ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
+    ps.required = True
+    q = ps.add_parser("commit", help="render, stage only ledger/ and reports/ at the home, commit on its default branch and push; refused from any linked worktree (Spud's)")
+    q.add_argument("--message", required=True, type=text_arg, help="the whole commit message (@file, @- accepted); its subject names the ticket")
+    q.add_argument("--no-push", action="store_true", help="commit without pushing")
+    q.set_defaults(func=cmd_ledger_commit)
 
     p = sub.add_parser("sql", help="run one read-only statement against the database (any actor; the inspection path)")
     p.add_argument("statement", help="SELECT, WITH, VALUES, EXPLAIN or a read-only PRAGMA")
@@ -8128,7 +9573,7 @@ def build_parser():
     q.add_argument("--outcome", type=text_arg)
     q.add_argument("--heading", help="a shorter H1 than the title")
     q.add_argument("--tag", action="append", help="extra tag (ticket is always first)")
-    q.add_argument("--project", help="project key (default spud)")
+    q.add_argument("--project", help="project key (default: the project of the working directory, else spud)")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes: SPD-nnn created (<status>, <priority>): <title>")
     q.set_defaults(func=cmd_ticket_new)
     q = ps.add_parser("move", help="change a ticket's status along the state machine")
@@ -8251,17 +9696,20 @@ def build_parser():
 
     p = sub.add_parser("board", help="the board (v_board)")
     p.add_argument("--brief", action="store_true", help="open tickets and live members, one line each")
+    p.add_argument("--project", help="only this project's tickets")
     p.set_defaults(func=cmd_board)
     p = sub.add_parser("fleet", help="every member (v_fleet)")
     p.set_defaults(func=cmd_fleet)
     p = sub.add_parser("card", help="a ticket's team tree")
     p.add_argument("key")
+    p.add_argument("--project", help="refuse unless the ticket is this project's")
     p.set_defaults(func=cmd_card)
     p = sub.add_parser("events", help="the event log")
     p.add_argument("--ticket")
     p.add_argument("--member")
     p.add_argument("--kind", choices=EVENT_KINDS)
     p.add_argument("--limit", type=int)
+    p.add_argument("--project", help="only this project's tickets' events and the project and session events naming it")
     p.set_defaults(func=cmd_events)
     return parser
 
@@ -8298,8 +9746,9 @@ class HookCall:
     actor = None
     json = False
 
-    def __init__(self, event):
+    def __init__(self, event, project=None):
         self.event = event
+        self.project = project
         self.func = cmd_hook
 
 
@@ -8310,12 +9759,15 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if len(argv) == 2 and argv[0] == "hook" and argv[1] in HOOK_EVENTS:
         args = HookCall(argv[1])
+    elif len(argv) == 4 and argv[0] == "hook" and argv[1] in HOOK_EVENTS and argv[2] == "--project":  # a project's hook line (SPD-014)
+        args = HookCall(argv[1], argv[3])
     else:
         args = build_parser().parse_args(normalize_argv(argv))
     ctx = None
     try:
         home, how = resolve_home(os.environ, Path(__file__))
         ctx = Ctx(home, how, args.json)
+        ACTIVE_CTX[:] = [ctx]
         result = args.func(ctx, args)
     except SpudError as e:
         sys.stderr.write("spud: %s\n" % e.message)
