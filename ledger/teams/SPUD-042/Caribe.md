@@ -36,6 +36,8 @@ Constraints: the hook budget holds: measure PreToolUse(Bash) median of 15 before
 Done when: tests in tests/test_hooks.py that failed on the unchanged code now pass, covering the ticket's three evidence commands, every body form and header form of item 1 with each Law 7, Law 5 and 6, tee, cd and redirection payload of item 2, for the `**` member, a narrow-glob member and Spud; the loop model of item 3; and the controls of item 4. The whole suite is green from this worktree; a differential of old against new analyse_command over the command strings in tests/test_hooks.py loses no finding; latency and every grammar decision with its shell probe are in the result.
 
 ## Log
+- 2026-09-14T23:26 Read ticket, briefs of Bintje/Elba/Agria/Roseval, and ShellWalk (add_word, walk, push/pop/branch/finish, skip). Starting real-shell probes in the scratchpad.
+- 2026-09-14T23:49 Probed zsh 5.9 -f and -o nobareglobqual against bash 3.2 in the scratchpad with a fake git: the short-loop body is a do..done, a { list }, a ( list ) or ONE sublist (whole and-or list with its pipelines: 'repeat 2 echo a | wc -l' printed 1 twice; 'repeat 3 true && git push' pushed 3 times), ending at ; newline or & ; a newline or several terminators may stand between header and body; 'for f (a|b)' is a parse error so the loop word list is never a glob; 'for f in a b do' without a terminator is a parse error; coproc/time/! may precede a short loop and zsh runs it. Implemented in ShellWalk: frame.body header/pending/long/compound/sublist, end_header, resolve_body, close_sublists, and mark_zsh_patterns no longer marks a for/select word list.
 
 ## Sub-agents
 

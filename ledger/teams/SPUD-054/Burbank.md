@@ -6,9 +6,9 @@ model: opus
 parent: "[[Spud]]"
 ticket: "[[SPD-054]]"
 project: spud
-status: active
+status: done
 spawned: 2026-09-14T22:36
-finished: ""
+finished: 2026-09-14T23:43
 duration_ms: 1889315
 tool_uses: 122
 tokens_out: 106275
@@ -75,3 +75,4 @@ COST. A member is refused a relative redirection or tee inside a trap action (tr
 PROPOSAL 63 (P2): an alias defined on the line and run through eval hides a command -- alias gp='git push'; eval gp ran git push in zsh, zsh -o nobareglobqual and sh, and the hook reads it as kinds other,eval,other with no finding. Its Why field is EMPTY because a stray second --why '' on my command line cleared it; the Evidence is complete and the intended Why is in my log. zsh's TRAP<SIG> function form (TRAPEXIT() { git push; }) is not a hole: the hook already analyses function bodies and refuses it. No sub-agents. CLAUDE.md's suite count becomes 677.
 
 ## Outcome
+Accepted after two rounds. A member's trap action string is now read as the shell text it is, with its own quotes, in both the bash position (after options and --) and the zsh position (the word after trap), at a directory the hook treats as unknown, so a VCS write inside it is refused under Law 7, a spud write under Law 6 or the actor check, and a relative redirection or tee inside it with the existing cannot-follow reason; an unresolvable expansion in the action is refused as SPD-043 refuses one; list, print, reset and ignore forms stay silent; env, nohup and exec before trap stay other. Round 2, from Spud's probe: a trap in a coproc'd group runs in zsh's forked shell, so coproc now sets a fork effect under which a builtin runs but no directory comes back, and cd and source keep their readings. Spud re-checked every probe line on the final module. TrapActionTest 11 methods, red first. Differential over 6,334 strings: 399 changed, all silent to deny, none refused to silent. Suite 677: Burbank's run OK, Spud's three reruns OK, OK, and one run with a single failure the tail did not name, rerun again before merge.
