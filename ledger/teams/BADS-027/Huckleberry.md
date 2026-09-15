@@ -39,6 +39,7 @@ Done when: the seven behaviours above are implemented, the new test file exists 
 
 ## Log
 - 2026-09-14T22:07 Read root+admin CLAUDE.md, implementing-changes, accounts.ts (ACCOUNTS_CTE/PROFILE_JOIN/PROFILE_COLUMNS/listAccounts/countAccounts/accountFacets), AccountFilters, accounts/page.tsx, admin-pool + admin-moderation tests, migration 0012. Worktree init green (node_modules linked, 23 voicepacks, smoke lib at /tmp/bt-lib-bad-027-handle-search); admin npm ci green. Confirmed private.profiles has no plan/status column, so the facets join cannot make those references ambiguous — qualifying with a. anyway. Starting the accounts.ts edits.
+- 2026-09-14T22:12 Implemented all seven behaviours. ACCOUNTS_WHERE is the shared clause (search matches a.account_email OR lower(pr.handle::text); status branches 'suspended' -> pr.suspended_at is not null, else a.status); countAccounts now carries PROFILE_JOIN. Found the brief's 'strip one leading @ (as today)' was NOT already there — listAccounts only did trim().toLowerCase() — so added .replace(/^@/, '') between them. accountFacets counts suspended in the same single query (join added, plan/status qualified a.). PROFILE_COLUMNS + AccountRow.profileSuspendedAt + badge in the list row; AccountFilters gets the new placeholder/aria-label and optgroup'd select. Negative control: all 9 new tests FAIL against git show HEAD: copies of the three files and pass on mine, so they are not vacuous.
 
 ## Sub-agents
 
