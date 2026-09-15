@@ -5693,6 +5693,19 @@ GIT_ALIAS_SECTIONS = {"alias", "include", "includeif"}
 GIT_CONFIG_FILE_VARS = ("GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM")
 GIT_CONFIG_INLINE_VARS = ("GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS")
 GIT_CONFIG_INDEXED_RE = re.compile(r"GIT_CONFIG_(?:KEY|VALUE)_\d+\Z")
+# SPD-047: the variables that move git's global config to a file the hook cannot read -- HOME to <HOME>/.gitconfig and
+# XDG_CONFIG_HOME to <XDG_CONFIG_HOME>/git/config (probed on git 2.54.0: `HOME=<dir> git v` and `XDG_CONFIG_HOME=<dir> git vv`
+# each expanded an alias defined there).  In force on the line they are GIT_CONFIG_GLOBAL by another name: the file can define
+# an alias (which the unknown-verb check closes) and every program-naming key of SPD-046's class under a real, allowed verb.
+GIT_CONFIG_HOME_VARS = ("HOME", "XDG_CONFIG_HOME")
+# The settings that point git at another repository, whose .git/config the hook cannot read either and which a member may have
+# crafted under its own deliverables (a .git directory is just files).  Probed: `git -C <repo> w`, `git --git-dir=<repo>/.git w`
+# (spaced and `=`), `git --work-tree`, and GIT_DIR/GIT_WORK_TREE/GIT_COMMON_DIR in force each read that repository's config.
+# git rejects an attached `-C<dir>`/`-C=<dir>` and every abbreviation of these global options (`--git-di=`, `--gitdir=`:
+# "unknown option", probed), so only these spellings parse; `-C` is repeatable and relative to the previous one, and it moves
+# what a relative --git-dir or --work-tree means whichever order they appear in (git(1) documents the equivalence).
+GIT_REPO_ENV_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+GIT_REPO_OPTIONS = ("--git-dir", "--work-tree")
 # SPD-046: git config and environment can name a program git runs (a pager, editor, ssh/proxy command, diff or merge driver,
 # hooks or exec path, credential or askpass helper, and more) under a verb Law 7's table allows, so a member's `-c core.pager=cmd
 # fetch` runs cmd while the hook reads only the allowed verb.  `git help --config` lists ~950 keys and the program-naming ones are
@@ -6976,16 +6989,24 @@ def git_line_defines_alias(words):
 
 
 def is_git_config_var(name):
-    """A GIT_CONFIG_* variable that points git at a config file or injects config inline (SPD-044)."""
-    return name in GIT_CONFIG_FILE_VARS or name in GIT_CONFIG_INLINE_VARS or GIT_CONFIG_INDEXED_RE.match(name) is not None
+    """A GIT_CONFIG_* variable that points git at a config file or injects config inline (SPD-044), or one of the home
+    variables that moves git's global config to a file the hook cannot read (SPD-047)."""
+    return (name in GIT_CONFIG_FILE_VARS or name in GIT_CONFIG_INLINE_VARS or name in GIT_CONFIG_HOME_VARS
+            or GIT_CONFIG_INDEXED_RE.match(name) is not None)
+
+
+def is_git_repo_var(name):
+    """A variable that points git at another repository, whose .git/config the hook cannot read (SPD-047)."""
+    return name in GIT_REPO_ENV_VARS
 
 
 def git_env_defines_alias(variables):
-    """The name of a GIT_CONFIG_* variable in force that injects config the hook cannot resolve (a file GIT_CONFIG,
-    GIT_CONFIG_GLOBAL or GIT_CONFIG_SYSTEM points at, or GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n and
-    GIT_CONFIG_PARAMETERS set inline), any of which can define an alias git expands into a write verb, or None.  A fixed
-    order so the reason is deterministic."""
-    for name in GIT_CONFIG_FILE_VARS + GIT_CONFIG_INLINE_VARS:
+    """The name of a variable in force that gives git config the hook cannot resolve (a file GIT_CONFIG, GIT_CONFIG_GLOBAL or
+    GIT_CONFIG_SYSTEM points at; GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n and GIT_CONFIG_PARAMETERS set inline;
+    HOME or XDG_CONFIG_HOME, which move git's global config to <dir>/.gitconfig or <dir>/git/config, SPD-047), any of which can
+    define an alias git expands into a write verb, or None.  A fixed order so the reason is deterministic, the home variables
+    last so a line that sets both keeps SPD-044's reason."""
+    for name in GIT_CONFIG_FILE_VARS + GIT_CONFIG_INLINE_VARS + GIT_CONFIG_HOME_VARS:
         if name in variables:
             return name
     for name in sorted(variables):
@@ -7087,6 +7108,120 @@ def git_verb_names_program(words):
         if shorts and w.startswith("-") and not w.startswith("--") and any(c in shorts for c in w[1:]):
             return "%s %s" % (verb, w)  # a short cluster carrying the program letter (fail closed)
     return None
+
+
+_GIT_OWN_COMMANDS = None  # git's own command set, read once per process
+GIT_COMMANDS_CACHE = "git-commands.json"  # ... and kept in the home's state directory between them
+
+
+def git_binary_fingerprint():
+    """What changes when the git the hook would run changes, read without running it: the path PATH finds for it and its
+    stat.  None when there is nothing to stat there (no git: the list is then read the slow way and fails closed)."""
+    path = command_path("git")
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return [path, st.st_mtime_ns, st.st_size, st.st_ino]
+
+
+def git_own_commands(home=None):
+    """The names git dispatches itself, from the git the hook runs (`git --list-cmds=main`: 174 on git 2.54.0, a superset of
+    --list-cmds=builtins' 147), with git_env()'s sanitised environment -- the hook's own, never the line's HOME or PATH.
+    None when git cannot be run or names nothing, which fails the unknown-verb check closed (SPD-047).
+
+    Read once per process, and kept in <home>/.spud/git-commands.json under the fingerprint of the git binary it was read
+    from, so a hook runs git only after git itself changes: the Bash hook runs on every command line, and the list costs
+    about 8 ms with the subprocess import, which SPD-016 keeps off the hook path.  A cache that is missing, unreadable or
+    stale is read anew; one that cannot be written is left unwritten.  It lives in the state directory, which the edit and
+    Bash hooks refuse to everyone, so nothing a member writes can widen git's command set."""
+    global _GIT_OWN_COMMANDS
+    if _GIT_OWN_COMMANDS is not None:
+        return _GIT_OWN_COMMANDS or None
+    state = os.path.join(str(home), STATE_DIR) if home else None
+    cache = os.path.join(state, GIT_COMMANDS_CACHE) if state else None
+    fingerprint = git_binary_fingerprint() if cache else None
+    if fingerprint is not None:
+        with contextlib.suppress(OSError, ValueError):
+            with open(cache, encoding="utf-8") as f:
+                stored = json.load(f)
+            if isinstance(stored, dict) and stored.get("git") == fingerprint \
+                    and isinstance(stored.get("commands"), list) and all(isinstance(c, str) for c in stored["commands"]):
+                _GIT_OWN_COMMANDS = frozenset(stored["commands"])
+                return _GIT_OWN_COMMANDS or None
+    try:
+        proc = subprocess.run(["git", "--list-cmds=main"], capture_output=True, text=True, errors="replace",
+                              env=git_env(), timeout=10)
+        _GIT_OWN_COMMANDS = frozenset(proc.stdout.split()) if proc.returncode == 0 else frozenset()
+    except (OSError, subprocess.TimeoutExpired):
+        _GIT_OWN_COMMANDS = frozenset()
+    if _GIT_OWN_COMMANDS and fingerprint is not None and os.path.isdir(state):
+        tmp = "%s.%d.tmp" % (cache, os.getpid())
+        with contextlib.suppress(OSError):
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"git": fingerprint, "commands": sorted(_GIT_OWN_COMMANDS)}, f)
+            os.replace(tmp, cache)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+    return _GIT_OWN_COMMANDS or None
+
+
+def git_unknown_verb(verb, home=None):
+    """("verb", name) when the verb is not one of git's own commands, ("unreadable", name) when the hook could not read that
+    command list at all, else None (SPD-047).  git ignores an alias that hides one of its own commands ("aliases that hide
+    existing Git commands are ignored", git-config(1); `alias.log` and `alias.status` were ignored, probed), so an alias can
+    only introduce a verb git does not have: a verb outside git's own set is the tell for every alias source at once -- a
+    repository's .git/config reached by -C/--git-dir/GIT_DIR, ~/.gitconfig, $XDG_CONFIG_HOME/git/config, the system config, an
+    include, GIT_CONFIG_* -- and for an external `git-<verb>` program on PATH, which the hook cannot read either.  A verb built
+    from an expansion keeps SPD-043's own reason."""
+    if verb is None:
+        return None
+    name = deglob(verb)
+    if unresolvable_word(name):
+        return None
+    commands = git_own_commands(home)
+    if commands is None:
+        return "unreadable", name
+    return None if name in commands else ("verb", name)
+
+
+def git_repo_targets(words, variables):
+    """Every directory a git call points git at, as (spelling, path): the composed `-C` chain (git chdirs there before it reads
+    any config, and a repeated -C is relative to the previous one), the values of --git-dir and --work-tree (spaced and `=`
+    forms) resolved against that chain wherever they stand on the line, and GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR in force.
+    Each names a repository whose .git/config the hook cannot read (SPD-047).  A path is absolute, or relative to the directory
+    the shell is in."""
+    base, options = None, []
+    i = 1
+    while i < len(words):
+        w = words[i]
+        if w == "-C":
+            value = words[i + 1] if i + 1 < len(words) else None
+            if value:
+                base = value if os.path.isabs(value) or base is None else os.path.join(base, value)
+            i += 2
+            continue
+        key, sep, attached = w.partition("=")
+        if key in GIT_REPO_OPTIONS:
+            value = attached if sep else (words[i + 1] if i + 1 < len(words) else None)
+            if value:
+                options.append((w if sep else "%s %s" % (key, value), value))
+            i += 1 if sep else 2
+            continue
+        if w in GIT_GLOBAL_VALUE_FLAGS:
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        break  # the verb: git's global options are done
+    for name in GIT_REPO_ENV_VARS:
+        if variables.get(name):
+            options.append(("%s=%s" % (name, variables[name]), variables[name]))
+    targets = [] if base is None else [("-C %s" % base, base)]
+    for spelled, value in options:
+        targets.append((spelled, value if os.path.isabs(value) or base is None else os.path.join(base, value)))
+    return targets
 
 
 def flag_list_refused(verb, args, read_flags, value_flags):
@@ -8229,7 +8364,8 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 continue
             wrapper_from = 1
             for aname, avalue in env_assignments:
-                if is_git_config_var(aname) or is_git_program_var(aname):  # `env GIT_CONFIG_*/GIT_PAGER/GIT_SSH_COMMAND=... git ...` (SPD-044, SPD-046)
+                # `env GIT_CONFIG_*/HOME/GIT_PAGER/GIT_SSH_COMMAND/GIT_DIR=... git ...` (SPD-044, SPD-046, SPD-047)
+                if is_git_config_var(aname) or is_git_program_var(aname) or is_git_repo_var(aname):
                     a.vars[aname] = avalue
                     a.doubt.add(aname)  # the command's environment, not the shell's (SPD-043)
             prefixed = True
@@ -8263,7 +8399,15 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 a.findings.append(("git-program", program))
             else:
                 verb, args = git_verb(words)
-                a.findings.append(("git", (verb, git_refused(verb, args))))
+                refused = git_refused(verb, args)
+                unknown = None if refused else git_unknown_verb(verb, a.home)
+                if unknown is not None:  # not one of git's own commands: an alias or an external git-<verb> (SPD-047)
+                    a.findings.append(("git-verb", unknown))
+                else:
+                    a.findings.append(("git", (verb, refused)))
+        for spelled, target in git_repo_targets(words, a.vars):
+            # another repository, whose .git/config the hook cannot read: resolved against the checkouts in bash_reason (SPD-047)
+            a.findings.append(("git-repo", (spelled, target, a.cwds)))
     elif base in SHELLS:
         if not read_points(lambda ws, start: option_point(shell_read_index(ws, start))):
             return
@@ -8444,6 +8588,10 @@ def vouched_spud_call(a, interpreter, options, script, prefixed):
 
 
 QUIET_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
+# The order bash_reason reads a line's findings in: a refusal the words as spelled already earn first, then the ones that are
+# the hook's last resort -- a verb it cannot place among git's own commands and a repository it cannot read (SPD-047), then a
+# word it cannot resolve at all (SPD-043).  So `touch push; git p?sh` still names `git push`, and `git -C /tmp commit` the verb.
+FINDING_LAST = {"git-verb": 1, "git-repo": 1, "var-word": 2, "var-doubt": 2}
 
 
 def actor_is_self(con, actor, caller_member, caller_agent_id):
@@ -8460,6 +8608,30 @@ def spud_call_writes(call):
     return call["command"] not in READ_ONLY_COMMANDS and (call["command"], call["subcommand"]) not in READ_ONLY_SUBCOMMANDS
 
 
+def git_repo_outside(ctx, con, target, cwds):
+    """Where a git call's repository target lands (SPD-047): (the first directory it may name that lies outside every checkout
+    the ledger knows, False), (None, True) when the hook cannot resolve it (a relative path from a directory it cannot follow,
+    `~-`/`~+`/`~name`, or a value holding an expansion), else (None, None).  Inside is a registered project's root or one of
+    the worktrees git names for it, read as the path rule reads a file's path."""
+    path = deglob(target)
+    if unresolvable_word(path):
+        return None, True
+    if path.startswith("~"):
+        if path != "~" and not path.startswith("~/"):
+            return None, True  # ~- and ~+ are OLDPWD and the current directory, ~name another user or a zsh named directory
+        candidates = [os.path.expanduser(path)]
+    elif os.path.isabs(path):
+        candidates = [path]
+    elif cwds is None:
+        return None, True
+    else:
+        candidates = [os.path.join(c, path) for c in sorted(cwds)]
+    for candidate in candidates:
+        if not project_paths(ctx, con, candidate, None):
+            return os.path.normpath(candidate), False
+    return None, None
+
+
 def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="spud"):
     """(reason or None, analysis) for a Bash command line.  In a session that is not Spud (`mode` plain, SPD-014) a caller
     with no agent_id, or an unbound one (Eric's own subagents), keeps the database, `spud hook`, `--as spud` and member-own
@@ -8473,9 +8645,10 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
     plain = mode == "plain"
     strict = bool(caller_agent_id) and not (plain and caller_member is None)
     who = ("%s (agent_id %s)" % (member_ref(con, caller_member["id"]), caller_agent_id)) if caller_member else ("agent_id %s" % caller_agent_id if caller_agent_id else "Spud")
-    # An expansion the hook cannot resolve in a word it reads by name (SPD-043) refuses a member last, so a refusal the words as
-    # spelled already earn (Law 7's verb, a program config key, Law 6, an actor) keeps its own reason.
-    for kind, detail in sorted(analysis.findings, key=lambda f: f[0] in ("var-word", "var-doubt")):
+    # An expansion the hook cannot resolve in a word it reads by name (SPD-043) refuses a member last, and a verb outside git's
+    # own commands or a repository it cannot read (SPD-047) second to last, so a refusal the words as spelled already earn
+    # (Law 7's verb, a program config key, an ambiguous glob, Law 6, an actor) keeps its own reason.
+    for kind, detail in sorted(analysis.findings, key=lambda f: FINDING_LAST.get(f[0], 0)):
         if kind == "db":
             return db_reason % ("`%s`" % detail), analysis
         if kind == "spud" and detail["command"] == "hook":
@@ -8495,9 +8668,37 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                 return ("Law 7: spudagents never run `git %s` (commit, add, stash, checkout, switch, rebase, reset, push, merge, cherry-pick,"
                         " worktree, branch, tag, pull, apply, restore, rm, mv, clean ...); Spud commits, after the outcome is recorded" % verb), analysis
         elif kind == "git-config":
-            return ("Law 7: this git call defines an alias or include (%s); git expands an alias into whatever command it names before it"
-                    " dispatches, so a write can run under a verb Law 7's table does not list. Run git with no `-c`/`--config-env` alias or"
-                    " include and no GIT_CONFIG_* variable; Spud commits, after the outcome is recorded" % detail), analysis
+            return ("Law 7: this git call takes config the hook cannot read (%s): an alias or include defined on the line, or a variable"
+                    " that injects config or points git at a config file of its own (HOME and XDG_CONFIG_HOME move git's global config to"
+                    " <dir>/.gitconfig or <dir>/git/config). git expands an alias into whatever command it names before it dispatches, and"
+                    " such a file can also name a program git runs, so a write can run under a verb Law 7's table does not list. Run git"
+                    " with no `-c`/`--config-env` alias or include and no GIT_CONFIG_*, HOME or XDG_CONFIG_HOME variable; Spud commits,"
+                    " after the outcome is recorded" % detail), analysis
+        elif kind == "git-verb":
+            how, verb = detail
+            if how == "unreadable":
+                return ("Law 7: the hook cannot read git's own command list (`git --list-cmds=main`), so it cannot tell whether `git %s` is"
+                        " one of git's commands or an alias from a config file it cannot read, which git would expand into whatever command"
+                        " it names before it dispatches; the hook fails closed. Spud commits, after the outcome is recorded" % verb), analysis
+            return ("Law 7: `git %s` is not one of git's own commands (`git --list-cmds=main`), so it is an alias from a config file the hook"
+                    " cannot read (another repository's .git/config, ~/.gitconfig, $XDG_CONFIG_HOME/git/config, the system config, an include)"
+                    " or an external `git-%s` program on PATH; git expands an alias into whatever command it names before it dispatches, so a"
+                    " write can run under a verb Law 7's table does not list. A member runs only git's own read verbs (status, log, diff, show,"
+                    " rev-parse, ls-files ...); Spud commits, after the outcome is recorded" % (verb, verb)), analysis
+        elif kind == "git-repo":
+            spelled, target, target_cwds = detail
+            outside, unresolved = git_repo_outside(ctx, con, target, target_cwds)
+            if unresolved:
+                return ("Law 7: this git call points git at a repository the hook cannot resolve (%s): a path relative to a directory it"
+                        " cannot follow, or a value it cannot read. git reads that repository's .git/config before it dispatches -- aliases"
+                        " and the keys that name a program it runs -- so a write can run under a verb Law 7's table does not list. Use an"
+                        " absolute path inside the session's own checkout; Spud commits, after the outcome is recorded" % deglob(spelled)), analysis
+            if outside is not None:
+                return ("Law 7: this git call points git at %s (%s), outside every checkout the ledger knows (a registered project's root or"
+                        " one of its worktrees). git reads that repository's .git/config before it dispatches -- aliases and the keys that"
+                        " name a program it runs -- and a member can write such a file under its own deliverables, so a write can run under a"
+                        " verb Law 7's table does not list. Run git in the session's own checkout; Spud commits, after the outcome is"
+                        " recorded" % (outside, deglob(spelled))), analysis
         elif kind == "git-program":
             return ("Law 7: this git call runs a program git never checks (%s); git config, the environment and some options can name or"
                     " enable a program git runs -- a pager, editor, ssh or proxy command, diff or merge driver, hooks or exec path, credential"

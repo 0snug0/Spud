@@ -2563,15 +2563,22 @@ class GlobCommandWordTest(BashHookCase):
 
     def test_a_verb_glob_matching_a_file_the_line_creates(self):
         """Decision: the verb is read as every write verb its pattern can match, whether or not a file matches now (the line may
-        create it), and a pattern that can match no write verb is read as spelled."""
+        create it), and a pattern that can match no write verb is read as spelled.  Since SPD-047 the spelled reading is refused
+        too, as a verb outside git's own commands: the shell expands the pattern against files, so a member that creates a file
+        named like an alias runs that alias (`touch zz; git z?`), and the pattern itself is no git command either.  The refusal
+        of a write verb the pattern can match still comes first, so `touch push; git p?sh` keeps naming `git push`."""
         for cmd in ("touch push; git p?sh", "touch push && git p*", "git p?sh", "git pu[s]h", "git p(u|x)sh", "touch commit; git c?mmit -m x",
                     "git ch?ckout main", "git st?sh", "git re[s]et --hard", "git st(a|x)sh pop", "git worktree a?d ../x", "git branch -[D] x"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd, "Law 7")
         self.assertIn("git push", self.assertRefused("touch push; git p?sh", "Law 7").reason)
-        for ok in ("git st?tus", "git l?g --oneline", "git d[i]ff", "git sh(o|x)w HEAD", "touch status; git st*tus"):
-            with self.subTest(ok):
-                self.assertSilent(ok)
+        # A pattern that can match no write verb was silent before SPD-047 and is now refused as a verb git does not have;
+        # Spud is still not bound by any of it.
+        for cmd in ("git st?tus", "git l?g --oneline", "git d[i]ff", "git sh(o|x)w HEAD", "touch status; git st*tus"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd, "Law 7")
+                self.assertIn("not one of git's own commands", r.reason)
+                self.assertSilent(cmd, agent_id=None)
 
     def test_brace_lists_in_the_command_word_and_the_verb(self):
         for cmd in ("{git,push}", "{/usr/bin/git,push}", "git {push,status}", "command {git,push}", "{env,git} push", "git {-C,.} push",
@@ -2580,9 +2587,13 @@ class GlobCommandWordTest(BashHookCase):
                 self.refused_for_members(cmd, "Law 7")
                 self.assertSilent(cmd, agent_id=None)
         # git status push; git gxt push; git x push; git /usr/bin/x push (probed: the second word is the verb)
-        for ok in ("git {status,push}", "g{i,x}t push", "{git,x} push", "/usr/bin/{git,x} push"):
-            with self.subTest(ok):
-                self.assertSilent(ok)
+        self.assertSilent("git {status,push}")  # status is one of git's own commands and its arguments are not read
+        # The other three put a word git does not have in the verb position, which SPD-047 refuses as an alias git would expand.
+        for cmd in ("g{i,x}t push", "{git,x} push", "/usr/bin/{git,x} push"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd, "Law 7")
+                self.assertIn("not one of git's own commands", r.reason)
+                self.assertSilent(cmd, agent_id=None)
 
     def test_zsh_equals_expansion(self):
         """zsh replaces `=git` with git's path (EQUALS, on by default and in the Bash tool); bash runs a command named =git.
@@ -2903,9 +2914,12 @@ class GitConfigAliasTest(BashHookCase):
                 self.refused_for_members(cmd)
 
     def test_reads_and_writes_without_config_are_unchanged(self):
-        for ok in ("git status", "git log --oneline -5", "git diff", "git -C /tmp status", "git show HEAD"):
+        for ok in ("git status", "git log --oneline -5", "git diff", "git -C . status", "git show HEAD"):
             with self.subTest(ok):
                 self.assertSilent(ok)
+        # `git -C /tmp status` was silent here until SPD-047: /tmp lies outside every checkout the ledger knows, and git reads
+        # the config of whatever repository it finds there (see GitAliasFileTest).
+        self.assertIn("outside", self.assertRefused("git -C /tmp status", "Law 7").reason)
         for verb in ("push", "commit -m x", "merge x"):
             with self.subTest(verb):
                 self.assertRefused("git " + verb, "Law 7")
@@ -3068,6 +3082,211 @@ class GitProgramTest(BashHookCase):
                    "git --exec-path", "git --exec-path status"):  # bare --exec-path prints the path, it does not set one
             with self.subTest(ok):
                 self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+
+class GitAliasFileTest(BashHookCase):
+    """SPD-047: git also loads aliases -- and every program-naming key of SPD-046's class -- from config files the hook never
+    opens, so a member who plants `[alias] p = push` in one runs a push under a verb Law 7's table does not list.  Probed
+    (git 2.54.0, Apple Git-157, a hand-built .git in the scratchpad, read-only `version` as the alias value, nothing committed):
+    `HOME=<dir> git v`, `XDG_CONFIG_HOME=<dir> git vv`, `git -C <repo> w`, `git --git-dir=<repo>/.git w` (spaced and `=`) and
+    `GIT_DIR=<repo>/.git git w` each expanded an alias defined in the file that setting points git at.  git ignores an alias
+    that hides one of its own commands (`alias.log = !echo SHADOWED` and `alias.status` were ignored; git-config(1): "aliases
+    that hide existing Git commands are ignored"), so an alias can only introduce a verb git does not have, and a verb outside
+    git's own command list is the tell for every alias source at once, on disk or not.  `git --list-cmds=main` is that set (174
+    names here, a superset of --list-cmds=builtins' 147); it holds neither an alias in force nor an external `git-<verb>` on
+    PATH (`--list-cmds=others`, which the hook cannot read either: `PATH=<dir>:$PATH git foo` ran <dir>/git-foo).
+
+    Three refusals, for a member only (Spud's session is unaffected): an unknown verb; HOME or XDG_CONFIG_HOME in force on the
+    line, refused like GIT_CONFIG_GLOBAL, since the file they name can also set core.pager and the rest of SPD-046's class under
+    a real verb; and a repository the hook cannot read, named by -C, --git-dir, --work-tree, GIT_DIR, GIT_WORK_TREE or
+    GIT_COMMON_DIR, when it lies outside every checkout the ledger knows.  git rejects `-C<dir>`, `-C=<dir>` and abbreviations
+    of the global options (`--git-di=`, probed), so only the spelled forms parse; `-C` is repeatable and relative to the
+    previous one, and it moves what a relative --git-dir means whichever order they appear in (probed, and git(1) documents the
+    equivalence).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        # A repository outside every checkout the ledger knows, built by hand (git init is a write verb): git reads its
+        # config, and the hook cannot.
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.repo = self.out / "repo"
+        (self.repo / ".git" / "objects").mkdir(parents=True)
+        (self.repo / ".git" / "refs" / "heads").mkdir(parents=True)
+        (self.repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (self.repo / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n[alias]\n\tp = push\n", encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7", cwd=None):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id, cwd)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None, cwd=cwd)  # Law 7 does not bind Spud
+        return r
+
+    def finding(self, command, cwd=None):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=cwd or str(self.home.path))).findings
+
+    # -- 1. an unknown verb -------------------------------------------------------
+    def test_the_tickets_evidence_commands(self):
+        # Each of these ran an alias defined in a file the hook cannot read; the verb is the tell.
+        for cmd in ("git p", "git -C %s p" % self.repo, "git --git-dir=%s/.git p" % self.repo,
+                    "GIT_DIR=%s/.git git p" % self.repo):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("git p", r.reason)
+        self.assertEqual(self.finding("git p"), [("git-verb", ("verb", "p"))])
+        # `HOME=<dir> git p` is refused too, but by the config-file finding, which comes first and names the variable: the
+        # unknown verb is the hook's last resort, so a refusal the words as spelled already earn keeps its own reason.
+        r = self.refused_for_members("HOME=%s git p" % self.out)
+        self.assertIn("HOME", r.reason)
+
+    def test_an_unknown_verb_is_refused_and_named(self):
+        for verb in ("p", "foo", "v", "w", "st", "co", "lg", "ci", "amend", "pushf", "git-foo", "Status", "STATUS"):
+            with self.subTest(verb):
+                r = self.refused_for_members("git " + verb)
+                self.assertIn("git " + verb, r.reason)
+                self.assertIn("alias", r.reason)
+        # An external `git-<verb>` on PATH is the same hole and the same tell.
+        r = self.refused_for_members("git foo")
+        self.assertIn("git-foo", r.reason)
+
+    def test_an_unknown_verb_behind_global_options_and_in_shell_constructs(self):
+        for cmd in ("git --no-pager p", "git -c color.ui=never p", "git -C . p", "sh -c 'git p'", "bash -c \"git p\"",
+                    "eval 'git p'", "(git p)", "echo $(git p)", "true && git p", "env git p", "command git p",
+                    "/usr/bin/git p", "git --literal-pathspecs p"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_gits_own_read_verbs_stay_silent(self):
+        for ok in ("git status", "git log --oneline -5", "git diff", "git show HEAD", "git blame f", "git rev-parse HEAD",
+                   "git ls-files", "git grep x", "git stash list", "git fetch", "git remote -v", "git worktree list",
+                   "git worktree list --porcelain", "git for-each-ref", "git for-each-ref --format=%(refname)",
+                   "git rev-list --count HEAD", "git ls-remote host:r", "git count-objects -v", "git describe --tags",
+                   "git shortlog -sn", "git show-ref", "git cat-file -p HEAD", "git check-ignore x", "git merge-base a b",
+                   "git name-rev HEAD", "git whatchanged", "git range-diff a b c", "git diff-tree HEAD", "git var GIT_AUTHOR_IDENT",
+                   "git verify-tag v1", "git help status", "git version", "git --version", "git --help", "git"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_write_verbs_keep_their_spd_044_era_reason(self):
+        for verb in ("commit -m x", "add .", "push", "merge x", "rebase main", "worktree add ../x", "branch -D x",
+                     "stash", "config user.name x"):
+            with self.subTest(verb):
+                r = self.assertRefused("git " + verb, "Law 7")
+                self.assertIn("git " + verb.split()[0], r.reason)
+                self.assertIn("Spud commits", r.reason)
+                self.assertNotIn("not one of git's own", r.reason)
+
+    def test_the_command_list_is_read_from_git_and_fails_closed(self):
+        # The hook reads `git --list-cmds=main` with its own sanitised environment; when git cannot be run at all it refuses
+        # every verb it cannot check, saying so.  (PATH without git: the CLI itself runs by absolute path.)
+        m = load_spud_module()
+        self.assertIn("status", m.git_own_commands())
+        self.assertNotIn("p", m.git_own_commands())
+        path = self.home.env.get("PATH")
+        self.home.env["PATH"] = str(self.out / "no-git-here")
+        try:
+            r = self.assertRefused("git status", "Law 7")
+            self.assertIn("--list-cmds=main", r.reason)
+            self.assertSilent("git status", agent_id=None)  # Law 7 does not bind Spud
+            r = self.assertRefused("git p", "Law 7")
+            self.assertIn("--list-cmds=main", r.reason)
+            self.assertRefused("git push", "spudagents never run")  # a real write verb keeps its own reason
+        finally:
+            if path is None:
+                self.home.env.pop("PATH", None)
+            else:
+                self.home.env["PATH"] = path
+        self.assertSilent("git status")
+
+    # -- 2. HOME and XDG_CONFIG_HOME ---------------------------------------------
+    def test_home_and_xdg_config_home_in_force_are_refused(self):
+        for cmd in ("HOME=/tmp/x git status", "XDG_CONFIG_HOME=/tmp/x git status", "HOME=%s git log" % self.out,
+                    "export HOME=/tmp/x; git status", "export XDG_CONFIG_HOME=/tmp/x; git diff",
+                    "env HOME=/tmp/x git status", "env XDG_CONFIG_HOME=/tmp/x git status",
+                    "/usr/bin/env HOME=/tmp/x git status", "HOME=/tmp/x XDG_CONFIG_HOME=/tmp/y git status",
+                    "sh -c 'HOME=/tmp/x git status'", "HOME=/tmp/x git commit -m y"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("HOME", r.reason)
+        self.assertEqual(self.finding("HOME=/tmp/x git status"), [("git-config", "HOME")])
+        self.assertEqual(self.finding("XDG_CONFIG_HOME=/tmp/x git status"), [("git-config", "XDG_CONFIG_HOME")])
+        r = self.refused_for_members("HOME=/tmp/x git status")
+        self.assertIn("alias", r.reason)  # the git-config reason of SPD-044, now naming the home variables too
+
+    def test_a_home_expansion_inside_a_path_stays_silent(self):
+        # Only an assignment puts HOME in force; `$HOME` used in a path is an ordinary word.
+        for ok in ("git log -1 $HOME", "git log -- $HOME/x", "echo $HOME", "cat $HOME/.gitconfig", "ls $XDG_CONFIG_HOME",
+                   "git diff HEAD -- $HOME"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        for ok in ("SPUD_HOME=/tmp/x git status", "HOMEBREW_PREFIX=/tmp/x git status", "MY_HOME=/tmp/x git status",
+                   "XDG_DATA_HOME=/tmp/x git status", "HOME_DIR=/tmp/x git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+
+    # -- 3. another repository ----------------------------------------------------
+    def test_a_repository_outside_every_known_checkout_is_refused(self):
+        for cmd in ("git -C %s status" % self.repo, "git -C /tmp status", "git -C /tmp log --oneline",
+                    "git --git-dir=%s/.git status" % self.repo, "git --git-dir %s/.git status" % self.repo,
+                    "git --work-tree=%s status" % self.repo, "git --work-tree %s status" % self.repo,
+                    "GIT_DIR=%s/.git git status" % self.repo, "GIT_WORK_TREE=%s git status" % self.repo,
+                    "GIT_COMMON_DIR=%s/.git git status" % self.repo,
+                    "env GIT_DIR=%s/.git git status" % self.repo, "export GIT_DIR=/tmp/x/.git; git status",
+                    "git -C /tmp -c color.ui=never status", "sh -c 'git -C /tmp status'", "(git -C /tmp status)",
+                    "cd /tmp && git -C . status", "git -C ../.. status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("outside", r.reason)
+
+    def test_the_repository_finding_names_the_directory_and_the_chain(self):
+        self.assertEqual(self.finding("git -C /tmp status"),
+                         [("git", ("status", None)), ("git-repo", ("-C /tmp", "/tmp", frozenset({str(self.home.path)})))])
+        # -C is repeatable and each is relative to the previous, so only the composed directory is the one git reads in.
+        r = self.refused_for_members("git -C /tmp -C sub status")
+        self.assertIn("/tmp/sub", r.reason)
+        self.assertNotIn("outside", self.assertRefused("git -C /tmp commit -m x", "Law 7").reason)  # the verb refuses first
+
+    def test_a_target_inside_the_session_checkout_stays_silent(self):
+        home = self.home.path
+        (home / ".claude" / "worktrees" / "w" / "bin").mkdir(parents=True)
+        for ok in ("git -C %s status" % home, "git -C . status", "git -C tests status", "git -C ./tests log",
+                   "git -C %s/tests status" % home, "git --git-dir=%s/.git status" % home,
+                   "git --git-dir %s/.git log" % home, "git --work-tree=%s status" % home,
+                   "GIT_DIR=%s/.git git status" % home, "GIT_WORK_TREE=%s git status" % home,
+                   "git -C %s -C tests status" % home, "cd %s/tests && git -C . status" % home,
+                   "git -C %s --git-dir=.git status" % home, "git status", "git log",
+                   # the common one: a worktree of the session's own checkout
+                   "git -C %s/.claude/worktrees/w status" % home, "git -C %s/.claude/worktrees/w/bin log" % home):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_a_target_the_hook_cannot_resolve_is_refused(self):
+        # A relative target from a directory the hook cannot follow, and a value it cannot read.
+        for cmd in ("cd - && git -C sub status", "popd && git -C sub status", "cd ~x && git -C sub status",
+                    "git -C '~x' status", "GIT_DIR=$D git status", "GIT_DIR=`echo /tmp` git status"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "cannot")
+        # A variable in an option git reads by name was refused as an unresolvable word (SPD-043) and now names the
+        # repository instead: the option is read first, and its reason says what to do about the path.
+        for cmd in ("git -C $D status", "git --git-dir=$D status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd, "cannot resolve")
+                self.assertIn("points git at a repository", r.reason)
+
+    def test_spud_is_unaffected_by_all_of_it(self):
+        for ok in ("git p", "git foo", "git -C /tmp status", "git -C %s p" % self.repo, "HOME=/tmp/x git status",
+                   "XDG_CONFIG_HOME=/tmp/x git log", "GIT_DIR=/tmp/x/.git git status", "git --work-tree=/tmp status",
+                   "cd - && git -C sub status"):
+            with self.subTest(ok):
                 self.assertSilent(ok, agent_id=None)
 
 
