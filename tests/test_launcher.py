@@ -35,6 +35,7 @@ class LauncherTest(SpudTestCase):
             ("PreToolUse", dict(common, hook_event_name="PreToolUse", tool_name="Bash", tool_use_id="toolu_1", tool_input={"command": "git status", "description": "s"})),
             ("SessionStart", dict(common, hook_event_name="SessionStart", source="startup", model="claude-opus-5")),
             ("Stop", dict(common, hook_event_name="Stop", stop_hook_active=False, last_assistant_message="Done.")),
+            ("UserPromptSubmit", dict(common, hook_event_name="UserPromptSubmit", prompt="Work on SPD-001")),  # SPD-057: silent in the home
         )
 
     def test_the_launcher_is_small_and_the_program_is_a_module_beside_it(self):

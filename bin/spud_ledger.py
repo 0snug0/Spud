@@ -1270,12 +1270,17 @@ def next_ticket_number(con, project_id):
     return (con.execute("SELECT COALESCE(MAX(number), 0) FROM tickets WHERE project_id = ?", (project_id,)).fetchone()[0]) + 1
 
 
+def ticket_key(prefix, number):
+    """The ledger's spelling of a ticket or team key: the prefix, a dash, the number padded to three digits."""
+    return "%s-%03d" % (prefix, number)
+
+
 def insert_ticket(con, at, actor_label, project, title, priority, status, origin="eric", proposal_id=None,
                   brief="", sizing="", outcome="", tags=None, heading=None, created_at=None, number=None, layout=None):
     if number is None:
         number = next_ticket_number(con, project["id"])
-    key = "%s-%03d" % (project["ticket_prefix"], number)
-    team_key = "%s-%03d" % (project["team_prefix"], number)
+    key = ticket_key(project["ticket_prefix"], number)
+    team_key = ticket_key(project["team_prefix"], number)
     stamp = created_at or at
     tags = tags if tags is not None else ["ticket"]
     cur = con.execute(
@@ -3286,6 +3291,7 @@ HOOK_TABLE = (
     ("SubagentStop", None),
     ("SessionStart", "startup|resume|clear|compact"),  # clear since SPD-011: a /clear gets the board too
     ("Stop", None),
+    ("UserPromptSubmit", None),  # SPD-057: a prompt naming a claim project's ticket claims the session; the event takes no matcher
 )
 HOOK_TIMEOUT = 30  # seconds; a hook is one Python start and one short transaction (busy_timeout 5 s)
 HOOK_MARK = "bin/spud hook"  # what marks a hook entry as the ledger's, whatever home it was generated for
@@ -4635,18 +4641,35 @@ CLAIM_CARD_CAP = 1536        # bytes: what `session claim` prints
 SESSION_CONTEXT_CAP = 2048   # bytes: a project session's SessionStart context (the design's probe P2)
 PLAIN_NOTICE_CAP = 300       # bytes: the one line a session that is not Spud gets
 SUBJECT_TICKET_KEY = re.compile(r"[A-Z][A-Z0-9]*-\d{3}")
-SKILL_TEMPLATE = """---
+# The /spud skill's steps, the one source of the installed SKILL.md and of the context the UserPromptSubmit hook gives a
+# session it claims (SPD-057), so the two cannot drift.  Step 2 is the claim: the skill runs it, the hook has made it.
+SKILL_HEAD = """---
 name: spud
 description: Make this session Spud, Eric's second brain, in a repository registered as a Spud project. Only when Eric types /spud or asks for Spud in this session.
 disable-model-invocation: true
 ---
 You are becoming Spud in this session.
-
-1. Read {home}/CLAUDE.md in full, then {home}/spud.config.json. They bind you from now on, with the rule in step 3.
-2. Run `python3.14 -I -S {home}/bin/spud --as spud session claim`. If it refuses, quote the refusal, say this session is not Spud, and stop following these steps.
-3. The claim names the project. This repository's own CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed. Spud's laws govern delegation, the ledger, and who writes what. In a conflict about the first, the project wins; about the second, Spud's laws win.
-4. Run the session ritual of CLAUDE.md from step 2.
 """
+SKILL_STEPS = (
+    "Read {home}/CLAUDE.md in full, then {home}/spud.config.json. They bind you from now on, with the rule in step 3.",
+    "{claim}",
+    "The claim names the project. This repository's own CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed. Spud's laws govern delegation, the ledger, and who writes what. In a conflict about the first, the project wins; about the second, Spud's laws win.",
+    "Run the session ritual of CLAUDE.md from step 2, including its step 4: set the session title to `{title}`.",
+)
+SKILL_CLAIM = "Run `python3.14 -I -S {home}/bin/spud --as spud session claim`. If it refuses, quote the refusal, say this session is not Spud, and stop following these steps."
+HOOK_CLAIM = ("The ledger's hook has made the claim (the card below); do not run `session claim`. If Eric says this session is not to be Spud,"
+              " run `python3.14 -I -S {home}/bin/spud --as spud session release`.")
+SKILL_TITLE = "<KEY> - <what this session does>"
+
+
+def skill_steps(home, claim, title):
+    """The numbered steps, one per line, with the claim step and the title filled in."""
+    return "".join("%d. %s\n" % (n, step.format(home=home, claim=claim, title=title)) for n, step in enumerate(SKILL_STEPS, start=1))
+
+
+def skill_markdown(home):
+    """What project install writes to ~/.claude/skills/spud/SKILL.md."""
+    return SKILL_HEAD + "\n" + skill_steps(home, SKILL_CLAIM.format(home=home), SKILL_TITLE)
 
 
 def user_claude_dir():
@@ -5078,7 +5101,7 @@ def install_project(ctx, con, p):
     agents = files["agent"].parent
     first_agent = not (agents.is_dir() and any(agents.glob("*.md")))
     agent_text = files["source_agent"].read_text(encoding="utf-8")
-    skill_text = SKILL_TEMPLATE.format(home=ctx.home)
+    skill_text = skill_markdown(ctx.home)
     for path, text in ((files["agent"], agent_text), (files["skill"], skill_text)):
         if not path.is_file() or path.read_text(encoding="utf-8") != text:
             write_whole(path, text)
@@ -5313,7 +5336,24 @@ def cmd_project_remove(ctx, args):
                              "\n".join([text] + ["  " + c for c in changed] + ["  warning: " + w for w in warnings]), entry)
 
 
-def claim_card(ctx, con, project, session, at):
+def record_claim(con, at, actor_label, session, project, cwd, ticket=None):
+    """The one write of a claim: the session's row, unreleased, and its session.claimed event.  `how` in the event says who
+    claimed: `command` (`session claim`, which /spud runs) or `hook`, the UserPromptSubmit hook, with the ticket whose key
+    in the prompt made it claim (SPD-057)."""
+    con.execute(
+        "INSERT INTO sessions (session_id, project_id, claimed_at, released_at, cwd) VALUES (?, ?, ?, NULL, ?)"
+        " ON CONFLICT(session_id) DO UPDATE SET project_id = excluded.project_id, claimed_at = excluded.claimed_at, released_at = NULL, cwd = excluded.cwd",
+        (session, project["id"], at, cwd),
+    )
+    data = {"session_id": session, "project": project["key"], "cwd": cwd, "how": "command" if ticket is None else "hook"}
+    body = "session %s claimed in project %s" % (session, project["key"])
+    if ticket is not None:
+        data["ticket"] = ticket["key"]
+        body += " by the UserPromptSubmit hook: the prompt names %s" % ticket["key"]
+    write_event(con, at, actor_label, "session.claimed", body, ticket_id=ticket["id"] if ticket is not None else None, data=data)
+
+
+def claim_card(ctx, con, project, session, at, cap=CLAIM_CARD_CAP):
     root = project_root(ctx, project)
     head = "\n".join([
         "Session %s is Spud in project %s (%s), claimed %s." % (session, project["key"], project["name"], fm_minute(at)),
@@ -5327,7 +5367,7 @@ def claim_card(ctx, con, project, session, at):
         "board (%s):" % project["key"],
     ])
     rows = [dict(r) for r in con.execute("SELECT * FROM v_board WHERE project = ?", (project["key"],)).fetchall()]
-    return fit_bytes(head, board_brief_text(con, rows), CLAIM_CARD_CAP)
+    return fit_bytes(head, board_brief_text(con, rows), cap)
 
 
 def cmd_session_claim(ctx, args):
@@ -5356,13 +5396,7 @@ def cmd_session_claim(ctx, args):
             return Result({"session_id": session, "project": project["key"], "claimed": False}, "every session in the home is Spud; nothing to claim")
         at = now()
         with write_txn(con):
-            con.execute(
-                "INSERT INTO sessions (session_id, project_id, claimed_at, released_at, cwd) VALUES (?, ?, ?, NULL, ?)"
-                " ON CONFLICT(session_id) DO UPDATE SET project_id = excluded.project_id, claimed_at = excluded.claimed_at, released_at = NULL, cwd = excluded.cwd",
-                (session, project["id"], at, cwd),
-            )
-            write_event(con, at, actor.label, "session.claimed", "session %s claimed in project %s" % (session, project["key"]),
-                        data={"session_id": session, "project": project["key"], "cwd": cwd})
+            record_claim(con, at, actor.label, session, project, cwd)
             card = claim_card(ctx, con, project, session, at)
     finally:
         con.close()
@@ -5514,11 +5548,11 @@ def cmd_ledger_commit(ctx, args):
 # (PreToolUse for Agent, Bash and the edit tools; Stop) fail closed: a planned refusal is
 # `permissionDecision: deny` with the reason (so the model reads why), anything unexpected
 # is exit 2.  Recording hooks (PostToolUse for Agent, SubagentStart, SubagentStop,
-# SessionStart) fail open: exit 0 whatever happens, the gap written to the spool
+# SessionStart, UserPromptSubmit) fail open: exit 0 whatever happens, the gap written to the spool
 # <SPUD_HOME>/.spud/hook-errors.jsonl and drained into `hook.error` events by the next
 # successful hook or CLI command.  One short BEGIN IMMEDIATE transaction per hook.
 
-HOOK_EVENTS = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop", "SessionStart", "Stop")
+HOOK_EVENTS = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop", "SessionStart", "Stop", "UserPromptSubmit")
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 ENFORCED_TOOLS = ("Agent", "Bash") + EDIT_TOOLS
 # Spud's hand-written set (Law 1 and correction 2 on SPD-008); everything else in the
@@ -9499,6 +9533,84 @@ def hook_session_start(ctx, payload):
     return HookOutput({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}})
 
 
+# The UserPromptSubmit hook (SPD-057).  Eric starts a session in a claim project with "Work on BAD-006" and no /spud; before
+# SPD-057 it stayed plain, and the work happened outside the ledger.  Now a prompt that names a ticket of the session's
+# launch project claims the session the way `session claim` does, and hands the model the /spud skill's steps.
+PROMPT_KEY_SHAPE = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")  # a cheap test before the database is opened: most prompts name no key
+SPUD_COMMAND = re.compile(r"\A\s*/spud(?:\s|\Z)|<command-name>\s*/spud\s*</command-name>")  # typed, or as the transcript expands it
+PROMPT_CLAIM_CAP = SESSION_CONTEXT_CAP  # the same inline limit as SessionStart's context (the design's probe P2; SPD-048)
+
+
+def prompt_is_spud_command(prompt):
+    """/spud, with or without arguments: the skill claims the session itself, so the hook stays out of its way."""
+    return SPUD_COMMAND.search(prompt) is not None
+
+
+def prompt_ticket_keys(prompt, prefix):
+    """The keys with this ticket prefix a prompt names, in order, each once: word-bounded, case-sensitive as the tickets
+    table's keys are, and spelled exactly as the ledger spells a key (ticket_key).  So BAD-006 and BAD-1000, never BAD-23
+    (the older tracker's numbers BadTakes cites), BAD-0060, BAD-06, bad-006 or XBAD-006."""
+    out = []
+    for m in re.finditer(r"\b%s-(\d{1,12})\b" % re.escape(prefix), prompt):
+        key = m.group(0)
+        if key == ticket_key(prefix, int(m.group(1))) and key not in out:
+            out.append(key)
+    return out
+
+
+def prompted_ticket(con, project, prompt):
+    """The first ticket of the project the prompt names that is not declined (a done one counts: Eric may be reopening it)."""
+    for key in prompt_ticket_keys(prompt, project["ticket_prefix"]):
+        row = con.execute("SELECT * FROM tickets WHERE project_id = ? AND key = ? AND status != 'declined'", (project["id"], key)).fetchone()
+        if row is not None:
+            return row
+    return None
+
+
+def released_by_command(con, session):
+    """Whether `session release` ever released this session: its session.released event.  A release sticks, so the hook never
+    claims such a session again; `project uninstall` and `project remove` release claims without that event."""
+    return con.execute("SELECT 1 FROM events WHERE kind = 'session.released' AND json_extract(data, '$.session_id') = ? LIMIT 1",
+                       (session,)).fetchone() is not None
+
+
+def prompt_claim_context(ctx, con, project, ticket, session, at):
+    head = ("Ledger: the prompt names %s, a ticket of Spud project `%s`, so the UserPromptSubmit hook claimed this session: it is Spud now."
+            " Before anything else:\n" % (ticket["key"], project["key"]))
+    head += skill_steps(ctx.home, HOOK_CLAIM.format(home=ctx.home), "%s - <what this session does>" % ticket["key"])
+    card = claim_card(ctx, con, project, session, at, cap=max(PROMPT_CLAIM_CAP - len(head.encode("utf-8")) - 1, 0))
+    return fit_bytes(head, card, PROMPT_CLAIM_CAP)  # a blank line between the steps and the card
+
+
+def hook_user_prompt_submit(ctx, payload):
+    """Claim a plain session (an unclaimed one in a claim project) whose prompt names one of its launch project's tickets.
+    Silent for everything else: a subagent's call, a session that is Spud already (the home, an always project, a claim), a
+    session `session release` released, /spud itself, and a prompt that names no such ticket."""
+    prompt, session = payload.get("prompt"), payload.get("session_id")
+    if payload.get("agent_id") or not isinstance(prompt, str) or not isinstance(session, str) or not session or not ctx.db_path.is_file():
+        return SILENT
+    if not PROMPT_KEY_SHAPE.search(prompt) or prompt_is_spud_command(prompt):
+        return SILENT
+    con = connect(ctx)
+    try:
+        mode, project, _claim = session_mode(ctx, con, payload)
+        if mode != "plain" or released_by_command(con, session):
+            return SILENT
+        ticket = prompted_ticket(con, project, prompt)
+        if ticket is None:
+            return SILENT
+        cwd = payload.get("cwd") if isinstance(payload.get("cwd"), str) and payload.get("cwd") else None
+        at = now()
+        with write_txn(con):
+            if claim_of(con, session) is not None:
+                return SILENT  # claimed meanwhile (a /spud in the same breath)
+            record_claim(con, at, "hook:UserPromptSubmit", session, project, cwd, ticket=ticket)
+            context = prompt_claim_context(ctx, con, project, ticket, session, at)
+    finally:
+        con.close()
+    return HookOutput({"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": context}})
+
+
 # Spud's Stop hook, one session at a time (SPD-018).  Eric runs tickets in parallel sessions; before SPD-018 every Stop
 # was held, ledger-wide, for any member returned unrecorded, another session's included.  A member's session is the
 # session that spawned its tree.  Every hook payload fired inside a subagent carries the main session's session_id (the
@@ -9707,6 +9819,7 @@ HOOK_HANDLERS = {
     "SubagentStop": hook_subagent_stop,
     "SessionStart": hook_session_start,
     "Stop": hook_stop,
+    "UserPromptSubmit": hook_user_prompt_submit,
 }
 
 
@@ -9761,7 +9874,7 @@ actors (--as):
                      spawn, SubagentStop for a foreground one.
 
 hooks: `spud hook <event>` is the harness's entry point (payload on stdin, answer on
-       stdout); `spud settings sync` installs the six events into .claude/settings.json.
+       stdout); `spud settings sync` installs the seven events into .claude/settings.json.
        Enforcing hooks fail closed (exit 2), recording hooks fail open (spool, then
        hook.error events).  Inspect the database with `spud sql --readonly '<statement>'`.
 
@@ -9866,7 +9979,7 @@ def build_parser():
     p = sub.add_parser("settings", help=".claude/settings.json generation")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
-    q = ps.add_parser("sync", help="write the two env caps, the six ledger hooks, the CLI allow rules and the Agent deny rules into a settings file, keeping every other key")
+    q = ps.add_parser("sync", help="write the two env caps, the seven ledger hooks, the CLI allow rules and the Agent deny rules into a settings file, keeping every other key")
     q.add_argument("--path", help="settings file (default <SPUD_HOME>/.claude/settings.json)")
     q.add_argument("--dry-run", action="store_true", help="print the result, write nothing")
     q.set_defaults(func=cmd_settings_sync)

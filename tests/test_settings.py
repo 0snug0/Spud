@@ -1,4 +1,4 @@
-"""settings sync: the two env caps generated from spud.config.json limits, the six
+"""settings sync: the two env caps generated from spud.config.json limits, the seven
 ledger hooks and the CLI allow rules, written into a settings file with every
 other key preserved. Always against a temp file."""
 
@@ -22,6 +22,7 @@ EVENTS = {
     "SubagentStop": [None],
     "SessionStart": ["startup|resume|clear|compact"],
     "Stop": [None],
+    "UserPromptSubmit": [None],  # SPD-057
 }
 
 
@@ -81,20 +82,20 @@ class SettingsSyncTest(SpudTestCase):
         self.assertEqual(set(data.keys()), {"env", "permissions", "hooks"})
         self.assertEqual(data["env"], {"CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "2", "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "9"})
 
-    def test_the_six_hooks_are_installed_with_absolute_commands(self):
+    def test_the_seven_hooks_are_installed_with_absolute_commands(self):
         path = self.home.path / ".claude" / "settings.json"
         self.home.json("settings", "sync", "--path", path)
         data = json.loads(path.read_text(encoding="utf-8"))
         found = spud_hooks(data)
         expected = {(event, matcher) for event, matchers in EVENTS.items() for matcher in matchers}
         self.assertEqual({(e, m) for e, m, _ in found}, expected)
-        self.assertEqual(len(found), 8)
+        self.assertEqual(len(found), 9)
         for event, matcher, h in found:
             self.assertEqual(h["type"], "command")
             self.assertEqual(h["timeout"], 30)
             self.assertTrue(h["command"].startswith("SPUD_HOME=%s %s -I -S %s/bin/spud hook %s" % (self.home.path, sys.executable, self.home.path, event)), h["command"])
         # matcher-less events carry no matcher key at all
-        for group in data["hooks"]["SubagentStart"] + data["hooks"]["SubagentStop"] + data["hooks"]["Stop"]:
+        for group in data["hooks"]["SubagentStart"] + data["hooks"]["SubagentStop"] + data["hooks"]["Stop"] + data["hooks"]["UserPromptSubmit"]:
             self.assertNotIn("matcher", group)
         # each event has exactly one ledger hook group, so matching hooks never run twice
         for event in EVENTS:
@@ -176,7 +177,7 @@ class SettingsSyncTest(SpudTestCase):
         out = self.home.json("settings", "sync", "--path", path)
         data = out["settings"]
         commands = [h["command"] for _, _, h in spud_hooks(data)]
-        self.assertEqual(len(commands), 8)
+        self.assertEqual(len(commands), 9)
         self.assertFalse(any("/old/" in c for c in commands))
         self.assertEqual(data["hooks"]["Notification"], stale["hooks"]["Notification"])
         foreign = [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"] if "bin/spud hook" not in h["command"]]
@@ -211,7 +212,7 @@ class SettingsSyncTest(SpudTestCase):
         self.home.json("settings", "sync", "--path", self.home.path / "s.json")
         events = self.home.json("events", "--kind", "config.synced")["events"]
         self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["data"]["hooks"], 8)
+        self.assertEqual(events[0]["data"]["hooks"], 9)
         self.assertEqual(events[0]["data"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
         self.assertIn("path", events[0]["data"])
 

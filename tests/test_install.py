@@ -15,7 +15,7 @@ from helpers import EXIT_ERROR, EXIT_OK, RepoMixin, SpudTestCase, git
 BADTAKES_LOCAL = ('{\n    "permissions": {"allow": ["Bash(node -e \' *)"]},\n    "outputStyle": "Concise",\n'
                   '    "disabledMcpjsonServers": ["Blender", "openscad"]\n}\n')
 AGENT = "---\nname: spudagent\ndescription: A spudagent (test fixture).\n---\nYou are a spudagent.\n"
-EVENTS = {"PreToolUse": 3, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop": 1, "SessionStart": 1, "Stop": 1}
+EVENTS = {"PreToolUse": 3, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop": 1, "SessionStart": 1, "Stop": 1, "UserPromptSubmit": 1}
 
 
 class InstallTest(RepoMixin, SpudTestCase):
@@ -55,7 +55,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         home = str(self.home.path)
         self.assertEqual(data["permissions"]["allow"], ["Bash(node -e ' *)", "Bash(python3.14 -I -S %s/bin/spud *)" % home, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, home)])
         commands = [(event, h["command"]) for event, groups in data["hooks"].items() for g in groups for h in g["hooks"]]
-        self.assertEqual(len(commands), 8)
+        self.assertEqual(len(commands), 9)
         self.assertEqual({e: sum(1 for x, _ in commands if x == e) for e in EVENTS}, EVENTS)
         for event, command in commands:
             self.assertEqual(command, "SPUD_HOME=%s %s -I -S %s/bin/spud hook %s --project badtakes" % (home, sys.executable, home, event))
@@ -90,6 +90,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertIn("\ndisable-model-invocation: true\n", skill)
         self.assertIn("python3.14 -I -S %s/bin/spud --as spud session claim" % self.home.path, skill)
         self.assertIn("%s/CLAUDE.md" % self.home.path, skill)
+        self.assertIn("set the session title to `<KEY> - <what this session does>`", skill)  # SPD-057
         self.assertEqual(self.pointer.read_text(encoding="utf-8"), "%s\n" % self.home.path)
 
     def test_a_second_install_writes_nothing(self):
@@ -172,7 +173,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.install()
         out = self.home.json("settings", "sync", "--path", self.home.path / "s.json")
         commands = [h["command"] for groups in out["settings"]["hooks"].values() for g in groups for h in g["hooks"]]
-        self.assertEqual(len(commands), 8)
+        self.assertEqual(len(commands), 9)
         self.assertTrue(all(not c.endswith("--project badtakes") and "--project" not in c for c in commands), commands)
         self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
         self.assertIn("env", out["settings"])
@@ -195,6 +196,25 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertIn("no /spud skill", proc.stdout)
         self.assertEqual(self.cli("project", "sync", "nope", actor="spud", check=False).returncode, EXIT_ERROR)
         self.assertEqual(self.cli("project", "sync", actor="spud", check=False).returncode, 2)
+
+    def test_sync_writes_the_prompt_hook_into_an_installation_made_before_it(self):
+        """SPD-057: an installation from before the UserPromptSubmit hook lacks its line; doctor names the gap and `project sync`
+        writes the line with the project's key, keeping every other entry."""
+        self.install()
+        data = self.settings()
+        del data["hooks"]["UserPromptSubmit"]
+        self.local.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        proc = self.cli("--json", "doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("lacks this home's ledger hooks", proc.stdout)
+        out = self.cli_json("project", "sync", "badtakes", actor="spud")
+        self.assertEqual(out["projects"][0]["written"], [str(self.local)])
+        data = self.settings()
+        self.assertEqual([h["command"] for g in data["hooks"]["UserPromptSubmit"] for h in g["hooks"]],
+                         ["SPUD_HOME=%s %s -I -S %s/bin/spud hook UserPromptSubmit --project badtakes" % (self.home.path, sys.executable, self.home.path)])
+        self.assertNotIn("matcher", data["hooks"]["UserPromptSubmit"][0])
+        self.assertEqual(data["outputStyle"], "Concise")
+        self.assertEqual(self.cli("doctor").returncode, EXIT_OK)
 
     def test_remove_uninstalls_first(self):
         self.install()

@@ -142,8 +142,9 @@ class RoundTripMixin:
         return got
 
     def sources(self):
-        files = sorted(self.src.glob("ledger/tickets/SPD-*.md"))
-        files += sorted(self.src.glob("ledger/teams/SPUD-*/*.md"))
+        # every project's notes render flat into the home's ledger/ (SPD-014): BAD-nnn and BADS-nnn beside SPD and SPUD
+        files = sorted(self.src.glob("ledger/tickets/*.md"))
+        files += sorted(self.src.glob("ledger/teams/*/*.md"))
         files += sorted(p for p in self.src.glob("reports/*.md"))
         return [p.relative_to(self.src) for p in files]
 
