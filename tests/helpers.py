@@ -29,7 +29,7 @@ REPO = Path(__file__).resolve().parent.parent
 
 
 def _remove_bytecode():
-    for cache in (REPO / "bin" / "__pycache__", REPO / "tests" / "__pycache__"):
+    for cache in (REPO / "bin" / "__pycache__", REPO / "tests" / "__pycache__", *(REPO / "bin" / "spudlib").glob("**/__pycache__")):
         shutil.rmtree(cache, ignore_errors=True)
 
 

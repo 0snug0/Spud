@@ -77,6 +77,7 @@ class Scratch:
         (self.home / "bin").mkdir()
         for rel in ("bin/spud", "bin/spud_ledger.py", "spud.config.json"):
             shutil.copyfile(REPO / rel, self.home / rel)
+        shutil.copytree(REPO / "bin" / "spudlib", self.home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
         os.chmod(self.home / "bin" / "spud", 0o755)
         (self.home / ".claude" / "agents").mkdir(parents=True)
         shutil.copyfile(REPO / ".claude" / "agents" / "spudagent.md", self.home / ".claude" / "agents" / "spudagent.md")

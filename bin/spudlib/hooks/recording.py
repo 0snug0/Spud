@@ -1,0 +1,147 @@
+"""hooks/recording: Binding, and the recording handlers PostToolUse and SubagentStart.  Moved from bin/spud_ledger.py (SPD-065)."""
+
+import json
+
+from . import hookio, worktrees
+from ..core import kernel
+from ..projects import sessions
+from ..state import ledgerdb, lookup, ops, transcripts
+
+
+# -- the recording handlers ------------------------------------------------------------
+
+
+def bind_member(con, at, actor_label, member, agent_id, session_id=None, tool_use_id=None, resolved_model=None):
+    """agent_id -> member: the columns only hooks write, planned -> active through the state
+    machine, and the events the child recorded before the binding attached to it."""
+    if member["agent_id"] and member["agent_id"] != agent_id:
+        ledgerdb.write_event(con, at, actor_label, "hook.error", "%s is already bound to agent_id %s; not rebinding to %s" % (lookup.member_ref(con, member["id"]), member["agent_id"], agent_id),
+                    ticket_id=member["ticket_id"], member_id=member["id"], agent_id=agent_id, data={"tool_use_id": tool_use_id})
+        return member
+    updates = {"agent_id": agent_id}
+    if session_id:
+        updates["session_id"] = str(session_id)
+    if tool_use_id:
+        updates["tool_use_id"] = tool_use_id
+    if resolved_model:
+        updates["resolved_model"] = str(resolved_model)
+    con.execute("UPDATE members SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), member["id"]))
+    member = lookup.get_member_by_id(con, member["id"])
+    if member["status"] == "planned":
+        ops.member_status_change(con, at, actor_label, member, "active")
+        member = lookup.get_member_by_id(con, member["id"])
+    con.execute("UPDATE events SET member_id = ?, ticket_id = COALESCE(ticket_id, ?) WHERE agent_id = ? AND member_id IS NULL", (member["id"], member["ticket_id"], agent_id))
+    return member
+
+
+# A member's run totals (SPD-021).  A foreground spawn fires SubagentStop and then PostToolUse(Agent,
+# completed) (spike, Enforcement plan, fact 8); a background spawn's PostToolUse comes at launch with no
+# usage fields, so only its SubagentStop records the run.
+# total_tokens and the usage key token_counts reads come only from a transcript sum: the completion's
+# totalTokens and usage cover its final API request only (hooks reference, Agent tool telemetry).
+# What the completion reports is kept under "completion" in usage_json, beside the sum or alone.  Its
+# totalDurationMs and totalToolUseCount, which the reference defines over the whole run (the run's
+# wall-clock duration, the count of tool calls the subagent made), win over the transcript's
+# first-to-last timestamps and tool_use blocks.  Both hooks merge through run_totals, so either order
+# ends in the same row.
+COMPLETION_KEYS = ("status", "usage", "totalTokens", "totalDurationMs", "totalToolUseCount", "toolStats", "modelsUsed")
+
+
+def record_completion(con, member, resp):
+    """A completed foreground Agent call: the child's final text into return_text, and what the
+    completion reports merged into the run totals (run_totals)."""
+    content = resp.get("content")
+    text = None
+    if isinstance(content, list):
+        text = "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    totals = transcripts.run_totals(member, completion={key: resp[key] for key in COMPLETION_KEYS if key in resp})
+    con.execute(
+        "UPDATE members SET return_text = COALESCE(?, return_text), total_tokens = ?, duration_ms = ?, tool_uses = ?, usage_json = ? WHERE id = ?",
+        (text if text else None, totals["total_tokens"], totals["duration_ms"], totals["tool_uses"], totals["usage_json"], member["id"]),
+    )
+
+
+def hook_post_tool_use(ctx, payload):
+    if payload.get("tool_name") != "Agent" or not ctx.db_path.is_file():
+        return hookio.SILENT
+    con = ledgerdb.connect(ctx)
+    try:
+        at = kernel.now()
+        resp = payload.get("tool_response")
+        resp = resp if isinstance(resp, dict) else {}
+        tool_use_id = payload.get("tool_use_id")
+        agent_id = resp.get("agentId")
+        data = {"tool_use_id": tool_use_id, "agent_id": agent_id, "status": resp.get("status")}
+        with ledgerdb.write_txn(con):
+            req = con.execute("SELECT * FROM spawn_requests WHERE tool_use_id = ?", (tool_use_id,)).fetchone() if isinstance(tool_use_id, str) else None
+            gap = None
+            if req is None and sessions.session_mode(ctx, con, payload)[0] == "plain":
+                return hookio.SILENT  # Eric's own subagent in a session that is not Spud: PreToolUse wrote no row, and that is no gap (SPD-014)
+            if req is None:
+                gap = "PostToolUse(Agent) for tool_use_id %s (agentId %s) has no spawn_requests row: the spawn was not seen by PreToolUse" % (tool_use_id, agent_id)
+            elif req["decision"] != "allow":
+                gap = "PostToolUse(Agent) for tool_use_id %s: the spawn was denied by PreToolUse yet a subagent ran (agentId %s)" % (tool_use_id, agent_id)
+            elif req["member_id"] is None:
+                gap = "PostToolUse(Agent) for tool_use_id %s matched no member row" % tool_use_id
+            elif not isinstance(agent_id, str) or not agent_id:
+                gap = "PostToolUse(Agent) for tool_use_id %s carries no agentId; nothing to bind" % tool_use_id
+            if gap:
+                ledgerdb.write_event(con, at, "hook:PostToolUse", "hook.error", gap, agent_id=agent_id if isinstance(agent_id, str) else None, data=data)
+                return hookio.SILENT
+            member = lookup.get_member_by_id(con, req["member_id"])
+            con.execute("UPDATE spawn_requests SET agent_id = ? WHERE tool_use_id = ?", (agent_id, tool_use_id))
+            if member["status"] not in kernel.ALIVE:
+                ledgerdb.write_event(con, at, "hook:PostToolUse", "hook.error", "%s is %s; the binding of agent_id %s was skipped" % (lookup.member_ref(con, member["id"]), member["status"], agent_id),
+                            ticket_id=member["ticket_id"], member_id=member["id"], agent_id=agent_id, data=data)
+                return hookio.SILENT
+            member = bind_member(con, at, "hook:PostToolUse", member, agent_id, session_id=payload.get("session_id"), tool_use_id=tool_use_id, resolved_model=resp.get("resolvedModel"))
+            if resp.get("status") == "completed":
+                record_completion(con, member, resp)
+    finally:
+        con.close()
+    return hookio.SILENT
+
+
+def hook_subagent_start(ctx, payload):
+    if not ctx.db_path.is_file():
+        return hookio.SILENT
+    agent_id = payload.get("agent_id")
+    if not isinstance(agent_id, str) or not agent_id:
+        raise hookio.HookError("SubagentStart payload carries no agent_id")
+    con = ledgerdb.connect(ctx)
+    try:
+        at = kernel.now()
+        with ledgerdb.write_txn(con):
+            member = con.execute("SELECT * FROM members WHERE agent_id = ?", (agent_id,)).fetchone()
+            if member is None and not sessions.pending_spawn(con, payload.get("session_id")) and sessions.session_mode(ctx, con, payload)[0] == "plain":
+                return hookio.SILENT  # Eric's own subagent in a session that is not Spud (SPD-014)
+            ledgerdb.write_event(con, at, "hook:SubagentStart", "member.started", "subagent %s started (%s)" % (agent_id, payload.get("agent_type")),
+                        ticket_id=member["ticket_id"] if member else None, member_id=member["id"] if member else None, agent_id=agent_id,
+                        data={"agent_type": payload.get("agent_type"), "session_id": payload.get("session_id"), "cwd": payload.get("cwd")})
+            context = "Ledger: your agent_id is `%s`; every `spud` command you run takes `--as %s`." % (agent_id, agent_id)
+            named = member
+            if named is None:
+                # A background spawn starts before PostToolUse(Agent) binds it: when the session has exactly one spawn waiting
+                # to bind (of this agent type), that is the member starting, and it is named here without being bound.
+                params = [payload.get("session_id")]
+                narrowing = ""
+                if isinstance(payload.get("agent_type"), str) and payload.get("agent_type"):
+                    narrowing = " AND (subagent_type IS NULL OR subagent_type = ?)"
+                    params.append(payload["agent_type"])
+                waiting = con.execute("SELECT member_id FROM spawn_requests WHERE session_id = ? AND decision = 'allow' AND member_id IS NOT NULL"
+                                      " AND agent_id IS NULL" + narrowing, params).fetchall()
+                if len(waiting) == 1:
+                    named = lookup.get_member_by_id(con, waiting[0]["member_id"])
+            if named:
+                member = named
+                ticket = lookup.get_ticket_by_id(con, member["ticket_id"])
+                context += " You are %s/%s (%s, %s) on %s; your deliverables: %s." % (
+                    ticket["team_key"], member["name"], member["lineage"], member["persona"], ticket["key"], ", ".join(json.loads(member["deliverables"])) or "none")
+                if ticket["project_id"] != 1:
+                    project = con.execute("SELECT * FROM projects WHERE id = ?", (ticket["project_id"],)).fetchone()
+                    context += (" Your ticket's project is `%s`; bare deliverables are relative to `%s` or a worktree of it, and `<key>:<glob>` names"
+                                " another project's checkout; that repository's CLAUDE.md and skills govern how you build and verify."
+                                % (project["key"], worktrees.project_root(ctx, project)))
+    finally:
+        con.close()
+    return hookio.HookOutput({"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": context}})

@@ -1,0 +1,165 @@
+"""commands/views: events, board, fleet, card, member list.  Moved from bin/spud_ledger.py (SPD-065)."""
+
+from ..core import kernel
+from ..projects import sessions
+from ..render import prices, teamcard
+from ..state import ledgerdb, lookup
+
+
+def cmd_events(ctx, args):
+    con = ledgerdb.connect(ctx)
+    try:
+        clauses, params = [], []
+        if args.ticket:
+            clauses.append("ticket_id = ?")
+            params.append(lookup.get_ticket(con, args.ticket)["id"])
+        if args.member:
+            clauses.append("member_id = ?")
+            params.append(lookup.get_member(con, args.member)["id"])
+        if args.kind:
+            clauses.append("kind = ?")
+            params.append(args.kind)
+        if args.project:  # SPD-014: its tickets' events, and the project and session events that name it
+            lookup.get_project(con, args.project)
+            clauses.append("(ticket_id IN (SELECT t.id FROM tickets t JOIN projects p ON p.id = t.project_id WHERE p.key = ?)"
+                           " OR json_extract(data, '$.project') = ?)")
+            params += [args.project, args.project]
+        sql = "SELECT * FROM events" + ((" WHERE " + " AND ".join(clauses)) if clauses else "") + " ORDER BY id"
+        rows = con.execute(sql, params).fetchall()
+        if args.limit:
+            rows = rows[-args.limit :]
+        events = [lookup.event_dict(con, e) for e in rows]
+    finally:
+        con.close()
+    lines = ["%d  %s  %s  %s  %s" % (e["id"], e["at"], e["actor"], e["kind"], e["body"].split("\n")[0]) for e in events]
+    return kernel.Result({"events": events}, "\n".join(lines) or "(no events)")
+
+
+def cmd_board(ctx, args):
+    con = ledgerdb.connect(ctx)
+    try:
+        rows = [dict(r) for r in con.execute("SELECT * FROM v_board").fetchall()]
+        if args.project:
+            lookup.get_project(con, args.project)
+            rows = [r for r in rows if r["project"] == args.project]
+        if args.brief:
+            text = sessions.board_brief_text(con, rows)
+        else:
+            for r in rows:
+                r["created"] = kernel.fm_date(r["created_at"])
+            columns = [("ticket", "key"), ("status", "status"), ("P", "priority"), ("title", "title"), ("lead", "lead"), ("origin", "origin"), ("proposed by", "proposed_by"), ("created", "created")]
+            if con.execute("SELECT count(*) FROM projects").fetchone()[0] > 1:  # SPD-014: the project column once there is more than one
+                columns.insert(1, ("project", "project"))
+            text = kernel.table(rows, columns)
+    finally:
+        con.close()
+    return kernel.Result({"tickets": rows}, text)
+
+
+def cmd_fleet(ctx, args):
+    con = ledgerdb.connect(ctx)
+    try:
+        rows = [dict(r) for r in con.execute("SELECT * FROM v_fleet").fetchall()]
+    finally:
+        con.close()
+    for r in rows:
+        r["spawned"] = kernel.fm_minute(r["spawned_at"])
+        r["finished"] = kernel.fm_minute(r["finished_at"])
+    return kernel.Result({"members": rows}, kernel.table(rows, [("ticket", "ticket"), ("id", "id"), ("name", "name"), ("persona", "persona"), ("model", "model"), ("status", "status"), ("parent", "parent"), ("spawned", "spawned"), ("finished", "finished")]))
+
+
+def team_tree(con, ticket, pricing=None):
+    rows = con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (ticket["id"],)).fetchall()
+    nodes = {}
+    roots = []
+    for m in rows:
+        node = lookup.member_dict(con, m)
+        cost, reasons = prices.run_cost(m["usage_json"], pricing)  # SPD-013: the run's tokens and its cost at the API list price
+        node.update(tokens=prices.token_counts(m["usage_json"]), cost_usd=prices.usd_text(cost) if cost is not None else None, not_priced=reasons)
+        node["children"] = []
+        nodes[m["id"]] = node
+        if m["parent_id"] in nodes:
+            nodes[m["parent_id"]]["children"].append(node)
+        else:
+            roots.append(node)
+    return roots
+
+
+def flatten_team(nodes):
+    """team_tree()'s roots flattened in the depth-first order `card` prints (format_tree's order:
+    each root, then its children recursively), each member dict without its "children" key."""
+    flat = []
+    for n in nodes:
+        flat.append({k: v for k, v in n.items() if k != "children"})
+        flat.extend(flatten_team(n["children"]))
+    return flat
+
+
+def format_tree(nodes, depth=0):
+    lines = []
+    for n in nodes:
+        run = "spawned %s, finished %s" % (kernel.fm_minute(n["spawned_at"]) or "-", kernel.fm_minute(n["finished_at"]) or "-")
+        line = "%s- %s (%s, %s, %s) %s; %s" % ("  " * depth, n["name"], n["lineage"], n["persona"] if n["persona"] != "contractor" else "contractor on %s" % n["agent_type"], n["model"], n["status"], run)
+        if n.get("tokens"):
+            line += "; %s · %s" % (teamcard.tokens_text(n["tokens"]), "$" + n["cost_usd"] if n.get("cost_usd") else "— (%s)" % "; ".join(n.get("not_priced") or ["not priced"]))
+        lines.append(line)
+        if n["summary"]:
+            lines.append("%s  %s" % ("  " * depth, n["summary"]))
+        lines.extend(format_tree(n["children"], depth + 1))
+    return lines
+
+
+def card_total_line(totals, not_priced, pricing):
+    """The card's last line (SPD-013): the ticket's tokens and its cost at the API list price, with the table's date,
+    partial when a member's transcript sum has no cost, naming each such member and why."""
+    if totals["tokens"] is None:
+        return "total: no tokens recorded"
+    tokens = teamcard.tokens_text(totals["tokens"])
+    if pricing is None:
+        return "total: %s · — (%s)" % (tokens, prices.NO_TABLE)
+    cost = "—" if totals["cost"] is None else prices.money(totals["cost"]) + (" (partial)" if not_priced else "")
+    line = "total: %s · %s at API list price (USD, prices as of %s)" % (tokens, cost, pricing["as_of"])
+    if not_priced:
+        line += "; not priced: " + ", ".join("%s (%s)" % (p["ref"], "; ".join(p["reasons"])) for p in not_priced)
+    return line
+
+
+def cmd_card(ctx, args):
+    con = ledgerdb.connect(ctx)
+    try:
+        t = lookup.get_ticket(con, args.key)
+        d = lookup.ticket_dict(con, t)
+        if args.project and d["project"] != args.project:
+            lookup.get_project(con, args.project)
+            raise kernel.SpudError(kernel.EXIT_ERROR, "%s is project %s's, not %s's" % (d["key"], d["project"], args.project))
+        pricing = ctx.pricing
+        tree = team_tree(con, t, pricing)
+        totals = teamcard.team_totals(con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (t["id"],)).fetchall(), pricing)
+        not_priced = [{"ref": lookup.member_ref(con, m["id"]), "reasons": reasons} for m, reasons in totals["not_priced"]]
+    finally:
+        con.close()
+    total = {"tokens": totals["tokens"], "cost_usd": prices.usd_text(totals["cost"]) if totals["cost"] is not None else None,
+             "partial": totals["cost"] is not None and bool(not_priced), "not_priced": not_priced, "tool_uses": totals["tools"],
+             "pricing": {k: pricing[k] for k in ("as_of", "source", "currency")} if pricing else None}
+    lines = ["%s — %s  [%s, %s]  lead: %s" % (d["key"], d["title"], d["status"], d["priority"], d["lead"] or "-")]
+    lines.extend(format_tree(tree) or ["(no team yet)"])
+    if tree:
+        lines.append(card_total_line(totals, not_priced, pricing))
+    return kernel.Result({"ticket": d, "team": tree, "total": total}, "\n".join(lines))
+
+
+def cmd_member_list(ctx, args):
+    """member list [--ticket]: what `card`'s team shows for one ticket, in its order, or what
+    `fleet` shows for every member, in its order; read-only, for any actor or none."""
+    con = ledgerdb.connect(ctx)
+    try:
+        if args.ticket:
+            t = lookup.get_ticket(con, args.ticket)
+            members = flatten_team(team_tree(con, t, ctx.pricing))  # SPD-013: match card's team, cost included
+        else:
+            rows = con.execute("SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id ORDER BY t.id DESC, m.lineage").fetchall()
+            members = [lookup.member_dict(con, m) for m in rows]
+    finally:
+        con.close()
+    lines = ["%s (%s, %s, %s) %s" % (d["ref"], d["lineage"], d["persona"], d["model"], d["status"]) for d in members]
+    return kernel.Result({"members": members}, "\n".join(lines) or "(no members)")

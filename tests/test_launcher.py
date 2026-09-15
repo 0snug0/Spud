@@ -47,13 +47,17 @@ class LauncherTest(SpudTestCase):
         cache = self.home.path / ".spud" / "pycache"
         self.home.run("board")
         pycs = cached_programs(cache)
-        self.assertEqual([p.name for p in pycs], ["spud_ledger.cpython-%d%d.pyc" % sys.version_info[:2]], pycs)
-        # the cache mirrors the program's own path, so a worktree's program and the main checkout's never share a file
-        self.assertEqual(pycs[0].parent, cache / str(PROGRAM.parent).lstrip("/"))
-        stamp = pycs[0].stat().st_mtime_ns
+        # the cache mirrors each file's own path, so a worktree's program and the main checkout's never share a file
+        mirror = cache / str(PROGRAM.parent).lstrip("/")
+        tag = ".cpython-%d%d.pyc" % sys.version_info[:2]
+        sources = sorted(str(p.relative_to(mirror))[:-len(tag)] + ".py" for p in pycs)
+        self.assertIn("spud_ledger.py", sources)
+        self.assertIn("spudlib/core/kernel.py", sources)  # every run imports the kernel
+        self.assertTrue(all((PROGRAM.parent / s).is_file() for s in sources), sources)
+        stamps = [p.stat().st_mtime_ns for p in pycs]
         self.assertEqual(self.home.run("board").returncode, 0)
-        self.assertEqual(pycs[0].stat().st_mtime_ns, stamp)  # read, not rewritten
-        self.assertFalse((REPO / "bin" / "__pycache__" / pycs[0].name).exists())
+        self.assertEqual([p.stat().st_mtime_ns for p in pycs], stamps)  # read, not rewritten
+        self.assertEqual(cached_programs(REPO / "bin"), [])
 
     def imports_of(self, event, payload):
         proc = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(SPUD), "hook", event],
@@ -97,6 +101,7 @@ class WithoutSpudHomeTest(unittest.TestCase):
         (self.root / "bin").mkdir()
         for name in ("spud", "spud_ledger.py"):
             shutil.copy(REPO / "bin" / name, self.root / "bin" / name)
+        shutil.copytree(REPO / "bin" / "spudlib", self.root / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
         self.env = {k: v for k, v in os.environ.items() if k != "SPUD_HOME"}
 
     def version(self):
@@ -112,7 +117,8 @@ class WithoutSpudHomeTest(unittest.TestCase):
     def test_the_checkouts_spud_directory_holds_the_cache(self):
         (self.root / ".spud").mkdir()
         self.version()
-        self.assertEqual([p.name for p in cached_programs(self.root)], ["spud_ledger.cpython-%d%d.pyc" % sys.version_info[:2]])
+        self.assertIn("spud_ledger.cpython-%d%d.pyc" % sys.version_info[:2], [p.name for p in cached_programs(self.root)])
+        self.assertTrue(all(p.is_relative_to(self.root / ".spud") for p in cached_programs(self.root)))
         self.assertEqual(cached_programs(self.root / "bin"), [])
 
 

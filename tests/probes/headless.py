@@ -231,6 +231,8 @@ def build_home(root, scenario):
     home = root / "home"
     (home / "bin").mkdir(parents=True)
     shutil.copy2(SPUD, home / "bin" / "spud")
+    shutil.copy2(SPUD.parent / "spud_ledger.py", home / "bin" / "spud_ledger.py")
+    shutil.copytree(SPUD.parent / "spudlib", home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copy2(CONFIG, home / "spud.config.json")
     for d in ("tests", "docs", ".claude"):
         (home / d).mkdir()
