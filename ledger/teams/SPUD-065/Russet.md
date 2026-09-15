@@ -46,6 +46,9 @@ Children: up to two, one level, no fable tier (the account's Fable limit is reac
 
 ## Log
 - 2026-09-15T13:14 Started: read brief, Burbank spike (6d412b4), launcher, header, main, cmd_hook, helpers, test_launcher, test_backup; spud_ledger.py still at 9e1deda (11065 lines), anchors hold
+- 2026-09-15T13:30 Control suite (scratch copy with .git, 9e1deda program): Ran 732, 2 failures, both test_acceptance.CutoverReadinessTest (SPD-076), 473 s. Prototype built mechanically: 58 modules under bin/spudlib/, 1706 call-site rewrites name->module.name, no rebinding across modules; one import cycle left (10 shell modules), no import-time edge on it; hook closure 35 modules
+- 2026-09-15T13:33 Prototype A smoke: CLI and hooks answer as control; hook imports 35 modules plus 9 package inits; 69 pyc cached under the scratch home, none under bin. Reassembly: 719 names each in one module plus HookCall and main in the entry, 0 lines missing or extra, 710 statements match by AST. Timing 30 rounds interleaved vs main: hooks +1.02 to +1.28 ms (over the 1 ms pass), board +3.85 ms. Suite survey: 43 attributes read, backup_stamp and do_backup patched (test_backup 228, 264, 303). Next: trim import overhead (combined from-imports, namespace group dirs)
+- 2026-09-15T13:36 Patch target evidence, test_backup alone (30 tests) against the prototype: (i) tests patch spudlib.state.backup by string target, 3 lines edited: OK; (ii) entry module class forwards setattr/delattr to the defining module, tests unedited: OK (the suite's path-loaded entry is not in sys.modules, so it finds itself through gc.get_referrers); neither: 5 tests fail (7 subtests), the patch lands on the entry and nothing reads it
 
 ## Sub-agents
 
