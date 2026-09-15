@@ -37,6 +37,7 @@ Style: the spike is a design document Eric reads in Obsidian; headings, tables, 
 Children: you may plan and spawn up to two, one level, no grandchildren, and no fable tier (the account's Fable limit is reached): scouts on haiku for mechanical surveys (the test-suite attribute list, the symbol-to-region table), or an architect on opus with `--tier-reason` for the shell-analysis region (lines 6261 to 9105) if you cannot hold it with the rest. Their deliverable globs must be disjoint from yours and each other's (give them docs/spikes/spd-065/parts/<name>.md and fold their output into the spike yourself). Wait for each child inside your turn; record each with `member finish` before you return.
 
 ## Log
+- 2026-09-15T11:19 Started: reading brief, ticket, launcher, header; plan to survey symbols and test references with ast scripts in scratchpad myself before deciding on children
 
 ## Sub-agents
 
