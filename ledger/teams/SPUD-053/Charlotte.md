@@ -33,6 +33,7 @@ Rules for this research: read-only. Do not merge, open, label, approve or close 
 
 ## Log
 - 2026-09-14T22:33 Started: read brief and SPD-053. Plan: contractor for official docs (auto mode classifier + permission rule syntax), local evidence from transcripts/settings/spud_ledger.py in parallel.
+- 2026-09-14T22:39 Key evidence: the classifier is NON-DETERMINISTIC. Since 2026-09-14 in BadTakes, gh pr merge: 12 allowed, 13 denied. PR 337: the identical command denied 00:36:28, allowed 00:37:24, same session, no config change. gh pr view --json mergeCommit (a pure read) denied twice. My own read-only probes of the same reads were allowed just now. Also: the Spud repo has never had a git merge refused (only 2 denials, both [Irreversible Local Destruction]). Found the sanctioned surface: an autoMode block (allow / soft_deny / environment, each a natural-language line starting $defaults) in ~/.claude/settings.json, Eric's user scope. My attempt to print the live defaults with 'claude auto-mode defaults' was itself refused, Reason [Auto-Mode Bypass]; NOT working around it.
 
 ## Sub-agents
 - [[SPUD-053/Kestrel|Kestrel]] (01.01, contractor on `claude-code-guide`, sonnet)

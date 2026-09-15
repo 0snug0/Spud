@@ -34,6 +34,7 @@ Verification: the hook's own suite `python3.14 -I -S -m unittest tests.test_hook
 Done when: TrapActionTest is red first and then green; the full suite passes with no new failure; the differential shows no refused-to-silent change; `member result` names the functions changed, the test count, the suite count, the probe outcomes for the single-argument form, and what an unknown cwd does to a relative path inside the action.
 
 ## Log
+- 2026-09-14T22:37 Started: read brief, Agria's SPD-043 record, analyse_words/analyse_isolated/ShellAnalysis/GLOB_COMMAND_SAMPLES, BashHookCase and ParameterExpansionCommandWordTest.
 
 ## Sub-agents
 
