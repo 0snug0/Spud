@@ -54,6 +54,7 @@ Done when: `test/server/deploy-step.test.mjs` exists, passes, would fail under t
 
 ## Log
 - 2026-09-14T22:13 Starting BAD-029: read brief, running worktree-init, reading the deploy step + proposer harness.
+- 2026-09-14T22:19 test/server/deploy-step.test.mjs written: extracts the step's run: | body from the YAML by line-slicing, runs it under bash -e in a scratch server/ dir with a stub psql. 10 tests, all green. Mutation checks on scratch copies of the YAML: the #350 -c form fails 1 test (argv shows -c + the literal :'pw'), the #349 unchanged-URL-is-an-error form fails 5, a renamed step fails all 10 loudly rather than skipping. No system psql needed: the no-psql case runs bash by absolute path with PATH=<empty stub dir>, so it also runs on ubuntu-latest where /usr/bin/psql exists.
 
 ## Sub-agents
 
