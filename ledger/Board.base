@@ -80,10 +80,10 @@ views:
     sort:
       - property: priority
         direction: ASC
-      - property: status
-        direction: DESC
       - property: file.name
         direction: ASC
+      - property: status
+        direction: DESC
       - property: formula.status_rank
         direction: ASC
     columnSize:
