@@ -32,6 +32,7 @@ Questions to answer, each with its source (official Claude Code docs on auto mod
 Rules for this research: read-only. Do not merge, open, label, approve or close any pull request, do not create a repository, do not edit any settings file, do not change anything on GitHub. A read-only probe of the classifier is fine (for example `gh pr view 353 --json state,mergedBy` and separately `--json mergeCommit`, to see whether reads are refused). The live test is the next real BadTakes PR, run by Spud after this ticket lands the change.
 
 ## Log
+- 2026-09-14T22:33 Started: read brief and SPD-053. Plan: contractor for official docs (auto mode classifier + permission rule syntax), local evidence from transcripts/settings/spud_ledger.py in parallel.
 
 ## Sub-agents
 
