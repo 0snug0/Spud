@@ -29,6 +29,7 @@ Why: three BadTakes sessions started "Work on BAD-006" and one "Start on BAD-020
 Work in the current working directory (the SPD-057 worktree, branch worktree-spd-057-auto-claim). Do not commit; Spud commits.
 
 ## Log
+- 2026-09-14T17:12 Read brief, code and tests. Decisions: match word-bounded PREFIX-digits then require the canonical '%s-%03d' spelling (so BAD-23 and BAD-0060 never match) and a non-declined ticket of the launch project; a release sticks via the session.released event log for that session_id (no migration: uninstall/remove release without that event); /spud detected raw ('/spud ...') and expanded ('<command-name>/spud</command-name>', seen in a BadTakes transcript); SKILL.md and hook context built from one SKILL_STEPS source.
 
 ## Sub-agents
 
