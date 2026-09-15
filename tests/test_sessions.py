@@ -30,7 +30,7 @@ class SessionTest(RepoMixin, SpudTestCase):
         row = self.home.rows("SELECT s.session_id, p.key, s.released_at, s.cwd FROM sessions s JOIN projects p ON p.id = s.project_id")
         self.assertEqual(row, [{"session_id": SESSION, "key": "badtakes", "released_at": None, "cwd": str(self.other)}])
         e = self.home.json("events", "--kind", "session.claimed")["events"]
-        self.assertEqual([(x["data"]["session_id"], x["data"]["project"]) for x in e], [(SESSION, "badtakes")])
+        self.assertEqual([(x["data"]["session_id"], x["data"]["project"], x["data"]["how"]) for x in e], [(SESSION, "badtakes", "command")])
 
     def test_claim_from_a_worktree_and_with_an_explicit_project(self):
         self.assertEqual(self.cli_json("session", "claim", actor="spud", cwd=self.wt, session=SESSION)["project"], "badtakes")
