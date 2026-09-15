@@ -5752,7 +5752,7 @@ CONFIG_WRITE_FLAGS = {"--add", "--unset", "--unset-all", "--replace-all", "--ren
 # A word the dispatch reads by name that the shell expands first (SPD-041) is read as each of these it can match: the names a
 # command word dispatches on, and every option, verb and argument the dispatch compares a later word with.
 GLOB_COMMAND_SAMPLES = frozenset(WRAPPERS | SHELLS | DIRECTORY_COMMANDS | SHELL_DECLARATIONS | JS_RUNTIMES
-                                 | {"git", "spud", "eval", "source", ".", "sqlite3", "sqlite", "tee", "python", "python3", "python3.14"})
+                                 | {"git", "spud", "eval", "source", ".", "trap", "sqlite3", "sqlite", "tee", "python", "python3", "python3.14"})
 GLOB_SAMPLES = frozenset(
     GLOB_COMMAND_SAMPLES | GIT_WRITE_VERBS | GIT_GLOBAL_VALUE_FLAGS | BRANCH_READ_FLAGS | BRANCH_READ_VALUE_FLAGS | TAG_READ_FLAGS
     | TAG_READ_VALUE_FLAGS | CONFIG_READ_FLAGS | CONFIG_VALUE_FLAGS | CONFIG_WRITE_FLAGS
@@ -6896,11 +6896,26 @@ def prefix_effect(word, following):
     return "process"
 
 
-EFFECT_ORDER = {"shell": 0, "either": 1, "process": 2}
+# Where a builtin behind the prefixes runs: in the shell that reads the line ("shell"), in one of the two shells
+# ("either"), in a forked shell of its own ("fork": zsh's coproc, whose exit fires an EXIT trap set there -- probed in zsh
+# 5.9 -f and zsh -f -o nobareglobqual, `coproc { trap 'git push' EXIT; }` pushed, SPD-054), or not at all ("process": an
+# external wrapper execs a program and finds no builtin).  A builtin runs for the first three and here for the first two.
+EFFECT_ORDER = {"shell": 0, "either": 1, "fork": 2, "process": 3}
+
+
+def builtin_runs(effect):
+    """A builtin behind the prefixes runs somewhere, so what it stores runs too (SPD-054)."""
+    return effect != "process"
+
+
+def builtin_runs_here(effect):
+    """... and in the shell that reads the line, so a directory it changes is the line's own (SPD-030)."""
+    return effect in ("shell", "either")
 
 
 def settle(effect, before, after):
-    """The directories after a command that changed them from `before` to `after` when it runs in the shell, run with `effect`."""
+    """The directories after a command that changed them from `before` to `after` when it runs in the shell, run with `effect`.
+    A forked shell's directory never comes back, so "fork" settles as an external program's does."""
     if effect == "shell":
         return after
     if effect == "either":
@@ -8053,6 +8068,49 @@ def shell_read_index(words, start=1):
     return None
 
 
+# `trap` stores shell code the shell runs later: at exit, before every command under DEBUG, on ERR, and on every signal by
+# name or number (SPD-054, Agria's SPD-043 proposal).  Probed in bash 3.2, zsh 5.9 -f, zsh -f -o nobareglobqual and sh with a
+# fake git first on a scratch PATH: all four ran the action of `trap 'git push' EXIT`, and the two shells disagree about
+# where that action is.  bash reads it after its options and `--` (`trap -- 'git push' EXIT` pushed; with `-p` or `-l` it
+# prints and runs nothing); zsh has no options there and takes the word right after `trap` whatever it is (`trap -P EXIT`
+# ran `-P` at exit, `trap -p EXIT` ran `-p`).  Both positions are read.  A word list that sets no action runs nothing:
+# `trap`, `trap -p`, `trap -l`, `trap -lp`, `trap -`, `trap - EXIT`, `trap '' EXIT` and `trap "" INT TERM` list, print,
+# reset or ignore, and each of those words reads as a command that does nothing.  The single-argument form runs nothing
+# either (`trap 'git push'` and `trap git` print bash's and sh's usage and set nothing in zsh), but its word names code,
+# so it is read all the same: fail closed, at no real cost, since the line is a usage error where it is not a no-op.
+def trap_action_indices(words):
+    """The indices of a `trap` line's words a shell may run as code later: zsh's action, the word right after `trap`, and
+    bash's, the first word after its options and `--`."""
+    if len(words) < 2:
+        return []
+    found, i = [1], 1
+    while i < len(words) and words[i].startswith("-") and len(words[i]) > 1:
+        i += 1
+        if words[i - 1] == "--":
+            break
+    return found if i in (1, len(words)) else found + [i]
+
+
+def trap_read_index(words, start=1):
+    """The index, from `start`, of the first word a `trap` line may run as code that holds a glob or an expansion, or None."""
+    return next((k for k in trap_action_indices(words) if k >= start and active_read_word(words[k])), None)
+
+
+def analyse_trap(words, a, depth):
+    """Read each action a `trap` line may set as the shell text it is, with its own quotes, as eval's rejoined words and a
+    shell's `-c` string are (SPD-054): a finding inside it is the finding it would be on the line.  The action runs later,
+    at a directory the hook cannot know (probed: `trap 'echo trapped >> rel.txt' EXIT; cd /tmp` wrote /tmp/rel.txt, and an
+    EXIT action's `pwd` is the last directory of the line), so it is read with the directories unknown, as a sourced file
+    is, and a relative redirection or tee inside it refuses a member.  The line's own directories and variables are
+    restored afterwards: defining a trap changes nothing on the line, and the action's assignments run later, where
+    SPD-043's `a.all_doubt` after `trap` already doubts every variable."""
+    cwds, variables = a.cwds, dict(a.vars)
+    for k in trap_action_indices(words):
+        a.cwds = None
+        analyse_isolated(a, deglob(words[k]), depth + 1)
+        a.cwds, a.vars = cwds, dict(variables)
+
+
 def python_read_index(words, a, start=1):
     """(index, is the script), from `start`, of the first word python_interpreter_args reads, or a spud launcher's arguments, that
     holds a glob or an expansion; or None."""
@@ -8145,7 +8203,9 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
         spelled_command = False
         if reserved:
             if w == "coproc":
-                effect = "process"
+                # a forked shell of the shell's own, not an external program: a builtin runs there (SPD-054), and its
+                # directory changes still never reach the line
+                effect = max(effect, "fork", key=EFFECT_ORDER.get)
                 prefixed = True
             words = words[1:]
         elif m:
@@ -8225,9 +8285,14 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
         before = a.cwds
         analyse_command(deglob(" ".join(words[1:])), a, depth + 1)  # eval reads its words again, their quotes gone (SPD-041)
         a.cwds = settle(effect, before, a.cwds)
-    elif cmd in ("source", ".") and effect != "process":
+    elif cmd in ("source", ".") and builtin_runs_here(effect):
         a.kinds.append("other")
         a.cwds = None  # the file may change directory anywhere
+    elif cmd == "trap" and builtin_runs(effect):  # the builtin, spelled exactly: env trap and /usr/bin/trap set no trap (SPD-054)
+        a.kinds.append("other")  # never a spud call, so a line that sets a trap is not allowed on its own
+        if not read_points(lambda ws, start: option_point(trap_read_index(ws, start))):
+            return
+        analyse_trap(words, a, depth)
     elif base in ("sqlite3", "sqlite"):
         a.kinds.append("db")
         a.findings.append(("db", cmd))
@@ -8263,7 +8328,7 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
         for w in words[1:]:
             if not w.startswith("-"):
                 a.redirects.append((w, a.cwds))
-    elif cmd in DIRECTORY_COMMANDS and effect != "process":
+    elif cmd in DIRECTORY_COMMANDS and builtin_runs_here(effect):
         a.kinds.append("cd")
         directory_change(words, a, effect)
     elif cmd in SHELL_DECLARATIONS:

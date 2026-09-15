@@ -3246,6 +3246,195 @@ class ParameterExpansionCommandWordTest(BashHookCase):
         self.assertRefused("$X push", "spell the command out")
 
 
+class TrapActionTest(BashHookCase):
+    """SPD-054 (Agria's SPD-043 proposal): `trap` stores shell code the shell runs later -- at exit, before every command
+    under DEBUG, on ERR, and on every signal by name or number -- and analyse_words dispatched the line as kind other, so a
+    member's VCS write inside the action string reached the hook with no finding.  Probed in bash 3.2, zsh 5.9 -f, zsh -f -o
+    nobareglobqual (the Bash tool's zsh on this Mac) and sh, with a fake git first on a scratch PATH writing a marker in the
+    scratchpad.  All four ran `git push`: `trap 'git push' EXIT`, `trap "git commit -m x" ERR; false`, `trap 'cd /tmp && git
+    add .' DEBUG; :`, `trap 'eval "git push"' 0`, `trap 'sh -c "git push"' INT; kill -INT $$`, the signal spelled `0`,
+    `SIGHUP`, `15` or several at once, `trap -- 'git push' EXIT`, the command word reached through `builtin`, `time`,
+    `X=trap; $X` or `tr?p` with a file named trap beside it, the line inside eval, `sh -c`, a function body, a subshell, a
+    loop and another trap's action, and the action read from `"$X"`, `"$(echo git push)"` and `${X:-'git push'}`.  `command
+    trap` ran it in bash and sh (in zsh `command` finds only an external) and `noglob trap` in zsh, whose modifier it is;
+    `env`, `nohup`, `exec`, `sudo`, `nice` and `xargs` ran no builtin at all.
+
+    The action is now read as the shell text it is, with its own quotes, as eval's rejoined words and a shell's `-c` string
+    are: a finding inside it is the finding it would be on the line, so a member is refused under Law 7, Law 6 or the actor
+    check exactly as it would be, and Spud is refused by none of it while keeping his own checks inside the action.
+
+    The words that run nothing stay silent, each probed to run nothing in all four shells: `trap` alone, `trap -p`, `trap
+    -l`, `trap -lp` and `trap -P EXIT` print or list, `trap -`, `trap - EXIT`, `trap '' EXIT` and `trap "" INT TERM` reset or
+    ignore, and `trap EXIT` is a reset (bash and zsh) or a usage error (sh).  Both action positions are read, since the two
+    shells disagree about options: bash reads the action after its options and `--`, zsh has none there and reads the word
+    right after `trap` whatever it is (`trap -P EXIT` ran `-P` at exit, `trap -p EXIT` ran `-p`).  The single-argument form
+    runs nothing anywhere (`trap 'git push'` and `trap git` print bash's and sh's usage and set nothing in zsh), but it is
+    read all the same, fail closed and at no real cost: it names code, and the line is a shell error where it is not a
+    no-op.  `env trap`, `nohup trap`, `exec trap` and `xargs trap` run no builtin, so they stay kind other, as `env cd` and
+    `env source` do.
+
+    The action runs at a working directory the hook cannot know: an EXIT action runs after every later cd (probed: `trap
+    'echo trapped >> rel.txt' EXIT; cd /tmp` wrote /tmp/rel.txt, and an EXIT action's `pwd` is the last directory of the
+    line), a DEBUG action before every command.  It is therefore read with the directories unknown, as a sourced file is, so
+    a relative redirection or tee inside it is refused for a member and left unchecked for Spud; the line's own directories
+    are restored afterwards, since defining a trap changes nothing on the line.  The action's own assignments do not reach
+    the rest of the line either -- they run later, and SPD-043's `a.all_doubt` after `trap`, which this ticket leaves alone,
+    already doubts every variable (probed: a DEBUG action's `X=git` did reach the next command's expansion in all four
+    shells, so the doubt, not the value, is what the hook keeps).  An action word holding an expansion the hook cannot
+    resolve exactly is refused as SPD-043 refuses one; a value the line assigned resolves as SPD-043 resolves it.
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        for rel in ("tests/keep.py", "ledger/tickets/SPD-001.md"):
+            p = self.home.path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7", cwd=None):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id, cwd)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None, cwd=cwd)
+        return r
+
+    def silent_for_everyone(self, command, cwd=None):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id, cwd)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def findings(self, command):
+        return self.analysis(command).findings
+
+    def test_the_tickets_evidence_commands(self):
+        for cmd in ("trap 'git push' EXIT", 'trap "git commit -m x" ERR', "trap 'cd /tmp && git add .' DEBUG",
+                    "trap 'eval \"git push\"' 0", "trap 'sh -c \"git push\"' INT"):
+            self.refused_for_members(cmd)
+        self.assertEqual(self.findings("trap 'git push' EXIT"), [("git", ("push", "push"))])
+        self.assertEqual(self.findings("trap 'git status' EXIT"), [("git", ("status", None))])
+
+    def test_every_signal_spelling(self):
+        for sig in ("EXIT", "0", "1", "15", "INT", "SIGINT", "sigint", "TERM", "HUP", "USR1", "ERR", "DEBUG", "RETURN",
+                    "INT TERM EXIT", "EXIT INT", "1 2 15"):
+            with self.subTest(sig):
+                self.refused_for_members("trap 'git push' %s" % sig)
+
+    def test_the_forms_that_run_nothing_stay_silent(self):
+        for ok in ("trap", "trap -p", "trap -l", "trap -lp", "trap -p EXIT", "trap -P EXIT", "trap -",
+                   "trap - EXIT", "trap - INT TERM", "trap '' EXIT", 'trap "" INT TERM', "trap -- '' EXIT",
+                   "trap -- - EXIT", "trap EXIT", "trap git", "trap 'echo done' EXIT", "trap 'git status' EXIT",
+                   "trap 'git log --oneline -5' EXIT", "trap 'rm -f /tmp/x' EXIT", "trap 'cd /tmp' EXIT",
+                   "trap 'X=1' EXIT", "trap 'echo x > /tmp/out.txt' EXIT", "echo trap", "grep -n trap tests/keep.py"):
+            self.silent_for_everyone(ok)
+        self.assertEqual(self.findings("trap -p"), [])
+        self.assertEqual(self.findings("trap - EXIT"), [])
+
+    def test_both_action_positions_are_read(self):
+        """`--` and bash's options are skipped, and the word right after `trap` is read too, since zsh takes it for the
+        action.  Only `trap -- 'git push' EXIT` runs in the shells; the rest are read fail closed."""
+        for cmd in ("trap -- 'git push' EXIT", "trap -p 'git push' EXIT", "trap -l 'git push' EXIT",
+                    "trap -P 'git push' EXIT", "trap -x 'git push' EXIT", "trap --p 'git push' EXIT",
+                    "trap -lp 'git push' EXIT", "trap 'git push'", 'trap "git push"'):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_the_command_word_reached_another_way(self):
+        for cmd in ("builtin trap 'git push' EXIT", "command trap 'git push' EXIT", "time trap 'git push' EXIT",
+                    "noglob trap 'git push' EXIT", "X=trap; $X 'git push' EXIT", "X=trap; ${X} 'git push' EXIT",
+                    "tr?p 'git push' EXIT", "tr*p 'git push' EXIT", "'trap' 'git push' EXIT", "t\"\"rap 'git push' EXIT",
+                    "tr\\ap 'git push' EXIT"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        for ok in ("env trap 'git push' EXIT", "nohup trap 'git push' EXIT", "exec trap 'git push' EXIT",
+                   "sudo trap 'git push' EXIT", "xargs trap 'git push' EXIT", "nice trap 'git push' EXIT",
+                   "/usr/bin/trap 'git push' EXIT", "./trap 'git push' EXIT", "TRAP 'git push' EXIT",
+                   "traps 'git push' EXIT", "echo trap 'git push' EXIT"):
+            self.silent_for_everyone(ok)
+
+    def test_a_coproc_or_a_pipeline_forks_a_shell_where_the_builtin_runs(self):
+        """Round 2 of Spud's review: `coproc` is not an external wrapper -- it runs its command in a forked shell of its
+        own, where the builtin does run and whose exit fires the action.  Probed in zsh 5.9 -f and zsh -f -o nobareglobqual
+        with a fake git on a scratch PATH: `coproc { trap 'git push' EXIT; }`, `coproc ( trap 'git push' EXIT )`,
+        `cat /dev/null | trap 'git push' EXIT` and `{ trap 'git push' EXIT; } | cat` each ran git push, and `coproc
+        { trap 'echo x > rel.txt' EXIT; }` wrote the file; bash 3.2 and sh have no coproc (a syntax error there) and ran
+        nothing for any of them.  `coproc trap 'git push' EXIT`, the simple command, ran nothing in any of the four and is
+        read fail closed all the same.  A cd under coproc still changes nothing the line can see: the forked shell's
+        directory never comes back, so its effect settles as an external program's does."""
+        for cmd in ("coproc { trap 'git push' EXIT; }", "coproc trap 'git push' EXIT",
+                    "coproc ( trap 'git push' EXIT )", "cat /dev/null | trap 'git push' EXIT",
+                    "{ trap 'git push' EXIT; } | cat", "coproc { trap 'eval \"git push\"' EXIT; }"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.refused_for_members("coproc { trap 'echo x > out.txt' EXIT; }", "cannot follow")
+        self.silent_for_everyone("coproc { trap 'echo done' EXIT; }")
+        # a cd under coproc is unchanged: the forked shell's directory is not the line's
+        for cmd in ("coproc { cd /tmp; }", "coproc cd /tmp", "coproc { trap 'cd /tmp' EXIT; }"):
+            with self.subTest(cmd):
+                self.assertEqual(self.analysis(cmd).cwds, frozenset([str(self.home.path)]))
+        self.silent_for_everyone("coproc { cd /tmp; }")
+
+    def test_the_line_inside_every_construct_that_recurses(self):
+        for cmd in ("eval \"trap 'git push' EXIT\"", "sh -c \"trap 'git push' EXIT\"", "bash -lc \"trap 'git push' EXIT\"",
+                    "zsh -c \"trap 'git push' EXIT\"", "f() { trap 'git push' EXIT; }; f", "( trap 'git push' EXIT )",
+                    "{ trap 'git push' EXIT; }", "for i in 1; do trap 'git push' EXIT; done",
+                    "if true; then trap 'git push' EXIT; fi", "true && trap 'git push' EXIT",
+                    "echo $(trap 'git push' EXIT)", "trap \"trap 'git push' EXIT\" DEBUG",
+                    "sh <<'EOF'\ntrap 'git push' EXIT\nEOF"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_an_expansion_in_the_action_word(self):
+        for cmd in ('trap "$X" EXIT', "trap $X EXIT", 'trap "$(echo git push)" EXIT', "trap `echo git push` EXIT",
+                    "trap ${X:-'git push'} EXIT", "trap ${X} EXIT", "X=g; trap $X$Y EXIT", "X=it; trap \"g$X\" EXIT",
+                    "trap $'git push' EXIT", 'trap -- "$X" EXIT', "trap \"$(cat f)\" EXIT"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "cannot resolve")
+        for cmd in ("X='git push'; trap \"$X\" EXIT", "X='git push'; trap $X EXIT", "X='git push'; trap ${X} EXIT",
+                    "X=push; trap \"git $X\" EXIT"):
+            with self.subTest(cmd):  # the value the line assigned, read as bash splits it and as zsh keeps it
+                self.refused_for_members(cmd)
+
+    def test_the_action_runs_where_the_hook_cannot_know_the_directory(self):
+        for cmd in ("trap 'echo x > out.txt' EXIT", "cd /tmp && trap 'echo x >> out.txt' EXIT",
+                    "trap 'echo x | tee out.txt' EXIT", "trap 'echo x > tests/keep.py' EXIT"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "cannot follow")
+        # the action's own absolute cd settles its directory again, and the target is checked there
+        self.silent_for_everyone("trap 'cd /tmp; echo x > out.txt' EXIT")
+        absolute = "trap 'echo x > %s/ledger/tickets/SPD-001.md' EXIT" % self.home.path
+        self.assertRefused(absolute, "ledger/tickets", AGENT_C)
+        self.assertRefused(absolute, "Law 1", agent_id=None)  # Spud keeps his own checks inside the action
+        self.assertEqual([c for _, c in self.analysis("trap 'echo x > out.txt' EXIT").redirects], [None])
+        # defining a trap changes nothing on the line: its directories and its variables are the line's own
+        self.assertEqual(self.analysis("trap 'cd /tmp' EXIT").cwds, frozenset([str(self.home.path)]))
+        self.assertEqual(self.analysis("X=git; trap 'X=ls' EXIT").vars["X"], "git")
+        self.assertSilent("trap 'cd /tmp' EXIT; echo x > tests/keep.py")  # the member's own deliverable, from the line's directory
+        self.assertSilent("trap 'cd /tmp' EXIT; echo x > CLAUDE.md", agent_id=None)  # Spud's own file, from the line's directory
+
+    def test_a_spud_call_in_the_action(self):
+        spud = self.spud_cli
+        self.refused_for_members("trap '%s --as spud ticket new --title x' EXIT" % spud, "Law 6")
+        self.refused_for_members("trap '%s init' EXIT" % spud, "Law 6")
+        self.assertRefused("trap '%s --as %s member log hi' EXIT" % (spud, AGENT_B), "--as", AGENT_A)
+        self.assertRefused("trap '%s --as %s member log hi' EXIT" % (spud, AGENT_A), "Law 5", agent_id=None)
+        self.assertRefused("trap 'sqlite3 %s/.spud/ledger.db \"select 1\"' EXIT" % self.home.path, "spud sql --readonly", AGENT_A)
+        # a trap is not a spud call, so the line is never allowed, not even one the caller may make
+        self.assertSilent("trap '%s --as %s member log hi' EXIT" % (spud, AGENT_A))
+        self.assertAllowed("%s --as %s member log hi" % (spud, AGENT_A))
+
+    def test_all_doubt_after_a_trap_is_what_spd_043_left(self):
+        self.assertIn("may not hold", self.refused_for_members("X=ls; trap 'X=git' DEBUG; $X push", "").reason)
+        self.assertIn("Law 7", self.refused_for_members("X=git; trap 'X=ls' DEBUG; $X push", "").reason)
+        self.assertIn("may not hold", self.refused_for_members("X=ls; trap 'echo hi' EXIT; $X push", "").reason)
+
+
 # =============================================================================
 # PreToolUse / Write|Edit|MultiEdit|NotebookEdit
 # =============================================================================
