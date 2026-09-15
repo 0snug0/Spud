@@ -86,6 +86,8 @@ views:
         direction: ASC
       - property: formula.status_rank
         direction: ASC
+    columnSize:
+      note.title: 493
   - type: table
     name: Reports
     filters:
