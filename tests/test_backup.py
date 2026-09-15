@@ -225,7 +225,7 @@ class DailyBackupInProcessTest(BackupCase):
         out, err = io.StringIO(), io.StringIO()
         with contextlib.ExitStack() as stack:
             stack.enter_context(mock.patch.dict(os.environ, {"SPUD_HOME": str(self.home.path)}))
-            stack.enter_context(mock.patch.object(self.spud, "backup_stamp", lambda: stamp))
+            stack.enter_context(mock.patch("spudlib.state.backup.backup_stamp", lambda: stamp))
             stack.enter_context(contextlib.redirect_stdout(out))
             stack.enter_context(contextlib.redirect_stderr(err))
             code = self.spud.main(["--json", "--as", "spud", "backup", "--daily", *argv])
@@ -261,7 +261,7 @@ class DailyBackupInProcessTest(BackupCase):
             raise OSError(28, "No space left on device")
 
         for fault in (partial_copy_then_disk_full, nothing_written):
-            with self.subTest(fault=fault.__name__), mock.patch.object(self.spud, "do_backup", fault):
+            with self.subTest(fault=fault.__name__), mock.patch("spudlib.state.backup.do_backup", fault):
                 code, out = self.main("--keep", "1", stamp="20300101T030000")
                 self.assertEqual(code, EXIT_ERROR)
                 self.assertEqual((out["ok"], out["written"], out["pruned"], out["kept"]), (False, False, [], 16))
@@ -300,7 +300,7 @@ class DailyBackupInProcessTest(BackupCase):
                 damage(path)
                 return path
 
-            with self.subTest(damage=damage.__name__), mock.patch.object(self.spud, "do_backup", damaging):
+            with self.subTest(damage=damage.__name__), mock.patch("spudlib.state.backup.do_backup", damaging):
                 code, out = self.main("--keep", "1", stamp="20300101T030000")
                 self.assertEqual(code, EXIT_ERROR)
                 self.assertEqual((out["written"], out["pruned"], out["kept"]), (False, [], 16))

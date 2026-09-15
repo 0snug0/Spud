@@ -175,11 +175,10 @@ class InitTest(SpudTestCase):
         from helpers import REPO, load_spud_module
 
         self.assertTrue(sys.dont_write_bytecode)
-        cache = REPO / "bin" / "__pycache__"
-        before = set(cache.glob("*")) if cache.exists() else set()
-        load_spud_module()
+        before = set((REPO / "bin").rglob("*.pyc"))
+        load_spud_module().owners()  # imports every module of the package in this process
         self.home.run("board")
-        after = set(cache.glob("*")) if cache.exists() else set()
+        after = set((REPO / "bin").rglob("*.pyc"))
         self.assertEqual(after - before, set())
 
     def test_help_says_the_hooks_bind_and_check_as(self):
