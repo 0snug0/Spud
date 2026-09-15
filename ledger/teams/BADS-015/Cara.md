@@ -37,6 +37,7 @@ House style for the spec: match the existing specs in docs/superpowers/specs/ (a
 
 ## Log
 - 2026-09-14T19:55 Read config, Spud CLAUDE.md, BadTakes CLAUDE.md and my brief. Starting the read-first list: the two profile/scene designs, firebase.json, the three workflows, migrations 0012/0019/0027, build-web, ensure-web-hosting, admin apphosting.
+- 2026-09-14T20:00 Course correction from Spud: the end-card half of BAD-015 is dropped (Eric, 2026-09-14); the spec drops the end-card section and states under Not in scope that export end cards keep printing badtakes.io. The URL-always-resolves requirement stands.
 
 ## Sub-agents
 
