@@ -16,7 +16,7 @@ Inside this repo this file supersedes the oh-my-claudecode block in `~/.claude/C
 
 ## The ledger CLI
 
-The ledger is one SQLite database, `.spud/ledger.db` at the ledger root, and **`bin/spud` is the only program that writes it** (since SPD-016 a launcher for `bin/spud_ledger.py`, whose bytecode it caches under `.spud/pycache/`; the module run directly refuses). In this file `spud …` means:
+The ledger is one SQLite database, `.spud/ledger.db` at the ledger root, and **`bin/spud` is the only program that writes it** (since SPD-016 a launcher for `bin/spud_ledger.py`, the entry of the package `bin/spudlib/` since SPD-065; it caches every module's bytecode under `.spud/pycache/`, and the entry run directly refuses). In this file `spud …` means:
 
 ```bash
 python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud …
@@ -167,7 +167,11 @@ Open this repo as a vault and start at `ledger/Home.md`. Frontmatter and wikilin
 `spud` and `git` are the tools. There is no build; the test suite is `bin/spud`'s:
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests   # 748 tests, about eight minutes, leaves no bytecode
+python3.14 -I -S -m unittest discover -s tests -t tests   # 755 tests, about eight minutes, leaves no bytecode
+```
+
+```bash
+python3.14 -I -S tests/probes/hook_timing.py 30 bin/spud <other checkout>/bin/spud   # hook-run medians, interleaved; a hook change passes within 1 ms of main
 ```
 
 ```bash
