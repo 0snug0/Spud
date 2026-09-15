@@ -35,6 +35,7 @@ Rules for this research: read-only. Do not merge, open, label, approve or close 
 - 2026-09-14T22:33 Started: read brief and SPD-053. Plan: contractor for official docs (auto mode classifier + permission rule syntax), local evidence from transcripts/settings/spud_ledger.py in parallel.
 
 ## Sub-agents
+- [[SPUD-053/Kestrel|Kestrel]] (01.01, contractor on `claude-code-guide`, sonnet)
 
 ## Ticket proposals
 
