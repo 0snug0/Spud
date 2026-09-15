@@ -34,6 +34,7 @@ Verdict in `member result`: PASS or FAIL, one line per check with its evidence. 
 
 ## Log
 - 2026-09-15T15:07 Started review: read brief, Estima's Result, Bamberg's block, spike sections 4/5/8/9/10; worktree status shows only the 7 expected paths
+- 2026-09-15T15:14 Checks so far: own move check (scratch yukon/movecheck.js, acorn) RESULT OK exit 0 on the worktree, exit 1 on a one-token change in deleteSession; webapi+render-server 38/38; E no-cache build 21 steps 0 cache, check-image complete, jq true, container+image removed; dropping await on createSession/putBlob fails test 3, on deleteSession nothing fails (coverage note); npm test 1636/0/109 skip. A and B pending.
 
 ## Sub-agents
 
