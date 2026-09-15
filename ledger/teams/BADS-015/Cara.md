@@ -6,8 +6,8 @@ model: fable
 parent: "[[Spud]]"
 ticket: "[[BAD-015]]"
 project: badtakes
-status: planned
-spawned: ""
+status: active
+spawned: 2026-09-14T19:54
 finished: ""
 tags: [spudagent]
 ---
@@ -36,6 +36,7 @@ Read first: the two designs named above; docs/superpowers/specs/2026-08-23-my-ba
 House style for the spec: match the existing specs in docs/superpowers/specs/ (a dated title, "What this is", "Approaches considered" with the losers and why, numbered sections, "Testing", "Not in scope", "Assumptions to push back on"). State decisions, not options. Under 400 lines.
 
 ## Log
+- 2026-09-14T19:55 Read config, Spud CLAUDE.md, BadTakes CLAUDE.md and my brief. Starting the read-first list: the two profile/scene designs, firebase.json, the three workflows, migrations 0012/0019/0027, build-web, ensure-web-hosting, admin apphosting.
 
 ## Sub-agents
 

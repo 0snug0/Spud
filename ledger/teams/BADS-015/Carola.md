@@ -6,8 +6,8 @@ model: opus
 parent: "[[Spud]]"
 ticket: "[[BAD-015]]"
 project: badtakes
-status: planned
-spawned: ""
+status: active
+spawned: 2026-09-14T19:55
 finished: ""
 tags: [spudagent]
 ---
