@@ -6,9 +6,9 @@ model: opus
 parent: "[[BADS-036/Sebago]]"
 ticket: "[[BAD-036]]"
 project: badtakes
-status: active
+status: done
 spawned: 2026-09-15T10:54
-finished: ""
+finished: 2026-09-15T11:14
 duration_ms: 1144556
 tool_uses: 54
 tokens_out: 96974
@@ -55,7 +55,7 @@ No sub-agents.
 ## Sub-agents
 
 ## Ticket proposals
-- **Share one BT_CORS_ORIGINS parser between web-api.js and render-server.js** — suggested P3; open, with Sebago.
+- **Share one BT_CORS_ORIGINS parser between web-api.js and render-server.js** — suggested P3; escalated by Sebago (Valid P3 dedupe of the BT_CORS_ORIGINS parser across web-api.js and render-server.js, but it is a code change outside BAD-036, which is planning only; Spud decides whether it becomes a ticket.); created as [[BAD-039]] at P3 by Spud.
   Why: The same comma-split-trim-filter parse of BT_CORS_ORIGINS exists twice in BadTakes' render service: corsAllowlist() in scripts/web-api.js decides what gets CORS, and renderConfig().origins in scripts/render-server.js only feeds its boot log line. They agree today, but a rule written twice drifts, the hazard this repo names with sceneBucket. BAD-036's split moves corsAllowlist and must not add a third copy.
   Evidence: scripts/web-api.js:233-235 corsAllowlist: String(process.env.BT_CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean); scripts/render-server.js:62 origins: String(env.BT_CORS_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean). Found while writing docs/spikes/bad-036/scripts-web-api.md.
 
@@ -63,3 +63,4 @@ No sub-agents.
 Spike written: docs/spikes/bad-036/scripts-web-api.md (817 lines, all ten sections). Proposed tree: scripts/web-api.js stays as entry+router (≈125, same path, same exports handle/configure/sendFile, same routes) plus a flat scripts/web-api/ directory: config.js ≈55, http.js ≈65, seam.js ≈105 (the only mutable state, read through inContainer/currentStore/currentNow), gate.js ≈35, scene-inputs.js ≈140, job-video.js ≈90, job-reel.js ≈70, job-assemble.js ≈120, route-render.js ≈180, route-session.js ≈70, route-status.js ≈30, route-dev.js ≈80. Files over 250: none (largest route-render.js ≈180; §6 lists the five largest with reasons and three merge options). Verified: acorn parse of 67 top-level statements; a script confirmed all 78 top-level names appear in the §4 assignment table; Node resolves scripts/web-api.js before a same-named directory (scratchpad test); storeFrom does no network at construction. Key finding: the container copies files by name (.dockerignore excludes by default and re-includes only scripts/web-api.js), and no PR workflow builds the image, so PR 1 must add !scripts/web-api, check-image MUST_EXIST rows and the deploy-render.yml path filter, and verify with podman build. Phase 2: 4 PRs (constants/utilities + container plumbing; services/IO incl. jobs, proven by browser exports on web:local; route handlers with return-await at the try; entry + comment sweep). Proposal 72 (P3) filed: the BT_CORS_ORIGINS parse is duplicated in render-server.js. Nothing changed in BadTakes. Left: Eric's call on 12 modules vs the merge options, and whether to commit the pure-move check script.
 
 ## Outcome
+Spike scripts-web-api.md has all ten sections in order; 78 top-level names assigned; no file over 250 (largest route-render.js ~180); found the .dockerignore, check-image.js and deploy-render.yml path-filter edits the split needs; filed proposal 72.

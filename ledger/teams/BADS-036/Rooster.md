@@ -6,9 +6,9 @@ model: opus
 parent: "[[BADS-036/Sebago]]"
 ticket: "[[BAD-036]]"
 project: badtakes
-status: active
+status: done
 spawned: 2026-09-15T10:53
-finished: ""
+finished: 2026-09-15T11:14
 duration_ms: 1044798
 tool_uses: 43
 tokens_out: 88530
@@ -55,7 +55,7 @@ No sub-agents.
 ## Sub-agents
 
 ## Ticket proposals
-- **Guard release-note art bytes against art.lock.json in npm test** — suggested P3; open, with Sebago.
+- **Guard release-note art bytes against art.lock.json in npm test** — suggested P3; escalated by Sebago (Valid P3 guard that release-note art still matches art.lock.json in npm test, and it would protect the split; still a test addition outside a planning-only ticket, so Spud decides whether it becomes a ticket or joins the art refactor ticket.); created as [[BAD-040]] at P2 by Spud.
   Why: No test covers scripts/build-release-notes-art.js. A change to a shared SVG primitive (after BAD-036, scripts/release-notes-art/svg.js, motion.js or constants.js) silently changes every published illustration's SVG bytes. Nothing notices until someone runs npm run release-notes:render, usually mid-release, and it re-encodes already-published GIFs on whatever ffmpeg is installed (8.0 and 8.1 differ by 384 bytes). A pure-Node test that copies scripts/ to a temp root, runs the generator there and compares each output's digest with docs/release-notes/art.lock.json would catch this at PR time, in milliseconds, without Electron.
   Evidence: grep -rn build-release-notes-art test/ finds only a comment (test/fonts.test.js:65). The digest recipe is reproducible in plain Node (scripts/render-release-notes.js:60-72, 137-146). Measured at 20d11e1: 12 of 12 lock entries match a fresh generation in a scratch copy. Spike: spud:docs/spikes/bad-036/scripts-release-notes-art.md §8 check 3 and §10.
 
@@ -63,3 +63,4 @@ No sub-agents.
 Spike at spud:docs/spikes/bad-036/scripts-release-notes-art.md (all ten sections). Finding: the file is a pure-Node SVG generator (fs+path only, no exports, argv or env); rasterizing is render-release-notes.js; the contract is every SVG byte, digested by docs/release-notes/art.lock.json. Proposed tree (prototype sizes): scripts/build-release-notes-art.js 80 (ROOT/OUT, ART, emit, loop); scripts/release-notes-art/constants.js 32, motion.js 27, svg.js 115; illustrations/creator.js 178, auto-align.js 70, background-bed.js 84, versions.js 84, free.js 47, scoring.js 95, take-file.js 79, catalog.js 139, collab.js 143, cam-sync.js 140, update-staging.js 161, collab-listing.js 224. Files over 250: none (largest collab-listing.js 224). All 81 top-level statements assigned once (table in §4). Verified on a throwaway prototype in the session scratchpad, never in BadTakes: symbol diff 81/81 with 0 changes, 853 SVGs and stdout byte-identical (aggregate sha256 b241ef6d...), lock 12/12; the negative control caught a one-character change. Phase 2: PR 1 constants/motion/svg; no IO PR (emit is 4 lines of orchestration); PR 2 illustrations plus entry plus cutting-a-release SKILL.md:269 update. Land between releases. Not run: Electron check 3 and npm test, which are specified only. Proposal 73 (P3): an npm test guard against art.lock.json.
 
 ## Outcome
+Spike scripts-release-notes-art.md has all ten sections in order; 81 top-level statements assigned; no file over 250 (largest collab-listing.js 224); byte identity proven on a scratchpad prototype against art.lock.json; filed proposal 73.
