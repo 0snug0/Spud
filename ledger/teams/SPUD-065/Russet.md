@@ -45,6 +45,7 @@ Style: a design document Eric reads in Obsidian; headings, tables, short paragra
 Children: up to two, one level, no fable tier (the account's Fable limit is reached): scouts on haiku for mechanical surveys, or an engineer or architect on opus with `--tier-reason` for the cycle resolution of the shell modules or the loader prototype. Deliverable globs disjoint from yours and each other's, under docs/spikes/spd-065/parts/; fold their output into the spike yourself. Wait for each child inside your turn; record each with `member finish` before you return.
 
 ## Log
+- 2026-09-15T13:14 Started: read brief, Burbank spike (6d412b4), launcher, header, main, cmd_hook, helpers, test_launcher, test_backup; spud_ledger.py still at 9e1deda (11065 lines), anchors hold
 
 ## Sub-agents
 
