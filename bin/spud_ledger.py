@@ -5618,6 +5618,9 @@ SHELL_OPERATORS = (";;&", "&>>", "<<<", "<<-", ";;", ";&", "&&", "||", "|&", "&>
                    ";", "&", "|", "(", ")", "<", ">")
 SHELL_PUNCTUATION = frozenset("();<>|&")
 LIST_TERMINATORS = {";", ";;", ";&", ";;&"}
+# Words zsh lets stand before a compound command, so `coproc repeat 1 git push` runs the loop (probed; `nocorrect`, `noglob`,
+# `command` and `-` do not: zsh reports a parse error or looks for a program named repeat).  SPD-042.
+LOOP_PREFIX_WORDS = {"coproc", "time", "!"}
 DIRECTORY_COMMANDS = {"cd", "chdir", "pushd", "popd"}  # the builtins, spelled exactly: CD and /usr/bin/cd are programs
 SHELL_DECLARATIONS = {"export", "typeset", "declare", "local", "readonly"}
 # A redirection or tee target the shell expands is checked as every file it opens, not as its literal spelling (SPD-034).
@@ -6603,6 +6606,11 @@ def mark_zsh_patterns(text):
     command = True  # zsh's command position
     target = None  # after a redirection operator: the command position to restore after its target
     heredoc = cond = arith_next = punctuation_next = False
+    # SPD-042: zsh's `for name ( word ... )` word list is not a glob (`for f (a|b)` is a parse error), and a command follows
+    # it and a `repeat` count, so `for f (a b) (git push)` and `repeat 1 (git push)` open subshells, not patterns.
+    for_list = 0  # 1: the loop's name is next; 2: a `(` here opens its word list
+    repeat_count = False  # the next word is a `repeat` count; the body, in command position, follows it
+    for_close = -1  # where a `for name (` list closes
     cases = []  # per open case command: "subject", "in", "pattern" or "body"
     while i < n:
         c = text[i]
@@ -6619,9 +6627,14 @@ def mark_zsh_patterns(text):
                 end = parens[i] + 1
                 out.append(text[i:end])
                 other.append(text[i:end])
-                i, command, arith_next = end, False, False
+                # a `for (( ... ))` header is followed by its body, in command position; a `(( ... ))` command is not
+                i, command, arith_next = end, arith_next and not command, False
                 continue
-            word_start = not (command or cond or heredoc or in_pattern or text.startswith("()", i)) and _zsh_group(text, i, scan) is not None
+            if for_list == 2 and i in parens:  # `for f ( a b )`: the loop's word list
+                for_close = parens[i]
+                word_start = False
+            else:
+                word_start = not (command or cond or heredoc or in_pattern or text.startswith("()", i)) and _zsh_group(text, i, scan) is not None
         else:
             word_start = c == "<" and not (cond or heredoc) and ZSH_RANGE_RE.match(text, i) is not None
         punctuation_next = False
@@ -6629,8 +6642,9 @@ def mark_zsh_patterns(text):
             op = "()" if text.startswith("()", i) else next((o for o in SHELL_OPERATORS if text.startswith(o, i)), c)
             out.append(op)
             other.append(op)
-            i += len(op)
+            pos, i = i, i + len(op)
             arith_next = False
+            for_list, repeat_count = 0, False
             if op in ("<(", ">("):
                 command, target = True, None
             elif op in ("(", "()"):  # a subshell, or a function's header: a command follows (zsh's INOUTPAR)
@@ -6639,7 +6653,7 @@ def mark_zsh_patterns(text):
                 if in_pattern:
                     cases[-1], command = "body", True
                 else:
-                    command = False
+                    command = pos == for_close  # a `for name ( ... )` list closes: its body follows
             elif op in OUT_REDIRECTS or op in IN_REDIRECTS:
                 target = command if target is None else target
                 command, heredoc = False, op in ("<<", "<<-")
@@ -6710,7 +6724,8 @@ def mark_zsh_patterns(text):
         out.append("".join(word))
         other.append("".join(alternative))
         w, i = text[start:j], j
-        arith_next = False
+        was_name, was_count = for_list == 1, repeat_count
+        arith_next, for_list, repeat_count = False, 0, False
         if heredoc:
             heredoc = False
         if target is not None:
@@ -6738,10 +6753,15 @@ def mark_zsh_patterns(text):
                 cond, command = True, False
             elif w in ("for", "select", "foreach", "function", "repeat"):
                 command, arith_next = False, w in ("for", "select")
+                for_list, repeat_count = 1 if w in ("for", "select") else 0, w == "repeat"
             elif w in ZSH_COMMAND_POSITION_WORDS or ASSIGNMENT_WORD_RE.match(w):
                 pass
             else:
                 command = False
+        if was_name and not for_list:
+            for_list = 2  # the loop's name was read: a `(` now opens its word list, not a pattern
+        elif was_count:
+            command = True  # `repeat word`: its body follows, in command position (zsh's SHORT_LOOPS)
     return "".join(out), "".join(other)
 
 
@@ -7303,12 +7323,16 @@ class ShellFrame:
     """An open compound command: its kind, the word that closes it, the directories it started in, the directories any of
     its branches ended in so far, and the enclosing list's state to restore."""
 
-    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark")
+    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body")
 
     def __init__(self, kind, closer, saved, outer, mark=0):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
         self.pattern = kind == "case"  # a case command reads a pattern first, and again after each ;;
         self.mark = mark  # how many assignments the line had made when it opened (SPD-043)
+        # SPD-042: a loop's body form.  None for anything but a for, select or repeat; then "header" while its header is read,
+        # "pending" until the body's first word, and then "long" (`do ... done`), "compound" (a `{ ... }` or `( ... )` body that
+        # closes this frame with it) or "sublist" (zsh's SHORT_LOOPS: one and-or list, closing this frame where the list ends).
+        self.body = None
 
 
 _CURRENT = object()  # analyse_segment: redirections open in the directories in force
@@ -7324,12 +7348,17 @@ class ShellWalk:
     - a cd that may not run (after && or ||, in an if, case or loop body, in a function body) or may fail (its target does
       not exist now) leaves either directory for what runs after its and-or list; what runs after `cd x &&` is in x;
     - a relative cd in a loop or a function body may repeat, so the hook cannot follow it;
-    - a compound command's redirections open where it started."""
+    - a compound command's redirections open where it started;
+    - zsh's SHORT_LOOPS (on by default, SPD-042) run a loop body with no `do` and `done`: after `repeat word`, after
+      `for name ( word ... )` and after a `for`/`select` list closed by `;` or a newline, the body is a `do ... done`, a
+      `{ list }`, a `( list )` or one sublist, and the loop ends where that sublist ends."""
 
     def __init__(self, a, inner, bodies, depth):
         self.a, self.inner, self.bodies, self.depth = a, list(inner), list(bodies), depth
         self.words, self.stack = [], []
         self.skip = False  # the words are a for, select or case header or a function's name, not a command
+        self.header = None  # which header they are: "for" (for, select), "repeat" or "func"
+        self.expect_body = False  # the header is complete: the next word decides the body's form (SPD-042)
         self.function_next = False  # `name ()` or `function name` was read: the next body is a function's
         self.redirect_cwds = _CURRENT
         self.start_list()
@@ -7354,11 +7383,12 @@ class ShellWalk:
 
     # -- compound commands --------------------------------------------------------------
     def push(self, kind, closer):
-        outer = (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words, self.skip)
+        outer = (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words,
+                 self.skip, self.header, self.expect_body)
         self.stack.append(ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned)))
         if kind in ("loop", "func"):
             self.a.loop_depth += 1
-        self.words, self.skip = [], False
+        self.words, self.skip, self.header, self.expect_body = [], False, None, False
         self.start_list()
 
     def pop(self):
@@ -7373,13 +7403,16 @@ class ShellWalk:
             self.a.sticky.update(assigned)  # a function body assigns again whenever it is called
         inner = self.a.cwds
         after = frame.saved if frame.kind == "sub" else (inner if frame.kind == "group" else union_dirs(frame.seen, inner))
-        (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words, self.skip) = frame.outer
+        (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words,
+         self.skip, self.header, self.expect_body) = frame.outer
         self.a.cwds = after
         if after != frame.saved and self.conditional:
             self.uncertain = True
         self.list_seen = union_dirs(self.list_seen, after)
         if frame.kind != "sub":
             self.redirect_cwds = union_dirs(frame.saved, after)
+        if self.stack and self.stack[-1].body == "compound":
+            self.pop()  # the short loop whose body this `{ ... }` or `( ... )` was (SPD-042)
 
     def branch(self):
         """then, else, elif, do, a case arm: the body may start from the directories the compound command started in."""
@@ -7391,6 +7424,33 @@ class ShellWalk:
             self.a.doubt.update(self.a.assigned[top.mark :])  # a branch may run without what an earlier one assigned (SPD-043)
             self.a.cwds = union_dirs(top.saved, self.a.cwds)
         self.start_list()
+
+    # -- zsh's short loop forms (SPD-042) -----------------------------------------------
+    def open_loop(self, t):
+        """A `for`, `select` or `repeat` in command position: its header is read, then its body, with or without `do`."""
+        self.push("loop", "done")
+        self.skip, self.header = True, "repeat" if t == "repeat" else "for"
+        self.stack[-1].body = "header"
+
+    def end_header(self):
+        """The loop's header is complete.  Its body may follow with no `do`, so the next word decides the body's form."""
+        self.finish()
+        if self.stack and self.stack[-1].body == "header":
+            self.stack[-1].body, self.expect_body = "pending", True
+
+    def resolve_body(self, t):
+        """The first word after a complete header: `do` opens a `do ... done` body, `{` or `(` a compound one that closes the
+        loop with it, anything else a single sublist (probed in zsh 5.9: `repeat 2 echo a; echo b` ran `echo a` twice)."""
+        self.expect_body = False
+        frame = self.stack[-1] if self.stack else None
+        if frame is None or frame.body != "pending":
+            return
+        frame.body = "long" if t == "do" else ("compound" if t in ("{", "(") else "sublist")
+
+    def close_sublists(self):
+        """A short loop whose body is one sublist ends where that sublist ends."""
+        while self.stack and self.stack[-1].body == "sublist":
+            self.pop()
 
     # -- simple commands ----------------------------------------------------------------
     def consume(self, words):
@@ -7429,14 +7489,16 @@ class ShellWalk:
         """Analyse the simple command read so far.  `unsure`: it runs in its own process (a pipeline element, a background job)."""
         words, self.words = self.words, []
         skip, self.skip = self.skip, False
+        header, self.header = self.header, None
         redirect_cwds, self.redirect_cwds = self.redirect_cwds, _CURRENT
         if not words:
             return
         cleaned, bodies = self.consume(words)
         a = self.a
         if skip:
-            for w in cleaned:  # a for or select header assigns its name (SPD-043)
-                a.doubt.update(_NAME_RE.findall(deglob(w)))
+            if header != "repeat":  # a for or select header assigns its name (SPD-043); a repeat count assigns nothing
+                for w in cleaned:
+                    a.doubt.update(_NAME_RE.findall(deglob(w)))
             return
         before = a.cwds
         # SPD-043: an assignment in a command that may not run (after && or ||) or runs in its own process may not hold after it
@@ -7463,6 +7525,7 @@ class ShellWalk:
                 self.function_next = False
                 return
             if t in ("}", "fi", "done", "esac"):
+                self.close_sublists()
                 if self.stack and self.stack[-1].closer == t:
                     self.pop()
                 return
@@ -7470,8 +7533,7 @@ class ShellWalk:
                 self.push("cond" if t == "if" else "loop", "fi" if t == "if" else "done")
                 return
             if t in ("for", "select", "repeat"):
-                self.push("loop", "done")
-                self.skip = True
+                self.open_loop(t)
                 return
             if t == "case":  # its subject and `in` are read with the first pattern and discarded at the pattern's `)`
                 self.push("case", "esac")
@@ -7481,20 +7543,29 @@ class ShellWalk:
                 return
             if t == "function":
                 self.function_next = self.skip = True
+                self.header = "func"
                 return
         if self.skip and self.function_next and t == "{":  # function name {
             self.discard()
-            self.skip = False
+            self.skip, self.header = False, None
             self.push("func", "}")
             self.function_next = False
             return
+        if t in ("for", "select", "repeat") and not self.skip and self.words and all(w in LOOP_PREFIX_WORDS for w in self.words):
+            self.discard()  # zsh runs a compound command after `coproc`, `time` and `!` (probed: `coproc repeat 1 git push` ran it)
+            self.open_loop(t)
+            return
         self.words.append(t)
+        if self.skip and self.header == "repeat":  # `repeat word`: one word of header, then the body (SPD-042)
+            self.end_header()
 
     def walk(self, tokens):
         toks = [p for t in tokens for p in operator_parts(t)]
         i = 0
         while i < len(toks):
             t = toks[i]
+            if self.expect_body and t not in LIST_TERMINATORS:  # terminators may stand between a header and its body
+                self.resolve_body(t)
             case = self.stack[-1] if self.stack and self.stack[-1].kind == "case" else None
             if t == ")" and case:
                 self.discard()  # the end of a case pattern (with the subject and `in` before the first)
@@ -7508,12 +7579,12 @@ class ShellWalk:
                     j += 1
                 self.words[-1] += _ARRAY_VALUE + " ".join(toks[i + 1 : j])  # name=(a b), name=(): one assignment word, marked an array
                 i = j
-            elif t == "(" and i + 1 < len(toks) and toks[i + 1] == ")":
+            elif t == "(" and i + 1 < len(toks) and toks[i + 1] == ")" and not self.skip:
                 self.discard()  # name (): a function definition's header
                 self.function_next = True
                 i += 1
             elif t == "(" and self.skip:
-                depth, j = 0, i  # for (( ... )): the loop's header, not a subshell
+                depth, j = 0, i  # for (( ... )) and for name ( ... ): the loop's header, not a subshell
                 while j < len(toks):
                     depth += toks[j] in ("(", "<(", ">(")
                     depth -= toks[j] == ")"
@@ -7522,10 +7593,13 @@ class ShellWalk:
                     j += 1
                 self.words.append("".join(toks[i : j + 1]))
                 i = j
+                if self.header in ("for", "repeat") and len(self.words) <= 2:
+                    self.end_header()  # `for (( ... ))` or `for name ( ... )` closed: its body follows (SPD-042)
             elif t in ("(", "<(", ">("):
                 self.function_next = False
                 self.push("sub", ")")
             elif t == ")":
+                self.close_sublists()
                 if self.stack and self.stack[-1].closer == ")":
                     self.pop()
                 else:
@@ -7543,12 +7617,17 @@ class ShellWalk:
                 self.piped = True
             elif t == "&":
                 self.finish(unsure=True)
+                self.close_sublists()  # `repeat 2 git push &`: the `&` ends the body's sublist, and the loop with it
                 self.a.doubt.update(self.a.assigned[self.list_mark :])  # a background list assigns in its own process (SPD-043)
                 self.end_pipeline()
                 self.a.cwds = self.list_start  # the whole and-or list ran in the background
                 self.start_list()
             elif t in LIST_TERMINATORS:
+                if self.skip and self.header == "for":
+                    self.end_header()  # `for f in a b;` and `for f;`: zsh takes what follows as the body (SPD-042)
                 self.finish()
+                self.close_sublists()
+                case = self.stack[-1] if self.stack and self.stack[-1].kind == "case" else None  # a short loop closed above it
                 if t != ";" and case:
                     self.branch()
                     case.pattern = True
