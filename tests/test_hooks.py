@@ -1713,9 +1713,12 @@ class SpudAllowIdentityTest(BashHookCase):
             with self.subTest(tail=tail):
                 self.assertAllowedForBoth(cli + " {tail}" + tail)
         for tail in (" > %s/board.txt" % self.out, " >> %s/board.txt" % self.out, " 2> %s/err.txt" % self.out, " &> %s/all.txt" % self.out,
-                     " > ~/x.pth", " >| %s/x" % self.out):
+                     " >| %s/x" % self.out):
             with self.subTest(tail=tail):
                 self.assertSilentForBoth(cli + " {tail}" + tail)
+        # A shell profile or .pth file in Eric's home: not allowed, and since SPD-064 refused to a member outright.
+        self.assertRefused(cli + " board > ~/x.pth", "outside every registered project")
+        self.assertSilent(cli + " board > ~/x.pth", agent_id=None)
         self.assertRefused(cli + " board > ledger/tickets/SPD-001.md", "generated")
 
     def test_every_prescribed_spelling_stays_allowed(self):
@@ -1904,14 +1907,19 @@ class ShellModelTest(BashHookCase):
         self.assertRefused("cd %s/docs && echo x > ~+/note.txt" % home, "deliverables")
         self.assertRefused("cd ~+/docs && echo x > note.txt", "deliverables")
         self.assertSilent("cd %s && cd ~+/tests && echo x > note.txt" % home)
-        self.assertSilent("cd ~ && echo x > ledger/tickets/SPD-001.md")
+        # ~ is HOME, so this writes no ledger file; since SPD-064 a member is refused there all the same, for being outside
+        # every registered project, while Spud writes his own home as before.
+        self.assertRefused("cd ~ && echo x > ledger/tickets/SPD-001.md", "outside every registered project")
+        self.assertSilent("cd ~ && echo x > ledger/tickets/SPD-001.md", agent_id=None)
         self.assertRefused("cd %s && echo x > ~+/ledger/tickets/SPD-001.md" % home, "Law 1", agent_id=None)
 
     def test_cdpath_sends_a_relative_cd_elsewhere(self):
         """bash tries CDPATH before the current directory, zsh after it; a target starting with / ./ or ../ skips it."""
         home, out = self.home.path, str(self.out)
+        # The non-matching CDPATH entry is under the scratch root: since SPD-064 a member's redirection into a directory
+        # outside every registered project is refused, and this control is about which directory the cd lands in.
         for setting in ("CDPATH=%s cd ledger", "CDPATH=%s; cd ledger", "export CDPATH=%s; cd ledger", "cdpath=(%s); cd ledger",
-                        "CDPATH=/nowhere:%s; cd ledger"):
+                        "CDPATH=" + out + "/nowhere:%s; cd ledger"):
             with self.subTest(setting):
                 self.assertRefused((setting % home) + " && echo x > tickets/SPD-001.md", "generated", AGENT_C, cwd=out)
         self.assertSilent("CDPATH=%s; cd ./ledger && echo x > tickets/SPD-001.md" % home, AGENT_C, cwd=out)
@@ -2356,7 +2364,9 @@ class ZshGlobOperatorTest(BashHookCase):
                     self.assertRefused("echo x > tests/%s/../../ledger/tickets/SPD-001.md" % pattern, "generated", agent_id)
                 self.assertRefused("echo x > %s" % self.outside(pattern, "ledger/tickets/SPD-001.md"), "Law 1", agent_id=None)
         self.assertRefused("echo x > tests/<1-1>/../../docs/x.md", "deliverables", AGENT_A)
-        self.assertSilent("echo x > tests/<1-1>/../../docs/x.md", AGENT_C)
+        # bash's reading opens /../../docs/x.md, which is /docs/x.md at the filesystem root: no ledger file, and since
+        # SPD-064 refused to a member (even a ** one) for being outside every registered project.
+        self.assertRefused("echo x > tests/<1-1>/../../docs/x.md", "outside every registered project", AGENT_C)
 
     def test_the_open_range(self):
         for pattern in ("<->", "<1->", "<-9>", "<0-7>"):
@@ -3290,6 +3300,238 @@ class GitAliasFileTest(BashHookCase):
                 self.assertSilent(ok, agent_id=None)
 
 
+# SPD-063: the refusal needles.  (a) a file git reads with nothing on the line; (b) a program-naming key in force at the
+# target repository's local or worktree scope.
+GIT_FILE_WORDING = "git reads with nothing on the line"
+GIT_SCOPE_WORDING = "scope (the repository in"
+
+
+class GitConfigFileTest(BashHookCase):
+    """SPD-063 (a): SPD-064 closes a member's writes to ~/.gitconfig and $XDG_CONFIG_HOME/git/config, but the local scope
+    stays open -- a `.git/config` (or `.git/config.worktree`, or a file an `include.path` there names) inside a checkout the
+    ledger knows, which a member can craft under its own deliverable globs and git then reads with nothing on the line.  So
+    the edit hook, and with it the Bash hook's redirection and tee check, refuses a caller with an agent_id any file named
+    `.gitconfig` or whose path ends in `.git/config`, `.git/config.worktree` or `git/config`, anywhere, deliverables
+    included.  And `git config edit` -- the 2.46 subcommand syntax, one positional -- slipped through git_refused, which
+    counted positionals; the writing subcommands are named now, and `git config get <key>` and `--get-urlmatch <name> <url>`,
+    two reads git_refused counted as a key and a value, are silent.  Probed on git 2.54.0 (Apple Git-157)."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.tests = self.home.path / "tests"
+        self.tests.mkdir(exist_ok=True)
+
+    def config_files(self):
+        t = self.tests
+        return [t / ".git" / "config", t / "fake" / ".git" / "config", t / "fake" / ".git" / "config.worktree",
+                t / ".gitconfig", t / "sub" / ".gitconfig", t / "git" / "config", t / "xdg" / "git" / "config"]
+
+    def test_a_member_may_not_write_a_git_config_file_even_inside_its_globs(self):
+        for p in self.config_files():
+            with self.subTest(str(p)):
+                for agent_id in (AGENT_A, AGENT_C, AGENT_D):
+                    r = self.assertRefused("echo x > %s" % p, GIT_FILE_WORDING, agent_id=agent_id)
+                    self.assertIn("Law 7", r.reason)
+                    self.assertIn(str(p), r.reason)
+                r = self.home.hook("PreToolUse", self.pre_edit(p, agent_id=AGENT_A))
+                self.assertEqual((r.code, r.decision), (0, "deny"), (str(p), r))
+                self.assertIn(GIT_FILE_WORDING, r.reason)
+        self.assertEqual(self.wide["deliverables"], ["**"])
+
+    def test_every_edit_tool_and_every_redirection_form(self):
+        p = self.tests / ".git" / "config"
+        for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+            with self.subTest(tool):
+                r = self.home.hook("PreToolUse", self.pre_edit(p, agent_id=AGENT_A, tool=tool))
+                self.assertIn(GIT_FILE_WORDING, r.reason)
+        commands = [form % p for form in ("echo x > %s", "echo x >> %s", "printf x | tee %s", "printf x | tee -a %s")]
+        commands.append("cd %s/tests && echo x > .git/config" % self.home.path)
+        for command in commands:
+            with self.subTest(command):
+                self.assertRefused(command, GIT_FILE_WORDING)
+
+    def test_case_variants_are_refused_too(self):
+        for p in (self.tests / ".GITCONFIG", self.tests / ".Git" / "Config", self.tests / "GIT" / "CONFIG"):
+            with self.subTest(str(p)):
+                self.assertRefused("echo x > %s" % p, GIT_FILE_WORDING)
+
+    def test_similar_names_stay_under_the_globs(self):
+        for p in (self.tests / "config", self.tests / "gitconfig", self.tests / "x.gitconfig", self.tests / ".gitconfig.bak",
+                  self.tests / ".github" / "config", self.tests / ".git" / "hooks" / "x", self.tests / "git" / "config.json",
+                  self.tests / "notgit" / "config"):
+            with self.subTest(str(p)):
+                self.assertSilent("echo x > %s" % p)
+                r = self.home.hook("PreToolUse", self.pre_edit(p, agent_id=AGENT_A))
+                self.assertEqual((r.code, r.stdout), (0, ""), (str(p), r))
+
+    def test_spud_is_not_bound_by_it(self):
+        for p in self.config_files():
+            with self.subTest(str(p)):
+                r = self.home.hook("PreToolUse", self.pre_edit(p, agent_id=None))
+                self.assertNotIn(GIT_FILE_WORDING, r.reason)  # Law 1 may refuse it in the home; never this reason
+                self.assertSilent("echo x > /private/tmp/claude-%d/x/.gitconfig" % os.getuid(), agent_id=None)
+
+    # -- `git config` itself ------------------------------------------------------
+    def test_the_writing_forms_of_git_config_are_refused(self):
+        for cmd in ("git config user.name x", "git config --add a.b c", "git config --append a.b c",
+                    "git config --unset a.b", "git config --unset-all a.b", "git config --replace-all a.b c",
+                    "git config --rename-section a b", "git config --remove-section a", "git config --edit",
+                    "git config -e", "git config --global --edit", "git config --local core.pager less",
+                    "git config set core.pager x", "git config unset core.pager", "git config edit",
+                    "git config rename-section a b", "git config remove-section a", "git config --file f core.pager x",
+                    "git config set --all core.pager x"):
+            with self.subTest(cmd):
+                for agent_id in (AGENT_A, AGENT_C):
+                    r = self.assertRefused(cmd, "Law 7", agent_id=agent_id)
+                    self.assertIn("git config", r.reason)
+                self.assertSilent(cmd, agent_id=None)
+
+    def test_the_reading_forms_of_git_config_stay_silent(self):
+        for cmd in ("git config --get core.pager", "git config --get-all a.b", "git config --get-regexp a",
+                    "git config --list", "git config -l", "git config core.pager", "git config list",
+                    "git config get core.pager", "git config --list --show-scope --name-only",
+                    "git config --get-colorbool color.ui", "git config --get-urlmatch a https://x",
+                    "git config -f f core.pager", "git config --global --list", "git config get --all a.b"):
+            with self.subTest(cmd):
+                self.assertSilent(cmd)
+                self.assertSilent(cmd, agent_id=None)
+
+
+class GitLocalConfigTest(BashHookCase):
+    """SPD-063 (b): git reads the target repository's own config with nothing on the line, and a member can craft one under
+    its deliverable globs inside a checkout the ledger knows (`git -C tests/fake status` resolves inside the home, so
+    SPD-047's git-repo refusal, which only fires outside every known checkout, stays silent).  So before a member's git call
+    the hook reads the keys in force at that repository's `local` and `worktree` scopes with `git config --list --show-scope
+    --name-only`, run there with the module's sanitised environment, and refuses the ones that name or enable a program git
+    runs (SPD-046's class) under a verb Law 7's table allows.  The system and global scopes are Eric's own and stay out of
+    it: credential.helper is in force at the system scope on this Mac, and this very checkout's local scope holds
+    core.filemode, extensions.worktreeconfig, remote.origin.url and branch.main.vscode-merge-base, so a check that refused
+    every key outside SPD-046's inert allowlist would refuse every member git call in Spud's own repository.  The answer is
+    kept in the home's state directory under the stat fingerprint of the config files git reads there, so only the first
+    hook after one of them changes runs git (the hook path never imports subprocess otherwise, SPD-016)."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.repo = self.home.path / "tests" / "fake"  # a repository inside the home: git reads it, the ledger knows it
+        (self.repo / ".git" / "objects").mkdir(parents=True)
+        (self.repo / ".git" / "refs" / "heads").mkdir(parents=True)
+        (self.repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        self.plant("[core]\n\trepositoryformatversion = 0\n")
+
+    def plant(self, text, name="config"):
+        (self.repo / ".git" / name).write_text(text, encoding="utf-8")
+
+    def calls(self):
+        return ("git -C %s status" % self.repo, "cd %s && git status" % self.repo, "git -C %s log --oneline" % self.repo,
+                "git --git-dir=%s/.git status" % self.repo, "cd %s && git diff" % self.repo)
+
+    def assertRepoRefused(self, needle):
+        for cmd in self.calls():
+            with self.subTest(cmd):
+                for agent_id in (AGENT_A, AGENT_C):
+                    r = self.assertRefused(cmd, "Law 7", agent_id=agent_id)
+                    self.assertIn(needle, r.reason)
+                self.assertSilent(cmd, agent_id=None)  # Law 7 does not bind Spud
+
+    def assertRepoSilent(self):
+        for cmd in self.calls():
+            with self.subTest(cmd):
+                self.assertSilent(cmd)
+                self.assertSilent(cmd, agent_id=None)
+
+    def test_a_planted_program_key_at_the_local_scope_refuses_every_member_git_call(self):
+        for key, text in (("core.pager", "[core]\n\tpager = /bin/echo\n"),
+                          ("diff.external", "[diff]\n\texternal = /bin/echo\n"),
+                          ("core.sshCommand", "[core]\n\tsshCommand = /bin/echo\n"),
+                          ("core.hooksPath", "[core]\n\thooksPath = /tmp/h\n"),
+                          ("credential.helper", "[credential]\n\thelper = /bin/echo\n"),
+                          ("difftool.t.cmd", '[difftool "t"]\n\tcmd = /bin/echo\n')):
+            with self.subTest(key):
+                self.plant("[core]\n\trepositoryformatversion = 0\n" + text)
+                self.assertRepoRefused("local")
+                r = self.assertRefused("git -C %s status" % self.repo, key.split(".")[-1].casefold())
+                self.assertIn(GIT_SCOPE_WORDING, r.reason)
+
+    def test_a_program_key_at_the_worktree_scope_is_named_as_such(self):
+        self.plant("[core]\n\trepositoryformatversion = 0\n[extensions]\n\tworktreeConfig = true\n")
+        self.plant("[core]\n\tpager = /bin/echo\n", name="config.worktree")
+        self.assertRepoRefused("worktree")
+
+    def test_a_program_key_reached_by_include_path_is_refused(self):
+        """git reports an included file's keys at the including file's scope, so the listing already covers includes."""
+        self.plant("[core]\n\trepositoryformatversion = 0\n[include]\n\tpath = extra\n")
+        self.plant("[core]\n\tsshCommand = /bin/echo\n", name="extra")
+        self.assertRepoRefused("local")
+
+    def test_inert_local_keys_stay_silent(self):
+        self.plant("[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tignorecase = true\n"
+                   '[remote "origin"]\n\turl = https://example.invalid/x\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n'
+                   '[branch "main"]\n\tremote = origin\n\tmerge = refs/heads/main\n\tvscode-merge-base = origin/main\n'
+                   "[extensions]\n\tworktreeConfig = false\n[color]\n\tui = never\n")
+        self.assertRepoSilent()
+
+    def test_a_key_at_the_global_or_system_scope_is_ignored(self):
+        """Eric's own scopes: credential.helper is in force at the system scope on this Mac, so a check over every scope
+        would refuse every member git call."""
+        planted = self.home.path / "tests" / "global.gitconfig"
+        planted.write_text("[core]\n\tpager = /bin/echo\n\tsshCommand = /bin/echo\n", encoding="utf-8")
+        self.home.env["GIT_CONFIG_GLOBAL"] = str(planted)
+        self.addCleanup(self.home.env.pop, "GIT_CONFIG_GLOBAL", None)
+        self.assertRepoSilent()
+
+    def test_a_directory_the_hook_cannot_follow_is_refused(self):
+        for cmd in ("cd - && git status", "popd && git status", "cd ~x && git log"):
+            with self.subTest(cmd):
+                r = self.assertRefused(cmd, "Law 7")
+                self.assertIn("cannot", r.reason)
+                self.assertSilent(cmd, agent_id=None)
+
+    def test_a_directory_in_no_repository_at_all_needs_no_git_run(self):
+        cache = self.home.path / STATE / "git-config-scopes.json"
+        self.assertSilent("git status")  # the scratch home is not a repository: no local scope, nothing to read
+        self.assertFalse(cache.exists(), "a directory in no repository costs no git run and no cache entry")
+
+    def test_the_answer_is_cached_and_a_config_edit_invalidates_it(self):
+        cache = self.home.path / STATE / "git-config-scopes.json"
+        self.assertSilent("git -C %s status" % self.repo)
+        self.assertTrue(cache.exists(), "the first call writes the cache")
+        stored = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertTrue(stored, stored)
+        self.assertSilent("git -C %s status" % self.repo)  # a hit: the same answer
+        self.plant("[core]\n\trepositoryformatversion = 0\n\tpager = /bin/echo\n")
+        self.assertRefused("git -C %s status" % self.repo, "core.pager")  # the fingerprint changed
+        self.plant("[core]\n\trepositoryformatversion = 0\n")
+        self.assertSilent("git -C %s status" % self.repo)
+
+    def test_a_cache_hit_imports_no_subprocess(self):
+        """The Bash hook runs on every command line; SPD-016 keeps subprocess off its path, so only a miss may pay for it."""
+        cold = self.imports_of("git -C %s status" % self.repo)
+        self.assertIn("subprocess", cold)
+        self.assertNotIn("subprocess", self.imports_of("git -C %s status" % self.repo))
+
+    def imports_of(self, command):
+        payload = self.pre_bash(command, agent_id=AGENT_A)
+        proc = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(SPUD), "hook", "PreToolUse"],
+                              input=json.dumps(payload), capture_output=True, text=True, env=self.home.env)
+        self.assertEqual(proc.returncode, 0, proc)
+        return {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines() if line.startswith("import time:")}
+
+    def test_a_repository_outside_every_known_checkout_keeps_its_own_reason(self):
+        outside = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, outside, True)
+        (outside / ".git").mkdir()
+        (outside / ".git" / "config").write_text("[core]\n\tpager = /bin/echo\n", encoding="utf-8")
+        r = self.assertRefused("git -C %s status" % outside, "outside")
+        self.assertNotIn(GIT_SCOPE_WORDING, r.reason)
+
+    def test_a_write_verb_and_a_program_option_still_refuse_first(self):
+        self.plant("[core]\n\trepositoryformatversion = 0\n\tpager = /bin/echo\n")
+        self.assertNotIn(GIT_SCOPE_WORDING, self.assertRefused("git -C %s commit -m x" % self.repo, "never run").reason)
+        self.assertNotIn(GIT_SCOPE_WORDING, self.assertRefused("git -C %s -c core.editor=vi log" % self.repo, "program git never checks").reason)
+
+
 class ParameterExpansionCommandWordTest(BashHookCase):
     """SPD-043: a word the Bash hook dispatches on by name that the shell builds from an expansion the hook does not resolve
     exactly hid the command.  Probed in zsh 5.9 -f, zsh -f -o nobareglobqual (this Mac's Bash tool), bash 3.2 and sh, with a fake
@@ -3826,10 +4068,16 @@ class PreEditTest(PathRuleAsserts, HookCase):
         else:
             self.assertRefused(home / "claude.md", "Law 1", agent_id=None)
 
-    def test_outside_every_project_root_is_allowed(self):
-        for p in ("/Users/eric/.claude/projects/-Users-eric-Personal-Spud/memory/x.md", "/tmp/claude-501/x/scratchpad/notes.md", "/etc/hosts", str(self.home.path.parent / "elsewhere.md"), str(self.home.path) + "-sibling/x.md"):
+    def test_outside_every_project_root_is_spuds_and_the_scratchpad_is_the_members(self):
+        """SPD-064: a path outside every registered project was refused to nobody; only the scratchpad and the system temp
+        directories stay open to a member now (OutsideProjectTest), and Spud writes out there as he always did."""
+        for p in ("/tmp/claude-501/x/scratchpad/notes.md", str(self.home.path.parent / "elsewhere.md"),
+                  str(self.home.path) + "-sibling/x.md"):  # the suite's homes live under tempfile, an open root
             self.assertSilent(p)
             self.assertSilent(p, agent_id=None)
+        for p in ("/Users/eric/.claude/projects/-Users-eric-Personal-Spud/memory/x.md", "/etc/hosts"):
+            self.assertSilent(p, agent_id=None)
+            self.assertRefused(p, "outside every registered project")
 
     def test_worktree_paths_map_to_the_repository(self):
         self.assertSilent(self.wt / "tests" / "x.py")
@@ -4146,6 +4394,140 @@ class StateDirTest(StateDirAsserts, HookCase):
         self.assertBashSilent("echo x > %s" % (home / (STATE + "rc")), agent_id=AGENT_A)
         self.assertBashRefused("echo x > %s" % quote_split(nested[0]), "Law 1", agent_id=None)
         self.assertBashSilent("echo x > %s" % (home / "tests" / "out.txt"), agent_id=AGENT_A)
+
+
+# The refusal a caller with an agent_id gets for a path outside every registered project (SPD-064).
+OUTSIDE = "outside every registered project"
+
+
+class OutsideProjectTest(PathAliasAsserts, HookCase):
+    """SPD-064: edit_reason resolved a target against the registered projects and, when it lay inside none of them, returned
+    no reason at all (`inside = project_paths(...); if not inside: return None, None`), so the path rule that holds a member
+    to its deliverable globs stopped at project boundaries: a bound member could Write, Edit or redirect into ~/.gitconfig,
+    ~/.claude/settings.json and ~/.claude/agents/, the shell rc files, ~/.ssh, a LaunchAgent, or anything else in Eric's
+    home.  Spud's design decision is the allowlist: a caller with an agent_id in a Spud session may write outside every
+    registered project only under the harness's scratchpad root for this user (/private/tmp/claude-<uid>/) and the system
+    temp directories, where members run probes and differential harnesses; everything else outside a project is refused,
+    fail closed, with the path named.  Both readings of the target must land under an allowed root, so a symlink planted in
+    the scratchpad that points at ~/.gitconfig is refused while /tmp and /private/tmp, which resolve to each other, stay
+    open.  Unchanged: Spud himself, who keeps writing his own files and his memory directory under ~/.claude/projects/;
+    a plain session and its unbound subagents (tests/test_hooks_projects.py); the harness_file and state-directory refusals,
+    which run before the project lookup.
+
+    The suite's homes and registered projects live under tempfile, which the allowlist opens, so every refusal here names a
+    path under a HOME that does not exist (/Users/nobody) or a system directory outside every temp root."""
+
+    def setUp(self):
+        super().setUp()
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud"]), AGENT_A)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.fake_home = "/Users/nobody"  # a HOME outside every project and every temp root; nothing here is created
+        self.home.env["HOME"] = self.fake_home
+        self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        self.tmp = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+
+    # The ticket's own list, plus the two files `project sync --all` writes under ~/.claude.  ~/.gitconfig and
+    # $XDG_CONFIG_HOME/git/config are here too, but they earn SPD-063's Law 7 reason first (GitConfigFileTest).
+    def sensitive(self):
+        return [self.fake_home + p for p in ("/.zshrc", "/.bashrc", "/.profile", "/.ssh/config", "/.ssh/authorized_keys",
+                                             "/.claude/settings.json", "/.claude/agents/x.md")] \
+            + ["/Library/LaunchAgents/x.plist", "/etc/hosts"]
+
+    def open_paths(self):
+        return [self.scratchpad + "/notes.md", str(self.tmp / "probe.py"), "/tmp/x", "/private/tmp/x",
+                "/private/tmp/claude-%d/x" % os.getuid(), str(self.tmp.parent / "sibling.txt")]
+
+    def test_a_member_may_not_write_outside_every_project(self):
+        for p in self.sensitive():
+            with self.subTest(p):
+                for agent_id in (AGENT_A, AGENT_C):
+                    r = self.assertRefused(p, OUTSIDE, agent_id=agent_id)
+                    self.assertIn(p, r.reason)  # the reason names the path
+        self.assertEqual(self.wide["deliverables"], ["**"])  # not even a ** member: outside a project there is no glob
+
+    def test_the_git_config_files_outside_every_project_are_refused_too(self):
+        for p in (self.fake_home + "/.gitconfig", self.fake_home + "/.config/git/config"):
+            with self.subTest(p):
+                r = self.assertRefused(p, p)  # SPD-063's Law 7 reason comes first; both name the path
+                self.assertIn("Law 7", r.reason)
+                self.assertSilent(p, agent_id=None)
+
+    def test_every_edit_tool_is_covered_and_the_denial_is_recorded(self):
+        for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+            with self.subTest(tool):
+                self.assertRefused(self.fake_home + "/.zshrc", OUTSIDE, tool=tool)
+        self.assertIn(self.fake_home + "/.zshrc", [e["data"].get("path") or "" for e in self.denied()])
+
+    def test_a_redirection_or_tee_outside_every_project(self):
+        for p in self.sensitive():
+            for command in ("echo x > %s", "echo x >> %s", "printf x | tee %s", "printf x | tee -a %s"):
+                with self.subTest(command % p):
+                    self.assertBashRefused(command % p, OUTSIDE)
+                    self.assertBashSilent(command % p, agent_id=None)  # Spud writes his own files
+
+    def test_a_tilde_spelling_is_expanded_and_a_variable_one_is_refused_as_unresolvable(self):
+        self.assertBashRefused("echo x > ~/.zshrc", OUTSIDE)
+        self.assertRefused("~/.zshrc", OUTSIDE)
+        # A variable the line did not assign stays SPD-043's unresolvable-target refusal, not this one.
+        r = self.home.hook("PreToolUse", self.pre_bash("echo x > $HOME/.zshrc", agent_id=AGENT_A))
+        self.assertEqual((r.code, r.decision), (0, "deny"), r)
+        self.assertIn("spell the path out", r.reason)
+        self.assertNotIn(OUTSIDE, r.reason)
+        self.assertBashSilent("echo x > $HOME/.zshrc", agent_id=None)
+
+    def test_the_scratchpad_and_the_system_temp_directories_stay_open(self):
+        for p in self.open_paths():
+            with self.subTest(p):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(p, agent_id=agent_id)
+                self.assertBashSilent("echo x > %s" % p)
+                self.assertBashSilent("printf x | tee %s" % p)
+
+    def test_a_symlink_under_a_temp_root_that_resolves_outside_is_refused(self):
+        link = self.tmp / "link"
+        link.symlink_to(self.fake_home + "/.zshrc")  # the target need not exist: the check is on the path
+        deep = self.tmp / "dir"
+        deep.symlink_to(self.fake_home + "/.claude")
+        for p in (link, deep / "settings.json"):
+            with self.subTest(str(p)):
+                self.assertRefused(p, OUTSIDE)
+                self.assertBashRefused("echo x > %s" % p, OUTSIDE)
+        self.assertSilent(self.tmp / "real.txt")  # the control: a real file beside the links
+
+    def test_a_symlink_inside_the_globs_cannot_reach_outside_either(self):
+        """Every reading of the target is accounted for: inside a project (the globs decide) or under an allowed root."""
+        tests = self.home.path / "tests"
+        tests.mkdir(exist_ok=True)
+        (tests / "escape").symlink_to(self.fake_home + "/.ssh")
+        self.assertRefused(tests / "escape" / "config", OUTSIDE)
+        self.assertBashRefused("echo x > %s/escape/config" % tests, OUTSIDE)
+        (tests / "outlink").symlink_to("/tmp")  # a link to an allowed root stays open, as it was before
+        self.assertSilent(tests / "outlink" / "x.txt")
+
+    def test_spud_keeps_his_own_files_and_his_memory_directory(self):
+        for p in self.sensitive() + [self.fake_home + "/.claude/projects/-Users-eric-Personal-Spud/memory/MEMORY.md"]:
+            with self.subTest(p):
+                self.assertSilent(p, agent_id=None)
+
+    def test_the_harness_and_state_directory_refusals_still_come_first(self):
+        harness = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/subagents/agent-%s.meta.json" % (os.getuid(), SESSION, AGENT_A)
+        r = self.assertRefused(harness, "harness")
+        self.assertNotIn(OUTSIDE, r.reason)
+        r = self.assertRefused(self.home.path / STATE / "ledger.db", DB_WORDING)
+        self.assertNotIn(OUTSIDE, r.reason)
+
+    def test_the_reason_names_the_path_and_the_roots_that_stay_open(self):
+        r = self.assertRefused(self.fake_home + "/.claude/settings.json", OUTSIDE)
+        self.assertIn("scratchpad", r.reason)
+        self.assertIn("deliverables", r.reason)
+        self.assertIn("/private/tmp/claude-%d" % os.getuid(), r.reason)
+
+    def test_an_unbound_agent_id_keeps_its_scratchpad_and_nothing_else(self):
+        """A foreground child before its first tool call writes probes in its scratchpad; it has no globs, so nothing else."""
+        self.assertSilent(self.scratchpad + "/probe.py", agent_id=AGENT_D)
+        self.assertRefused(self.fake_home + "/.zshrc", OUTSIDE, agent_id=AGENT_D)
+        self.assertRefused(self.home.path / "tests" / "x.py", "not bound", agent_id=AGENT_D)  # inside a project: unchanged
 
 
 class DeliverableGlobTest(SpudTestCase):

@@ -5757,18 +5757,28 @@ BRANCH_READ_FLAGS = {"-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", 
 BRANCH_READ_VALUE_FLAGS = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--abbrev"}
 TAG_READ_FLAGS = {"-l", "--list", "-n", "--column", "--no-column", "-i", "--ignore-case", "--color", "--no-color"}
 TAG_READ_VALUE_FLAGS = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format"}
-CONFIG_READ_FLAGS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--list", "-l", "--show-origin", "--show-scope",
-                     "--bool", "--int", "--bool-or-int", "--path", "--expiry-date", "--null", "-z", "--name-only", "--includes",
-                     "--no-includes", "--global", "--local", "--system", "--worktree"}
-CONFIG_VALUE_FLAGS = {"--file", "-f", "--blob", "--type", "--default"}
-CONFIG_WRITE_FLAGS = {"--add", "--unset", "--unset-all", "--replace-all", "--rename-section", "--remove-section", "--edit", "-e"}
+CONFIG_READ_FLAGS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "--list", "-l",
+                     "--show-origin", "--show-scope", "--bool", "--int", "--bool-or-int", "--path", "--expiry-date", "--null",
+                     "-z", "--name-only", "--includes", "--no-includes", "--global", "--local", "--system", "--worktree"}
+CONFIG_VALUE_FLAGS = {"--file", "-f", "--blob", "--type", "--default", "--comment"}
+CONFIG_WRITE_FLAGS = {"--add", "--append", "--unset", "--unset-all", "--replace-all", "--rename-section", "--remove-section",
+                      "--edit", "-e"}
+# The flags whose positional words are their own arguments, so a second positional is not a value being written
+# (`--get-urlmatch <name> <url>`, `--get-color <name> [<default>]`, `--get <name> [<value-pattern>]`).
+CONFIG_READ_SELECTORS = {"--get", "--get-all", "--get-regexp", "--get-urlmatch", "--get-color", "--get-colorbool", "--list", "-l"}
+# git 2.46 gave `git config` subcommands beside the flag syntax (git-config(1) synopsis, git 2.54.0): `git config edit`
+# carries a single positional, which the positional count read as a key, so it slipped through Law 7 (SPD-063).
+CONFIG_WRITE_SUBCOMMANDS = {"set", "unset", "edit", "rename-section", "remove-section"}
+CONFIG_READ_SUBCOMMANDS = {"list", "get"}
 # A word the dispatch reads by name that the shell expands first (SPD-041) is read as each of these it can match: the names a
 # command word dispatches on, and every option, verb and argument the dispatch compares a later word with.
 GLOB_COMMAND_SAMPLES = frozenset(WRAPPERS | SHELLS | DIRECTORY_COMMANDS | SHELL_DECLARATIONS | JS_RUNTIMES
                                  | {"git", "spud", "eval", "source", ".", "trap", "sqlite3", "sqlite", "tee", "python", "python3", "python3.14"})
 GLOB_SAMPLES = frozenset(
     GLOB_COMMAND_SAMPLES | GIT_WRITE_VERBS | GIT_GLOBAL_VALUE_FLAGS | BRANCH_READ_FLAGS | BRANCH_READ_VALUE_FLAGS | TAG_READ_FLAGS
-    | TAG_READ_VALUE_FLAGS | CONFIG_READ_FLAGS | CONFIG_VALUE_FLAGS | CONFIG_WRITE_FLAGS
+    # CONFIG_READ_SUBCOMMANDS are left out: a glob read as `get` or `list` refuses nothing, so sampling them would only
+    # widen an ambiguity refusal (`command -v g?t` reads as git alone) without closing anything.
+    | TAG_READ_VALUE_FLAGS | CONFIG_READ_FLAGS | CONFIG_VALUE_FLAGS | CONFIG_WRITE_FLAGS | CONFIG_WRITE_SUBCOMMANDS
     | {"stash", "worktree", "remote", "reflog", "branch", "tag", "config", "list", "show", "add", "remove", "rm", "rename", "set-url",
        "set-head", "set-branches", "prune", "update", "expire", "delete"}
     | {o for options in WRAPPER_VALUE_OPTIONS.values() for o in options}
@@ -6135,12 +6145,11 @@ def map_into_checkouts(roots, path):
     return project, base, "/".join(parts)
 
 
-def project_paths(ctx, con, path, cwd):
-    """Every reading of `path` that lands inside a project's checkout: the lexical path and, when
-    a symlink changes it, the real one, as (project row, root, repository-relative path).  Relative
-    paths resolve against the payload's cwd.  The real path is taken of the path as given too, since
-    the kernel resolves a symlink before a `..` after it (tests/link/.. is the link target's parent)
-    where normpath drops the pair (SPD-029)."""
+def path_readings(path, cwd):
+    """Every reading of `path` the kernel could give: the lexical path and, when a symlink changes it, the real one.
+    Relative paths resolve against the payload's cwd.  The real path is taken of the path as given too, since the kernel
+    resolves a symlink before a `..` after it (tests/link/.. is the link target's parent) where normpath drops the pair
+    (SPD-029)."""
     p = os.path.expanduser(path) if path.startswith("~") else path
     if not os.path.isabs(p):
         p = os.path.join(cwd or os.getcwd(), p)
@@ -6149,13 +6158,109 @@ def project_paths(ctx, con, path, cwd):
     for real in (os.path.realpath(lexical), os.path.realpath(p)):
         if real not in candidates:
             candidates.append(real)
+    return candidates
+
+
+def path_placements(ctx, con, path, cwd):
+    """(inside, outside) for every reading of `path`: the ones that land in a project's checkout, as (project row, root,
+    repository-relative path), and the ones that land in no registered project at all, as absolute paths (SPD-064)."""
     roots = project_checkouts(ctx, con)
-    out = []
-    for c in candidates:
+    inside, outside = [], []
+    for c in path_readings(path, cwd):
         mapped = map_into_checkouts(roots, c)
-        if mapped and all((mapped[0]["id"], mapped[1], mapped[2]) != (o[0]["id"], o[1], o[2]) for o in out):
-            out.append(mapped)
+        if mapped is None:
+            if c not in outside:
+                outside.append(c)
+        elif all((mapped[0]["id"], mapped[1], mapped[2]) != (o[0]["id"], o[1], o[2]) for o in inside):
+            inside.append(mapped)
+    return inside, outside
+
+
+def project_paths(ctx, con, path, cwd):
+    """Every reading of `path` that lands inside a project's checkout, as (project row, root, repository-relative path)."""
+    return path_placements(ctx, con, path, cwd)[0]
+
+
+# SPD-064: the path rule holds a member to its deliverable globs inside a registered project; outside every project
+# edit_reason returned no reason at all, so a bound member could Write, Edit or redirect into ~/.gitconfig (which SPD-047
+# shows git reads with nothing on the line), ~/.claude/settings.json and ~/.claude/agents/ (the user-level hooks,
+# permissions and the spudagent definition `project sync --all` writes there), the shell rc files, ~/.ssh, a LaunchAgent,
+# or anything else in Eric's home.  Spud's decision is the allowlist: outside every registered project only the harness's
+# scratchpad root for this user and the system temp directories stay open, where members run probes and differential
+# harnesses (Cherie did for SPD-047); everything else is refused, fail closed, the rule's shape everywhere else.
+SCRATCHPAD_ROOT = "/private/tmp/claude-%d"  # the harness's scratchpad root: /private/tmp/claude-<uid>/<project>/<session>/scratchpad
+FIXED_TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
+TEMP_ROOT_VARS = ("TMPDIR", "TMP", "TEMP")  # what tempfile.gettempdir() reads, which the hook path may not import (SPD-016)
+# The character devices a redirection legitimately opens: /dev/null and the standard streams, which are outside every project
+# and are nobody's file (QUIET_TARGETS is the same set for the spud allow; /dev/stdout resolves to /dev/fd/1 on macOS).
+DEV_WRITE_ROOTS = ("/dev/null", "/dev/zero", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd")
+OUTSIDE_PROJECT_REASON = (
+    "Law 5: %s is outside every registered project, and a spudagent writes only its deliverables (Law 2, Law 5): outside"
+    " every registered project only this session's scratchpad (under %s/) and the system temp directories (%s) are open,"
+    " where members run probes and harnesses. Nothing else out there is any member's to write -- not ~/.gitconfig, the"
+    " shell rc files, ~/.ssh, ~/.claude/settings.json or ~/.claude/agents/. Write inside your deliverable globs, or in"
+    " the scratchpad; ask your parent to extend the globs if the work is really out there")
+
+
+def outside_roots():
+    """The roots outside every registered project a caller with an agent_id may still write under (SPD-064), each in every
+    spelling the filesystem honours, since a target is held under one by both its lexical and its real reading (on macOS
+    /tmp is /private/tmp and TMPDIR is under /var/folders, which is /private/var/folders)."""
+    roots = [SCRATCHPAD_ROOT % os.getuid(), *FIXED_TEMP_ROOTS, *DEV_WRITE_ROOTS]
+    for name in TEMP_ROOT_VARS:
+        value = os.environ.get(name)
+        if value and os.path.isabs(value):
+            roots.append(value)
+    out = []
+    for root in roots:
+        for spelling in (os.path.normpath(root), os.path.realpath(root)):
+            if spelling not in out and spelling not in ("", os.sep):
+                out.append(spelling)
     return out
+
+
+def under_outside_root(path, roots):
+    """True when an absolute, normalized path is one of the allowed outside roots or lies under it."""
+    return any(path == root or path.startswith(root + os.sep) for root in roots)
+
+
+def outside_project_reason(outside):
+    """The reason a caller with an agent_id may not write these readings of a target, none of which lands in a registered
+    project, or None when every one of them is under an allowed outside root (SPD-064).  Both readings must hold, so a
+    symlink planted in the scratchpad that points at ~/.gitconfig is refused, while /tmp and /private/tmp, which resolve
+    to each other, stay open."""
+    roots = outside_roots()
+    for candidate in outside:
+        if not under_outside_root(candidate, roots):
+            return OUTSIDE_PROJECT_REASON % (candidate, SCRATCHPAD_ROOT % os.getuid(), ", ".join(FIXED_TEMP_ROOTS))
+    return None
+
+
+# SPD-063: the files git reads with nothing on the line.  SPD-064 closes a member's writes to ~/.gitconfig and
+# $XDG_CONFIG_HOME/git/config, but a repository's own config stays open: a member can craft `.git/config` (or
+# `.git/config.worktree`, or a file an `include.path` there names) under its own deliverable globs inside a checkout the
+# ledger knows, and `git -C tests/fake status` resolves inside the home, so SPD-047's git-repo refusal never fires.  Such a
+# file defines aliases git expands into a write verb and every program-naming key of SPD-046's class under a real verb, so
+# no caller with an agent_id writes one, anywhere, its own deliverables included.
+GIT_CONFIG_FILE_NAMES = (".gitconfig",)
+GIT_CONFIG_FILE_TAILS = ((".git", "config"), (".git", "config.worktree"), ("git", "config"))
+GIT_CONFIG_FILE_REASON = (
+    "Law 7: %s is a configuration file git reads with nothing on the line (a repository's .git/config and"
+    " .git/config.worktree, ~/.gitconfig, $XDG_CONFIG_HOME/git/config). It can define an alias git expands into whatever"
+    " command it names before it dispatches, and the keys that name a program git runs -- a pager, editor, ssh or proxy"
+    " command, diff or merge driver, hooks path, credential or askpass helper -- under a verb Law 7's table allows, so a"
+    " write can run under a verb the table does not list. No spudagent writes one, its own deliverables included; Spud"
+    " commits, after the outcome is recorded")
+
+
+def git_config_file(path):
+    """True when `path` (absolute, normalized) names a configuration file git reads by itself: any `.gitconfig`, or a path
+    ending in `.git/config`, `.git/config.worktree` or `git/config`.  Matched case-folded, so a case variant or a simple
+    fold is refused on every filesystem (SPD-029's reading of the generated roots)."""
+    parts = [p.casefold() for p in path.replace("\\", "/").split("/") if p]
+    if parts and parts[-1] in GIT_CONFIG_FILE_NAMES:
+        return True
+    return any(len(parts) >= len(tail) and parts[-len(tail):] == list(tail) for tail in GIT_CONFIG_FILE_TAILS)
 
 
 NOT_SPUD_HOME = ("a session that is not Spud does not write in Spud's home (%s is there); type /spud to make this session Spud,"
@@ -6210,15 +6315,29 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
     """The path rule for a Write/Edit target (and for a shell redirection target), the table of the design's section 3.2
     (SPD-014).  A path in the ledger state directory at any project root, by any reading of it, is refused to everyone
     before the binding, Law 1 and glob checks (SPD-031).  A bound member is held to its globs in any session; a session
-    that is not Spud (`mode` plain), and an unbound subagent of one, writes freely in other projects and nowhere in the home."""
-    p = os.path.expanduser(path) if path.startswith("~") else path
-    if not os.path.isabs(p):
-        p = os.path.join(cwd or os.getcwd(), p)
-    for candidate in (os.path.normpath(p), os.path.realpath(p)):
+    that is not Spud (`mode` plain), and an unbound subagent of one, writes freely in other projects and nowhere in the home.
+
+    Since SPD-064 a caller with an agent_id in a Spud session is held outside the projects too: a git configuration file is
+    refused wherever it lies (SPD-063), and every reading of the target must land either in a registered project, where the
+    globs decide, or under an allowed outside root -- the session scratchpad and the system temp directories.  So a symlink
+    that reaches out of a project, and a path in no project at all, are both refused instead of passing unchecked."""
+    readings = path_readings(path, cwd)
+    for candidate in readings:
         if harness_file(candidate):
             return ("%s is one of the harness's subagent files (<project>/<session>/subagents/...): the ledger binds identities from them,"
                     " so nothing but Claude Code writes them" % candidate), None
-    inside = project_paths(ctx, con, path, cwd)
+    # A caller the path rule binds: a bound member in any session, and an agent_id in a Spud session before its binding,
+    # which has no globs of its own (a plain session's own subagents are Eric's, SPD-014).
+    held = bool(caller_agent_id) and not (mode == "plain" and caller_member is None)
+    if held:
+        for candidate in readings:
+            if git_config_file(candidate):
+                return GIT_CONFIG_FILE_REASON % candidate, None
+    inside, outside = path_placements(ctx, con, path, cwd)
+    if held and outside:
+        reason = outside_project_reason(outside)
+        if reason:
+            return reason, None
     if not inside:
         return None, None
     for _project, _root, rel in inside:
@@ -6273,6 +6392,10 @@ class ShellAnalysis:
         self.findings = []
         self.kinds = []
         self.redirects = []
+        # SPD-063: one entry per git call on the line, (its repository targets, the directories the shell may be in), so
+        # bash_reason can read the config in force at each target repository's local and worktree scopes.  Not a finding:
+        # every git line has one, and the findings are the refusals a line has earned.
+        self.git_calls = []
         self.vars = {}
         self.cwds = frozenset([cwd]) if cwd else None
         self.unparseable = False
@@ -7166,6 +7289,200 @@ def git_own_commands(home=None):
     return _GIT_OWN_COMMANDS or None
 
 
+# -- the config a repository sets for itself (SPD-063) ------------------------------------------------------------------
+#
+# git reads the target repository's own config with nothing on the line, and a member can craft one under its deliverable
+# globs inside a checkout the ledger knows (`git -C tests/fake status` resolves inside the home, so SPD-047's git-repo
+# refusal, which only fires outside every known checkout, stays silent).  SPD-064 closes a member's writes to ~/.gitconfig
+# and $XDG_CONFIG_HOME/git/config, and the edit hook now refuses every .git/config, so what is left is a repository the
+# member did not write: before a member's git call the hook reads the keys in force at that repository's `local` and
+# `worktree` scopes and refuses the ones that name or enable a program git runs (SPD-046's class).
+#
+# The system and global scopes are Eric's own and stay out of it: credential.helper is in force at the system scope on this
+# Mac.  And the check is on the program-naming keys, not on every key outside SPD-046's inert allowlist: Spud's own checkout
+# carries core.filemode, core.bare, core.logallrefupdates, core.ignorecase, core.precomposeunicode, extensions.worktreeConfig,
+# remote.origin.url, remote.origin.fetch and branch.main.remote/merge/vscode-merge-base at its local scope (probed), none of
+# them in that allowlist, so a literal default-deny would refuse every member git call in every real repository.
+GIT_CONFIG_SCOPES_CACHE = "git-config-scopes.json"
+GIT_OWN_SCOPES = ("local", "worktree")  # the scopes a repository sets for itself; `system`, `global` and `unknown` are Eric's
+GIT_CONFIG_SCOPES_KEPT = 64  # repositories kept in the cache file
+GIT_CONFIG_INCLUDE_FILES = 8  # config files followed through include.path/includeIf.<c>.path when fingerprinting
+GIT_CONFIG_READ_LIMIT = 1 << 18  # bytes read from one config file when looking for its includes
+GIT_WALK_LIMIT = 64  # directories walked up from a candidate looking for a repository
+_GIT_INCLUDE_PATH_RE = re.compile(r"^[ \t]*path[ \t]*=[ \t]*(.+?)[ \t]*$", re.MULTILINE | re.IGNORECASE)
+# The sections whose every documented key names or drives a program git runs, and the words the last component of such a key
+# carries (SPD-046's enumeration generalised: core.pager/editor/sshCommand/hooksPath/gitProxy/fsmonitor/alternateRefsCommand/
+# askPass, sequence.editor, diff.external and diff.<d>.command/textconv, filter.<d>.clean/smudge/process, {diff,merge,gui}
+# tool.<t>.cmd, gpg.program and gpg.<f>.program and gpg.ssh.defaultKeyCommand, credential.helper, pager.<cmd>,
+# log.showSignature, remote.<n>.uploadpack/receivepack, uploadpack.packObjectsHook, protocol.ext.allow, url.<b>.insteadOf,
+# browser.<t>.cmd, instaweb.httpd).  Matching the word anywhere in the last component catches the keys git adds later under
+# the same naming (anything ...Command, ...Cmd, ...Program, ...Helper, ...Hook) and over-refuses an occasional inert one
+# (merge.tool, difftool.prompt), which fails closed and costs a member nothing it needs.
+GIT_PROGRAM_KEY_SECTIONS = {"filter", "difftool", "mergetool", "guitool", "instaweb", "browser", "protocol", "gpg",
+                            "credential", "pager", "sequence"}
+GIT_PROGRAM_KEY_WORDS = ("pager", "editor", "command", "cmd", "program", "helper", "hook", "external", "textconv", "clean",
+                         "smudge", "process", "askpass", "proxy", "exec", "uploadpack", "receivepack", "insteadof", "httpd",
+                         "showsignature", "fsmonitor", "driver", "tool", "shell", "script", "wrapper", "alternaterefs")
+
+
+def git_config_key_names_program(key):
+    """True when a config key in force in a repository names or enables a program git runs under a verb Law 7's table allows
+    (SPD-046's class), so a member's git call in that repository is refused (SPD-063).  The keys SPD-046 proved inert pass
+    first, so color.pager (a boolean) and safe.directory stay silent."""
+    if git_config_key_allowed("--config-env", key):  # never the `-c` form: the hook reads no value here, so a pager is not inert
+        return False
+    section = key.split(".", 1)[0].strip().casefold()
+    last = key.rsplit(".", 1)[-1].strip().casefold()
+    return section in GIT_PROGRAM_KEY_SECTIONS or any(word in last for word in GIT_PROGRAM_KEY_WORDS)
+
+
+def git_repo_common_dir(gitdir):
+    """The repository's common directory: what `<gitdir>/commondir` names for a linked worktree (gitrepository-layout(5)),
+    else the git directory itself."""
+    try:
+        with open(os.path.join(gitdir, "commondir"), encoding="utf-8", errors="replace") as f:
+            named = f.read().strip()
+    except OSError:
+        return gitdir
+    if not named:
+        return gitdir
+    return os.path.normpath(named if os.path.isabs(named) else os.path.join(gitdir, named))
+
+
+def git_repository_dirs(directory):
+    """(the directory to run git in, the repository's git directory, its common directory) for the repository `directory`
+    lies in, or (None, None, None) when it lies in none -- read without running git, the way git discovers one: the nearest
+    ancestor holding a `.git` directory or a `.git` file naming one (a linked worktree or a submodule), or a directory that
+    is a git directory itself (a bare repository, or the `--git-dir=<repo>/.git` a git call names)."""
+    cur = os.path.abspath(directory)
+    for _ in range(GIT_WALK_LIMIT):
+        dot = os.path.join(cur, ".git")
+        if os.path.isdir(dot):
+            return cur, dot, git_repo_common_dir(dot)
+        if os.path.isfile(dot):
+            try:
+                with open(dot, encoding="utf-8", errors="replace") as f:
+                    named = f.read(GIT_CONFIG_READ_LIMIT).strip()
+            except OSError:
+                return None, None, None
+            if not named.startswith("gitdir:"):
+                return None, None, None
+            gitdir = named[len("gitdir:"):].strip()
+            gitdir = os.path.normpath(gitdir if os.path.isabs(gitdir) else os.path.join(cur, gitdir))
+            return cur, gitdir, git_repo_common_dir(gitdir)
+        if os.path.isdir(os.path.join(cur, "objects")) and os.path.isdir(os.path.join(cur, "refs")) \
+                and os.path.lexists(os.path.join(cur, "HEAD")):
+            return cur, cur, git_repo_common_dir(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return None, None, None
+
+
+def git_scope_config_files(gitdir, commondir):
+    """Every file git reads at the local and worktree scopes of one repository: <commondir>/config (the local scope),
+    <gitdir>/config.worktree (the worktree scope, with extensions.worktreeConfig), the git directory's own config where it
+    is the common one, and the files any `include.path`/`includeIf.<c>.path` in them names.  An included file's keys are
+    reported at the including file's scope, so the listing already covers them; they are here so that editing one changes
+    the fingerprint the answer is cached under."""
+    files, queue = [], [os.path.join(commondir, "config"), os.path.join(gitdir, "config"),
+                        os.path.join(gitdir, "config.worktree"), os.path.join(commondir, "config.worktree")]
+    while queue and len(files) < GIT_CONFIG_INCLUDE_FILES:
+        path = os.path.normpath(queue.pop(0))
+        if path in files:
+            continue
+        files.append(path)
+        try:
+            with open(path, encoding="utf-8", errors="replace") as f:
+                text = f.read(GIT_CONFIG_READ_LIMIT)
+        except OSError:
+            continue
+        for named in _GIT_INCLUDE_PATH_RE.findall(text):
+            named = named.strip().strip('"')
+            if named:
+                queue.append(os.path.expanduser(named) if named.startswith("~") else
+                             (named if os.path.isabs(named) else os.path.join(os.path.dirname(path), named)))
+    return files
+
+
+def git_config_fingerprint(files):
+    """What changes when the config a repository sets for itself changes, read without running git: the stat of each file
+    git reads at its local and worktree scopes; a file that is not there is recorded as absent, so one that appears later
+    is a change too."""
+    out = []
+    for path in files:
+        try:
+            st = os.stat(path)
+            out.append([path, st.st_mtime_ns, st.st_size, st.st_ino])
+        except OSError:
+            out.append([path, None, None, None])
+    return out
+
+
+def git_run_config_scopes(where):
+    """[[scope, key]] as `git config --list --show-scope --name-only` prints them in `where`, with git_env()'s sanitised
+    environment -- the hook's own, never the line's HOME or PATH -- or None when git cannot be run or fails there.  git
+    reports an included file's keys at the including file's scope, and prints one `scope<TAB>key` per line (a config key
+    can hold neither a tab nor a newline: a section header is one line and a subsection name escapes only \\" and \\\\)."""
+    try:
+        proc = subprocess.run(["git", "-C", where, "config", "--list", "--show-scope", "--name-only"],
+                              capture_output=True, text=True, errors="replace", env=git_env(), timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    out = []
+    for line in proc.stdout.splitlines():
+        scope, sep, key = line.partition("\t")
+        if sep and key:
+            out.append([scope, key])
+    return out
+
+
+def git_own_config_keys(home, where, gitdir, commondir):
+    """[[scope, key]] in force at one repository's own scopes (`local` and `worktree`), [] when it sets nothing there, or
+    None when the hook could not read them, which fails closed.
+
+    Kept in <home>/.spud/git-config-scopes.json under the stat fingerprint of the files git reads at those scopes, so a hook
+    runs git only after one of them changes: the Bash hook runs on every command line and SPD-016 keeps subprocess off its
+    path.  A repository that sets nothing for itself costs no git run at all.  The cache lives in the state directory, which
+    the edit and Bash hooks refuse to everyone, so nothing a member writes can widen what passes."""
+    files = git_scope_config_files(gitdir, commondir)
+    if not any(os.path.lexists(f) for f in files):
+        return []  # no local or worktree scope: nothing for the repository to say, and nothing to run git for
+    fingerprint = git_config_fingerprint(files)
+    state = os.path.join(str(home), STATE_DIR) if home else None
+    cache = os.path.join(state, GIT_CONFIG_SCOPES_CACHE) if state else None
+    stored = {}
+    if cache:
+        with contextlib.suppress(OSError, ValueError):
+            with open(cache, encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                stored = loaded
+        entry = stored.get(gitdir)
+        if isinstance(entry, dict) and entry.get("fingerprint") == fingerprint and isinstance(entry.get("keys"), list):
+            return [k for k in entry["keys"] if isinstance(k, list) and len(k) == 2]
+    listed = git_run_config_scopes(where)
+    if listed is None:
+        return None
+    keys = [[scope, key] for scope, key in listed if scope in GIT_OWN_SCOPES]
+    if cache and os.path.isdir(state):
+        stored = {k: v for k, v in stored.items() if k != gitdir}
+        for extra in sorted(stored)[:max(0, len(stored) - GIT_CONFIG_SCOPES_KEPT + 1)]:
+            del stored[extra]
+        stored[gitdir] = {"fingerprint": fingerprint, "keys": keys}
+        tmp = "%s.%d.tmp" % (cache, os.getpid())
+        with contextlib.suppress(OSError):
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(stored, f)
+            os.replace(tmp, cache)
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+    return keys
+
+
 def git_unknown_verb(verb, home=None):
     """("verb", name) when the verb is not one of git's own commands, ("unreadable", name) when the hook could not read that
     command list at all, else None (SPD-047).  git ignores an alias that hides one of its own commands ("aliases that hide
@@ -7270,7 +7587,11 @@ def git_refused(verb, args):
     if verb == "tag":
         return flag_list_refused(verb, args, TAG_READ_FLAGS, TAG_READ_VALUE_FLAGS)
     if verb == "config":
-        positionals = 0
+        # Two syntaxes (SPD-063, probed on git 2.54.0): the flags, where a key and a value write and one positional reads,
+        # and the 2.46 subcommands, where the verb is the first positional -- `git config edit` opens the file in an editor
+        # with a single positional, and `git config get <key>` reads with two.  A read selector (--get, --get-urlmatch,
+        # --get-color ...) takes positionals of its own, so they are never a key and a value.
+        sub, positionals, selector = None, 0, False
         i = 0
         while i < len(args):
             w = args[i]
@@ -7279,12 +7600,22 @@ def git_refused(verb, args):
             if w in CONFIG_VALUE_FLAGS:
                 i += 2
                 continue
+            if w in CONFIG_READ_SELECTORS:
+                selector = True
+                i += 1
+                continue
             if w.startswith("-"):
                 i += 1
                 continue
+            if positionals == 0 and not selector:
+                sub = w
             positionals += 1
             i += 1
-        return verb if positionals >= 2 else None
+        if sub in CONFIG_WRITE_SUBCOMMANDS:
+            return verb
+        if sub in CONFIG_READ_SUBCOMMANDS:
+            return None
+        return verb if (positionals >= 2 and not selector) else None
     return None
 
 
@@ -8242,7 +8573,12 @@ def analyse_trap(words, a, depth):
     cwds, variables = a.cwds, dict(a.vars)
     for k in trap_action_indices(words):
         a.cwds = None
+        calls = len(a.git_calls)
         analyse_isolated(a, deglob(words[k]), depth + 1)
+        # SPD-063: the action's git calls are not scope-checked.  The hook reads the action with the directories unknown
+        # because it runs later, not because the line lost them, and `trap 'git status' EXIT` names no repository, so the
+        # unresolvable-directory refusal would fall on every trap that mentions git.  Its own findings still stand.
+        del a.git_calls[calls:]
         a.cwds, a.vars = cwds, dict(variables)
 
 
@@ -8405,9 +8741,12 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                     a.findings.append(("git-verb", unknown))
                 else:
                     a.findings.append(("git", (verb, refused)))
-        for spelled, target in git_repo_targets(words, a.vars):
+        targets = git_repo_targets(words, a.vars)
+        for spelled, target in targets:
             # another repository, whose .git/config the hook cannot read: resolved against the checkouts in bash_reason (SPD-047)
             a.findings.append(("git-repo", (spelled, target, a.cwds)))
+        # ... and the repository this call does read, whose local and worktree scopes bash_reason holds to the allowlist (SPD-063)
+        a.git_calls.append((tuple(targets), a.cwds))
     elif base in SHELLS:
         if not read_points(lambda ws, start: option_point(shell_read_index(ws, start))):
             return
@@ -8608,28 +8947,82 @@ def spud_call_writes(call):
     return call["command"] not in READ_ONLY_COMMANDS and (call["command"], call["subcommand"]) not in READ_ONLY_SUBCOMMANDS
 
 
-def git_repo_outside(ctx, con, target, cwds):
-    """Where a git call's repository target lands (SPD-047): (the first directory it may name that lies outside every checkout
-    the ledger knows, False), (None, True) when the hook cannot resolve it (a relative path from a directory it cannot follow,
-    `~-`/`~+`/`~name`, or a value holding an expansion), else (None, None).  Inside is a registered project's root or one of
-    the worktrees git names for it, read as the path rule reads a file's path."""
+def git_target_dirs(target, cwds):
+    """(the directories a git call's repository target may name, whether the hook cannot resolve it): a path relative to a
+    directory it cannot follow, `~-`/`~+`/`~name`, or a value holding an expansion is unresolvable (SPD-047)."""
     path = deglob(target)
     if unresolvable_word(path):
-        return None, True
+        return [], True
     if path.startswith("~"):
         if path != "~" and not path.startswith("~/"):
-            return None, True  # ~- and ~+ are OLDPWD and the current directory, ~name another user or a zsh named directory
-        candidates = [os.path.expanduser(path)]
-    elif os.path.isabs(path):
-        candidates = [path]
-    elif cwds is None:
+            return [], True  # ~- and ~+ are OLDPWD and the current directory, ~name another user or a zsh named directory
+        return [os.path.expanduser(path)], False
+    if os.path.isabs(path):
+        return [path], False
+    if cwds is None:
+        return [], True
+    return [os.path.join(c, path) for c in sorted(cwds)], False
+
+
+def git_repo_outside(ctx, con, target, cwds):
+    """Where a git call's repository target lands (SPD-047): (the first directory it may name that lies outside every checkout
+    the ledger knows, False), (None, True) when the hook cannot resolve it, else (None, None).  Inside is a registered
+    project's root or one of the worktrees git names for it, read as the path rule reads a file's path."""
+    candidates, unresolved = git_target_dirs(target, cwds)
+    if unresolved:
         return None, True
-    else:
-        candidates = [os.path.join(c, path) for c in sorted(cwds)]
     for candidate in candidates:
         if not project_paths(ctx, con, candidate, None):
             return os.path.normpath(candidate), False
     return None, None
+
+
+GIT_SCOPE_REASON = (
+    "Law 7: this git call reads a repository that sets %s at its own %s scope (the repository in %s), a config key that"
+    " names or enables a program git runs -- a pager, editor, ssh or proxy command, diff or merge driver, hooks path,"
+    " credential or askpass helper, the ext:: transport -- under a verb Law 7's table allows. git reads that file with"
+    " nothing on the line, and a member can write such a file under its own deliverables, so a write can run under a verb"
+    " the table does not list. Run git in a checkout that does not set it; Spud commits, after the outcome is recorded")
+GIT_SCOPE_UNRESOLVED_REASON = (
+    "Law 7: this git call runs in a directory the hook cannot follow (a cd into a variable, `cd -`, popd, a directory stack"
+    " entry or ~name, an option or a CDPATH it cannot read, a relative cd in a loop, a sourced file), so it cannot read the"
+    " config in force at the local and worktree scopes of the repository git would read there -- the keys that name a"
+    " program git runs under a verb Law 7's table allows. The hook fails closed: run git from an absolute path inside the"
+    " session's own checkout; Spud commits, after the outcome is recorded")
+GIT_SCOPE_UNREADABLE_REASON = (
+    "Law 7: the hook cannot read the config in force in the repository this git call reads (`git config --list --show-scope"
+    " --name-only` in %s), so it cannot tell whether that repository sets a key naming a program git runs under a verb"
+    " Law 7's table allows; the hook fails closed. Spud commits, after the outcome is recorded")
+
+
+def git_local_config_reason(ctx, targets, cwds):
+    """The reason a member's git call is refused for the config the repository it reads sets for itself (SPD-063), or None.
+    The repository is the one `-C`, `--git-dir`, `--work-tree`, GIT_DIR and friends name (SPD-047's git_repo_targets) or,
+    with none of them on the line, the one containing each directory the shell may be in.  A target outside every checkout
+    the ledger knows already has SPD-047's own refusal, which is read first."""
+    dirs, unresolved = [], False
+    if targets:
+        for _spelled, target in targets:
+            resolved, cannot = git_target_dirs(target, cwds)
+            unresolved = unresolved or cannot
+            dirs.extend(resolved)
+    elif cwds is None:
+        unresolved = True
+    else:
+        dirs.extend(sorted(cwds))
+    if unresolved:
+        return GIT_SCOPE_UNRESOLVED_REASON
+    for directory in dirs:
+        where, gitdir, commondir = git_repository_dirs(directory)
+        if gitdir is None:
+            continue  # no repository there: git reads no config of its own, and the hook runs nothing
+        keys = git_own_config_keys(ctx.home, where, gitdir, commondir)
+        if keys is None:
+            return GIT_SCOPE_UNREADABLE_REASON % where
+        for scope, key in keys:
+            if git_config_key_names_program(key):
+                return GIT_SCOPE_REASON % (key, scope, where)
+    return None
 
 
 def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="spud"):
@@ -8736,6 +9129,15 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                 if not actor_is_self(con, call["actor"], caller_member, caller_agent_id):
                     return ("`--as %s` does not resolve to the caller's own member %s; use `--as %s`"
                             % (deglob(call["actor"]), who, caller_agent_id)), analysis
+    if strict:
+        # SPD-063: the config the repository each git call reads sets for itself, which git reads with nothing on the line.
+        # After the findings, so a refusal the words as spelled already earn (a write verb, a program key, an unknown verb,
+        # a repository outside every known checkout) keeps its own reason.
+        for targets, target_cwds in analysis.git_calls:
+            reason = git_local_config_reason(ctx, targets, target_cwds)
+            if reason:
+                return reason, analysis
+
     def redirect_reason(spelled, path):
         """edit_reason for one concrete file a redirection or tee may open, phrased for the redirect."""
         reason, rel = edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode)
