@@ -45,12 +45,18 @@ Read-only in BadTakes: you may read anything there and run read-only commands (w
 
 ## Log
 - 2026-09-15T10:54 Planned and spawned Rooster (05.01, release-notes-art spike) and Goldrush (05.02, web-api spike) on opus; working the collab Edge Function spike myself.
+- 2026-09-15T10:58 collab survey done: 18 modes, all branches terminal; clients main.js collabFetch + web/collabweb.js; integration covers only create/info/start/close/mine (functions.test.mjs 2233, 2290; account.test.mjs 300); 4 static text tests in collab.test.mjs read index.ts; CI excludes storage-api; no deno.json; deploy bundles import graph via --use-api.
+- 2026-09-15T11:00 deno 2.9.5 check on collab/index.ts (DENO_DIR in scratchpad) baseline: exactly 3 TS7006 errors, info branch lines 748/763/774. Split must reproduce the same 3 and add no TS2304; that is the missed-destructure check.
+- 2026-09-15T11:06 Wrote docs/spikes/bad-036/server-collab.md: 13 flat files in collab/ (index, gate, bucket, sweep, lobby, browse, report, room, info, seats, lifecycle, push, pull), none over 250 (largest push.ts ~190); 4 PRs with PR 1 = characterization tests for the 13 untested modes; proposal 69 filed for the duplicated wrap SQL.
 
 ## Sub-agents
 - [[BADS-036/Rooster|Rooster]] (05.01, architect, opus)
 - [[BADS-036/Goldrush|Goldrush]] (05.02, architect, opus)
 
 ## Ticket proposals
+- **Share the wrap-completion rule between collab info and commit** — suggested P3; open, with Spud.
+  Why: The 'no fresh recording seat, so the wrapping room becomes wrapped' check-and-UPDATE is written twice in the collab Edge Function, once on read before info and once inside commit. A BAD-036 split is a pure move and keeps both copies; if one drifts, read and commit disagree on when a room wraps, and nothing tests the two against each other.
+  Evidence: server/supabase/functions/collab/index.ts:655-674 (membership gate, with returning + Object.assign) and :1128-1145 (commit, no returning); both select recording_at >= now - RECORDING_FRESH_MS and set status='wrapped', wrap_expires_at = now + WRAPPED_TTL_MS where status='wrapping'.
 
 ## Result
 

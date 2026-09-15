@@ -6,9 +6,9 @@ model: opus
 parent: "[[Spud]]"
 ticket: "[[SPD-064]]"
 project: spud
-status: active
+status: done
 spawned: 2026-09-15T09:44
-finished: ""
+finished: 2026-09-15T11:04
 duration_ms: 3770245
 tool_uses: 154
 tokens_out: 145743
@@ -56,7 +56,7 @@ Return: ≤10 lines — what you produced, where, proposals if any, open questio
 ## Sub-agents
 
 ## Ticket proposals
-- **Edit hook: everything under a .git/ directory except its config files is still a member's to write, and git runs .git/hooks/* with nothing on the line** — suggested P2; open, with Spud.
+- **Edit hook: everything under a .git/ directory except its config files is still a member's to write, and git runs .git/hooks/* with nothing on the line** — suggested P2; created as [[SPD-066]] at P2 by Spud.
   Why: SPD-063 closes the config files git reads by itself (.gitconfig, .git/config, .git/config.worktree, git/config) and SPD-063(b) holds the keys in force at a repository's local and worktree scopes to the program allowlist. What both leave open is the rest of a .git directory: a member whose globs reach one (a ** member, or any member that may create a repository under its own globs, as tests/fake/.git) may still write .git/hooks/pre-auto-gc, .git/hooks/post-index-change and the rest, .git/info/attributes (which can name a filter driver), .git/info/exclude, .git/shallow, and the index. git runs a hook from .git/hooks with nothing on the line and no config key pointing at it, so the SPD-046 class of program-naming keys is not the only route to a program. The likely reachable one under Law 7's allowed verbs is pre-auto-gc: git fetch runs auto maintenance, which can run gc, which runs that hook; git status and git log run none by default. Narrow, but the same shape as SPD-047 and SPD-063 and worth closing once, by refusing a caller with an agent_id any path with a .git component, the way SPD-031 refuses the state directory at any project root.
   Evidence: bin/spud_ledger.py git_config_file (about line 6193, SPD-063) matches only .gitconfig and the three config tails, so tests/_probe/.git/hooks/x stays under the deliverable globs; tests/test_hooks.py GitConfigFileTest.test_similar_names_stay_under_the_globs asserts that today (self.tests / '.git' / 'hooks' / 'x' is silent for AGENT_A). git-fetch(1) on 2.54 runs auto maintenance after a fetch; git-gc(1) documents the pre-auto-gc hook. Not probed end to end: filing rather than widening SPD-063.
 
@@ -80,3 +80,4 @@ Proposal 67 filed: everything under a .git/ directory except its config files is
 Left: Spud commits and lands, and updates the suite count in CLAUDE.md from 702 to 732. A reviewer should read bin/spud_ledger.py 6144-6270 (the readings, the outside allowlist, the git config files), 6320-6345 (edit_reason), 7300-7470 (the repository's own scopes and the cache), 8950-9070 (git_target_dirs, git_local_config_reason, the bash_reason hook-in), 7539-7570 (git config's verbs) and 8827 (analyse_trap).
 
 ## Outcome
+Accepted. SPD-064's allowlist and both halves of SPD-063 are in bin/spud_ledger.py with three red-first test classes (30 methods); suite 732 OK twice; differential of 3025 lines changed 24 member answers and no Spud answer, the three refused-to-silent being git config reads the old count misread. Spud accepts the program-naming classifier over a default-deny of every local key: this checkout and BadTakes both carry inert local keys outside SPD-046's allowlist, and BadTakes' local config names no program. Proposal 67 created.

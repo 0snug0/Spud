@@ -45,10 +45,18 @@ Read-only in BadTakes: you may read anything there and run read-only commands (w
 
 ## Log
 - 2026-09-15T10:53 Read all three files, admin tooling, and the test/server admin-*.test.mjs text assertions. Decision: I write all three spikes myself, no children; the plans cross-reference each other (page imports accounts, tests pin all three by path), so one author keeps them consistent. Key finding: admin-accounts-list, admin-moderation, admin-version-key and admin-pool read lib/accounts.ts, lib/actions.ts and app/accounts/[email]/page.tsx by path and pin declarations to them, so Phase 2 must retarget those tests.
+- 2026-09-15T10:59 Inventoried every top-level declaration (TS AST, comments included): accounts.ts 58, actions.ts 34 plus the directive, page.tsx 20. Baseline export list via the TS compiler API with fully-qualified, path-normalised member types: accounts 29, actions 20, page 2 (default, dynamic; no metadata). Confirmed next build type-checks page exports (checkFields), so page.tsx cannot export helpers. The moderation test's ACCOUNTS_CTE slice needs the predicate within 2000 chars; it is at 1601.
+- 2026-09-15T11:04 Verified the section 8 tooling in the scratchpad. verify-moves.cjs (TS printer, comments stripped, added export ignored) passes self-checks, 58/34/20 statements, and a synthetic split with an added export, and fails with exit 1 on a one-token change. exports.cjs follows barrel re-exports and prints fully-qualified member types, so a sub-module that forgets import type { Location } shows the DOM Location. Filed two P3 proposals: the unpinned parseVersion regex copies in actions.ts, and stale actions.ts line pointers in functions/account/index.ts. Writing the three spikes next.
 
 ## Sub-agents
 
 ## Ticket proposals
+- **Pin or unify the admin's two unpinned parseVersion regex copies in lib/actions.ts** — suggested P3; open, with Spud.
+  Why: admin/src/lib/actions.ts carries two hand-written copies of parseVersion's strictness, FLAG_VERSION_RE (line 50) and VERSION_RE (line 433), and no test pins either against _shared/clientversion.mjs, unlike VERSION_MATCH in lib/accounts.ts, which test/server/admin-version-key.test.mjs pins. BAD-036 Phase 2 moves them into two different files (actions/flags.ts and actions/announcements.ts), which makes the duplicate harder to see. The refactor must not merge them, because that is a rule change, not a move.
+  Evidence: actions.ts:48-50 FLAG_VERSION_RE = /^v?\d+(\.\d+){0,2}$/ ('The same strictness as parseVersion'); actions.ts:433 VERSION_RE = /^v?[0-9]+(\.[0-9]+){0,2}$/; saveAnnouncement's message at 487 says 'readable by parseVersion'; admin-version-key.test.mjs reads only lib/accounts.ts.
+- **Replace line-number pointers to admin/src/lib/actions.ts in the account Edge Function's comments** — suggested P3; open, with Spud.
+  Why: server/supabase/functions/account/index.ts cites admin/src/lib/actions.ts:216 and :363-366 by line number. BAD-036 Phase 2 moves those functions to admin/src/lib/actions/accounts.ts, so both pointers go stale. The admin refactor PR should not edit server/supabase/functions/**, because server-deploy.yml redeploys Edge Functions on merge. The fix belongs in the next real server change: name the symbols (deleteAccount's typed confirmation, deleteAuthUser's exact-address re-check) instead of line numbers.
+  Evidence: grep: server/supabase/functions/account/index.ts:23 'the rule admin/src/lib/actions.ts:216 already'; :57 'Same guard admin/src/lib/actions.ts:363-366 already carries.' Same pointers are copied in docs/superpowers/plans/2026-09-09-account-deletion.md:672,692 (a historical plan, leave).
 
 ## Result
 

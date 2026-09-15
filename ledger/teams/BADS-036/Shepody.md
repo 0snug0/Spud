@@ -37,6 +37,7 @@ The spike has exactly these ten sections, in this order, so Spud can paste it in
 Constraints: shared rules (sceneBucket, isUnlimited and the rest) exist as pairs across src/, web/ and server/supabase/functions/_shared that must agree; a refactor moves code and never reimplements a shared rule or creates a third copy. If the script already imports from src/ or _shared, say so and keep it importing. Read-only in BadTakes: read anything, run read-only commands (wc, grep, node -e or acorn for parsing), write only your spike file. No code edits, no branches, no Supabase stack starts, no deploys, no tests or dry runs that write into the tree (you may run a read-only parse; you need not run the dry run, only specify it).
 
 ## Log
+- 2026-09-15T11:03 Read collabweb.js in full at 20d11e1 and both sibling spikes; scope analysis (acorn+eslint-scope from admin/node_modules, read-only) shows no load-time cross-file read and no duplicate top-level name across the 8 view scripts. Working design: 8 contiguous classic scripts, entry collabweb.js last (invites+wiring 1455-1580).
 
 ## Sub-agents
 
