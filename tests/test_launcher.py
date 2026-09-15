@@ -55,14 +55,24 @@ class LauncherTest(SpudTestCase):
         self.assertEqual(pycs[0].stat().st_mtime_ns, stamp)  # read, not rewritten
         self.assertFalse((REPO / "bin" / "__pycache__" / pycs[0].name).exists())
 
+    def imports_of(self, event, payload):
+        proc = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(SPUD), "hook", event],
+                              input=json.dumps(payload), capture_output=True, text=True, env=self.home.env)
+        self.assertEqual(proc.returncode, 0, proc)
+        imported = {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines() if line.startswith("import time:")}
+        self.assertIn("json", imported, event)  # the flag took: the log is there
+        return imported
+
     def test_the_hook_path_imports_nothing_it_does_not_use(self):
+        # SPD-047: to place a git verb the Bash hook needs git's own command list, which costs one `git --list-cmds=main`
+        # with the subprocess import.  It is kept in the home's state directory under the fingerprint of the git binary, so
+        # only the first hook after git itself changes pays for it; every later one reads the file.
+        cache = self.home.path / ".spud" / "git-commands.json"
+        self.assertFalse(cache.exists())
+        self.assertIn("subprocess", self.imports_of(*self.payloads()[0]))  # a Bash line naming git, with a cold cache
+        self.assertIn("status", json.loads(cache.read_text(encoding="utf-8"))["commands"])
         for event, payload in self.payloads():
-            proc = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(SPUD), "hook", event],
-                                  input=json.dumps(payload), capture_output=True, text=True, env=self.home.env)
-            self.assertEqual(proc.returncode, 0, proc)
-            imported = {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines() if line.startswith("import time:")}
-            self.assertIn("json", imported, event)  # the flag took: the log is there
-            self.assertEqual(imported & HOOK_UNUSED, set(), event)
+            self.assertEqual(self.imports_of(event, payload) & HOOK_UNUSED, set(), event)
 
     def test_the_hook_answers_the_same_through_the_launcher(self):
         for event, payload in self.payloads():
