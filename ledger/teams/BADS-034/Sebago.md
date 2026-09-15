@@ -6,8 +6,8 @@ model: sonnet
 parent: "[[Spud]]"
 ticket: "[[BAD-034]]"
 project: badtakes
-status: planned
-spawned: ""
+status: active
+spawned: 2026-09-14T22:35
 finished: ""
 tags: [spudagent]
 ---
