@@ -109,6 +109,17 @@
           }
         ]
       }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook UserPromptSubmit",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }
