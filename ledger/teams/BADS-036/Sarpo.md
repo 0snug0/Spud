@@ -6,9 +6,9 @@ model: haiku
 parent: "[[BADS-036/Amandine]]"
 ticket: "[[BAD-036]]"
 project: badtakes
-status: active
+status: done
 spawned: 2026-09-15T10:27
-finished: ""
+finished: 2026-09-15T10:38
 duration_ms: 162344
 tool_uses: 14
 tokens_out: 15114
@@ -51,3 +51,4 @@ Method: `grep -n "js(" main.js`, `sed -n '5916,6724p' main.js`, `grep -n "SMOKE_
 Survey complete. Created /Users/ericlugo/Personal/Spud/docs/spikes/bad-036/main-smoke.md: comprehensive inventory of 95 renderer identifiers, 123 js() call sites across 7 legs (setup/home/tableread/booth/screening/history/reel), 24 SMOKE_* log tokens, and 12 env vars/switches that the smoke walkthrough evaluates. Tables A-D provide line-by-line mapping, gists, payloads, and leg coverage for the compatibility contract. All js() calls between lines 5916-6724 accounted for; no dependencies on other files.
 
 ## Outcome
+Delivered main-smoke.md with the four sections and 123 js() call sites in order. Section A is a raw index, not the contract: it invents #adopt-photo-btn, conflates tr-stage-wrap with stage-wrap, lists Credits.creditLine as a bare function, omits reportImport, buildSchedule, activeLines, btn-add-zips, btn-add-zip-folder, btn-claude-tip, btn-upgrade, btn-edit-pack and most class selectors, and section C counts env vars as log tokens. Amandine rebuilt the renderer-name list from her own read in main.md section 2; main-smoke.md stays as the scout's raw survey.

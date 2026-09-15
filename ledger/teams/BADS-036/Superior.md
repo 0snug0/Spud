@@ -46,12 +46,17 @@ Read-only in BadTakes: you may read anything there and run read-only commands (w
 ## Log
 - 2026-09-15T10:26 Read config, laws, brief. Plan: read shared context (CLAUDE.md files, index.html x2, build-web.js, implementing-changes), then brief two fable architect children for the web files (app.js; booth.js+collabweb.js) while I work creator.js myself.
 - 2026-09-15T10:30 Planned and spawned Roseval (03.01, web/app.js) and Marfona (03.02, web/booth.js + collabweb.js), both architect/fable, background. Shared context brief at scratchpad/brief-shared.md: script order, lib/ IIFE convention, cross-file names by grep, build-web copyTree+stampAssets cover new files, tests that name files by path (web-ids non-recursive readdir, web-guest-mode vm list + fnBody scans, fonts.test booth sweep). Now working creator.js myself.
+- 2026-09-15T10:36 Spud relayed Eric's clarification: 250 lines is a review threshold, not a cap; split by responsibility, cohesive units stay whole, and section 6 lists every file over 250 with its honest size and reason. Forwarded verbatim to Roseval (03.01) and Marfona (03.02) via SendMessage. Applying it to renderer-creator.md: fewer, responsibility-shaped files (lanes editor, backing tracks and the painter stay whole).
+- 2026-09-15T10:47 renderer-creator.md written (ten sections). Tree: renderer/creator/ with 14 classic scripts + creator.js entry (224 lines), split by responsibility; four files over 250 argued in section 6 (tracks 384, lanes 362, strip 264, paint 252). Verified in the scratchpad: the ranges partition 1..3044 exactly, every fragment passes node --check, the multiset of lines is unchanged, and a vm stub-DOM load in tag order passes while three wrong orders throw the predicted ReferenceErrors (cvid, renderStripTip, wireTracks). Proposal 68 filed (announce.js hasStaged). Waiting on Roseval and Marfona via background pollers.
 
 ## Sub-agents
 - [[BADS-036/Roseval|Roseval]] (03.01, architect, fable)
 - [[BADS-036/Marfona|Marfona]] (03.02, architect, fable)
 
 ## Ticket proposals
+- **announce.js guards on creatorView.hasStaged(), which creator.js never defines** — suggested P3; open, with Spud.
+  Why: renderer/announce.js:110-111 suppresses the announcement popup only when window.creatorView.hasStaged() is a function returning true; creatorView (renderer/creator.js:1847-2015) has enter, fetchYtdlp, enterEdit, leave, confirmLeave, sessionActive, repaint, handleDrop, startFromVideo and no hasStaged, so the guard is always false and a popup can open over a staged creator session — the case the comment at announce.js:13-15 says it prevents. One-line fix either side: add hasStaged() to creatorView (staged = cstate.sessionId && cstate.step !== 'source', the same test sessionActive uses) or have announce.js call sessionActive(). Kept out of BAD-036, whose Phase 2 PRs must be pure moves.
+  Evidence: grep -n hasStaged renderer/*.js → only announce.js:110 and :111; the creatorView method list is renderer/creator.js:1848-2014; spike docs/spikes/bad-036/renderer-creator.md §2f.
 
 ## Result
 

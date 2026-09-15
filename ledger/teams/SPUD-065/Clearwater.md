@@ -36,6 +36,7 @@ Children: you may plan and spawn up to two, one level, no grandchildren: scouts 
 
 ## Log
 - 2026-09-15T10:31 Started: read config, brief, ticket, launcher, helpers, settings hooks, SPD-016 events. Next: AST survey of every top-level symbol with line spans, section markers, test attribute grep, hook baseline timing.
+- 2026-09-15T10:34 Course correction from Spud (Eric): ~250 lines is a soft threshold, not a cap; never cut a cohesive function, class or region to fit it; section 7 becomes the justification for every module over ~250. Tests and non-application files are out of scope for the whole ticket; no note on splitting tests/test_hooks.py. Survey so far: ast finds 674 top-level bindings (11 classes, 423 defs, 240 assignments; the brief's 664 counts differently), 44 attributes the suite reads on the loaded module, only two patched (do_backup, backup_stamp via patch.object in test_backup). hyperfine absent; timing via a shell-loop script in a scratch home.
 
 ## Sub-agents
 

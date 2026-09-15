@@ -66,6 +66,7 @@ Return: ≤10 lines — what you produced, where, proposals if any, open questio
 
 ## Log
 - 2026-09-15T10:31 Read config, Spud laws, brief. Starting the read-first list: web/CLAUDE.md, web/README.md, implementing-changes skill, index.html tags, build-web.js, the three path-scanning tests, then booth.js and collabweb.js in full.
+- 2026-09-15T10:44 Superior's clarification received: 250 is a review threshold, not a cap; split by responsibility, cohesive units (a function, a screen, a collab phase) stay whole; section 6 lists every proposed file over 250 with its honest size and why it stays whole. Adjusting: booth family becomes 5 contiguous files (recording room 530, screening room 293, camera 129, render client 211, exports+save sheet 243); collab family 7 (model 259, host 235, seat 103, sync 221, modal+phases 375, tab 287, wiring 100). Every new file is a contiguous line range of the original so the tag-order concatenation diffs clean.
 
 ## Sub-agents
 
