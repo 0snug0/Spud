@@ -161,6 +161,40 @@ class DocumentTest(unittest.TestCase):
         self.assertEqual(doc["sections"][1][1], "")
         self.assertEqual(doc["sections"][2][1], "Done.")
 
+    def test_owned_sections_leave_every_other_level_2_line_in_the_prose(self):
+        # SPD-076: given the names its layout owns, a note opens a section only at those headings
+        brief = ["Brief.", "## Shared context", "Facts.", "", "## Outcome", "A line of the brief.", "```", "## Team", "```"]
+        sizing = ["Small.", "", "## Team", "A line of the sizing."]
+        team = ["- [[SPUD-001/Russet|Russet]] (01, scout, haiku)", "```"]  # an unbalanced fence hides no heading
+        outcome = ["## Outcome", "Done.", "## Brief", "A line of the outcome."]
+        lines = ["---", "id: SPD-001", "---", spud.MARKER, "# SPD-001 — T", "", "## Brief"] + brief
+        lines += ["", "## Size, persona and model decision"] + sizing + ["", "## Team"] + team
+        lines += ["", "## Handoffs", "", "## Proposals received", "", "## Outcome"] + outcome + [""]
+        doc = spud.split_document("\n".join(lines), spud.TICKET_SECTIONS)
+        self.assertEqual(doc["preamble"], "")
+        self.assertEqual(
+            doc["sections"],
+            [
+                ("Brief", "\n".join(brief)),
+                ("Size, persona and model decision", "\n".join(sizing)),
+                ("Team", "\n".join(team)),
+                ("Handoffs", ""),
+                ("Proposals received", ""),
+                ("Outcome", "\n".join(outcome)),
+            ],
+        )
+        # without the names, markdown-v0 as written by hand: every level-2 line outside a fence opens a section
+        legacy = [name for name, _ in spud.split_document("\n".join(lines))["sections"]]
+        self.assertEqual(legacy[:4], ["Brief", "Shared context", "Outcome", "Size, persona and model decision"])
+
+    def test_owned_sections_absent_from_the_note_are_skipped_in_layout_order(self):
+        body = "\n".join(["## Brief", "Do it.", "## Blocked", "A line of the brief.", "", "## Log", "", "## Result", "## Log", "", "## Outcome", ""])
+        doc = spud.split_document("---\nid: \"01\"\n---\n# Russet (01, scout) — SPD-001\n\n" + body, spud.MEMBER_SECTIONS)
+        self.assertEqual(
+            doc["sections"],
+            [("Brief", "Do it.\n## Blocked\nA line of the brief."), ("Log", ""), ("Result", "## Log"), ("Outcome", "")],
+        )
+
     def test_marker_line_after_frontmatter_is_dropped(self):
         text = "---\nid: SPD-001\n---\n%s\n# SPD-001 — T\n\n## Brief\nx\n" % spud.MARKER
         doc = spud.split_document(text)

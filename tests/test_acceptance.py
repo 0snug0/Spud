@@ -32,7 +32,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import REPO, MARKER, Home, normalize_markdown, split_team_section, team_section_problems
+from helpers import REPO, MARKER, Home, load_spud_module, normalize_markdown, split_team_section, team_section_problems
+
+spud = load_spud_module()
 
 # The last ledger commit on main before bin/spud existed (Law 10 and the Main and
 # worktrees section landed in it).  It is on main, in every worktree and on origin,
@@ -260,6 +262,72 @@ class RoundTripMixin:
         proc = self.home.run("import", self.src / "ledger", self.src / "reports", check=False)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("already", proc.stderr.lower())
+
+    def stored_prose(self, home):
+        """Every prose value a ledger stores, by note: the ticket and member columns and the kept sections.  Not a
+        member's summary: a rendered Team card's tree line carries each member's worked-on sentence, which an import
+        takes as the summary (SPD-010), so a second import derives one where the first had none."""
+        tickets = home.rows("SELECT 'ledger/tickets/' || key || '.md' AS path, brief, sizing, outcome, layout FROM tickets ORDER BY key")
+        members = home.rows(
+            "SELECT 'ledger/teams/' || t.team_key || '/' || m.name || '.md' AS path, m.brief, m.result, m.blocked, m.outcome, m.layout"
+            " FROM members m JOIN tickets t ON t.id = m.ticket_id ORDER BY path"
+        )
+        kept = home.rows(
+            "SELECT 'ledger/tickets/' || t.key || '.md' AS path, s.section, s.body FROM imported_sections s"
+            " JOIN tickets t ON t.id = s.entity_id WHERE s.entity = 'ticket'"
+            " UNION ALL"
+            " SELECT 'ledger/teams/' || t.team_key || '/' || m.name || '.md', s.section, s.body FROM imported_sections s"
+            " JOIN members m ON m.id = s.entity_id JOIN tickets t ON t.id = m.ticket_id WHERE s.entity = 'member'"
+            " ORDER BY 1, 2"
+        )
+        for row in tickets + members:  # a layout's sections; its fm_keys gain `project` once rendered (SPD-014)
+            row["layout"] = json.loads(row["layout"]).get("sections") if row["layout"] else None
+        return tickets, members, kept
+
+    def test_stored_prose_survives_a_second_round_trip(self):
+        # SPD-076: no prose the corpus stores breaks the round trip.  The rendered tree imports into a fresh ledger
+        # that stores the same prose in every column and kept section, and renders every file again byte for byte.
+        other = Home()
+        self.addCleanup(other.cleanup)
+        other.init()
+        other.json("import", self.out / "ledger", self.out / "reports")
+        again = Path(self.tmp.name) / "again"
+        other.json("render", "--out", again)
+        for rel in self.sources():
+            self.assertEqual((again / rel).read_bytes(), (self.out / rel).read_bytes(), rel)
+        for want, got in zip(self.stored_prose(self.home), self.stored_prose(other)):
+            self.assertEqual(got, want)
+
+    def test_no_stored_prose_holds_a_line_naming_a_section_of_its_note(self):
+        # SPD-076, the canary: a line `## <name>` for a section its note's kind owns may move text between columns on
+        # the next import while every render stays byte for byte.  The CLI refuses one at write time; the corpus holds
+        # none, whatever wrote it, in a column or in a kept section.
+        tickets, members, kept = self.stored_prose(self.home)
+        values = [(row["path"], column, row[column], spud.TICKET_SECTIONS) for row in tickets for column in ("brief", "sizing", "outcome")]
+        values += [(row["path"], column, row[column], spud.IMPORT_MEMBER_SECTIONS) for row in members for column in ("brief", "result", "blocked", "outcome")]
+        values += [(row["path"], "kept " + row["section"], row["body"], spud.TICKET_SECTIONS if row["path"].startswith("ledger/tickets/") else spud.IMPORT_MEMBER_SECTIONS)
+                   for row in kept]
+        found = [(path, what, line) for path, what, value, names in values for line in (value or "").split("\n")
+                 if line.startswith("## ") and line[3:].strip() in names]
+        self.assertEqual(found, [])
+        # the kept sections are read: SPUD-006/Dakota's Sources, the one a member layout carries beyond the defaults
+        dakota = [row["body"] for row in kept if (row["path"], row["section"]) == ("ledger/teams/SPUD-006/Dakota.md", "Sources")]
+        self.assertEqual(len(dakota), 1)
+        self.assertTrue(dakota[0].strip())
+
+    def test_notes_whose_prose_holds_a_level_2_line_render_as_committed(self):
+        # SPD-076: a note whose stored prose has a line starting `## ` (at HEAD on 2026-09-15, the briefs of
+        # BADS-036's Marfona, Roseval and Sarpo) renders exactly as committed, outside a ticket's generated ## Team
+        heading = re.compile(r"^## ", re.M)
+        tickets, members, kept = self.stored_prose(self.home)
+        paths = {row["path"] for row in tickets + members + kept for key, value in row.items() if key != "path" and isinstance(value, str) and heading.search(value)}
+        for path in sorted(paths):
+            rel = Path(path)
+            want, got = (self.src / rel).read_text(encoding="utf-8"), self.rendered_text(rel)
+            if is_ticket(rel):
+                (want, want_team), (got, got_team) = split_team_section(want), split_team_section(got)
+                self.assertEqual(team_section_problems(want_team or "", got_team or ""), [], rel)
+            self.assertEqual(got, want, rel)
 
 
 class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):

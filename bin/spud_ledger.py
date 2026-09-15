@@ -100,6 +100,9 @@ EVENT_KINDS = (
 TICKET_FM_KEYS = ["id", "title", "priority", "status", "origin", "project", "proposed_by", "lead", "created", "tags"]
 TICKET_SECTIONS = ["Brief", "Size, persona and model decision", "Team", "Handoffs", "Proposals received", "Outcome"]
 MEMBER_SECTIONS = ["Brief", "Log", "Sub-agents", "Ticket proposals", "Result", "Blocked", "Outcome"]
+# The headings an import opens a member note's sections at, its layout not known yet (SPD-076): the layout keys, and
+# ## Sources, the one section a markdown-v0 member note carried beyond them (SPD-006/Dakota), where its layout puts it.
+IMPORT_MEMBER_SECTIONS = ["Brief", "Log", "Sub-agents", "Ticket proposals", "Result", "Blocked", "Sources", "Outcome"]
 TICKET_COLUMN_SECTIONS = {"Brief": "brief", "Size, persona and model decision": "sizing", "Outcome": "outcome"}
 MEMBER_COLUMN_SECTIONS = {"Brief": "brief", "Result": "result", "Blocked": "blocked", "Outcome": "outcome"}
 # Derived sections render from rows; imported prose (when the rows cannot regenerate
@@ -889,9 +892,34 @@ def restyled_render(raw, renders):
     return False, None
 
 
-def split_document(text):
-    """A ledger note: frontmatter, the H1 tail, and (name, body) sections in order.
-    `## ` headings inside fenced code are not sections."""
+def owned_headings(lines, found, owned):
+    """{line index: name}: which of the `## ` lines `found` [(line index, name)] open the sections of a note whose
+    layout owns the names `owned`, in that order (SPD-076).  Prose may hold an owned name too, so the first owned line
+    opens a section and the rest are the longest run of owned lines in layout order after it; of equally long runs,
+    each next heading is one that follows a blank line, as the render writes every heading, then the later one.  Text
+    the CLI writes cannot hold an owned heading line (check_prose_headings refuses it).  Hand-written or legacy text
+    that does, fenced or not, may open a section there and move text between sections: prose that repeats its own
+    section's name after a blank line, a fenced block holding owned headings, or an owned name the note does not carry."""
+    cands = [(n, name, owned.index(name)) for n, name in found if name in owned]
+    longest = [1] * len(cands)  # the longest run in layout order that starts at each candidate
+    for k in range(len(cands) - 2, -1, -1):
+        longest[k] += max((longest[j] for j in range(k + 1, len(cands)) if cands[j][2] > cands[k][2]), default=0)
+    opens, k = {}, 0
+    while cands:
+        opens[cands[k][0]] = cands[k][1]
+        after = [j for j in range(k + 1, len(cands)) if cands[j][2] > cands[k][2] and longest[j] == longest[k] - 1]
+        if not after:
+            break
+        k = max(after, key=lambda j: (not lines[cands[j][0] - 1].strip(), j))
+    return opens
+
+
+def split_document(text, owned=None):
+    """A ledger note: frontmatter, the H1 tail, and (name, body) sections in order.  Given `owned`, the section names
+    the note's layout owns in order, only those headings open a section (owned_headings), so prose may hold any other
+    `## ` line (SPD-076).  Fences hide no owned heading: the CLI refuses stored prose holding one, and hand-written or
+    legacy text that does may move between sections.  Without it, markdown-v0 as written by hand: every `## ` line
+    outside fenced code opens one."""
     fm_lines, body = frontmatter_block(text)
     fm = parse_frontmatter(fm_lines)
     rest = body.split("\n")
@@ -902,20 +930,26 @@ def split_document(text):
     if i < len(rest) and rest[i].startswith("# "):
         heading = rest[i][2:].strip()
         i += 1
+    lines = rest[i:]
+    found = []
+    fence = False
+    for n, line in enumerate(lines):
+        if owned is None and line.startswith("```"):
+            fence = not fence
+        if not fence and line.startswith("## "):
+            found.append((n, line[3:].strip()))
+    opens = dict(found) if owned is None else owned_headings(lines, found, owned)
     sections = []
     name = None
     buf = []
     preamble = []
-    fence = False
-    for line in rest[i:]:
-        if line.startswith("```"):
-            fence = not fence
-        if not fence and line.startswith("## "):
+    for n, line in enumerate(lines):
+        if n in opens:
             if name is None:
                 preamble = buf
             else:
                 sections.append((name, strip_trailing_blank(buf)))
-            name = line[3:].strip()
+            name = opens[n]
             buf = []
         else:
             buf.append(line)
@@ -924,6 +958,25 @@ def split_document(text):
     else:
         sections.append((name, strip_trailing_blank(buf)))
     return {"frontmatter": fm, "heading": heading, "sections": sections, "preamble": strip_blank_edges(preamble)}
+
+
+def check_prose_headings(value, names, what, before=None):
+    """Refuse stored prose holding a line an import reads as its note's own section heading (SPD-076): `## <name>`, read
+    as split_document reads a heading, for a name in `names` (TICKET_SECTIONS for ticket prose, IMPORT_MEMBER_SECTIONS
+    for member prose), fenced or not, since owned_headings sees no fences.  Given `before`, only the lines added to it."""
+    lines = [line for line in (value or "").split("\n") if line.startswith("## ") and line[3:].strip() in names]
+    for line in (before or "").split("\n"):
+        if line in lines:
+            lines.remove(line)
+    if lines:
+        name = lines[0][3:].strip()
+        raise SpudError(EXIT_ERROR, "%s holds the line `%s`, which an import reads as the note's own ## %s heading and so moves"
+                        " text into another section (SPD-076); write `### %s` or reword it" % (what, lines[0].rstrip(), name, name))
+
+
+def proposal_brief(why, evidence):
+    """The brief of a ticket created from a proposal: its why, then its evidence."""
+    return ((why + "\n\n" if why else "") + "Evidence: " + evidence) if evidence else why
 
 
 LOG_ENTRY = re.compile(r"^(?:- )?(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?)(?:\s*[—–:-])?\s+(.*)$")
@@ -1446,9 +1499,8 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
 def create_ticket_for_proposal(con, at, actor, proposal, title, priority):
     origin_ticket = get_ticket_by_id(con, proposal["ticket_id"])
     project = con.execute("SELECT * FROM projects WHERE id = ?", (origin_ticket["project_id"],)).fetchone()
-    brief = proposal["why"]
-    if proposal["evidence"]:
-        brief = (brief + "\n\n" if brief else "") + "Evidence: " + proposal["evidence"]
+    brief = proposal_brief(proposal["why"], proposal["evidence"])
+    check_prose_headings(brief, TICKET_SECTIONS, "proposal %d's why and evidence, the new ticket's brief," % proposal["id"])
     t = insert_ticket(con, at, actor.label, project, title or proposal["title"], priority, "queued",
                       origin="proposal", proposal_id=proposal["id"], brief=brief)
     write_event(con, at, actor.label, "ticket.created", "%s created from proposal %d: %s" % (t["key"], proposal["id"], t["title"]),
@@ -2402,7 +2454,7 @@ def require_keys(fm, keys, path):
 
 
 def import_ticket_file(ctx, con, at, path, rel):
-    doc = split_document(path.read_text(encoding="utf-8"))
+    doc = split_document(path.read_text(encoding="utf-8"), TICKET_SECTIONS)
     fm = doc["frontmatter"]
     require_keys(fm, ["id", "title", "priority", "status", "origin", "created", "tags"], rel)
     key = fm["id"]
@@ -2479,7 +2531,7 @@ def usage_columns(fm, rel):
 
 
 def import_member_file(ctx, con, at, path, rel, team_key):
-    doc = split_document(path.read_text(encoding="utf-8"))
+    doc = split_document(path.read_text(encoding="utf-8"), IMPORT_MEMBER_SECTIONS)
     fm = doc["frontmatter"]
     require_keys(fm, ["id", "name", "persona", "model", "parent", "ticket", "status", "spawned", "finished"], rel)
     ticket = con.execute("SELECT * FROM tickets WHERE team_key = ?", (team_key,)).fetchone()
@@ -2820,6 +2872,7 @@ def accept_ticket_edit(ctx, con, at, t, base, doc, rel):
         if base_sections[name] == body:
             continue
         if name in TICKET_COLUMN_SECTIONS:
+            check_prose_headings(body, TICKET_SECTIONS, "%s: ## %s" % (rel, name), before=base_sections[name])
             updates[TICKET_COLUMN_SECTIONS[name]] = body
         elif name in TICKET_SECTION_COMMANDS:
             refuse(rel, "## %s is generated from the ledger; it changes through `%s`" % (name, TICKET_SECTION_COMMANDS[name]))
@@ -2877,6 +2930,7 @@ def accept_member_edit(ctx, con, at, m, ticket, base, doc, rel):
         if base_sections[name] == body:
             continue
         if name in ("Brief", "Outcome"):
+            check_prose_headings(body, IMPORT_MEMBER_SECTIONS, "%s: ## %s" % (rel, name), before=base_sections[name])
             updates[MEMBER_COLUMN_SECTIONS[name]] = body
         elif name in MEMBER_OWN_SECTIONS:
             refuse(rel, "## %s is the member's own; the member writes it through the CLI (`%s`)" % (name, MEMBER_OWN_SECTIONS[name]))
@@ -2944,16 +2998,19 @@ def accept_file(ctx, con, actor, path):
         baseline = record["content"] if record and record["content"] else None
         if kind[0] == "ticket":
             t = get_ticket(con, kind[1])
-            base = split_document(baseline or render_ticket(con, t, ctx.pricing))
-            doc = split_document(text)
+            owned = (json.loads(t["layout"]) if t["layout"] else {}).get("sections") or TICKET_SECTIONS  # SPD-076
+            base = split_document(baseline or render_ticket(con, t, ctx.pricing), owned)
+            doc = split_document(text, owned)
             if doc["frontmatter"].get("id") != t["key"]:
                 raise SpudError(EXIT_ERROR, "%s: id is not editable by hand" % rel)
             changed = accept_ticket_edit(ctx, con, at, t, base, doc, rel)
         elif kind[0] == "member":
             m = get_member(con, "%s/%s" % (kind[1], kind[2]))
             ticket = get_ticket_by_id(con, m["ticket_id"])
-            base = split_document(baseline or render_member(con, m, ctx.pricing))
-            doc = split_document(text)
+            # every member section, Blocked included, since the last render may predate a block or its clearing (SPD-076)
+            owned = (json.loads(m["layout"]) if m["layout"] else {}).get("sections") or MEMBER_SECTIONS
+            base = split_document(baseline or render_member(con, m, ctx.pricing), owned)
+            doc = split_document(text, owned)
             fm = doc["frontmatter"]
             expected_parent = "Spud" if m["parent_id"] is None else member_ref(con, m["parent_id"])
             parent_link = parse_link(fm["parent"]) if fm.get("parent") else None
@@ -3692,6 +3749,8 @@ def cmd_ticket_new(ctx, args):
             project = mapped[0] if mapped else con.execute("SELECT * FROM projects WHERE id = 1").fetchone()
         if project["archived_at"]:
             raise SpudError(EXIT_ERROR, "project %s is archived (%s); no ticket is created in it" % (project["key"], fm_date(project["archived_at"])))
+        for field in ("brief", "sizing", "outcome"):
+            check_prose_headings(getattr(args, field), TICKET_SECTIONS, "--" + field)
         tags = ["ticket"] + [t for t in (args.tag or []) if t != "ticket"]
         at = now()
         with write_txn(con):
@@ -3737,6 +3796,8 @@ def cmd_ticket_edit(ctx, args):
         actor = resolve_actor(con, args.actor)
         require_spud(con, actor, "editing a ticket")
         check_next(con, actor, args)
+        for field in ("brief", "sizing", "outcome"):
+            check_prose_headings(getattr(args, field), TICKET_SECTIONS, "--" + field)
         at = now()
         entry = None
         with write_txn(con):
@@ -3805,6 +3866,7 @@ def cmd_member_new(ctx, args):
     con = connect(ctx)
     try:
         actor = resolve_actor(con, args.actor)
+        check_prose_headings(args.brief, IMPORT_MEMBER_SECTIONS, "--brief")
         m = plan_member(ctx, con, actor, args.ticket, args.persona, args.model, name=args.name, tier_reason=args.tier_reason,
                         agent_type=args.agent_type, brief=args.brief or "", deliverables=args.deliverable,
                         session_id=planning_session(os.environ))
@@ -3867,6 +3929,7 @@ def cmd_member_finish(ctx, args):
         with write_txn(con):
             m = get_member(con, args.ref)
             require_ancestor(con, actor, m, "finishing a member (status, outcome, finished)")
+            check_prose_headings(args.outcome, IMPORT_MEMBER_SECTIONS, "--outcome")
             if args.next is not None and m["parent_id"] is not None:
                 raise no_entry_for_next("member finish writes one only for a root member, and %s is %s's child" % (member_ref(con, m["id"]), member_ref(con, m["parent_id"])))
             extra = {"outcome": args.outcome}
@@ -3893,6 +3956,7 @@ def cmd_member_edit(ctx, args):
         with write_txn(con):
             m = get_member(con, args.ref)
             require_ancestor(con, actor, m, "editing a member's brief, deliverables, model or summary")
+            check_prose_headings(args.brief, IMPORT_MEMBER_SECTIONS, "--brief")
             updates = {}
             if args.brief is not None and args.brief != m["brief"]:
                 updates["brief"] = args.brief
@@ -3929,6 +3993,8 @@ def cmd_member_own(ctx, args, kind):
         actor = resolve_actor(con, args.actor)
         what = {"log": "the Log", "result": "the Result", "block": "the Blocked section"}[kind]
         require_member(con, actor, what)
+        if kind != "log":  # a Log renders each entry's later lines indented, so no log line reads as a heading
+            check_prose_headings(args.text, IMPORT_MEMBER_SECTIONS, what)
         at = now()
         with write_txn(con):
             m = get_member_by_id(con, actor.member["id"])
@@ -4133,6 +4199,8 @@ def cmd_proposal_file(ctx, args):
     try:
         actor = resolve_actor(con, args.actor)
         require_member(con, actor, "filing a proposal")
+        check_prose_headings(proposal_brief(args.why or "", args.evidence or ""), TICKET_SECTIONS,
+                             "--why and --evidence, the brief of a ticket created from the proposal,")
         at = now()
         with write_txn(con):
             m = get_member_by_id(con, actor.member["id"])
