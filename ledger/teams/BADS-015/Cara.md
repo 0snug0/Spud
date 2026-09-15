@@ -38,6 +38,7 @@ House style for the spec: match the existing specs in docs/superpowers/specs/ (a
 ## Log
 - 2026-09-14T19:55 Read config, Spud CLAUDE.md, BadTakes CLAUDE.md and my brief. Starting the read-first list: the two profile/scene designs, firebase.json, the three workflows, migrations 0012/0019/0027, build-web, ensure-web-hosting, admin apphosting.
 - 2026-09-14T20:00 Course correction from Spud: the end-card half of BAD-015 is dropped (Eric, 2026-09-14); the spec drops the end-card section and states under Not in scope that export end cards keep printing badtakes.io. The URL-always-resolves requirement stands.
+- 2026-09-14T20:05 Read-first list done, plus Firebase Hosting (full-config priority order, regex rewrites, manage-cache s-maxage/private default), Cloudflare (HTML not cached by default; Browser Cache TTL overrides only cached responses), Supabase pooler (custom role as ROLE.PROJECT-REF, IPv4-only pooler, no prepared statements in transaction mode) and Docker (Dockerfile.dockerignore precedence) docs. Decision: Firebase Hosting rewrite on the my target to a new small Cloud Run service badtakes-profiles in us-east4, deployed by a copy of deploy-render.yml; App Hosting loses the domain, prerender loses the freshness rule, client-fetch loses OG, the render service loses on concurrency 1 and blast radius. Phase 3: complete; screen map differs from the design table in three recorded places, no suspended filter on /accounts. Writing the spec now.
 
 ## Sub-agents
 
