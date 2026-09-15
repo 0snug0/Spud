@@ -65,6 +65,7 @@ Rules: read-only in BadTakes (read anything, run read-only commands such as wc, 
 Return: ≤10 lines — what you produced, where, proposals if any, open questions. Run `member result` first; the harness holds you once if you return without it.
 
 ## Log
+- 2026-09-15T10:30 Started: read Spud config/laws and brief; reading web/CLAUDE.md, README, skill, index.html tags, build-web.js, the two tests, then app.js in full
 
 ## Sub-agents
 

@@ -35,6 +35,7 @@ Style: the spike is a design document Eric reads in Obsidian; headings, tables, 
 Children: you may plan and spawn up to two, one level, no grandchildren: scouts on haiku for mechanical surveys (the test-suite attribute list, the symbol-to-region table), or an architect on fable for the shell-analysis region (lines 6261 to 9105) if you cannot hold it with the rest. Their deliverable globs must be disjoint from yours and each other's (give them docs/spikes/spd-065/parts/<name>.md and fold their output into the spike yourself). Wait for each child inside your turn; record each with `member finish` before you return.
 
 ## Log
+- 2026-09-15T10:31 Started: read config, brief, ticket, launcher, helpers, settings hooks, SPD-016 events. Next: AST survey of every top-level symbol with line spans, section markers, test attribute grep, hook baseline timing.
 
 ## Sub-agents
 

@@ -6,8 +6,8 @@ model: fable
 parent: "[[BADS-036/Superior]]"
 ticket: "[[BAD-036]]"
 project: badtakes
-status: planned
-spawned: ""
+status: active
+spawned: 2026-09-15T10:30
 finished: ""
 tags: [spudagent]
 ---
@@ -65,6 +65,7 @@ Rules: read-only in BadTakes (read anything, run read-only commands such as wc, 
 Return: ≤10 lines — what you produced, where, proposals if any, open questions. Run `member result` first; the harness holds you once if you return without it.
 
 ## Log
+- 2026-09-15T10:31 Read config, Spud laws, brief. Starting the read-first list: web/CLAUDE.md, web/README.md, implementing-changes skill, index.html tags, build-web.js, the three path-scanning tests, then booth.js and collabweb.js in full.
 
 ## Sub-agents
 

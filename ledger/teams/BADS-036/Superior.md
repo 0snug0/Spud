@@ -45,6 +45,7 @@ Read-only in BadTakes: you may read anything there and run read-only commands (w
 
 ## Log
 - 2026-09-15T10:26 Read config, laws, brief. Plan: read shared context (CLAUDE.md files, index.html x2, build-web.js, implementing-changes), then brief two fable architect children for the web files (app.js; booth.js+collabweb.js) while I work creator.js myself.
+- 2026-09-15T10:30 Planned and spawned Roseval (03.01, web/app.js) and Marfona (03.02, web/booth.js + collabweb.js), both architect/fable, background. Shared context brief at scratchpad/brief-shared.md: script order, lib/ IIFE convention, cross-file names by grep, build-web copyTree+stampAssets cover new files, tests that name files by path (web-ids non-recursive readdir, web-guest-mode vm list + fnBody scans, fonts.test booth sweep). Now working creator.js myself.
 
 ## Sub-agents
 - [[BADS-036/Roseval|Roseval]] (03.01, architect, fable)
