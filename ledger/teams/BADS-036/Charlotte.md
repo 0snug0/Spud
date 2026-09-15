@@ -44,6 +44,7 @@ Constraints from the repo's CLAUDE.md files, which you read first (root CLAUDE.m
 Read-only in BadTakes: you may read anything there and run read-only commands (wc, grep, node -e for parsing), but you write only your spike files at the Spud home. No code edits, no branches, no tests run that would write into the tree.
 
 ## Log
+- 2026-09-15T10:53 Read all three files, admin tooling, and the test/server admin-*.test.mjs text assertions. Decision: I write all three spikes myself, no children; the plans cross-reference each other (page imports accounts, tests pin all three by path), so one author keeps them consistent. Key finding: admin-accounts-list, admin-moderation, admin-version-key and admin-pool read lib/accounts.ts, lib/actions.ts and app/accounts/[email]/page.tsx by path and pin declarations to them, so Phase 2 must retarget those tests.
 
 ## Sub-agents
 

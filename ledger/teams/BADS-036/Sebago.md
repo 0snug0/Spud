@@ -44,8 +44,11 @@ Constraints from the repo's CLAUDE.md files, which you read first (root CLAUDE.m
 Read-only in BadTakes: you may read anything there and run read-only commands (wc, grep, node -e for parsing), but you write only your spike files at the Spud home. No code edits, no branches, no tests run that would write into the tree.
 
 ## Log
+- 2026-09-15T10:54 Planned and spawned Rooster (05.01, release-notes-art spike) and Goldrush (05.02, web-api spike) on opus; working the collab Edge Function spike myself.
 
 ## Sub-agents
+- [[BADS-036/Rooster|Rooster]] (05.01, architect, opus)
+- [[BADS-036/Goldrush|Goldrush]] (05.02, architect, opus)
 
 ## Ticket proposals
 
