@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import unittest
 from datetime import datetime, timedelta
@@ -1941,6 +1942,250 @@ class ShellModelTest(BashHookCase):
         for ok in ("git status # before git push", "echo 'a\ngit push'", "echo a \\\ngit push", "x=$((1 + 2)); echo $x", "ls *(.)"):
             with self.subTest(ok):
                 self.assertSilent(ok)
+
+
+# zsh's short loop forms (SPD-042): a header, and the body that may follow it with no `do`.  Each fills its `%s`.
+SHORT_HEADERS = ("repeat 2 %s", "repeat 2; %s", "repeat 2\n%s", "repeat 2 ;\n; %s", "n=2; repeat $n %s", "repeat $(echo 2) %s",
+                 "repeat 1+1 %s", "for f (a b) %s", "for f (a b); %s", "for f (a b)\n%s", "for f (*.py) %s", "for f () %s",
+                 "for f in a b; %s", "for f in a b\n%s", "for f; %s", "select f (a b) %s", "select f in a b; %s",
+                 "for (( i=0; i<2; i++ )) %s", "for (( i=0; i<2; i++ )); %s")
+SHORT_BODIES = ("%s", "{ %s }", "{ %s; }", "( %s )", "do %s; done", "if true; then %s; fi", "case x in x) %s;; esac",
+                "true && %s", "false || %s", "%s | cat")
+
+
+class ZshShortLoopTest(BashHookCase):
+    """SPD-042: zsh's SHORT_LOOPS, on under its default options, run a loop body with no `do` and `done`, and the hook read
+    that body as header words and discarded it, so a git write, a spud call, a tee, a cd or a redirection there was never
+    checked (Laws 1, 5, 6 and 7).  Probed in zsh 5.9 -f and in zsh -f -o nobareglobqual (this Mac's Bash tool), with bash 3.2
+    as the control that rejects every one of these forms, in a scratchpad directory with a fake git first on a scratch PATH:
+
+    - the header is `repeat word` (one word, arithmetic: `repeat 1+1` ran twice), `for name ( word ... )`,
+      `for name in word ... TERM`, `for name TERM` (the positional parameters), `select` in both spellings, or `for (( ... ))`;
+      TERM is `;` or a newline, and more than one may stand between a header and its body (`repeat 2 ;\\n;\\n git push` pushed
+      twice).  `for f in a b do ...` is a parse error, so the `in` form always has a terminator before its body;
+    - the body is a `do ... done`, a `{ list }`, a `( list )` subshell, or one sublist: a whole and-or list with its pipelines
+      (`repeat 3 true && git push` pushed three times; `repeat 2 echo a | wc -l` printed 1 twice, so the pipeline is inside),
+      a compound command (`repeat 2 if true; then git push; fi` pushed twice) and the redirections of each, ending at `;`, a
+      newline or `&` (`repeat 2 echo a >> f1; echo b >> f2` left two lines in f1 and one in f2; `repeat 2 git push & wait`
+      pushed twice, so `&` ends the body and backgrounds the loop);
+    - the loop runs in the shell itself, so a cd in a sublist or a `{ }` body moves it and may repeat (`repeat 1 cd d; pwd`
+      ended in d), while a `( )` body's does not (`repeat 1 (cd d); pwd` did not), and a cd after the sublist is outside the
+      loop (`repeat 1 true; cd d; pwd` ended in d);
+    - `for f (a|b)` is a parse error, so a loop's word list is never read as a glob, and a command follows it and a repeat
+      count in command position (`for f (a b) (git push)` and `repeat 1 (git push)` open subshells).
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **; note.txt is refused to AGENT_A at the home."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone", "bin"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    # -- payloads the body may hold -----------------------------------------------------
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("%s hook PreToolUse" % spud, "hook"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    def refused_everywhere(self, line, member_needle, spud_needle):
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, member_needle, agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, spud_needle, agent_id=None)
+
+    # -- the hole ------------------------------------------------------------------------
+    def test_the_tickets_evidence_commands_are_refused(self):
+        """The three lines from the ticket: each wrote ledger/tickets/SPD-001.md in zsh and the hook recorded no redirect."""
+        for line in ("repeat 3 echo x > ledger/tickets/SPD-001.md",
+                     "repeat 1 (echo x > ledger/tickets/SPD-001.md)",
+                     "for f (a b) echo x > ledger/tickets/SPD-001.md"):
+            self.refused_everywhere(line, "generated", "Law 1")
+
+    def test_every_header_form_reaches_its_body(self):
+        for header in SHORT_HEADERS:
+            with self.subTest(header=header):
+                self.assertRefused(header % "git push", "Law 7")
+                self.assertRefused(header % "git push", "Law 7", AGENT_C)
+
+    def test_every_body_form_reaches_its_commands(self):
+        for header in ("repeat 2 %s", "for f (a b) %s", "for f in a b; %s", "select f (a b) %s", "for (( i=0; i<2; i++ )) %s"):
+            for body in SHORT_BODIES:
+                with self.subTest(header=header, body=body):
+                    self.assertRefused(header % (body % "git push"), "Law 7")
+
+    def test_every_payload_in_every_body_for_every_caller(self):
+        for header in ("repeat 2 %s", "for f (a b) %s", "for f in a b; %s"):
+            for body in ("%s", "{ %s }", "( %s )", "do %s; done"):
+                for command, needle in self.member_payloads():
+                    line = header % (body % command)
+                    for agent_id in (AGENT_C, AGENT_A):
+                        with self.subTest(line=line, agent_id=agent_id):
+                            self.assertRefused(line, needle, agent_id)
+                for command, needle in self.spud_payloads():
+                    line = header % (body % command)
+                    with self.subTest(line=line, agent_id="spud"):
+                        self.assertRefused(line, needle, agent_id=None)
+
+    def test_a_target_outside_a_narrow_members_deliverables(self):
+        """AGENT_A plans tests/** and bin/spud, so note.txt at the home is refused it and allowed the ** member."""
+        for header in ("repeat 2 %s", "for f (a b) %s", "for f in a b; %s", "for (( i=0; i<2; i++ )) %s"):
+            for body in ("%s", "{ %s }", "( %s )"):
+                line = header % (body % "echo x > note.txt")
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")
+                    self.assertSilent(line, AGENT_C)
+
+    # -- the loop model -------------------------------------------------------------------
+    def test_the_loop_model_matches_the_long_form(self):
+        """A relative cd in a short body may repeat, so it is unfollowable; an absolute one leaves the union of before and
+        after, as pop computes for `do ... done`; a `( )` body's cd does not carry out; a cd after the sublist is outside the
+        loop and followed."""
+        out, home = self.out, self.home.path
+        for header in ("repeat 2 %s", "for f (a b) %s", "for f in a b; %s", "select f (a b) %s", "for (( i=0; i<2; i++ )) %s"):
+            for body in ("%s", "{ %s; }", "do %s; done"):
+                with self.subTest(header=header, body=body):
+                    # a relative cd that may repeat: the hook cannot follow it, so a member's relative target is refused
+                    self.assertRefused((header % (body % "cd docs")) + "; echo x > note.txt", "cannot follow")
+                    # an absolute cd: both the old directory and the new one are checked
+                    self.assertRefused((header % (body % ("cd %s" % out))) + "; echo x > note.txt", "deliverables")
+                    self.assertRefused((header % (body % ("cd %s/ledger" % home))) + "; echo x > tickets/SPD-001.md", "generated", AGENT_C)
+        for header in ("repeat 2 %s", "for f (a b) %s"):
+            with self.subTest("a subshell body does not move the shell: " + header):
+                self.assertSilent((header % ("(cd %s)" % out)) + "; echo x > tests/zzone/k.py")
+            with self.subTest("after the sublist, the loop is over: " + header):
+                self.assertSilent((header % "true") + "; cd %s; echo x > note.txt" % out)
+                self.assertRefused((header % "true") + "; cd %s/ledger; echo x > tickets/SPD-001.md" % home, "generated", AGENT_C)
+
+    def test_the_loop_variable_is_doubted(self):
+        """`for name (...)` and `for name in ...` assign the name each turn, so a command word built from it is refused."""
+        for line in ("for X (git) $X push", "for X in git; $X push", "select X (git) $X push",
+                     "X=ls; for X (git) $X push", "for X (git) { $X push }"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "cannot resolve")
+                self.assertRefused(line, "cannot resolve", AGENT_C)
+
+    # -- where a short loop may stand ------------------------------------------------------
+    def test_short_loops_nested_and_enclosed(self):
+        for line in ("for f in a b; do repeat 1 git push; done",
+                     "repeat 2 for f in a; do git push; done",
+                     "repeat 2 repeat 2 git push",
+                     "for f (a b) for g (c) git push",
+                     "repeat 2 { repeat 1 git push }",
+                     "{ repeat 1 git push; }",
+                     "( repeat 1 git push )",
+                     "f() { repeat 1 git push; }; f",
+                     "eval 'repeat 1 git push'",
+                     "sh -c 'repeat 1 git push'",
+                     "zsh -c 'for f (a) git push'",
+                     "echo $(repeat 1 git push)",
+                     "echo `for f (a) git push`",
+                     "coproc repeat 1 git push",
+                     "coproc for f (a) git push",
+                     "time repeat 1 git push",
+                     "! repeat 1 git push",
+                     "for f (a b) (git push)",
+                     "for f () git push",
+                     "repeat 1 true; repeat 1 git push",
+                     "repeat 1 git push & wait",
+                     "repeat 1 git push | cat",
+                     "repeat 1 true && git push",
+                     "repeat 1 false || git push",
+                     "for f (a b) git push > out 2>&1",
+                     "case x in x) repeat 1 git push;; esac",
+                     "case x in x) repeat 1 git push;; y) git status;; esac",
+                     "if true; then repeat 1 git push; else echo no; fi",
+                     "repeat 2 cat <<< 'x'; git push"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+        # a short loop closed above a case frame must not swallow the arm's `;;`
+        ledger, out = self.home.path / "ledger", self.out
+        self.assertRefused("case x in a) repeat 1 cd %s;; b) cd %s;; esac; echo x > tickets/SPD-001.md" % (ledger, out),
+                           "generated", AGENT_C)
+
+    def test_bounded_on_pathological_input(self):
+        """Deep nesting and very long headers stay bounded and still find the write."""
+        m = load_spud_module()
+        for line in ("repeat 1 " * 2000 + "git push", "repeat 1 { " * 500 + "git push" + " }" * 500,
+                     "repeat 1 ( " * 200 + "git push" + " )" * 200, "for f (a) " * 2000 + "git push",
+                     "repeat 1 { " * 1000 + "git push", "for f (" + "a " * 5000 + ") git push", "repeat " * 500):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+    def test_the_sublist_body_ends_where_zsh_ends_it(self):
+        """`repeat 2 echo a; echo b` ran echo a twice and echo b once, so what follows the sublist is outside the loop."""
+        home = self.home.path
+        m = load_spud_module()
+        for line, inside, outside in (("repeat 2 echo a > ledger/tickets/SPD-001.md; echo b > tests/zzone/k.py", 1, 1),
+                                      ("for f (a b) echo a > ledger/tickets/SPD-001.md; echo b > tests/zzone/k.py", 1, 1)):
+            a = m.analyse_command(line, m.ShellAnalysis(cwd=str(home)))
+            self.assertEqual(len(a.redirects), inside + outside, (line, a.redirects))
+        # both simple commands are checked, and the one outside the loop for its own directory
+        self.assertRefused("repeat 2 true; echo x > ledger/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertSilent("repeat 2 true; echo x > tests/zzone/k.py")
+
+    # -- controls ---------------------------------------------------------------------------
+    def test_the_long_forms_and_ordinary_words_keep_todays_reading(self):
+        home, out = self.home.path, self.out
+        for refused in ("for f in a b; do git push; done", "for f in a b\ndo\n  git push\ndone",
+                        "for (( i=0; i<3; i++ )); do git push; done", "select f in a b; do git push; done",
+                        "while true; do git push; done", "until false; do git push; done", "repeat 3; do git push; done",
+                        "foreach f (a b); git push; end", "case x in x) git push;; esac",
+                        "f() { git push; }; f", "function f { git push; }",
+                        "(git push)", "{ git push; }", "n=0; while (( n++ < 2 )) { git push }"):
+            with self.subTest(refused):
+                self.assertRefused(refused, "Law 7")
+        for ok in ("echo repeat 3 git push", "echo 'repeat 3 git push'", "echo \"for f (a b) git push\"",
+                   "git log --grep 'for f (a b) git push'", "grep -n repeat tests/zzone/k.py",
+                   "grep -c 'repeat 2 git push' tests/zzone/k.py", "arr=(a b); echo $arr", "arr=(); echo done",
+                   "for f in tests/*.py; do echo $f; done", "echo select repeat for", "ls *(.)",
+                   "printf 'repeat 1 git push\\n' > tests/zzone/k.py"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+        # the directory model of the long forms is untouched
+        self.assertRefused("for d in a b; do cd ..; done; echo x > note.txt", "cannot follow")
+        self.assertSilent("cd %s; echo x > note.txt" % out)
+        self.assertSilent("for f in a b; do echo $f; done; cd %s; echo x > note.txt" % out)
+        self.assertRefused("for f in a b; do cd %s/ledger; done; echo x > tickets/SPD-001.md" % home, "generated", AGENT_C)
+
+    def test_a_short_loop_is_not_read_into_a_quoted_or_argument_position(self):
+        """`repeat`, `for` and `select` outside command position are ordinary words, and a `(` after a loop name is its word
+        list, never a glob: neither changes what the hook reads elsewhere."""
+        home = self.home.path
+        for ok in ("echo for f (a b) done", "echo x | grep -F 'for f (a b) git push'",
+                   "%s --as %s member log 'repeat 3 git push'" % (self.spud_cli, AGENT_A),
+                   "%s --as %s member log 'for f (a b) git push'" % (self.spud_cli, AGENT_A)):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+        self.assertRefused("echo x > 'ledger/tickets/SPD-001.md'", "generated", AGENT_C)
+        self.assertSilent("echo x > %s/tests/zzone/k.py" % home)
 
 
 class GlobRedirectTest(BashHookCase):
