@@ -89,7 +89,7 @@ Run `bash scripts/worktree-init.sh` first. Without it tests skip vacuously.
 ## Sub-agents
 
 ## Ticket proposals
-- **admin/CLAUDE.md documents the pool rule but not the client/server boundary** — suggested P2; open, with Spud.
+- **admin/CLAUDE.md documents the pool rule but not the client/server boundary** — suggested P2; created as [[BAD-081]] at P3 by Spud.
   Why: admin/CLAUDE.md's two bullets both end by naming the test that pins them (test/server/admin-pool.test.mjs). The client/server boundary now has three enforced rules across two test files — admin-client-boundary.test.mjs (no server module reads a plain value out of a 'use client' module; a library module that pulls server code declares import 'server-only'; every leaf behind a server-only barrel declares it) and admin-actions-boundary.test.mjs (every 'use server' export opens with requireAdmin; the support leaves under lib/actions/ open with the guard) — and admin/CLAUDE.md mentions none of it. A developer adding a module under admin/src/lib/ learns the rule by tripping a test rather than by reading the area's own file, and the part that is hardest to guess is which modules deliberately carry NO guard and why (action-state, cookies, env, format, platforms; installbase, retention, segments; the five 'use server' leaves).
   Evidence: grep -n 'server-only|use client|use server|boundary' admin/CLAUDE.md returns nothing across its 44 lines; the only hit anywhere in admin/ prose is README.md:316, about env accessors. Meanwhile admin/src holds 31 files declaring the guard and 8 modules whose head comments explain at length why they do not.
 
