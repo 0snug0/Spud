@@ -52,7 +52,7 @@ No commit, push or PR: Spud does that after the reviewer. If a spike range turns
 ## Sub-agents
 
 ## Ticket proposals
-- **Browser preview from a BadTakes worktree session serves the main checkout** — suggested P2; created as [[BAD-055]] at P3 by Spud.
+- **Browser preview from a BadTakes worktree session serves the main checkout** — suggested P2; created as [[BAD-055]] at P2 by Spud.
   Why: The web tier's only browser proof can silently verify the wrong tree: in a worktree session, preview_start with the 'web' entry of .claude/launch.json ran npm run web from the main checkout, so a split that was absent from main still 'passed'. implementing-changes warns against verifying stale code, but nothing points at this trap; web/CLAUDE.md or the skill should say to serve the worktree directly (PORT=… npm run web from the worktree, 8901 being the origin the production catalog's CORS allows) and check the served script tags.
   Evidence: BAD-044, 2026-09-15: preview_start name=web from /Users/ericlugo/Personal/BadTakes/.claude/worktrees/bad-044-split-web-app opened http://localhost:8901; in the page, script tags matching ^app were only app.js and fetch('/web/app.js') had 1909 lines, while the worktree's index.html had 12 app tags and a 176-line app.js. Serving with npm run web from the worktree gave the 12 tags.
 - **Reword web/start.js's head comment after the web/app.js split** — suggested P3; created as [[BAD-056]] at P3 by Spud.

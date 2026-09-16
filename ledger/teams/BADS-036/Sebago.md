@@ -60,7 +60,7 @@ Read-only in BadTakes: you may read anything there and run read-only commands (w
 - [[BADS-036/Goldrush|Goldrush]] (05.02, architect, opus)
 
 ## Ticket proposals
-- **Share the wrap-completion rule between collab info and commit** — suggested P3; created as [[BAD-038]] at P3 by Spud.
+- **Share the wrap-completion rule between collab info and commit** — suggested P3; created as [[BAD-038]] at P2 by Spud.
   Why: The 'no fresh recording seat, so the wrapping room becomes wrapped' check-and-UPDATE is written twice in the collab Edge Function, once on read before info and once inside commit. A BAD-036 split is a pure move and keeps both copies; if one drifts, read and commit disagree on when a room wraps, and nothing tests the two against each other.
   Evidence: server/supabase/functions/collab/index.ts:655-674 (membership gate, with returning + Object.assign) and :1128-1145 (commit, no returning); both select recording_at >= now - RECORDING_FRESH_MS and set status='wrapped', wrap_expires_at = now + WRAPPED_TTL_MS where status='wrapping'.
 
