@@ -69,7 +69,7 @@ views:
         - not:
             - file.inFolder("ledger/_templates")
         - file.inFolder("ledger/tickets")
-        - '!status.containsAny("done", "declined", "parked")'
+        - '!status.containsAny("done", "declined")'
     groupBy:
       property: project
       direction: ASC
