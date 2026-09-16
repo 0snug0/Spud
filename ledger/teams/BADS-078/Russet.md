@@ -54,6 +54,7 @@ If you find a hole worth pinning, you may add a case to `test/fixtures/movecheck
 No repository writes of any kind beyond your one deliverable glob, and no version-control writes at all — read-only history inspection is fine and is your instrument. No tickets — file a proposal with `spud --as <id> proposal file`. Never edit anything under `ledger/` or `reports/`. Scratch goes outside the repository. Do not run `npm test` in a way that needs the local Supabase stack — `test/server/` fails in this worktree for an unrelated environmental reason (nothing is serving Edge Functions here), which is not yours to fix or report; `node --test test/movecheck.test.js` is the suite you care about. Spawn no children of your own. Record your Result with `member result` before you return.
 
 ## Log
+- 2026-09-15T23:48 Read the six modules + test suite + Adirondack's BAD-047 review. Attack plan queued: (1) multi-line const/require blocks swallowed whole by the `import` class, (2) header's takePrefix accepting any new line that merely STARTS WITH the old condition, (3) whether a deleted statement can land in `isolated` (which does NOT fail the run), (4) no guard on the isolated:moved ratio — a run where contiguity collapsed entirely still exits 0, (5) --new pointed at the old file itself.
 
 ## Sub-agents
 
