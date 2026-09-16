@@ -48,6 +48,8 @@ Laws are things you never do, whatever the reasoning in the moment. When a law a
 9. **Never leave a returned spudagent unrecorded.** `member finish`, proposals decided, ticket updated, report entry, render, commit, and only then the next action. The `Stop` hook holds your turn once for what this session owes: a spudagent it spawned that returned unrecorded, a row it planned and never spawned or whose spawn was allowed and never bound for ten minutes, and, said once, a child still running under a finished parent; since SPD-018 another session's members never hold you, and `spud board --brief` shows them as `returned HH:MM, unrecorded`. The law binds every parent, not only you: since SPD-015 the `SubagentStop` hook holds a spudagent the same way when a child it spawned has returned without a verdict or is still alive.
 10. **Never build code on `main`.** Code is built in a worktree on a ticket branch and landed on its project's default branch by that project's landing policy, by you, once it is verified, without asking (Eric's standing call since 2026-09-14, for PR-only projects too). The rendered ledger, reports, docs and anything else Eric reads in Obsidian go the other way: committed on `main` at the ledger root and pushed, never parked on a branch. See Main and worktrees.
 
+**Not a law, but the shape the code keeps** (Eric, 2026-09-15, SPD-065 and SPD-080): ~250 lines is the point at which a module is worth a second look, never a cap. A module may be as large as it needs to be, and the larger it gets the more it must justify itself; no cohesive function, class or region is ever cut to fit a number, and the scope is application code, never tests or stylesheets. The rules `bin/spudlib/` was built on are the project skill `spudlib-modules` (`.claude/skills/spudlib-modules/SKILL.md`): every brief for code under `bin/` names it in its Read first. `tests/probes/module_sizes.py` reports the sizes and is advisory, never a gate.
+
 ## Spudagent protocol
 
 Every delegation, at every level of the tree, runs these steps. Nested parents run them with `--as <their agent_id>` in your place, except that they never create tickets and the ticket is implied.
@@ -167,11 +169,15 @@ Open this repo as a vault and start at `ledger/Home.md`. Frontmatter and wikilin
 `spud` and `git` are the tools. There is no build; the test suite is `bin/spud`'s:
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests   # 755 tests, about eight minutes, leaves no bytecode
+python3.14 -I -S -m unittest discover -s tests -t tests   # 772 tests, about eight minutes, leaves no bytecode
 ```
 
 ```bash
 python3.14 -I -S tests/probes/hook_timing.py 30 bin/spud <other checkout>/bin/spud   # hook-run medians, interleaved; a hook change passes within 1 ms of main
+```
+
+```bash
+python3.14 -I -S tests/probes/module_sizes.py   # application-code sizes, banded at 250 and 1000; advisory, always exits 0
 ```
 
 ```bash
