@@ -155,7 +155,7 @@ message naming BAD-038.
 ## Sub-agents
 
 ## Ticket proposals
-- **deno check does not run clean on the collab function, and nothing runs it** — suggested P3; created as [[BAD-086]] at P3 by Spud.
+- **deno check does not run clean on the collab function, and nothing runs it** — suggested P3; created as [[BAD-086]] at P2 by Spud.
   Why: The done-when for BAD-038 asked for a clean 'deno check' on the collab function. It is not clean and was not clean before this ticket: three TS7006 implicit-any errors in collab/info.ts (lines 73, 88, 99 — the .map callbacks over members, claims and takes, whose rows are the untyped 'any' every collab handler reads). Fixing them is a one-line-each annotation, but it belongs in its own change rather than mixed into a refactor whose whole claim is 'no behaviour change'. The deeper point is that nothing runs the check: there is no deno.json under server/supabase/functions and no deno step in any workflow, so the type errors are invisible until somebody types the command by hand, and the command itself needs --node-modules-dir=none to get past the repo's node_modules shadowing npm:postgres@3.4.5.
   Evidence: cd server/supabase/functions && deno check --node-modules-dir=none collab/index.ts -> 'Found 3 errors', all TS7006 in collab/info.ts, on an otherwise unmodified tree. grep for 'deno' across .github/workflows/*.yml: no matches. No deno.json exists under server/supabase/functions.
 
