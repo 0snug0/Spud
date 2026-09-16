@@ -181,9 +181,11 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 continue
             wrapper_from = 1
             for aname, avalue in env_assignments:
-                # `env GIT_CONFIG_*/HOME/GIT_PAGER/GIT_SSH_COMMAND/GIT_DIR/PATH=... git ...` (SPD-044, SPD-046, SPD-047, SPD-062)
+                # `env GIT_CONFIG_*/HOME/GIT_PAGER/GIT_SSH_COMMAND/GIT_DIR/PATH/GIT_TRACE=... git ...` (SPD-044, SPD-046,
+                # SPD-047, SPD-062, SPD-049)
                 if (git_programs.is_git_config_var(aname) or git_programs.is_git_program_var(aname)
-                        or git_programs.is_git_repo_var(aname) or git_programs.is_path_var(aname)):
+                        or git_programs.is_git_repo_var(aname) or git_programs.is_path_var(aname)
+                        or git_programs.is_git_write_var(aname)):
                     a.vars[aname] = avalue
                     a.doubt.add(aname)  # the command's environment, not the shell's (SPD-043)
             path_names.append(w)
@@ -252,6 +254,10 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
             a.findings.append(("git-repo", (spelled, target, a.cwds)))
         # ... and the repository this call does read, whose local and worktree scopes bash_reason holds to the allowlist (SPD-063)
         a.git_calls.append((tuple(targets), a.cwds))
+        for spelled, target in git_verbs.git_write_targets(words, a.vars):
+            # SPD-049: a file the call writes through one of its own options or the environment, held to the path rule
+            # in bash_reason like a redirection target, for every caller
+            a.git_writes.append((spelled, target, a.cwds))
     elif base in syntax.SHELLS:
         if not read_points(lambda ws, start: expansions.option_point(expansions.shell_read_index(ws, start))):
             return

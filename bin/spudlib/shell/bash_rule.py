@@ -7,6 +7,59 @@ from ..hooks import hookio, pathrule, worktrees
 from ..state import lookup
 
 
+# What a refused write is called in each channel's reasons: the path rule's own reason wrapped for the write ("into"),
+# a target holding an expansion ("variable", a member alone: Spud's own such target the hook simply cannot read), a
+# target relative to a directory the hook cannot follow ("unfollowable", every caller since SPD-035), and the two a glob
+# earns a member ("capped", "nomatch").
+_UNFOLLOWABLE = ("a cd into a variable, `cd -`, popd, a directory stack entry or ~name, an option or a CDPATH it cannot"
+                 " read, a relative cd in a loop, a sourced file)")
+REDIRECT_MESSAGES = {
+    "into": "a redirection or tee into %s: %s",
+    "variable": "the redirection target %s holds a variable or substitution the hook cannot resolve; spell the path out",
+    "unfollowable": "the redirection target %s is relative to a directory the hook cannot follow (" + _UNFOLLOWABLE + "; use an absolute path",
+    "capped": ("the redirection or tee target %s is a glob whose expansion reaches the hook's match budget of %d files;"
+               " write to explicit paths instead"),
+    "nomatch": ("the redirection or tee target %s is a glob that matches no file now, so the hook cannot know what the shell"
+                " would open (a matching file may appear before the command runs, or the shell may write the name literally);"
+                " write to an explicit path"),
+}
+GIT_WRITE_MESSAGES = {
+    "into": ("a file this git call writes (%s): %s. A git option or a GIT_TRACE* variable can name a file git creates or"
+             " appends to anywhere -- `--output`, archive and format-patch `-o`, `bundle create`, GIT_TRACE2_EVENT and"
+             " their kin -- under a verb Law 7's table allows, so it goes through the path rule as a redirection does"),
+    "variable": ("the file this git call writes (%s) holds a variable or substitution the hook cannot resolve, so it cannot"
+                 " tell where git would write; spell the path out"),
+    "unfollowable": "the file this git call writes (%s) is relative to a directory the hook cannot follow (" + _UNFOLLOWABLE + "; use an absolute path",
+    "capped": ("the file this git call writes (%s) is a glob whose expansion reaches the hook's match budget of %d files;"
+               " name the file explicitly"),
+    "nomatch": ("the file this git call writes (%s) is a glob that matches no file now, so the hook cannot know what git"
+                " would open; name the file explicitly"),
+}
+
+
+def redirection_paths(target, cwds):
+    """The paths a redirection or tee target may name, one per directory the shell may be in; None when it is relative to a
+    directory the hook cannot know (`~+` is that directory; `~-` and `~name` are OLDPWD, a user or a zsh named directory)."""
+    if target.startswith("~"):
+        head, _, tail = target.partition("/")
+        if head == "~":
+            return [target]
+        if head == "~+" and cwds is not None:
+            return [os.path.join(c, tail) for c in sorted(cwds)]
+        return None
+    if os.path.isabs(target):
+        return [target]
+    if cwds is None:
+        return None
+    return [os.path.join(c, target) for c in sorted(cwds)]
+
+
+def target_has_active_glob(target):
+    """True when a masked redirection or tee target holds an unquoted glob metacharacter the shell would expand (a quoted
+    one is a sentinel, so GLOB_RE, which looks for bare `* ? [` or a brace list, does not see it)."""
+    return syntax.GLOB_RE.search(target) is not None
+
+
 def git_target_dirs(target, cwds):
     """(the directories a git call's repository target may name, whether the hook cannot resolve it): a path relative to a
     directory it cannot follow, `~-`/`~+`/`~name`, or a value holding an expansion is unresolvable (SPD-047)."""
@@ -169,82 +222,60 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
             if reason:
                 return reason, analysis
 
-    def redirect_reason(spelled, path):
-        """edit_reason for one concrete file a redirection or tee may open, phrased for the redirect."""
+    def target_reason(messages, spelled, path):
+        """edit_reason for one concrete file a redirection, a tee or a git call may open, phrased for the write."""
         reason, rel = pathrule.edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode)
         if not reason:
             return None
         # the state directory is refused in the database's words, not Law 1's; a session that is not Spud is not held to Law 1
         law_1 = not caller_agent_id and not plain and not (rel is not None and pathrule.in_state_dir(rel))
-        return ("Law 1: a redirection or tee into %s: %s" if law_1 else "a redirection or tee into %s: %s") % (spelled, reason)
+        return ("Law 1: " if law_1 else "") + messages["into"] % (spelled, reason)
 
-    for target, target_cwds in analysis.redirects:
-        if "$" in target or "`" in target or hookio.SUBST in target:
-            if strict:
-                return "the redirection target %s holds a variable or substitution the hook cannot resolve; spell the path out" % prepare.deglob(target), analysis
-            continue
-        spelled = prepare.deglob(target)
-        if target_has_active_glob(target):
-            # The shell expands the target before opening it (SPD-034): check every file it opens from every candidate
-            # directory, not the literal spelling that maps under no root.
-            expansion = redirect_globs.expand_redirect_target(target, target_cwds)
-            if expansion is None:  # a directory the hook cannot follow
+    def targets_reason(entries, messages):
+        """The reason one of these writes is refused, or None.  An entry is (the spelling the reason names it by, or None
+        for the target's own, the target word as the line spells it, the directories the shell may be in when it opens)."""
+        for named, target, target_cwds in entries:
+            spelled = prepare.deglob(named if named else target)
+            if "$" in target or "`" in target or hookio.SUBST in target:
                 if strict:
-                    return ("the redirection target %s is relative to a directory the hook cannot follow (a cd into a variable, `cd -`, popd,"
-                            " a directory stack entry or ~name, an option or a CDPATH it cannot read, a relative cd in a loop, a sourced file);"
-                            " use an absolute path" % spelled), analysis
+                    return messages["variable"] % spelled
                 continue
-            matches, capped = expansion
-            for path in matches:
-                reason = redirect_reason(spelled, path)
-                if reason:
-                    return reason, analysis
-            if strict:  # a member: the hook cannot know what the glob opens beyond what it matches now
-                if capped:
-                    return ("the redirection or tee target %s is a glob whose expansion reaches the hook's match budget of %d files;"
-                            " write to explicit paths instead" % (spelled, syntax.GLOB_MATCH_CAP)), analysis
-                if not matches:
-                    return ("the redirection or tee target %s is a glob that matches no file now, so the hook cannot know what the shell"
-                            " would open (a matching file may appear before the command runs, or the shell may write the name literally);"
-                            " write to an explicit path" % spelled), analysis
-            else:  # Spud: also the literal name a shell writes when a glob matches nothing
-                for path in redirection_paths(spelled, target_cwds) or []:
-                    reason = redirect_reason(spelled, path)
+            if target_has_active_glob(target):
+                # The shell expands the target before opening it (SPD-034): check every file it opens from every candidate
+                # directory, not the literal spelling that maps under no root.
+                expansion = redirect_globs.expand_redirect_target(target, target_cwds)
+                if expansion is None:  # a directory the hook cannot follow: refused for Spud too since SPD-035
+                    return messages["unfollowable"] % spelled
+                matches, capped = expansion
+                for path in matches:
+                    reason = target_reason(messages, spelled, path)
                     if reason:
-                        return reason, analysis
-            continue
-        paths = redirection_paths(spelled, target_cwds)
-        if paths is None:  # a member is refused; Spud's target stays unchecked, since the hook cannot know where it lands
-            if strict:
-                return ("the redirection target %s is relative to a directory the hook cannot follow (a cd into a variable, `cd -`, popd,"
-                        " a directory stack entry or ~name, an option or a CDPATH it cannot read, a relative cd in a loop, a sourced file);"
-                        " use an absolute path" % spelled), analysis
-            continue
-        for path in paths:  # every directory the shell may be in (SPD-030)
-            reason = redirect_reason(spelled, path)
-            if reason:
-                return reason, analysis
+                        return reason
+                if strict:  # a member: the hook cannot know what the glob opens beyond what it matches now
+                    if capped:
+                        return messages["capped"] % (spelled, syntax.GLOB_MATCH_CAP)
+                    if not matches:
+                        return messages["nomatch"] % spelled
+                else:  # Spud: also the literal name a shell writes when a glob matches nothing
+                    for path in redirection_paths(prepare.deglob(target), target_cwds) or []:
+                        reason = target_reason(messages, spelled, path)
+                        if reason:
+                            return reason
+                continue
+            paths = redirection_paths(prepare.deglob(target), target_cwds)
+            if paths is None:  # a directory the hook cannot follow: Spud's target was left unchecked until SPD-035
+                return messages["unfollowable"] % spelled
+            for path in paths:  # every directory the shell may be in (SPD-030)
+                reason = target_reason(messages, spelled, path)
+                if reason:
+                    return reason
+        return None
+
+    # The redirections first, so a line that already earned a redirection's reason keeps it; then the files a git call
+    # writes through its own options or the environment (SPD-049), which are held to the same rule.
+    for entries, messages in (([(None, t, c) for t, c in analysis.redirects], REDIRECT_MESSAGES),
+                              (analysis.git_writes, GIT_WRITE_MESSAGES)):
+        reason = targets_reason(entries, messages)
+        if reason:
+            return reason, analysis
     return None, analysis
-
-
-def redirection_paths(target, cwds):
-    """The paths a redirection or tee target may name, one per directory the shell may be in; None when it is relative to a
-    directory the hook cannot know (`~+` is that directory; `~-` and `~name` are OLDPWD, a user or a zsh named directory)."""
-    if target.startswith("~"):
-        head, _, tail = target.partition("/")
-        if head == "~":
-            return [target]
-        if head == "~+" and cwds is not None:
-            return [os.path.join(c, tail) for c in sorted(cwds)]
-        return None
-    if os.path.isabs(target):
-        return [target]
-    if cwds is None:
-        return None
-    return [os.path.join(c, target) for c in sorted(cwds)]
-
-
-def target_has_active_glob(target):
-    """True when a masked redirection or tee target holds an unquoted glob metacharacter the shell would expand (a quoted
-    one is a sentinel, so GLOB_RE, which looks for bare `* ? [` or a brace list, does not see it)."""
-    return syntax.GLOB_RE.search(target) is not None

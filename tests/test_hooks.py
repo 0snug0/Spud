@@ -1887,8 +1887,10 @@ class ShellModelTest(BashHookCase):
                 self.assertSilent(cmd.replace("%s", str(out)))
 
     def test_directories_the_hook_cannot_follow(self):
-        """Refused for a member's relative redirection or tee target; Spud's relative target is left unchecked (the hook cannot
-        know the directory), an absolute one is checked for both."""
+        """Refused for a member's relative redirection or tee target, and since SPD-035 for Spud's too: Laws 1 and 5 held
+        for nobody after `popd`, `cd -`, a sourced file or a relative cd in a loop, because the hook could not say which
+        directory the target landed in.  Eric's call, made on SPD-035: refuse Spud with the reason members get, his own
+        files being few.  An absolute target is checked for both, as it was."""
         out = self.out
         for dir_command in ("popd", "popd -n", "pushd", "pushd +1", "pushd -1", "pushd -q %s", "pushd -n %s", "cd -q %s", "cd -s %s", "cd -e %s",
                             "cd -@ %s", "cd -x %s", "cd +1", "cd -1", "cd -", "cd ~-", "cd ~root", "cd ~nosuchuser-spd-030", "cd $DIR",
@@ -1898,7 +1900,9 @@ class ShellModelTest(BashHookCase):
             with self.subTest(command):
                 self.assertRefused(command, "cannot follow")
                 self.assertRefused(command.replace("echo x > note.txt", "echo x | tee note.txt"), "cannot follow")
-                self.assertSilent(command.replace("note.txt", "ledger/tickets/SPD-001.md"), agent_id=None)
+                self.assertRefused(command, "cannot follow", agent_id=None)
+                self.assertRefused(command.replace("echo x > note.txt", "echo x | tee note.txt"), "cannot follow", agent_id=None)
+                self.assertRefused(command.replace("note.txt", "ledger/tickets/SPD-001.md"), "cannot follow", agent_id=None)
         home = self.home.path
         self.assertRefused("popd; echo x > %s/docs/x.md" % home, "deliverables")
         self.assertRefused("popd; echo x > %s/ledger/tickets/SPD-001.md" % home, "Law 1", agent_id=None)
@@ -2299,9 +2303,9 @@ class GlobRedirectTest(BashHookCase):
         self.assertRefused("echo x > ~-/ledger/tickets/SPD-00?.md", "cannot follow", AGENT_C)
 
     def test_a_glob_over_a_directory_the_hook_cannot_follow(self):
-        # cwds unknown (a cd the hook cannot follow) plus a glob: refused for a member, unchecked for Spud.
+        # cwds unknown (a cd the hook cannot follow) plus a glob: refused for a member, and since SPD-035 for Spud too.
         self.assertRefused("cd $DIR; echo x > ledger/tickets/SPD-00?.md", "cannot follow", AGENT_C)
-        self.assertSilent("cd $DIR; echo x > ledger/tickets/SPD-00?.md", agent_id=None)
+        self.assertRefused("cd $DIR; echo x > ledger/tickets/SPD-00?.md", "cannot follow", agent_id=None)
 
     def test_the_glob_cost_is_bounded(self):
         # A glob whose expansion reaches the hook's match budget is refused for a member rather than walked without limit.
@@ -2527,11 +2531,17 @@ class ZshGlobOperatorTest(BashHookCase):
         self.assertSilent("make 2>&1", agent_id=None)
         self.assertSilent("make > /dev/null 2>&1")
         self.assertSilent("ls > /dev/null")
-        for ok in ("f() { echo hi; }; f", "arr=(a b); echo $arr", "typeset -a arr=(a b)", "x=$(( 1<2 )); (( 3 > 2 )) && echo y",
+        for ok in ("f() { echo hi; }; f", "arr=(a b); echo $arr", "typeset -a arr=(a b)", "x=$(( 1<2 )); (( 3 < 2 )) && echo y",
                    "[[ -n x && ( -d tests ) ]] && echo y", "case x in (x|y) echo y;; esac", "for f in tests/(keep|other).py; do echo $f; done",
                    "noglob echo (a|b)", "echo a |(cat)", "! (true)", "{ (true) }"):
             with self.subTest(ok):
                 self.assertSilent(ok)
+        # The `>` of an arithmetic command is read as an output operator and the word after it as a target: `(( a > b ))`
+        # and `(( n >= 3 ))` were refused before SPD-045 too, and since it the literal forms are as well, the digit
+        # operand no longer being dropped as a descriptor.  Not this ticket's to fix (the parentheses are gone by the
+        # time separate_redirects sees the tokens); carried by proposal 103.
+        self.assertRefused("x=$(( 1<2 )); (( 3 > 2 )) && echo y", "a redirection or tee into 2")
+        self.assertRefused("(( a > b ))", "a redirection or tee into b")
         self.assertRefused("case x in (x) git push;; esac", "Law 7")
         self.assertAllowed("%s --as %s member log 'a (b|c) <1-2>'" % (self.spud_cli, AGENT_A))
 
@@ -3842,7 +3852,8 @@ class TrapActionTest(BashHookCase):
                     "{ trap 'git push' EXIT; } | cat", "coproc { trap 'eval \"git push\"' EXIT; }"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd)
-        self.refused_for_members("coproc { trap 'echo x > out.txt' EXIT; }", "cannot follow")
+        for agent_id in (AGENT_C, AGENT_A, None):  # since SPD-035 a target the hook cannot place refuses Spud too
+            self.assertRefused("coproc { trap 'echo x > out.txt' EXIT; }", "cannot follow", agent_id)
         self.silent_for_everyone("coproc { trap 'echo done' EXIT; }")
         # a cd under coproc is unchanged: the forked shell's directory is not the line's
         for cmd in ("coproc { cd /tmp; }", "coproc cd /tmp", "coproc { trap 'cd /tmp' EXIT; }"):
@@ -3872,10 +3883,13 @@ class TrapActionTest(BashHookCase):
                 self.refused_for_members(cmd)
 
     def test_the_action_runs_where_the_hook_cannot_know_the_directory(self):
+        # A trap's action runs wherever the shell stands when the signal fires, so a relative target in it lands in a
+        # directory the hook cannot know: refused for a member, and since SPD-035 for Spud too (Laws 1 and 5 hold for him).
         for cmd in ("trap 'echo x > out.txt' EXIT", "cd /tmp && trap 'echo x >> out.txt' EXIT",
                     "trap 'echo x | tee out.txt' EXIT", "trap 'echo x > tests/keep.py' EXIT"):
             with self.subTest(cmd):
-                self.refused_for_members(cmd, "cannot follow")
+                for agent_id in (AGENT_C, AGENT_A, None):
+                    self.assertRefused(cmd, "cannot follow", agent_id)
         # the action's own absolute cd settles its directory again, and the target is checked there
         self.silent_for_everyone("trap 'cd /tmp; echo x > out.txt' EXIT")
         absolute = "trap 'echo x > %s/ledger/tickets/SPD-001.md' EXIT" % self.home.path
@@ -4453,10 +4467,10 @@ class PathInForceTest(BashHookCase):
 
     A command run by a path (`/usr/bin/git status`, `./git`) is not looked for on PATH, so a PATH in force does not refuse
     it, and a name the hook grants nothing for (`ls`) stays silent as before; GIT_EXEC_PATH keeps SPD-046's own reason.
-    The finding is appended after its own command's, so `PATH=<dir> git push` still answers with Law 7's verb; it carries no
-    entry in FINDING_LAST, so on a line of several commands it answers in the order the commands stand (`PATH=<dir> git
-    status; git push` names PATH, not push -- both refusals).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **; Law 7
-    does not bind Spud."""
+    The finding is appended after its own command's, so `PATH=<dir> git push` still answers with Law 7's verb; and since
+    SPD-049 `path` and `hashed` carry an entry in FINDING_LAST, so on a line of several commands a refusal the words as
+    spelled already earn answers first (`PATH=<dir> git status; git push` names the push -- both refusals, only the
+    wording changes).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **; Law 7 does not bind Spud."""
 
     def setUp(self):
         super().setUp()
@@ -4521,6 +4535,21 @@ class PathInForceTest(BashHookCase):
         r = self.refused_for_members("PATH=/tmp/x:$PATH git push")
         self.assertIn("git push", r.reason)
         r = self.assertRefused("PATH=/tmp/x:$PATH %s --as spud board" % self.spud_cli, "Law 6")
+        self.assertIn("--as spud", r.reason)
+
+    def test_a_later_command_that_earns_its_own_refusal_answers_before_the_path_reason(self):
+        # SPD-049's last objective: wave 2 added `path` and `hashed` but could not order them, FINDING_LAST living
+        # outside its globs, so on a line of several commands the PATH reason answered before a refusal the words as
+        # spelled already earn.  Both still refuse; only the wording changes.
+        for command in ("PATH=/tmp/x git status; git push", "path=(/tmp/x); git log; git commit -m x",
+                        "hash git=/tmp/x/git; git status; git push", "hash -p /tmp/x/git git; git status && git rebase"):
+            with self.subTest(command):
+                r = self.refused_for_members(command)
+                self.assertNotIn("PATH as the session has it", r.reason)
+                self.assertNotIn("command table", r.reason)
+        r = self.refused_for_members("PATH=/tmp/x git status; git push")
+        self.assertIn("git push", r.reason)
+        r = self.assertRefused("PATH=/tmp/x git status; %s --as spud board" % self.spud_cli, "Law 6")
         self.assertIn("--as spud", r.reason)
 
     def test_a_command_run_by_a_path_stays_silent(self):
@@ -4793,6 +4822,385 @@ class GitVerbProgramOptionTest(BashHookCase):
         for ok in ("git fetch", "git ls-remote host:r", "git grep -n foo", "git difftool A B", "git archive HEAD"):
             with self.subTest(ok):
                 self.assertSilent(ok)
+
+
+# The GIT_TRACE* siblings, probed on git 2.54.0 (Apple Git-157) in the scratchpad, each set to an absolute path with a
+# plain `git status`: GIT_TRACE, GIT_TRACE_PERFORMANCE, GIT_TRACE_SETUP, GIT_TRACE_PACK_ACCESS, GIT_TRACE_REFS,
+# GIT_TRACE2, GIT_TRACE2_EVENT and GIT_TRACE2_PERF each appended a file there on that one read verb; GIT_TRACE_PACKET,
+# GIT_TRACE_SHALLOW, GIT_TRACE_FSMONITOR, GIT_TRACE_CURL and GIT_TRACE_PACKFILE wrote nothing under `status` (they trace
+# transports and packfiles, under fetch, ls-remote and their kin) and take the same value, so the whole family counts.
+GIT_TRACE_VARS = ("GIT_TRACE", "GIT_TRACE_PACKET", "GIT_TRACE_PERFORMANCE", "GIT_TRACE_SETUP", "GIT_TRACE_SHALLOW",
+                  "GIT_TRACE_PACK_ACCESS", "GIT_TRACE_REFS", "GIT_TRACE_FSMONITOR", "GIT_TRACE_CURL",
+                  "GIT_TRACE_PACKFILE", "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF")
+
+
+class GitFileWriteTest(BashHookCase):
+    """SPD-049: a git call under a verb Law 7 allows writes a file of its own choosing through an option or the
+    environment, and the hook checked neither -- so a member wrote outside its deliverables and Spud past Law 1, with a
+    trace appended to a rendered ledger note or the database corrupting it.
+
+    Probed on git 2.54.0 (Apple Git-157), scratchpad only.  Environment: every GIT_TRACE* variable set to an absolute
+    path appended its trace there (GIT_TRACE, GIT_TRACE_PERFORMANCE, GIT_TRACE_SETUP, GIT_TRACE_PACK_ACCESS,
+    GIT_TRACE_REFS, GIT_TRACE2, GIT_TRACE2_EVENT and GIT_TRACE2_PERF did so under a bare `git status`), a directory
+    value made GIT_TRACE2 write one file per process inside it, and `0`, `1`, `2`, `3`, `9`, `true`, `false` and an
+    empty value wrote nothing (a descriptor or off), while a relative value only warned ("unknown trace value for
+    'GIT_TRACE'") and wrote nothing.  GIT_INDEX_FILE named the index `git read-tree HEAD` wrote (44 KB), and
+    GIT_OBJECT_DIRECTORY the directory `git hash-object -w --stdin` wrote a loose object into.
+
+    Options: `--output` (spaced and `=`) opened its file under diff, log, show, whatchanged, format-patch, range-diff,
+    diff-tree, diff-index, diff-files and blame; `git archive -o F`, `-oF`, `--output=F` and `--output F` each wrote the
+    tar; `git format-patch -o D`, `-oD`, `--output-directory=D`, `--output-directory D` and the cluster `-so D` each
+    wrote the patch into D; `git bundle create F HEAD` (with `-q` or `--version=2` before it) wrote the bundle;
+    `git bugreport -o D` and `git diagnose -o D` wrote their report and zip into D; `git checkout-index -a --prefix=D/`
+    wrote the whole tree there; `git mailsplit -oD mbox` wrote `0001`; `git mailinfo F F2` wrote both; and
+    `git pack-objects D/pack --revs` wrote the pack, its index and its rev file.  `git init` and `git clone` also make a
+    directory wherever they are pointed, but GIT_WRITE_VERBS already refuses both to a member whole, and Spud's own
+    `git init` is his, so their targets are left alone.
+
+    Each such path is checked with the path rule, like a redirection target, against every directory the shell may be
+    in; a path the hook cannot resolve refuses a member, fail closed.  Law 1 holds for Spud here as it does for a
+    redirection, so a trace appended to a rendered ledger note is refused to everyone.  AGENT_A plans tests/** and
+    bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/out", "bin"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger/tickets/SPD-001.md").write_text("orig\n", encoding="utf-8")
+        (home / "docs/x.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def out_of_deliverables(self, command, needle="deliverables"):
+        """Refused for AGENT_A, whose deliverables are tests/** and bin/spud, and silent for AGENT_C, whose are **."""
+        r = self.assertRefused(command, needle, AGENT_A)
+        with self.subTest(command=command, agent_id=AGENT_C):
+            self.assertSilent(command, AGENT_C)
+        return r
+
+    def refused_for_everyone(self, command, needle="generated"):
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertRefused(command, "Law 1", agent_id=None)
+
+    # -- the environment ---------------------------------------------------------------
+
+    def test_every_trace_variable_by_every_route_is_refused(self):
+        home = self.home.path
+        for var in GIT_TRACE_VARS:
+            for line in ("%s=%s/docs/trace.log git status", "env %s=%s/docs/trace.log git status",
+                         "export %s=%s/docs/trace.log; git status", "%s=%s/docs/trace.log; git status"):
+                command = line % (var, home)
+                with self.subTest(command):
+                    r = self.out_of_deliverables(command)
+                    self.assertIn("docs/trace.log", r.reason)
+                    self.assertIn(var, r.reason)
+
+    def test_a_trace_variable_inside_the_deliverables_is_silent(self):
+        home = self.home.path
+        for var in ("GIT_TRACE", "GIT_TRACE2_EVENT"):
+            for line in ("%s=%s/tests/out/trace.log git status", "env %s=%s/tests/out/trace.log git status",
+                         "export %s=%s/tests/out/trace.log; git status"):
+                with self.subTest(line % (var, home)):
+                    self.assertSilent(line % (var, home))
+
+    def test_a_descriptor_or_an_off_value_is_silent(self):
+        for value in ("0", "1", "2", "3", "9", "true", "false", "", "docs/trace.log", "./docs/trace.log"):
+            for var in ("GIT_TRACE", "GIT_TRACE2"):
+                command = "%s=%s git status" % (var, value)
+                with self.subTest(command):
+                    self.assertSilent(command)
+                    self.assertSilent(command, agent_id=None)
+
+    def test_a_trace_value_the_hook_cannot_resolve_is_refused(self):
+        for command in ("GIT_TRACE=$T git status", "env GIT_TRACE=$(echo x) git status",
+                        "export GIT_TRACE2=$T; git status"):
+            with self.subTest(command):
+                self.assertRefused(command, "cannot resolve", AGENT_A)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_trace_variable_without_a_git_call_is_silent(self):
+        home = self.home.path
+        for ok in ("GIT_TRACE=%s/docs/trace.log ls", "GIT_TRACE=%s/docs/trace.log; ls", "echo GIT_TRACE=%s/docs/t"):
+            with self.subTest(ok % home):
+                self.assertSilent(ok % home)
+                self.assertSilent(ok % home, agent_id=None)
+
+    def test_the_index_and_object_directory_variables_are_refused(self):
+        home = self.home.path
+        for command in ("GIT_INDEX_FILE=%s/docs/idx git read-tree HEAD" % home,
+                        "env GIT_INDEX_FILE=%s/docs/idx git status" % home,
+                        "GIT_OBJECT_DIRECTORY=%s/docs/objects git hash-object -w --stdin" % home,
+                        "export GIT_OBJECT_DIRECTORY=%s/docs/objects; git hash-object -w f" % home):
+            with self.subTest(command):
+                self.out_of_deliverables(command)
+
+    def test_a_trace_into_a_generated_note_or_the_database_is_refused_for_spud_too(self):
+        home = self.home.path
+        self.refused_for_everyone("GIT_TRACE=%s/ledger/tickets/SPD-001.md git status" % home)
+        self.refused_for_everyone("GIT_TRACE2_EVENT=%s/reports/2026-09-15.md git log -1" % home)
+        self.refused_for_everyone("env GIT_TRACE=%s/ledger/teams/SPUD-001/Russet.md git status" % home)
+        # ledger/Home.md is Spud's own hand-written note, so the path rule lets him write it and refuses a member
+        self.assertSilent("GIT_TRACE=%s/ledger/Home.md git status" % home, agent_id=None)
+        self.assertRefused("GIT_TRACE=%s/ledger/Home.md git status" % home, "generated", AGENT_C)
+        for agent_id in (AGENT_A, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertRefused("GIT_TRACE=%s/.spud/ledger.db git status" % home, "ledger database", agent_id)
+
+    # -- the options -------------------------------------------------------------------
+
+    def test_archive_output_in_every_spelling(self):
+        home = self.home.path
+        for spelling in ("-o %s/docs/a.tar", "-o%s/docs/a.tar", "--output=%s/docs/a.tar", "--output %s/docs/a.tar",
+                         "--out=%s/docs/a.tar", "--outp %s/docs/a.tar"):
+            command = "git archive %s HEAD" % (spelling % home)
+            with self.subTest(command):
+                self.out_of_deliverables(command)
+        for ok in ("git archive -o tests/out/a.tar HEAD", "git archive --output=tests/out/a.tar HEAD"):
+            with self.subTest(ok):
+                self.assertSilent(ok)  # inside AGENT_A's deliverables; Law 1 still refuses Spud that path, as a redirect would
+                self.assertRefused(ok, "Law 1", agent_id=None)
+        for ok in ("git archive HEAD", "git archive --format=tar HEAD", "git archive -o /dev/null HEAD"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_format_patch_output_directory_in_every_spelling(self):
+        home = self.home.path
+        for spelling in ("-o %s/docs", "-o%s/docs", "--output-directory=%s/docs", "--output-directory %s/docs",
+                         "-so %s/docs", "--output=%s/docs/p.patch"):
+            command = "git format-patch %s -1" % (spelling % home)
+            with self.subTest(command):
+                self.out_of_deliverables(command)
+        self.assertSilent("git format-patch -o tests/out -1")
+        self.assertSilent("git format-patch -1")
+
+    def test_the_diff_output_option_on_every_verb_that_takes_it(self):
+        home = self.home.path
+        for verb in ("diff", "log", "show", "whatchanged", "range-diff", "diff-tree", "diff-index", "diff-files",
+                     "blame"):
+            for spelling in ("--output=%s/docs/d.txt", "--output %s/docs/d.txt"):
+                command = "git %s %s" % (verb, spelling % home)
+                with self.subTest(command):
+                    self.out_of_deliverables(command)
+        self.assertSilent("git diff --output=tests/out/d.txt")
+        self.assertSilent("git log --oneline -5")  # --oneline is no prefix of --output
+        self.assertSilent("git log --output-indicator-new=x -1")
+
+    def test_bundle_create_names_the_file_it_writes(self):
+        home = self.home.path
+        for command in ("git bundle create %s/docs/b.bundle HEAD", "git bundle create -q %s/docs/b.bundle HEAD",
+                        "git bundle create --version=2 %s/docs/b.bundle HEAD"):
+            with self.subTest(command % home):
+                self.out_of_deliverables(command % home)
+        self.assertSilent("git bundle create tests/out/b.bundle HEAD")
+        for ok in ("git bundle verify %s/docs/b.bundle", "git bundle list-heads %s/docs/b.bundle",
+                   "git bundle unbundle %s/docs/b.bundle"):
+            with self.subTest(ok % home):
+                self.assertSilent(ok % home)
+
+    def test_the_other_verbs_that_name_a_path_they_write(self):
+        home = self.home.path
+        for command in ("git bugreport -o %s/docs", "git bugreport --output-directory=%s/docs",
+                        "git diagnose -o %s/docs", "git diagnose --output-directory %s/docs",
+                        "git checkout-index -a --prefix=%s/docs/", "git checkout-index -a --prefix %s/docs/",
+                        "git mailsplit -o%s/docs mbox", "git mailinfo %s/docs/msg %s/docs/patch",
+                        "git pack-objects %s/docs/pack", "git index-pack -o %s/docs/x.idx",
+                        "git read-tree --index-output=%s/docs/idx HEAD", "git read-tree --index-output %s/docs/idx HEAD",
+                        "git fast-export --export-marks=%s/docs/marks HEAD", "git commit-graph write --object-dir %s/docs",
+                        "git multi-pack-index --object-dir=%s/docs write", "git repack --expire-to=%s/docs",
+                        "git repack --filter-to %s/docs", "git credential-store --file %s/docs/creds get"):
+            filled = command % ((home,) * command.count("%s"))
+            with self.subTest(filled):
+                self.out_of_deliverables(filled)
+        self.assertSilent("git bugreport -o tests/out")
+        self.assertSilent("git checkout-index -a --prefix=tests/out/")
+        self.assertSilent("git read-tree --index-output=tests/out/idx HEAD")
+        # an option that only reads the file it names carries no entry
+        for ok in ("git archive --add-file=%s/docs/x.md HEAD", "git grep -f %s/docs/patterns foo",
+                   "git ls-files -X %s/docs/exclude"):
+            with self.subTest(ok % home):
+                self.assertSilent(ok % home)
+
+    def test_an_option_target_the_hook_cannot_resolve_is_refused(self):
+        for command in ("git archive -o $T HEAD", "git archive --output=$(echo x) HEAD",
+                        "git format-patch -o $D -1", "git bundle create $F HEAD"):
+            with self.subTest(command):
+                self.assertRefused(command, "cannot resolve", AGENT_A)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_relative_target_after_a_directory_the_hook_cannot_follow_is_refused(self):
+        for command in ("popd; git archive -o a.tar HEAD", "cd -; git bundle create b.bundle HEAD",
+                        "source x.sh; git diff --output=d.txt", "cd $DIR; git format-patch -o out -1"):
+            with self.subTest(command):
+                self.assertRefused(command, "cannot follow", AGENT_A)
+                self.assertRefused(command, "cannot follow", agent_id=None)
+
+    def test_the_directories_the_shell_may_be_in_are_followed(self):
+        home = self.home.path
+        self.assertRefused("cd ledger && git archive -o tickets/a.tar HEAD", "generated", AGENT_C)
+        self.assertRefused("cd %s/ledger; git archive -o tickets/SPD-001.md HEAD" % home, "Law 1", agent_id=None)
+        self.assertRefused("cd docs && git bundle create b.bundle HEAD", "deliverables", AGENT_A)
+        self.assertSilent("cd tests/out && git archive -o a.tar HEAD")
+
+    def test_law_1_holds_for_spud_and_his_own_paths_do_not(self):
+        home = self.home.path
+        self.assertRefused("git archive -o %s/ledger/tickets/SPD-001.md HEAD" % home, "Law 1", agent_id=None)
+        self.assertRefused("git diff --output %s/reports/2026-09-15.md" % home, "Law 1", agent_id=None)
+        self.assertSilent("git archive -o %s/CLAUDE.md HEAD" % home, agent_id=None)
+        self.assertSilent("git archive -o /dev/null HEAD", agent_id=None)
+        self.assertRefused("git archive -o %s/CLAUDE.md HEAD" % home, "deliverables", AGENT_A)
+
+    def test_init_and_clone_keep_law_7s_own_reason(self):
+        home = self.home.path
+        for command in ("git init %s/docs/new" % home, "git clone https://x/y %s/docs/new" % home):
+            with self.subTest(command):
+                self.assertRefused(command, "Law 7", AGENT_A)
+                self.assertRefused(command, "Law 7", AGENT_C)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_refusal_the_words_as_spelled_earn_keeps_its_own_reason(self):
+        home = self.home.path
+        r = self.assertRefused("git commit -o %s/docs/a.tar -m x" % home, "Law 7", AGENT_A)
+        self.assertIn("git commit", r.reason)
+        r = self.assertRefused("git archive --exec=cmd -o %s/docs/a.tar HEAD" % home, "Law 7", AGENT_A)
+        self.assertIn("--exec", r.reason)
+        self.assertRefused("GIT_TRACE=%s/docs/t.log git push" % home, "git push", AGENT_A)
+
+    def test_the_channel_records_what_the_call_writes(self):
+        home = self.home.path
+        cwds = frozenset([str(home)])
+        self.assertEqual(self.analysis("git archive -o docs/a.tar HEAD").git_writes,
+                         [("archive -o docs/a.tar", "docs/a.tar", cwds)])
+        self.assertEqual(self.analysis("GIT_TRACE=/tmp/t git status").git_writes,
+                         [("GIT_TRACE=/tmp/t", "/tmp/t", cwds)])
+        self.assertEqual(self.analysis("git status").git_writes, [])
+        self.assertEqual(self.analysis("GIT_TRACE=1 git status").git_writes, [])
+
+    def test_inside_shell_strings_eval_and_subshells(self):
+        home = self.home.path
+        for command in ("sh -c 'git archive -o %s/docs/a.tar HEAD'", "eval 'GIT_TRACE=%s/docs/t.log git status'",
+                        "(git archive -o %s/docs/a.tar HEAD)", "true && git archive -o %s/docs/a.tar HEAD",
+                        "for f in a; do git archive -o %s/docs/a.tar HEAD; done"):
+            with self.subTest(command % home):
+                self.assertRefused(command % home, "deliverables", AGENT_A)
+
+
+class DescriptorRedirectTest(BashHookCase):
+    """SPD-045 (proposed by SPUD-040/Bintje): separate_redirects dropped any operand that is all digits or `-` for every
+    output operator, though only `>&` reads such a word as a descriptor or a close.  The others open a file of that name,
+    so a member wrote outside its deliverables and Spud past Law 1 with nothing checked.
+
+    Probed again in zsh 5.9 -f -o nobareglobqual (this Mac's Bash tool) and bash 3.2, in an empty scratch directory:
+    `echo x > 3`, `>3`, `>> 3`, `>| 3`, `&> 3`, `1> 4`, `9> 9`, `2> 12` and `2>12` each created a file named by the
+    digits in both shells, `&>> 3` in zsh (a syntax error in bash 3.2), and `> -`, `>> -` and `&> -` created a file named
+    `-`.  Only `>& 3`, `>&3` and `1>&3` were a descriptor (both shells: "bad file descriptor") and `>& -`, `>&-` a close,
+    while `2>&1` duplicated; `>& out` and `>&out` wrote the file `out` in both.  shlex reads `2>&1` as `2`, `>&`, `1` and
+    `2>12` as `2`, `>`, `12`, so the leading descriptor never reaches the operand check.  AGENT_A plans tests/** and
+    bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        for d in ("ledger/tickets", "docs", "tests"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+
+    def test_a_digit_or_dash_operand_is_a_file_for_every_operator_but_the_dup(self):
+        for operator in (">", ">>", ">|", "&>", "&>>"):
+            for operand in ("3", "-", "12", "0"):
+                for spacing in ("%s %s", "%s%s"):
+                    command = "cd docs && echo x " + (spacing % (operator, operand))
+                    with self.subTest(command):
+                        self.assertRefused(command, "deliverables", AGENT_A)
+                        self.assertSilent(command, AGENT_C)
+
+    def test_a_leading_descriptor_does_not_make_the_operand_one(self):
+        for command in ("cd docs && echo x 2> 12", "cd docs && echo x 2>12", "cd docs && echo x 1> 4",
+                        "cd docs && echo x 9> 9", "cd docs && echo x 2>> 3"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables", AGENT_A)
+
+    def test_the_dup_operator_keeps_its_descriptor_and_its_close(self):
+        for ok in ("echo x >& 3", "echo x >&3", "echo x 1>&3", "echo x 2>&1", "echo x >&-", "echo x >& -",
+                   "echo x >&2", "make 2>&1", "exec 3>&1", "cd docs && echo x >& 3", "cd docs && echo x >&-"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_the_dup_operator_with_a_file_name_is_still_a_target(self):
+        for command in ("cd docs && echo x >& out", "cd docs && echo x >&out", "cd docs && ls >& 3x"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables", AGENT_A)
+
+    def test_a_generated_file_named_by_digits_is_refused_for_spud_too(self):
+        for command in ("cd ledger/tickets && echo x > 3", "cd ledger/tickets && echo x >> -",
+                        "cd ledger/tickets && echo x &> 12"):
+            with self.subTest(command):
+                self.assertRefused(command, "generated", AGENT_C)
+                self.assertRefused(command, "Law 1", agent_id=None)
+
+    def test_the_analysis_records_the_operand(self):
+        m = load_spud_module()
+        for command, targets in (("echo x > 3", ["3"]), ("echo x >> -", ["-"]), ("echo x 2> 12", ["12"]),
+                                 ("echo x &> 3", ["3"]), ("echo x >| 3", ["3"]), ("echo x >&3", []),
+                                 ("echo x 2>&1", []), ("echo x >&-", []), ("echo x >& out", ["out"])):
+            with self.subTest(command):
+                self.assertEqual([t for t, _cwds in m.analyse_command(command).redirects], targets)
+
+
+class UnenterableDirTest(BashHookCase):
+    """SPD-037 (proposed by SPUD-036/Huckleberry): SPD-030's directory model marked a cd uncertain only when the target
+    was not a directory (os.path.isdir), so a directory that exists but cannot be entered -- no execute bit, /var/root,
+    a directory a member chmod 000's -- passed, the hook assumed the cd succeeded, and a relative write after `;` or
+    `||` landed in the original directory unchecked.
+
+    Probed in zsh 5.9 -f -o nobareglobqual and bash 3.2 on a scratch directory with mode 000: `cd <dir>` is "permission
+    denied" and PWD stays put in both, while `cd <dir> && pwd` runs nothing (exit 1).  os.path.isdir is True there and
+    os.access(d, os.X_OK) is False, which is the difference the model was missing.  The `&&` form is unchanged: the write
+    only runs where the cd succeeded.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        self.locked = home / "locked"
+        self.locked.mkdir(exist_ok=True)
+        os.chmod(self.locked, 0o000)
+        self.addCleanup(os.chmod, self.locked, 0o755)
+
+    def test_a_cd_into_an_unenterable_directory_keeps_both_directories(self):
+        for command in ("cd %s; echo x > ledger/tickets/SPD-001.md", "cd %s || echo x > ledger/tickets/SPD-001.md",
+                        "cd %s\necho x > ledger/tickets/SPD-001.md", "cd %s; echo x | tee ledger/tickets/SPD-001.md",
+                        "pushd %s; echo x > ledger/tickets/SPD-001.md"):
+            with self.subTest(command % self.locked):
+                self.assertRefused(command % self.locked, "generated", AGENT_C)
+                self.assertRefused(command % self.locked, "Law 1", agent_id=None)
+
+    def test_the_and_form_is_unchanged(self):
+        # Only the directory the cd may have reached is checked, so `locked/ledger/tickets/SPD-001.md` is no generated
+        # root and AGENT_C's `**` covers it.  Spud is refused there as he was before, the locked directory being inside
+        # the repository and outside his own paths -- Law 1, not the cd model.
+        for ok in ("cd %s && echo x > ledger/tickets/SPD-001.md", "cd %s && echo x > note.txt"):
+            with self.subTest(ok % self.locked):
+                self.assertSilent(ok % self.locked, AGENT_C)
+                self.assertRefused(ok % self.locked, "Law 1", agent_id=None)
+
+    def test_an_enterable_directory_is_unchanged(self):
+        home = self.home.path
+        self.assertSilent("cd %s/tests; echo x > keep.py" % home)
+        self.assertSilent("cd %s/tests || echo x > keep.py" % home)
+        self.assertRefused("cd %s/docs; echo x > x.md" % home, "deliverables", AGENT_A)
+
+    def test_a_git_write_after_such_a_cd_is_checked_in_both_directories(self):
+        self.assertRefused("cd %s; git archive -o ledger/tickets/SPD-001.md HEAD" % self.locked, "generated", AGENT_C)
 
 
 # =============================================================================

@@ -14,6 +14,19 @@ def union_dirs(a, b):
     return a | b
 
 
+def redirect_descriptor(operator, operand):
+    """Whether an output operator's operand is a descriptor or a close rather than the name of a file it opens (SPD-045).
+    Only `>&` reads a word of digits or `-` that way: probed in zsh 5.9 -f -o nobareglobqual (this Mac's Bash tool) and
+    bash 3.2 in an empty directory, `echo x > 3`, `>3`, `>> 3`, `>| 3`, `&> 3`, `1> 4`, `9> 9`, `2> 12` and `2>12` each
+    created a file named by the digits in both shells and `&>> 3` in zsh (a syntax error in bash 3.2), and `> -`, `>> -`
+    and `&> -` created a file named `-`, while `>& 3`, `>&3` and `1>&3` were a descriptor ("bad file descriptor" in both)
+    and `>& -`, `>&-` a close; `>& out` wrote the file.  An operand the tokenizer leaves with a leading `&` is a
+    descriptor after every operator but `<>`, which has no dup form (`1<>&2` is a syntax error in both, SPD-040)."""
+    if operand.startswith("&"):
+        return operator != "<>"
+    return operator == ">&" and re.fullmatch(r"-|\d+", operand) is not None
+
+
 def separate_redirects(tokens):
     """Drop redirection operators and their operands; return (words, output targets).  A `<>` operand is always a file name
     (SPD-040, probed: `<>3` and `<>-` created files named 3 and -, and `1<>&2` is a syntax error), never a descriptor."""
@@ -23,7 +36,7 @@ def separate_redirects(tokens):
         t = tokens[i]
         if t in syntax.OUT_REDIRECTS:
             operand = tokens[i + 1] if i + 1 < len(tokens) else None
-            if operand is not None and (t == "<>" or not (re.fullmatch(r"-|\d+", operand) or operand.startswith("&"))):
+            if operand is not None and not redirect_descriptor(t, operand):
                 targets.append(operand)
             i += 2
             continue
@@ -233,6 +246,9 @@ def directory_change(words, a, effect):
     if words[0] == "chdir":
         effect = max(effect, "either", key=EFFECT_ORDER.get)  # zsh's synonym for cd; bash has no chdir
     new = cd_destinations(words[0], words[1:], a)
-    if new is not None and not all(os.path.isdir(d) for d in new):
+    # SPD-037: a directory that exists but the process cannot enter (no execute bit, /var/root, one a member chmod 000's)
+    # fails the cd exactly as a missing one does -- probed in zsh 5.9 and bash 3.2: "permission denied", and PWD stays
+    # put -- so the hook keeps the old directory beside the new one rather than assume the cd ran.
+    if new is not None and not all(os.path.isdir(d) and os.access(d, os.X_OK) for d in new):
         a.cd_uncertain = True
     a.cwds = settle(effect, a.cwds, new)

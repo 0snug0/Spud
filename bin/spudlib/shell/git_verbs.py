@@ -137,6 +137,92 @@ def git_repo_targets(words, variables):
     return targets
 
 
+def git_write_option_targets(words):
+    """Every file or directory a git call's own options name for git to write (SPD-049), as (the spelling a reason names
+    it by, the path word as the line spells it): the diff option syntax.GIT_FILE_OPTIONS on any verb, this verb's entry
+    in syntax.GIT_VERB_FILE_OPTIONS, and the positional forms of syntax.GIT_VERB_FILE_POSITIONALS.
+
+    Read in every spelling git takes: spaced, `=`-attached, a short option with its value attached or clustered, and any
+    `--`-prefix of a long option, git's parse-options resolving an unambiguous one.  A verb GIT_WRITE_VERBS refuses whole
+    carries no target: Law 7's verb is the reason a member gets, and `git init`/`git clone` are Spud's own."""
+    verb, args = git_verb(words)
+    if verb is None or verb in syntax.GIT_WRITE_VERBS:
+        return []
+    longs, shorts = syntax.GIT_VERB_FILE_OPTIONS.get(verb, ((), ""))
+    longs = tuple(longs) + syntax.GIT_FILE_OPTIONS
+    out, i = [], 0
+    while i < len(args):
+        w = args[i]
+        if w == "--":
+            break  # nothing after the end-of-options marker is an option (a path or a revision, not a target)
+        key, sep, attached = w.partition("=")
+        if key.startswith("--") and len(key) >= 3 and any(opt.startswith(key) for opt in longs):
+            value = attached if sep else (args[i + 1] if i + 1 < len(args) else None)
+            if value:
+                out.append(("%s %s" % (verb, w if sep else "%s %s" % (key, value)), value))
+            i += 1 if sep else 2
+            continue
+        if shorts and w.startswith("-") and not w.startswith("--") and len(w) > 1:
+            k = next((j for j in range(1, len(w)) if w[j] in shorts), None)
+            if k is not None:
+                rest = w[k + 1 :]
+                value = rest or (args[i + 1] if i + 1 < len(args) else None)
+                if value:
+                    out.append(("%s %s" % (verb, w if rest else "%s %s" % (w, value)), value))
+                i += 1 if rest else 2
+                continue
+        i += 1
+    return out + git_write_positional_targets(verb, args)
+
+
+def git_write_positional_targets(verb, args):
+    """The positional words of a verb whose writing form names its file that way (SPD-049): `git bundle create <file>`,
+    `git mailinfo <msg> <patch>`, `git pack-objects <base-name>`.  An option is skipped as spelled; which of a verb's
+    options take a separate value is not known here, so such a value is read as a positional and checked too, which fails
+    closed."""
+    entry = syntax.GIT_VERB_FILE_POSITIONALS.get(verb)
+    if not entry:
+        return []
+    subcommand, count = entry
+    positionals, options = [], True
+    for w in args:
+        if options and w == "--":
+            options = False
+            continue
+        if options and w.startswith("-") and len(w) > 1:
+            continue
+        positionals.append(w)
+    if subcommand is not None:
+        if not positionals or positionals[0] != subcommand:
+            return []
+        positionals = positionals[1:]
+    return [("%s %s" % (" ".join(x for x in (verb, subcommand) if x), p), p) for p in positionals[:count]]
+
+
+def git_write_env_targets(variables):
+    """Every file or directory a git call writes because of a variable in force on the line (SPD-049), as (the spelling a
+    reason names it by, the path word): a GIT_TRACE* sibling whose value is a path git appends to -- an absolute one, or
+    a `~` the shell expanded before git saw it, a descriptor, an off value and a relative one writing nothing -- or whose
+    value the hook cannot read, which fails closed, and GIT_INDEX_FILE and GIT_OBJECT_DIRECTORY, whose value is a path
+    whatever its shape.  A fixed order so the reason is deterministic."""
+    out = []
+    for name in sorted(variables):
+        value = variables[name]
+        if not value:
+            continue
+        if name in syntax.GIT_WRITE_PATH_ENV_VARS:
+            out.append(("%s=%s" % (name, value), value))
+        elif name.startswith(syntax.GIT_TRACE_VAR_PREFIX) and (value.startswith(("/", "~")) or spud_calls.unresolvable_word(value)):
+            out.append(("%s=%s" % (name, value), value))
+    return out
+
+
+def git_write_targets(words, variables):
+    """Every file or directory a git call writes beside the repository it reads (SPD-049): what its options name, then
+    what the environment in force names.  Each is checked with the path rule in bash_reason, like a redirection target."""
+    return git_write_option_targets(words) + git_write_env_targets(variables)
+
+
 def flag_list_refused(verb, args, read_flags, value_flags):
     """`git branch`/`git tag` listing forms are reads; a name or a modifying flag writes."""
     positional_allowed = False
