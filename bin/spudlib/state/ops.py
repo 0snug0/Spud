@@ -108,7 +108,10 @@ def check_deliverable_projects(con, globs):
 def normalize_deliverable(glob):
     """A deliverable is a repository-relative path glob: no leading slash, no `..`,
     `**` allowed; a trailing slash means everything under that directory.  An optional
-    `<key>:` in front names the project whose checkout it is relative to (SPD-014)."""
+    `<key>:` in front names the project whose checkout it is relative to (SPD-014).
+    `*` and `?` stay inside one path segment, `**` crosses segments, and every other
+    character is literal, brackets included: a Next.js `[email]` segment is written
+    plainly, and nothing in a glob has to be escaped (SPD-086, pathrule.glob_to_regex)."""
     key, rest = glob_scope((glob or "").strip())
     g = normalize_bare_deliverable(glob, rest)
     return "%s:%s" % (key, g) if key else g

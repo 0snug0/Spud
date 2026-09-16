@@ -5332,6 +5332,23 @@ class PreEditTest(PathRuleAsserts, HookCase):
         else:
             self.assertRefused(home / "Tests" / "x.py", "deliverables")
 
+    def test_a_bracketed_segment_is_a_directory_the_hook_lets_its_member_write(self):
+        """SPD-086, end to end: BAD-054/Snowden was refused admin/src/app/accounts/[email]/page.tsx -- its own planned
+        deliverable, quoted back at it in the refusal -- because `[` opened a character class, so the glob matched only a
+        one-letter directory.  The same plan and the same writes, through `member new` and the PreToolUse edit hook."""
+        home = self.home.path
+        m = self.spawn(self.plan(deliverable=["admin/src/app/accounts/[email]/**", "app/[...slug]/page.tsx"]), AGENT_B)
+        self.assertEqual(m["deliverables"], ["admin/src/app/accounts/[email]/**", "app/[...slug]/page.tsx"])
+        for ok in ("admin/src/app/accounts/[email]/page.tsx", "admin/src/app/accounts/[email]/_components/UserTab.tsx",
+                   "app/[...slug]/page.tsx"):
+            for tool in ("Write", "Edit", "MultiEdit"):
+                self.assertSilent(home / ok, agent_id=AGENT_B, tool=tool)
+        r = self.assertRefused(home / "admin" / "src" / "app" / "accounts" / "e" / "page.tsx", "deliverables", agent_id=AGENT_B)
+        self.assertIn("[email]", r.reason)  # the class it used to be is the only thing that ever matched this path
+        self.assertRefused(home / "admin" / "src" / "app" / "accounts" / "page.tsx", "deliverables", agent_id=AGENT_B)
+        self.assertRefused(home / "app" / "x" / "page.tsx", "deliverables", agent_id=AGENT_B)
+        self.assertRefused(home / "admin" / "src" / "app" / "accounts" / "[email]" / "page.tsx", "deliverables")  # not the lead's
+
     def test_case_variants_cannot_reach_generated_files_or_spuds_set(self):
         """Rooster's HIGH-2: the protected roots are matched whatever the case, on every filesystem."""
         home = self.home.path
@@ -5865,8 +5882,48 @@ class DeliverableGlobTest(SpudTestCase):
         self.assertTrue(match("a/b.md", "a/**/b.md"))
         self.assertTrue(match("ledger/Board.base", "ledger/*.base"))
         self.assertFalse(match("ledger/x/Board.base", "ledger/*.base"))
-        self.assertTrue(match("a/b?c", "a/b[?]c"))
+        # SPD-086 changed this case deliberately: brackets no longer open a character class, so `[?]` is a literal
+        # bracket around the one-character wildcard, which is what a reader of the glob would take it for.
+        self.assertFalse(match("a/b?c", "a/b[?]c"))
+        self.assertTrue(match("a/b[x]c", "a/b[?]c"))
         self.assertFalse(match("Tests/a.py", "tests/**"))
+
+    def test_brackets_are_literal(self):
+        """SPD-086: `[` opened a character class, so a Next.js dynamic segment matched nothing and the member that owned
+        it was read-only on its own files.  Every character but `*`, `?` and `**` is literal now."""
+        spud = load_spud_module()
+        match = spud.path_matches_glob
+        glob = "admin/src/app/accounts/[email]/**"
+        for ok in ("admin/src/app/accounts/[email]/page.tsx", "admin/src/app/accounts/[email]/_components/UserTab.tsx"):
+            self.assertTrue(match(ok, glob), ok)
+        for bad in ("admin/src/app/accounts/e/page.tsx", "admin/src/app/accounts/page.tsx", "admin/src/app/accounts/[id]/page.tsx"):
+            self.assertFalse(match(bad, glob), bad)
+        self.assertTrue(match("admin/src/app/accounts/[email]/_components/UserTab.tsx", "admin/src/app/accounts/?email?/**"))  # the workaround still works
+        self.assertTrue(match("admin/src/app/accounts/[email]/_components/UserTab.tsx", "admin/src/app/accounts/**"))
+        self.assertTrue(match("app/[...slug]/page.tsx", "app/[...slug]/**"))  # a catch-all route: the dots are literal too
+        self.assertTrue(match("app/[[...slug]]/page.tsx", "app/[[...slug]]/**"))
+        self.assertFalse(match("app/x/page.tsx", "app/[...slug]/**"))
+        # Nothing is an escape any more, so the shell's own spelling of a literal bracket names a directory spelled that
+        # way -- and, unlike before SPD-086, it compiles instead of raising re.PatternError from inside the hook.
+        self.assertTrue(match("a/[[]b[]]/c", "a/[[]b[]]/c"))
+        self.assertFalse(match("a/[b]/c", "a/[[]b[]]/c"))
+        for glob in ("a/[]]/c", "a/[/c", "a/]/c", "a/[!x]/c", "a/[a-z]/c"):
+            self.assertTrue(match(glob, glob), glob)  # each names itself, and none of them raises
+            self.assertFalse(match("a/x/c", glob), glob)
+
+    def test_no_accepted_glob_is_unsatisfiable(self):
+        """SPD-086 asked whether `member new` should warn about a deliverable that can match no path.  It cannot check the
+        checkout -- a member planned to create bin/spudlib/hooks/newmod.py legitimately matches nothing that exists yet --
+        and with brackets literal there is nothing left to warn about: every glob normalize_deliverable accepts matches a
+        path, because every character is either a wildcard or a literal, and `..`, absolute paths and empty segments are
+        already refused.  The witness below is that path."""
+        spud = load_spud_module()
+        globs = ["tests/**", "bin/spud", "docs/x/*.md", "**/d.md", "a/**/b.md", "ledger/*.base", "web/app*.js",
+                 "scripts/ci-changes*", "server/supabase/functions/collab/*.ts", "**", "a/b[?]c",
+                 "admin/src/app/accounts/[email]/**", "app/[[...slug]]/page.tsx", "a/[]]/c", "notes/**"]
+        for glob in globs:
+            witness = glob.replace("**/", "w/").replace("**", "w/w").replace("*", "w").replace("?", "w")
+            self.assertTrue(spud.path_matches_glob(witness, glob), (glob, witness))
 
 
 # =============================================================================

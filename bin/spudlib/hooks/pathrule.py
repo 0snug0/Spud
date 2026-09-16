@@ -11,8 +11,20 @@ from ..state import lookup, ops
 # -- paths: the rule of Law 5 (deliverables) and Law 1 (Spud's own set) ---------------
 
 
+# SPD-086: a bracket is a literal character in a deliverable glob, never a character class.  Until this ticket `[` opened
+# a class, as a shell glob's does, so `admin/src/app/accounts/[email]/**` -- a Next.js dynamic route segment, a directory
+# genuinely named `[email]` -- compiled to a class over e, m, a, i and l and matched no real path at all: BADS-054/Snowden
+# was refused its own page.tsx in the words of its own brief.  Deliverable globs are written by Spud and by parents through
+# `member new`, never by a shell: of every member ever planned, the only globs holding a bracket are BAD-054's three, all
+# three a literal segment (one of them the `?email?` workaround this bug forced); no class is documented anywhere, and
+# SPUD_PATHS holds none.  Class support was also unsafe on the hook path, where this runs in every Write and Edit: the
+# shell's own escape `[[]email[]]` compiled to an unterminated set, so path_matches_glob raised re.PatternError instead of
+# answering.  Escaping both ways round (option 1) would have needed `normalize_bare_deliverable` to stop folding `\` into
+# `/` as well, and would still leave every parent owing a spelling nobody writes.  With brackets literal every character
+# is either a wildcard or re.escape'd, so glob_to_regex is total: no glob it accepts can fail to compile.
 def glob_to_regex(glob):
-    """Repository-relative globs: `*` and `?` stay inside a path segment, `**` crosses segments."""
+    """Repository-relative globs: `*` and `?` stay inside a path segment, `**` crosses segments, and every other
+    character -- `[` and `]` included -- is literal, so a `[segment]` directory is written plainly (SPD-086)."""
     i, n, out = 0, len(glob), []
     while i < n:
         c = glob[i]
@@ -29,17 +41,6 @@ def glob_to_regex(glob):
         elif c == "?":
             out.append("[^/]")
             i += 1
-        elif c == "[":
-            j = glob.find("]", i + 1)
-            if j == -1:
-                out.append("\\[")
-                i += 1
-            else:
-                inner = glob[i + 1 : j]
-                if inner.startswith("!"):
-                    inner = "^" + inner[1:]
-                out.append("[" + inner.replace("\\", "\\\\") + "]")
-                i = j + 1
         else:
             out.append(re.escape(c))
             i += 1
