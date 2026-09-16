@@ -73,6 +73,8 @@ The server suite passes against a stack whose `collab` flag the web dev loop has
 ## Log
 - 2026-09-16T10:05 Read brief, skills, web-local.js, migration 0015, functions.test.mjs collab section. Confirmed: only web-local.js writes private.feature_flags.default_value; no test reads it (schema.test.mjs only greps migration text). Next: worktree-init + stack state.
 - 2026-09-16T10:09 REPRODUCED. Stack up (podman, 9 containers), functions served from this worktree (pid 8424, cwd .../bad-092-stack-flag/server, /activity 405). Baseline flag=f: 118 tests, 118 pass, 0 fail. Then ran web-local.js's exact UPDATE (collab default_value=true); same run: 118 tests, 117 pass, 1 fail — functions.test.mjs:2744 'info': actual {error:'not_a_member',code:'not_a_member'} vs expected {error:'flag_off',code:'flag_off'}.
+- 2026-09-16T10:34 FIX PROVEN. Flipped collab default_value=true, then node --test test/server/functions.test.mjs (serve pid 8424, cwd .../bad-092-stack-flag/server, /activity 405): tests 118, pass 118, fail 0, skipped 0, duration 43.7s — the gate case at :2744 green. Flag read back after the run: collab|f (the suite forced it off), and 0 leaked collab rules. Next: web-local restore demo, docs, npm test.
+- 2026-09-16T10:35 RESTORE PROVEN. node scripts/web-local.js printed 'collab flag on (restored on a clean exit)'; flag read collab|t while it served on 8901. kill -INT on the parent (+ its web-server child) -> exit 130, flag read back collab|f, no stray processes, git status shows only my two edits. Next: docs in server/README.md + server/CLAUDE.md, then npm test.
 
 ## Sub-agents
 

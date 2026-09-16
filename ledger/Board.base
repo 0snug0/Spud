@@ -1,5 +1,6 @@
 formulas:
   status_rank: if(status == "active", 1, if(status == "queued", 2, if(status == "done", 3, 4)))
+  Untitled: ""
 properties:
   file.name:
     displayName: Ticket
@@ -77,6 +78,8 @@ views:
       - proposed_by
       - origin
       - created
+      - formula.Untitled
+      - tags
     sort:
       - property: priority
         direction: ASC
