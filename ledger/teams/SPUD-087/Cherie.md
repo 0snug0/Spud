@@ -50,10 +50,14 @@ Return: at most 10 lines — what you changed and where, which shape you chose a
 
 ## Log
 - 2026-09-15T22:28 Read the brief, syntax.py, git_verbs.py, globbing.GLOB_SAMPLES, analyse.py and the four named tests. git 2.54.0 (Apple Git-157) lists 174 names in --list-cmds=main. Starting the probe sweep before choosing the shape.
+- 2026-09-15T23:04 Shape (b): inverted to an allowlist. syntax.GIT_MEMBER_VERBS (64 names) is what a member may run; git_verbs.git_not_allowed refuses every other name git knows, read after git_refused (Law 7's own table, now with stage and init-db) and after git_unknown_verb, so SPD-047 keeps its alias reason and an unreadable command list keeps its own. The newly refused verbs are NOT added to GIT_WRITE_VERBS, so their SPD-049 entries stay live for Spud. Sweep evidence: git <name> -h for every name, plus git help -a's own Manipulators/Interrogators grouping; 79 of the 174 are refused by default.
 
 ## Sub-agents
 
 ## Ticket proposals
+- **A member's format-patch, bugreport and diagnose write a file into the working directory no rule sees** — suggested P2; open, with Spud.
+  Why: SPD-049 lets a member run these verbs and checks the path they name; each also has a default form that names no path at all and writes into the current directory, which neither Law 7's verb reading nor the path rule sees. SPD-087 left them allowed because their writing forms are SPD-049's and overturning that division is another ticket's call, but the gap is real: a member can drop files into a checkout outside its deliverables with no refusal. The fix is probably a third small table -- the verbs whose default writing form the line never spells -- read like GIT_VERB_FILE_POSITIONALS but with the cwd as the target.
+  Evidence: Probed on git 2.54.0 (Apple Git-157): 'git format-patch -1' writes 0001-<subject>.patch into the current directory ('git format-patch -h': [<options>] [<since> | <revision-range>], with -o/--output-directory optional); 'git bugreport' writes git-bugreport-<date>.txt and 'git diagnose' a zip into the current directory when -o is absent (both usage lines make -o optional). tests/test_hooks.py::GitFileWriteTest asserts the silence today: self.assertSilent('git format-patch -1') and 'git bugreport -o tests/out'. git archive and git mailsplit have no such form (archive writes stdout with no -o, mailsplit requires -o).
 
 ## Result
 
