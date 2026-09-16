@@ -81,7 +81,7 @@ half-up stack produces is the half-up one, not the container-runtime one.
 ## Sub-agents
 
 ## Ticket proposals
-- **server-ci.yml's skip-reason grep never matches, so the skip gate prints no reasons** — suggested P2; created as [[BAD-085]] at P3 by Spud.
+- **server-ci.yml's skip-reason grep never matches, so the skip gate prints no reasons** — suggested P2; created as [[BAD-085]] at P2 by Spud.
   Why: The Server integration guard fails the job on any skip and then prints 'Reasons:' followed by nothing. It greps 'skip: ' but node's test reporters never emit that string: the spec reporter renders a skip as '<glyph> name (0.1ms) # <reason>' and the tap reporter as 'ok 1 - name # SKIP <reason>'. The count is read correctly; only the diagnosis is silently empty. BAD-084 just made those reasons carry real information (half-up vs absent vs no-container-runtime, each naming a different repair), and the operator staring at a red CI job is exactly the reader they were written for. The step's own comment shows listing reasons was the intent: it records that grepping for ONE reason was the previous bug.
   Evidence: .github/workflows/server-ci.yml:270 runs: grep -oE "skip: .*" /tmp/server-tests.log. Observed 2026-09-16 in worktree bad-084-stack-probe: 'node --test --test-reporter=tap test/server/account.test.mjs | grep -oE "skip: .*"' prints nothing, while the same output contains 'ok 1 - a token whose seat has moved cannot delete the account # SKIP local Supabase is half-up - ...'. The default spec reporter renders the same reason after a bare '# '. A grep of '# SKIP .*' (tap) or the text after '# ' (spec) would match; the summary-count grep 'skipped [0-9]+' is unaffected and still works.
 
