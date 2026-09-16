@@ -44,10 +44,14 @@ Rules: no git commit, no branch operations, no tickets. Write only `test/server/
 
 ## Log
 - 2026-09-15T23:26 Read collab.mjs (clocks + wrapGraceOpen), collab.test.mjs (606 lines, sibling predicate tests at 138-215), push.ts callers (WRAP_GRACE_MS for upload-url, +UPLOAD_URL_TTL_MS for commit), functions.test.mjs integration pin, implementing-changes skill. Plan: two new tests after 'recording is fresh...' — wrapGraceOpen pins + widen the clock-ordering test.
+- 2026-09-15T23:34 Four tests added to test/server/collab.test.mjs (606 -> 683 lines, 47 -> 51 tests). Three for wrapGraceOpen placed after the phase-predicate table (mirroring collab.mjs, where wrapGraceOpen follows downloadablePhase); one clock-ordering test placed beside the existing three-clocks test. Chose a NEW ordering test rather than widening the existing one: collab.mjs itself splits the three session clocks from the take's round trip into two commented blocks, so two tests keep the test file's structure agreeing with the source's and keep 'the three session clocks' an honest title. All four proven red by perturbing expectations, then restored byte-exact (diff -q).
 
 ## Sub-agents
 
 ## Ticket proposals
+- **functions.test.mjs's stack probe cannot tell a half-up stack from a live one** — suggested P2; open, with Spud.
+  Why: Observed on this machine while verifying BAD-079 (a test-only change to a different file).
+  Evidence: podman ps: 9 supabase_*_bad-takes containers Up 7 hours (healthy); pgrep -fl 'supabase functions serve': no process; curl -o /dev/null -w '%{http_code}' http://127.0.0.1:54321/functions/v1/license -> 503. npm test on an otherwise-clean worktree: tests 1770, pass 1655, fail 114, skipped 1 — failure locations group as 111 in test/server/functions.test.mjs and 3 in test/server/account.test.mjs, zero elsewhere. The same tree with those two files excluded: tests 1649, pass 1648, fail 0, skipped 1 (the skip is a mobile/node_modules build test, not a pack test).
 
 ## Result
 
