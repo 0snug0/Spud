@@ -92,8 +92,19 @@ _LITERAL_EQUALS = chr(0xE020)  # a word's leading `=` that zsh's EQUALS is not t
 # right after `$name` ends the name (`$X"t"` is $X then t, which shlex joins as $Xt).  _ARRAY_VALUE opens the value ShellWalk
 # joins for `name=(a b)`: bash reads `$name` as its first element, zsh as all of them.  deglob removes all four.
 _LITERAL_DOLLAR, _QUOTED_DOLLAR, _ARRAY_VALUE, _NAME_END = chr(0xE021), chr(0xE022), chr(0xE023), chr(0xE024)
-_SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **{_LITERAL_EQUALS: "=", _LITERAL_DOLLAR: "", _QUOTED_DOLLAR: "", _ARRAY_VALUE: "",
-                                                              _NAME_END: ""})
+# SPD-088: the characters of an arithmetic command `(( ... ))` and of an arithmetic expansion `$(( ... ))`.  Both shells
+# evaluate what stands between the parentheses as arithmetic -- the `>` of `(( n > 2 ))` is a comparison and opens no file,
+# `|` is a bitwise or and not a pipeline, `;` separates a `for` header's three expressions and no commands -- so
+# mark_zsh_patterns replaces every character there that shlex or the walk would read as an operator with one of these, the
+# glob metacharacters with the quoted-glob sentinels above (`*` is multiplication, not filename generation) and a `$` with
+# _LITERAL_DOLLAR (arithmetic names no command word, so nothing the hook dispatches on can come out of it).  Unlike the zsh
+# sentinels these are inert: GLOB_RE does not read them, so a word that holds one is never expanded either.  deglob restores
+# all of them, so a refusal still names the target the line spells.
+_ARITH_CHARS = "()<>|&;\n \t"
+_ARITH_SENTINELS = {c: chr(0xE030 + i) for i, c in enumerate(_ARITH_CHARS)}
+_ARITH_UNSENTINEL = {v: k for k, v in _ARITH_SENTINELS.items()}
+_SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **_ARITH_UNSENTINEL,
+                      **{_LITERAL_EQUALS: "=", _LITERAL_DOLLAR: "", _QUOTED_DOLLAR: "", _ARRAY_VALUE: "", _NAME_END: ""})
 _LITERALIZE = str.maketrans(dict(_GLOB_SENTINELS, **_ZSH_UNSENTINEL))
 _GLOB_SENTINEL_RE = re.compile("[" + "".join(_SENTINEL_TEXT) + "]")
 GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}|[" + ZSH_OPEN + ZSH_RANGE_OPEN + "]")
