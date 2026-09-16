@@ -78,6 +78,7 @@ views:
       - P3=yellow
     columnWidths:
       note.title: 386.0078125
+    columnNames: {}
   - type: table
     name: Board
     filters:
