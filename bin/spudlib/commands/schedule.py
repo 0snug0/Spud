@@ -110,7 +110,7 @@ def schedule_plist_path():
 
 
 def schedule_plist(ctx, at):
-    """The LaunchAgent as a dict: the home's bin/spud (never a worktree's copy) run by this interpreter as
+    """The LaunchAgent as a dict: the tool's bin/spud (SPD-097) run by this interpreter as
     given, symlinks unresolved so a Homebrew upgrade keeps the path valid; SPUD_HOME set, because launchd's
     environment is minimal; at load and daily at `at` (hour, minute)."""
     if not sys.executable:
@@ -118,7 +118,7 @@ def schedule_plist(ctx, at):
     log = os.path.abspath(os.path.expanduser(SCHEDULE_LOG))
     return {
         "Label": SCHEDULE_LABEL,
-        "ProgramArguments": [sys.executable, "-I", "-S", str(ctx.home / "bin" / "spud"), "--as", "spud", "backup", "--daily"],
+        "ProgramArguments": [sys.executable, "-I", "-S", str(ctx.launcher), "--as", "spud", "backup", "--daily"],
         "EnvironmentVariables": {"SPUD_HOME": str(ctx.home)},
         "RunAtLoad": True,
         "StartCalendarInterval": {"Hour": at[0], "Minute": at[1]},

@@ -112,7 +112,7 @@ def cmd_doctor(ctx, args):
 
 def doctor_projects(ctx, problems, notes):
     """doctor's projects section (SPD-014): each active project but the home, its root a main checkout, and when it is
-    installed its local settings carrying this home's hooks, the file ignored, the user-scope agent matching the home's
+    installed its local settings carrying this home's hooks, the file ignored, the user-scope agent matching the tool's
     and the /spud skill present.  The home pointer and the superseded worktree cache are notes, never problems."""
     out = []
     con = ledgerdb.open_connection(ctx.db_path)
@@ -120,7 +120,7 @@ def doctor_projects(ctx, problems, notes):
         rows = con.execute("SELECT * FROM projects WHERE id != 1 AND archived_at IS NULL ORDER BY id").fetchall()
     finally:
         con.close()
-    home_agent = ctx.home / ".claude" / "agents" / "spudagent.md"
+    source_agent = ctx.tool / ".claude" / "agents" / "spudagent.md"  # SPD-097: the tool repository's copy is the source
     for p in rows:
         root, checks, bad = p["root_path"], [], []
         if not os.path.isdir(root):
@@ -145,10 +145,10 @@ def doctor_projects(ctx, problems, notes):
                 checks.append("ignored")
             else:
                 bad.append("%s is not ignored by git in %s" % (install.SETTINGS_LOCAL, root))
-            if files["agent"].is_file() and home_agent.is_file() and kernel.sha256_bytes(files["agent"].read_bytes()) == kernel.sha256_bytes(home_agent.read_bytes()):
+            if files["agent"].is_file() and source_agent.is_file() and kernel.sha256_bytes(files["agent"].read_bytes()) == kernel.sha256_bytes(source_agent.read_bytes()):
                 checks.append("agent")
             else:
-                bad.append("%s differs from %s; run `spud --as spud project sync --all`" % (files["agent"], home_agent))
+                bad.append("%s differs from %s; run `spud --as spud project sync --all`" % (files["agent"], source_agent))
             if files["skill"].is_file():
                 checks.append("skill")
             else:

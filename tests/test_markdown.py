@@ -1,10 +1,8 @@
 """Unit tests for the markdown-v0 parser and emitter inside bin/spud, imported
-as a module (bin/spud has no .py suffix), and for SPUD_HOME resolution."""
+as a module (bin/spud has no .py suffix)."""
 
 import os
-import tempfile
 import unittest
-from pathlib import Path
 
 from helpers import load_spud_module
 
@@ -246,23 +244,6 @@ class ReportEntriesTest(unittest.TestCase):
         text = "# 2026-09-12\n\n## 12:25 — SPD-001 created and started\n- Ticket: x\n- Next: y\n\n## 12:32 — SPD-001 done\n- Done.\n"
         entries = spud.parse_report_entries(text)
         self.assertEqual(entries, [("12:25", "SPD-001 created and started", "- Ticket: x\n- Next: y"), ("12:32", "SPD-001 done", "- Done.")])
-
-
-class HomeResolutionTest(unittest.TestCase):
-    def test_env_var_wins(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            home, how = spud.resolve_home({"SPUD_HOME": tmp}, Path(spud.__file__))
-            self.assertEqual(home, Path(tmp).resolve())
-            self.assertEqual(how, "SPUD_HOME")
-
-    def test_git_common_dir_of_the_script_is_the_fallback(self):
-        # From the main checkout the home is the repo root; from a worktree it is
-        # still the main checkout (the one with a real .git directory), never the
-        # worktree, which only has a .git file.
-        home, how = spud.resolve_home({}, Path(spud.__file__))
-        self.assertEqual(how, "git common dir")
-        self.assertTrue((home / ".git").is_dir(), home)
-        self.assertTrue((home / "spud.config.json").is_file(), home)
 
 
 class TimestampTest(unittest.TestCase):

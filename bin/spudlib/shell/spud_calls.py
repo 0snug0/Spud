@@ -83,7 +83,7 @@ def any_spud_launcher(script, cwds):
 # What the Bash hook's allow needs beyond recognizing a spud call (SPD-032).  Recognition by name stays wide, since Laws 5 and 6
 # refuse every spelling; the allow skips the harness's prompt, so it is given only to a call whose every moving part the hook
 # can vouch for, each pinned by a probe in the scratchpad (python3.14 3.14.7, framework build):
-#   the launcher: the ledger root's bin/spud by file identity, run from its own directory, since it loads spud_ledger.py beside
+#   the launcher: the running tool's bin/spud by file identity (SPD-097), run from its own directory, since it loads spud_ledger.py beside
 #     its real path (a hard link elsewhere is the same file running another program; __file__ keeps the path as given, and its
 #     realpath is the kernel's reading, symlinks before `..` included).  Not a worktree's: bin/** there is a member's deliverable.
 #   the interpreter: the file the hook itself runs on, in the same directory (a symlink elsewhere is a file anyone who can write
@@ -138,11 +138,12 @@ def interpreter_vouched(word, cwds):
     return bool(cwds) and all(same(os.path.join(c, word)) for c in cwds)
 
 
-def launcher_vouched(script, cwds, home):
-    """The script is the ledger root's own bin/spud, the same file in the same directory, from every directory the shell may be in."""
+def launcher_vouched(script, cwds, launcher):
+    """The script is the running tool's own bin/spud (SPD-097: the tool repository's, which the hook itself runs; never the
+    home's, which has none), the same file in the same directory, from every directory the shell may be in."""
     if unresolvable_word(script) or (script.startswith("~") and not script.startswith("~/")):
         return False
-    real = os.path.realpath(os.path.join(home, "bin", "spud"))
+    real = os.path.realpath(launcher)
     want = (worktrees.file_identity(real), worktrees.file_identity(os.path.dirname(real)))
     if None in want:
         return False
@@ -166,12 +167,12 @@ def spud_home_vouched(value, home):
 
 def vouched_spud_call(a, interpreter, options, script, prefixed):
     """True when the hook may allow this python spud call without the harness's prompt (SPD-032)."""
-    if prefixed or a.home is None or not python_options_vouched(options):
+    if prefixed or a.home is None or a.launcher is None or not python_options_vouched(options):
         return False
     for name, value in a.vars.items():
         if name != "SPUD_HOME" or not spud_home_vouched(value, a.home):
             return False
-    return interpreter_vouched(interpreter, a.cwds) and launcher_vouched(script, a.cwds, a.home)
+    return interpreter_vouched(interpreter, a.cwds) and launcher_vouched(script, a.cwds, a.launcher)
 
 
 QUIET_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")

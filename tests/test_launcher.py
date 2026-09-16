@@ -84,6 +84,26 @@ class LauncherTest(SpudTestCase):
             self.assertEqual((r.code, r.stderr), (0, ""), (event, r))
             self.assertEqual(r.json is not None, event == "SessionStart", (event, r))  # the board brief; Bash and Stop stay silent
 
+    def test_the_cache_dir_comes_from_the_pointer_when_spud_home_is_unset(self):
+        config = self.home.path / ".user-config"
+        config.mkdir(exist_ok=True)
+        (config / "home").write_text(str(self.home.path) + "\n", encoding="utf-8")
+        env = dict(self.home.env)
+        env.pop("SPUD_HOME")
+        proc = subprocess.run([sys.executable, "-I", "-S", str(SPUD), "board"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 0, proc)
+        self.assertTrue(cached_programs(self.home.path / ".spud" / "pycache"))
+        self.assertEqual(cached_programs(REPO / "bin"), [])
+
+    def test_no_home_at_all_means_no_cache_and_a_clear_refusal(self):
+        env = dict(self.home.env)
+        env.pop("SPUD_HOME")
+        env["SPUD_CONFIG_DIR"] = str(self.home.path / "no-such-config")
+        proc = subprocess.run([sys.executable, "-I", "-S", str(SPUD), "board"], capture_output=True, text=True, env=env)
+        self.assertEqual(proc.returncode, 1, proc)
+        self.assertIn("cannot find Spud's home", proc.stderr)
+        self.assertEqual(cached_programs(REPO / "bin"), [])
+
     def test_running_the_module_directly_refuses(self):
         proc = subprocess.run([sys.executable, "-I", "-S", str(PROGRAM), "--as", "spud", "board"], capture_output=True, text=True, env=self.home.env)
         self.assertEqual(proc.returncode, EXIT_USAGE, proc)
@@ -92,8 +112,9 @@ class LauncherTest(SpudTestCase):
 
 
 class WithoutSpudHomeTest(unittest.TestCase):
-    """SPUD_HOME unset: the cache goes under the launcher's own checkout's .spud/, and only when that directory exists.
-    A scratch copy of bin/ runs `--version`, which touches no ledger."""
+    """SPUD_HOME unset: the cache goes under the home the ~/.config/spud/home pointer names, and only when that home's
+    .spud/ exists; the checkout the launcher sits in is never the home (SPD-097: it is the tool repository, and a home is
+    a plain directory elsewhere).  A scratch copy of bin/ runs `--version`, which touches no ledger."""
 
     def setUp(self):
         self.root = Path(tempfile.mkdtemp(prefix="spud-launcher-")).resolve()
@@ -102,23 +123,36 @@ class WithoutSpudHomeTest(unittest.TestCase):
         for name in ("spud", "spud_ledger.py"):
             shutil.copy(REPO / "bin" / name, self.root / "bin" / name)
         shutil.copytree(REPO / "bin" / "spudlib", self.root / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
+        self.config = self.root / "config"
+        self.config.mkdir()
+        self.pointed = self.root / "the-home"
         self.env = {k: v for k, v in os.environ.items() if k != "SPUD_HOME"}
+        self.env["SPUD_CONFIG_DIR"] = str(self.config)
+
+    def point_at(self, home):
+        (self.config / "home").write_text(str(home) + "\n", encoding="utf-8")
 
     def version(self):
         proc = subprocess.run([sys.executable, "-I", "-S", str(self.root / "bin" / "spud"), "--version"], capture_output=True, text=True, env=self.env)
         self.assertEqual(proc.returncode, 0, proc)
         self.assertTrue(proc.stdout.startswith("spud "), proc)
 
-    def test_no_spud_directory_means_no_bytecode_anywhere(self):
+    def test_no_pointer_means_no_bytecode_anywhere(self):
         self.version()
         self.assertEqual(cached_programs(self.root), [])
         self.assertFalse((self.root / ".spud").exists())
 
-    def test_the_checkouts_spud_directory_holds_the_cache(self):
+    def test_the_checkouts_own_spud_directory_is_never_the_cache(self):
         (self.root / ".spud").mkdir()
         self.version()
-        self.assertIn("spud_ledger.cpython-%d%d.pyc" % sys.version_info[:2], [p.name for p in cached_programs(self.root)])
-        self.assertTrue(all(p.is_relative_to(self.root / ".spud") for p in cached_programs(self.root)))
+        self.assertEqual(cached_programs(self.root), [])
+
+    def test_the_pointed_homes_spud_directory_holds_the_cache(self):
+        (self.pointed / ".spud").mkdir(parents=True)
+        self.point_at(self.pointed)
+        self.version()
+        self.assertIn("spud_ledger.cpython-%d%d.pyc" % sys.version_info[:2], [p.name for p in cached_programs(self.pointed)])
+        self.assertTrue(all(p.is_relative_to(self.pointed / ".spud") for p in cached_programs(self.pointed)))
         self.assertEqual(cached_programs(self.root / "bin"), [])
 
 

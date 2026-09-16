@@ -16,18 +16,16 @@ import json
 import os
 import plistlib
 import re
-import shlex
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE, REPO, SPUD, Home, SpudTestCase, load_spud_module
+from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE, REPO, SPUD, Home, LaunchdMixin, SpudTestCase, load_spud_module
 
 DAILY_NAME = re.compile(r"ledger-[0-9]{8}T[0-9]{6}-daily\.db")
 LABEL = "local.spud.backup"
@@ -371,60 +369,10 @@ class DoctorBackupsTest(BackupCase):
 # schedule: the LaunchAgent, against a scratch directory and a fake launchctl
 # =============================================================================
 
-FAKE_LAUNCHCTL = r'''"""A stand-in for launchctl: records each call's arguments and keeps the job's loaded state in a file."""
-import json
-import os
-import sys
-
-state = os.environ["FAKE_LAUNCHCTL_STATE"]
-calls_path = os.path.join(state, "calls.jsonl")
-loaded = os.path.join(state, "loaded")
-args = sys.argv[1:]
-with open(calls_path, "a", encoding="utf-8") as f:
-    f.write(json.dumps(args) + "\n")
-verb = args[0] if args else ""
-if verb == "bootout":
-    if os.path.exists(loaded):
-        os.remove(loaded)
-        sys.exit(0)
-    sys.stderr.write("Boot-out failed: 3: No such process\n")
-    sys.exit(3)
-if verb == "bootstrap":
-    with open(calls_path, encoding="utf-8") as f:
-        attempt = sum(1 for line in f if json.loads(line)[:1] == ["bootstrap"])
-    failures = os.environ.get("FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES", "0")
-    if failures == "all" or attempt <= int(failures) or os.path.exists(loaded):
-        sys.stderr.write("Bootstrap failed: 5: Input/output error\n")
-        sys.exit(5)
-    open(loaded, "w").close()
-    sys.exit(0)
-if verb == "print":
-    if os.path.exists(loaded):
-        sys.stdout.write("gui/501/local.spud.backup = {\n}\n")
-        sys.exit(0)
-    sys.stderr.write('Could not find service "local.spud.backup" in domain for user gui: 501\n')
-    sys.exit(113)
-sys.stderr.write("fake launchctl: unexpected arguments %r\n" % (args,))
-sys.exit(64)
-'''
-
-
-class ScheduleTest(SpudTestCase):
+class ScheduleTest(LaunchdMixin, SpudTestCase):
     def setUp(self):
         super().setUp()
-        scratch = tempfile.TemporaryDirectory(prefix="spud-schedule-")
-        self.addCleanup(scratch.cleanup)
-        self.scratch = Path(scratch.name).resolve()
-        self.agents = self.scratch / "LaunchAgents"
-        self.state = self.scratch / "launchctl-state"
-        self.state.mkdir()
-        fake = self.scratch / "fake_launchctl.py"
-        fake.write_text(FAKE_LAUNCHCTL, encoding="utf-8")
-        self.launchctl = self.scratch / "launchctl"
-        self.launchctl.write_text('#!/bin/sh\nexec %s -I -S %s "$@"\n' % (shlex.quote(sys.executable), shlex.quote(str(fake))), encoding="utf-8")
-        self.launchctl.chmod(0o755)
-        self.home.env.update({"SPUD_LAUNCH_AGENTS_DIR": str(self.agents), "SPUD_LAUNCHCTL": str(self.launchctl), "FAKE_LAUNCHCTL_STATE": str(self.state)})
-        self.home.env.pop("FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES", None)
+        self.setup_launchd()
         self.plist_path = self.agents / (LABEL + ".plist")
         self.uid = os.getuid()
         self.service = "gui/%d/%s" % (self.uid, LABEL)

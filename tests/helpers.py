@@ -10,6 +10,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -24,6 +25,16 @@ from pathlib import Path
 # first test module unittest imports is compiled before this line runs, so the
 # cache directories are also removed when the interpreter exits.
 sys.dont_write_bytecode = True
+
+# SPD-097: the real home is off limits.  The test process's own environment names a home that does not exist, so a CLI run
+# that inherits os.environ without a Home's env fails on "no ledger at" or "no spud.config.json in" the guard path instead
+# of opening the real ledger: the cause SPD-092 could not name was a run with no SPUD_HOME, which resolved the real home
+# (through git before SPD-097, through the ~/.config/spud/home pointer since).  Every Home derives its env from os.environ
+# and sets its own SPUD_HOME, SPUD_CONFIG_DIR and SPUD_TOOL_DIR.
+GUARD_HOME = os.path.join(tempfile.gettempdir(), "spud-test-guard-%d-does-not-exist" % os.getpid())
+os.environ["SPUD_HOME"] = GUARD_HOME
+os.environ["SPUD_CONFIG_DIR"] = os.path.join(GUARD_HOME, "config")
+os.environ["SPUD_TOOL_DIR"] = GUARD_HOME
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -87,6 +98,11 @@ class Home:
         self.env.pop("CLAUDE_PROJECT_DIR", None)
         self.env["SPUD_USER_CLAUDE_DIR"] = str(self.path / ".user-claude")
         self.env["SPUD_CONFIG_DIR"] = str(self.path / ".user-config")
+        # SPD-097: the tool, the checkout whose bin/spud the hook lines, allow rules, LaunchAgents and the /spud skill name
+        # and where the spudagent source is read, is this scratch home unless a test names another.  So the assertions the
+        # suite made before the split keep their `<home>/bin/spud` shape; a test of the split builds a separate tool with
+        # RepoMixin.make_tool() and sets SPUD_TOOL_DIR before `spud init` (init records the tool as project spud's root).
+        self.env["SPUD_TOOL_DIR"] = str(self.path)
         self.db = self.path / ".spud" / "ledger.db"
 
     def cleanup(self):
@@ -206,6 +222,18 @@ class RepoMixin:
         self.addCleanup(shutil.rmtree, path, True)
         git(repo, "worktree", "add", "-q", "-b", ("worktree-" + name) if inside else name, path)
         return path
+
+    def make_tool(self):
+        """A scratch main checkout playing the tool repository (SPD-097): this checkout's bin/ and its spudagent source,
+        committed on main, with .claude/settings.local.json ignored as the real repository ignores it."""
+        tool = self.make_repo("tool-")
+        shutil.copytree(REPO / "bin", tool / "bin", ignore=shutil.ignore_patterns("__pycache__"))
+        (tool / ".claude" / "agents").mkdir(parents=True)
+        shutil.copyfile(REPO / ".claude" / "agents" / "spudagent.md", tool / ".claude" / "agents" / "spudagent.md")
+        (tool / ".gitignore").write_text(".claude/settings.local.json\n", encoding="utf-8")
+        git(tool, "add", "-A")
+        git(tool, "commit", "-q", "-m", "tool")
+        return tool
 
     def cli(self, *args, actor=None, cwd=None, session=None, check=True, stdin=None, env=None):
         """bin/spud against the scratch home from `cwd` (default the home), in `session` (None: outside every session), with
@@ -374,3 +402,74 @@ def team_section_problems(source, rendered):
     elif lines:
         problems.append("a ticket without members renders an empty section, not %r" % rendered)
     return problems
+
+
+# A stand-in for launchctl (SPD-012, per label since SPD-097): records each call's arguments and keeps each job's loaded
+# state in a file named after its label, so `schedule install` can bootstrap local.spud.backup and local.spud.render in turn.
+FAKE_LAUNCHCTL = r'''"""A stand-in for launchctl: records each call's arguments and keeps each job's loaded state in a file."""
+import json
+import os
+import sys
+
+state = os.environ["FAKE_LAUNCHCTL_STATE"]
+calls_path = os.path.join(state, "calls.jsonl")
+args = sys.argv[1:]
+with open(calls_path, "a", encoding="utf-8") as f:
+    f.write(json.dumps(args) + "\n")
+verb = args[0] if args else ""
+
+
+def loaded_file(label):
+    return os.path.join(state, "loaded-" + label)
+
+
+if verb == "bootout":
+    label = args[1].rsplit("/", 1)[-1]
+    if os.path.exists(loaded_file(label)):
+        os.remove(loaded_file(label))
+        sys.exit(0)
+    sys.stderr.write("Boot-out failed: 3: No such process\n")
+    sys.exit(3)
+if verb == "bootstrap":
+    label = os.path.basename(args[2])[:-len(".plist")]
+    with open(calls_path, encoding="utf-8") as f:
+        attempt = sum(1 for line in f if json.loads(line)[:1] == ["bootstrap"] and os.path.basename(json.loads(line)[2]) == os.path.basename(args[2]))
+    failures = os.environ.get("FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES", "0")
+    if failures == "all" or attempt <= int(failures) or os.path.exists(loaded_file(label)):
+        sys.stderr.write("Bootstrap failed: 5: Input/output error\n")
+        sys.exit(5)
+    open(loaded_file(label), "w").close()
+    sys.exit(0)
+if verb == "print":
+    label = args[1].rsplit("/", 1)[-1]
+    if os.path.exists(loaded_file(label)):
+        sys.stdout.write("%s = {\n}\n" % args[1])
+        sys.exit(0)
+    sys.stderr.write('Could not find service "%s" in domain for user gui: %d\n' % (label, os.getuid()))
+    sys.exit(113)
+sys.stderr.write("fake launchctl: unexpected arguments %r\n" % (args,))
+sys.exit(64)
+'''
+
+
+class LaunchdMixin:
+    """A scratch LaunchAgents directory and the fake launchctl, wired into self.home.env (SPD-012, shared since SPD-097)."""
+
+    def setup_launchd(self):
+        scratch = tempfile.TemporaryDirectory(prefix="spud-schedule-")
+        self.addCleanup(scratch.cleanup)
+        self.scratch = Path(scratch.name).resolve()
+        self.agents = self.scratch / "LaunchAgents"
+        self.state = self.scratch / "launchctl-state"
+        self.state.mkdir()
+        fake = self.scratch / "fake_launchctl.py"
+        fake.write_text(FAKE_LAUNCHCTL, encoding="utf-8")
+        self.launchctl = self.scratch / "launchctl"
+        self.launchctl.write_text("#!/bin/sh\nexec %s -I -S %s \"$@\"\n" % (shlex.quote(sys.executable), shlex.quote(str(fake))), encoding="utf-8")
+        self.launchctl.chmod(0o755)
+        self.home.env.update({"SPUD_LAUNCH_AGENTS_DIR": str(self.agents), "SPUD_LAUNCHCTL": str(self.launchctl), "FAKE_LAUNCHCTL_STATE": str(self.state)})
+        self.home.env.pop("FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES", None)
+
+    def launchctl_calls(self):
+        path = self.state / "calls.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.is_file() else []

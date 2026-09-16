@@ -7,9 +7,10 @@ The program is spud_ledger.py beside this file's real path, never found through 
 the package spudlib beside it, which spud_ledger.py imports by the class of the loader that loaded it (SPD-065).
 Python compiles a script on every run but caches a module's bytecode, so this launcher loads the program as a module.
 Its bytecode goes under <home>/.spud/pycache/, in a tree mirroring each file's own path, so a worktree's program and
-the main checkout's never share a file.  <home> is SPUD_HOME, else the checkout this launcher sits in, and nothing is
-cached unless <home>/.spud/ already exists: gitignored, and refused to edits and to shell commands like the database
-beside it.  Only the program's bytecode goes there; the standard-library modules it imports keep Python's defaults.
+the main checkout's never share a file.  <home> is SPUD_HOME, else what ~/.config/spud/home names (SPD-097: the home
+is a plain directory, never the checkout this launcher sits in), and nothing is cached unless <home>/.spud/ already
+exists: refused to edits and to shell commands like the database beside it.  Only the program's bytecode goes there;
+the standard-library modules it imports keep Python's defaults.
 """
 
 import os
@@ -36,12 +37,26 @@ class CachedLoader(SourceFileLoader):
             sys.pycache_prefix, sys.dont_write_bytecode = prefix, quiet
 
 
+def home_dir():
+    """SPUD_HOME, else the ~/.config/spud/home pointer (SPD-097): the home whose state directory holds the bytecode cache;
+    None when neither names one, and then nothing is cached."""
+    home = os.environ.get("SPUD_HOME")
+    if not home:
+        pointer = os.path.join(os.path.expanduser(os.environ.get("SPUD_CONFIG_DIR") or "~/.config/spud"), "home")
+        try:
+            with open(pointer, encoding="utf-8") as f:
+                home = f.read().strip()
+        except OSError:
+            return None
+    return os.path.abspath(os.path.expanduser(home)) if home else None
+
+
 def load():
     here = os.path.dirname(os.path.realpath(__file__))
     path = os.path.join(here, NAME + ".py")
-    home = os.path.abspath(os.path.expanduser(os.environ.get("SPUD_HOME") or os.path.dirname(here)))
-    state = os.path.join(home, ".spud")
-    if os.path.isdir(state):
+    home = home_dir()
+    state = os.path.join(home, ".spud") if home else None
+    if state and os.path.isdir(state):
         CachedLoader.pycache = os.path.join(state, "pycache")
     loader = CachedLoader(NAME, path)
     code = loader.get_code(NAME)

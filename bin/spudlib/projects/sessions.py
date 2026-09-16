@@ -80,9 +80,9 @@ SKILL_STEPS = (
     "The claim names the project. This repository's own CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed. Spud's laws govern delegation, the ledger, and who writes what. In a conflict about the first, the project wins; about the second, Spud's laws win.",
     "Run the session ritual of CLAUDE.md from step 2, including its step 4: set the session title to `{title}`.",
 )
-SKILL_CLAIM = "Run `python3.14 -I -S {home}/bin/spud --as spud session claim`. If it refuses, quote the refusal, say this session is not Spud, and stop following these steps."
+SKILL_CLAIM = "Run `python3.14 -I -S {launcher} --as spud session claim`. If it refuses, quote the refusal, say this session is not Spud, and stop following these steps."
 HOOK_CLAIM = ("The ledger's hook has made the claim (the card below); do not run `session claim`. If Eric says this session is not to be Spud,"
-              " run `python3.14 -I -S {home}/bin/spud --as spud session release`.")
+              " run `python3.14 -I -S {launcher} --as spud session release`.")
 SKILL_TITLE = "<KEY> - <what this session does>"
 
 
@@ -91,9 +91,9 @@ def skill_steps(home, claim, title):
     return "".join("%d. %s\n" % (n, step.format(home=home, claim=claim, title=title)) for n, step in enumerate(SKILL_STEPS, start=1))
 
 
-def skill_markdown(home):
-    """What project install writes to ~/.claude/skills/spud/SKILL.md."""
-    return SKILL_HEAD + "\n" + skill_steps(home, SKILL_CLAIM.format(home=home), SKILL_TITLE)
+def skill_markdown(ctx):
+    """What project install writes to ~/.claude/skills/spud/SKILL.md: the home's CLAUDE.md and config, the tool's launcher (SPD-097)."""
+    return SKILL_HEAD + "\n" + skill_steps(ctx.home, SKILL_CLAIM.format(launcher=ctx.launcher), SKILL_TITLE)
 
 
 def spudagent_shaped(tool_input):

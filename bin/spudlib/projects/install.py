@@ -24,7 +24,7 @@ def install_files(ctx, p):
         "agent": user / "agents" / "spudagent.md",
         "skill": user / "skills" / "spud" / "SKILL.md",
         "pointer": homeconf.spud_config_dir() / "home",
-        "source_agent": ctx.home / ".claude" / "agents" / "spudagent.md",
+        "source_agent": ctx.tool / ".claude" / "agents" / "spudagent.md",  # SPD-097: the source lives in the tool repository
     }
 
 
@@ -94,7 +94,7 @@ def install_project(ctx, con, p):
         raise kernel.SpudError(kernel.EXIT_ERROR, "project %s's root %s is not a directory; `spud --as spud project edit %s --root <path>`" % (p["key"], root, p["key"]))
     files = install_files(ctx, p)
     if not files["source_agent"].is_file():
-        raise kernel.SpudError(kernel.EXIT_ERROR, "no %s to install at user scope: the home's spudagent definition is the source" % files["source_agent"])
+        raise kernel.SpudError(kernel.EXIT_ERROR, "no %s to install at user scope: the tool repository's spudagent definition is the source" % files["source_agent"])
     if homeconf.run_git(root, "ls-files", "--error-unmatch", "--", SETTINGS_LOCAL, timeout=30).returncode == 0:
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is tracked in %s's git; install writes nothing in the tracked tree" % (SETTINGS_LOCAL, p["key"]))
     previous = json.loads(p["installed"]) if p["installed"] else {}
@@ -113,7 +113,7 @@ def install_project(ctx, con, p):
     agents = files["agent"].parent
     first_agent = not (agents.is_dir() and any(agents.glob("*.md")))
     agent_text = files["source_agent"].read_text(encoding="utf-8")
-    skill_text = sessions.skill_markdown(ctx.home)
+    skill_text = sessions.skill_markdown(ctx)
     for path, text in ((files["agent"], agent_text), (files["skill"], skill_text)):
         if not path.is_file() or path.read_text(encoding="utf-8") != text:
             kernel.write_whole(path, text)

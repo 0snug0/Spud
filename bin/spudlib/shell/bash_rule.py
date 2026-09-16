@@ -97,7 +97,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
     db_reason = hookio.DB_REASON
     if hookio.DB_PATH_RE.search(command):
         return db_reason % "the command names ledger.db or .spud/", None
-    analysis = analyse.analyse_command(command, syntax.ShellAnalysis(cwd=cwd, home=str(ctx.home)))
+    analysis = analyse.analyse_command(command, syntax.ShellAnalysis(cwd=cwd, home=str(ctx.home), launcher=str(ctx.launcher)))
     if analysis.unparseable:
         return None, analysis
     plain = mode == "plain"
