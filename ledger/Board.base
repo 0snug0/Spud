@@ -87,7 +87,7 @@ views:
       - property: formula.status_rank
         direction: ASC
     columnSize:
-      note.project: 24
+      note.project: 103
       note.status: 76
       note.priority: 66
       note.title: 493
