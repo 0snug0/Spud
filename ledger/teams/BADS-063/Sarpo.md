@@ -6,8 +6,8 @@ model: fable
 parent: "[[Spud]]"
 ticket: "[[BAD-063]]"
 project: badtakes
-status: planned
-spawned: ""
+status: active
+spawned: 2026-09-15T22:15
 finished: ""
 tags: [spudagent]
 ---
