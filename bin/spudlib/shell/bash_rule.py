@@ -111,6 +111,19 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                     " allows. A member may set only inert `-c`/`--config-env` keys (color.*, advice.*, i18n.*, core.quotepath, log.date,"
                     " safe.directory, and core.pager/pager.<cmd>=cat), no program-naming environment variable, and no such option; Spud"
                     " commits, after the outcome is recorded" % detail), analysis
+        elif kind == "path":
+            var, name = detail
+            return ("Law 7: this line assigns %s and then runs `%s` by name, so the shell looks for it in a directory the"
+                    " line chose and the program the hook checked is not the one that would run: a `%s` of the member's own"
+                    " can do everything the name it borrows is allowed to do (zsh's `path` array is PATH under another"
+                    " name). Leave PATH as the session has it, or spell the program's path out (/usr/bin/git, bin/spud),"
+                    " which the shell does not search PATH for; Spud commits, after the outcome is recorded" % (var, name, name)), analysis
+        elif kind == "hashed":
+            return ("Law 7: this line hashes `%s` into the shell's own command table (`hash -p <path> <name>` in bash,"
+                    " `hash <name>=<path>` in zsh), so a later bare `%s` runs that file whatever PATH holds and the program"
+                    " the hook checked is not the one that would run. Hash none of the names the hook reads (git, spud,"
+                    " python3.14, sqlite3, tee, a shell, a wrapper), or spell the program's path out; Spud commits, after"
+                    " the outcome is recorded" % (detail, detail)), analysis
         elif kind == "var":
             return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
         elif kind == "var-word":
@@ -122,6 +135,12 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                     " condition, a compound command, a loop or function body, a pipeline, a background job, a subshell or substitution,"
                     " a command's prefix, or a builtin that assigns it), so the hook cannot resolve the words it becomes; spell them out"
                     % detail), analysis
+        elif kind == "alias":
+            return ("`eval` runs the command word %s, which this line defines as an alias the hook cannot resolve: its body holds"
+                    " an expansion or a substitution, or the definition or an `unalias` may not have run (a branch, a subshell, a"
+                    " pipeline, a background list, a loop or function body, a reading only one shell makes). A shell expands an"
+                    " alias when it parses the text, so the command that runs is not the one written; spell the command out, or"
+                    " define no alias on the line" % detail), analysis
         elif kind == "glob":
             return ("the word %s is a glob the shell expands before it runs the command, and it can become more than one command,"
                     " option or verb the hook checks at once, or more than the hook reads; spell the words out" % detail), analysis

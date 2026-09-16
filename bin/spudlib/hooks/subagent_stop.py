@@ -3,7 +3,7 @@
 import os
 from pathlib import Path
 
-from . import hookio, pretool, stophook
+from . import hookio, pretool, recording, stophook
 from ..core import kernel
 from ..projects import sessions
 from ..state import ledgerdb, lookup, transcripts
@@ -11,6 +11,28 @@ from ..state import ledgerdb, lookup, transcripts
 
 RESULT_HOLD = ("record your Result with `spud --as %s member result '<what you produced, where, what you verified, what is left>'`"
                " (or Blocked with `spud --as %s member block '<the question and the options>'`) before returning; then return your summary")
+
+
+def last_resume(con, member):
+    """The event id of the member's last resume (SPD-050), None when it was never resumed: the start that
+    superseded a return, which hook_subagent_start marks."""
+    row = con.execute("SELECT MAX(id) AS id FROM events WHERE member_id = ? AND kind = ?"
+                      " AND json_extract(data, '$.resumed') = 1", (member["id"], recording.RESUME_KIND)).fetchone()
+    return None if row is None else row["id"]
+
+
+def recorded_since(con, member, resumed):
+    """Whether the Result or Blocked the member holds answers for the round that is ending (SPD-050).  With no
+    resume this is the column check the Result hold has made since SPD-015.  After one it is not enough: what the
+    member recorded before it was resumed was the verdict of the round before, and letting it stand would send a
+    second round of work back with a first round's Result.  So the hold asks for a `member result` or `member
+    block` recorded since the resume, and the events are the memory of when that was."""
+    if not ((member["result"] or "").strip() or (member["blocked"] or "").strip()):
+        return False
+    if resumed is None:
+        return True
+    return con.execute("SELECT 1 FROM events WHERE member_id = ? AND kind IN ('member.result','member.blocked') AND id > ? LIMIT 1",
+                       (member["id"], resumed)).fetchone() is not None
 
 
 def unrecorded_children(con, member):
@@ -171,7 +193,8 @@ def hook_subagent_stop(ctx, payload):
                 ledgerdb.write_event(con, at, "hook:SubagentStop", "member.stopped", "subagent %s stopped unbound (%s)" % (agent_id, agent_type), agent_id=agent_id, data=base)
                 return hookio.SILENT
             ref = lookup.member_ref(con, member["id"])
-            recorded = bool((member["result"] or "").strip() or (member["blocked"] or "").strip())
+            resumed = last_resume(con, member)
+            recorded = recorded_since(con, member, resumed)
             live = member["status"] in kernel.ALIVE
             returned = unrecorded_children(con, member) if live else []
             still_alive = alive_children(con, member) if live else []
@@ -202,9 +225,14 @@ def hook_subagent_stop(ctx, payload):
             if transcript:
                 updates["transcript_path"] = transcript
             summed = None
-            if transcripts.usage_parts(member["usage_json"])[0] is None and transcript and os.path.isfile(transcript):
+            if (transcripts.usage_parts(member["usage_json"])[0] is None or resumed is not None) and transcript and os.path.isfile(transcript):
                 # a stored transcript sum stays, however it was counted (`member resum` re-sums one that added every
-                # entry, SPD-023); a completion recorded before this stop stays beside the new sum (SPD-021)
+                # entry, SPD-023); a completion recorded before this stop stays beside the new sum (SPD-021).
+                # A resumed member is the exception (SPD-050): its stored sum covers the round before, while the
+                # transcript has gone on growing through the round now ending, so the run figures are counted again
+                # from the whole file -- which is what a sum always is, so counting twice changes nothing else.
+                # Live proof of the gap: the probe of 2026-09-15 stopped a second time with `transcript_usage: false`
+                # and kept 60,994 tokens over a run the harness billed at 64,357.
                 summed = transcripts.transcript_usage(transcript)
                 if summed:
                     updates.update(transcripts.run_totals(member, summed=summed))

@@ -102,6 +102,34 @@ def hook_post_tool_use(ctx, payload):
     return hookio.SILENT
 
 
+# A resume (SPD-050).  Eric resumes a spudagent that has already returned by sending it a message, and the harness
+# gives the hooks one signal for it and only one: SubagentStart fires again for the same agent_id.  Probed live on
+# 2026-09-15 with the scout SPUD-050/Sarpo (agent_id aca970f6a277bd623): events 3685 (started), 3688 (stopped), then
+# SendMessage, then 3689, a second member.started carrying the same three fields, agent_type, session_id and cwd, and
+# nothing else; no PreToolUse or PostToolUse names SendMessage.  So the resume is read from the row, not the payload.
+# Before this the return stood through the whole second round: Spud's Stop held with Law 9 and named a member that was
+# running again, the board read `returned HH:MM, unrecorded`, and the first round's Result answered for the second
+# return's hold.  The resume rides on the member.started event rather than a kind of its own: events.kind is a CHECK
+# list, so a `member.resumed` kind is a migration, a user_version bump and a line in core/kernel.py's EVENT_KINDS (for
+# the `--kind` choices), none of which this ticket's member owns; RESUME_KIND is the one place that would change.
+RESUME_KIND = "member.started"
+
+
+def resume_member(con, member):
+    """A bound member whose SubagentStart fired again: (the row, the stop the start supersedes or None, whether the
+    return was cleared).  A return still open -- active, no outcome -- is cleared, so the member counts as live again
+    everywhere stopped_at is read: stop_owed's returned list, the board's returned label, a parent's unrecorded
+    children, and the run, which now ends at the second stop.  A member its parent has already recorded (done,
+    blocked, failed) keeps every stamp; only the event says it ran again."""
+    if member is None or not member["stopped_at"]:
+        return member, None, False
+    was_stopped = member["stopped_at"]
+    if member["status"] != "active" or (member["outcome"] or "").strip():
+        return member, was_stopped, False
+    con.execute("UPDATE members SET stopped_at = NULL WHERE id = ?", (member["id"],))
+    return lookup.get_member_by_id(con, member["id"]), was_stopped, True
+
+
 def hook_subagent_start(ctx, payload):
     if not ctx.db_path.is_file():
         return hookio.SILENT
@@ -115,9 +143,15 @@ def hook_subagent_start(ctx, payload):
             member = con.execute("SELECT * FROM members WHERE agent_id = ?", (agent_id,)).fetchone()
             if member is None and not sessions.pending_spawn(con, payload.get("session_id")) and sessions.session_mode(ctx, con, payload)[0] == "plain":
                 return hookio.SILENT  # Eric's own subagent in a session that is not Spud (SPD-014)
-            ledgerdb.write_event(con, at, "hook:SubagentStart", "member.started", "subagent %s started (%s)" % (agent_id, payload.get("agent_type")),
+            member, was_stopped, cleared = resume_member(con, member)
+            body = "subagent %s started (%s)" % (agent_id, payload.get("agent_type"))
+            data = {"agent_type": payload.get("agent_type"), "session_id": payload.get("session_id"), "cwd": payload.get("cwd")}
+            if was_stopped:
+                body = "subagent %s resumed (%s) after returning at %s" % (agent_id, payload.get("agent_type"), was_stopped)
+                data.update(resumed=True, was_stopped_at=was_stopped, cleared=cleared)
+            ledgerdb.write_event(con, at, "hook:SubagentStart", RESUME_KIND if was_stopped else "member.started", body,
                         ticket_id=member["ticket_id"] if member else None, member_id=member["id"] if member else None, agent_id=agent_id,
-                        data={"agent_type": payload.get("agent_type"), "session_id": payload.get("session_id"), "cwd": payload.get("cwd")})
+                        data=data)
             context = "Ledger: your agent_id is `%s`; every `spud` command you run takes `--as %s`." % (agent_id, agent_id)
             named = member
             if named is None:

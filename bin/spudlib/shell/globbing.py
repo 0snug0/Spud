@@ -11,7 +11,8 @@ from ..hooks import hookio
 # A word the dispatch reads by name that the shell expands first (SPD-041) is read as each of these it can match: the names a
 # command word dispatches on, and every option, verb and argument the dispatch compares a later word with.
 GLOB_COMMAND_SAMPLES = frozenset(syntax.WRAPPERS | syntax.SHELLS | syntax.DIRECTORY_COMMANDS | syntax.SHELL_DECLARATIONS | syntax.JS_RUNTIMES
-                                 | {"git", "spud", "eval", "source", ".", "trap", "sqlite3", "sqlite", "tee", "python", "python3", "python3.14"})
+                                 | {"git", "spud", "eval", "source", ".", "trap", "sqlite3", "sqlite", "tee", "python", "python3", "python3.14",
+                                    "hash"})  # `hash` shadows a name the hook reads (SPD-062)
 GLOB_SAMPLES = frozenset(
     GLOB_COMMAND_SAMPLES | syntax.GIT_WRITE_VERBS | syntax.GIT_GLOBAL_VALUE_FLAGS | syntax.BRANCH_READ_FLAGS | syntax.BRANCH_READ_VALUE_FLAGS | syntax.TAG_READ_FLAGS
     # CONFIG_READ_SUBCOMMANDS are left out: a glob read as `get` or `list` refuses nothing, so sampling them would only
@@ -20,6 +21,11 @@ GLOB_SAMPLES = frozenset(
     | {"stash", "worktree", "remote", "reflog", "branch", "tag", "config", "list", "show", "add", "remove", "rm", "rename", "set-url",
        "set-head", "set-branches", "prune", "update", "expire", "delete"}
     | {o for options in syntax.WRAPPER_VALUE_OPTIONS.values() for o in options}
+    # SPD-051: the verbs that carry a program-naming option and the options themselves, so a glob that can expand to one is
+    # read as it (`git ls-remote --upload-pac? cmd .` was read only as spelled, and the prefix check never saw --upload-pack).
+    | set(syntax.GIT_VERB_PROGRAM_OPTIONS)
+    | {o for longs, _ in syntax.GIT_VERB_PROGRAM_OPTIONS.values() for o in longs}
+    | {"-" + c for _, shorts in syntax.GIT_VERB_PROGRAM_OPTIONS.values() for c in shorts}
     | {"-c", "-lc", "-ic", "-m", "-", "-X", "-W", "-Q", "-I", "-S", "--as", "--as=spud", "--json", "--help", "-h", "--version"}
     | set(hookio.SPUD_COMMANDS) | {w for pair in hookio.SPUD_ONLY_SUBCOMMANDS + hookio.MEMBER_OWN_COMMANDS for w in pair})
 GLOB_OPTION = "-%"  # a glob that may start with `-` read as an option that takes no value (SPD-041)
