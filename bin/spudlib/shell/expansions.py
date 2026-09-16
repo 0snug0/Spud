@@ -51,6 +51,85 @@ def assign_variable(a, name, value, append=False):
         a.doubt.discard(name)
 
 
+# `alias NAME=body` stores shell text the shell runs wherever it next reads NAME in command position (SPD-059, Burbank's
+# SPD-054 proposal).  A shell expands an alias when it parses the text, before the line runs, so an alias defined on the line
+# reaches only code the line parses again: `eval`'s words, and a substitution inside them.  Probed in bash 3.2, zsh 5.9 -f,
+# zsh -f -o nobareglobqual and sh with a fake git first on a scratch PATH: `alias gp='git push'; eval gp` pushed in zsh,
+# zsh-nbgq and sh (bash expands no alias non-interactively without `shopt -s expand_aliases`, so it pushed nothing -- noted,
+# never relied on), and so did `alias -g GP=...; eval GP`, two definitions on one `alias` line, `eval 'gp; gp'`, `eval 'X=1
+# gp'`, `eval '{ gp; }'`, `eval 'if true; then gp; fi'`, `eval 'coproc gp'`, `eval 'time gp'`, `eval '! gp'`, `eval 'eval
+# gp'`, `eval 'echo $(gp)'`, an alias reached from another alias, and one that shadows a function of the same name.  `alias
+# g=git; g push` ran nothing anywhere (the alias does not exist when the line is parsed), nor did `eval 'command gp'`, `eval
+# 'env gp'` or `eval 'sh -c gp'`, and `unalias` cleared.
+def record_alias(a, name, body, doubtful=False):
+    """Record `alias NAME=body`, or an `unalias` (whose body is None), where the shell reads it (SPD-059).  The name goes into
+    `assigned` under a key no variable can have, so every rule that doubts a variable the line assigned -- a branch that may
+    not run, a subshell, a pipeline element, a background list, a loop or function body, a reading only one shell makes --
+    doubts the alias too, and a certain definition settles an earlier doubt as an assignment does.  The body itself stays out
+    of `vars`, which holds the shell's variables alone (vouched_spud_call reads every name there)."""
+    key = syntax.ALIAS_KEY + name
+    a.aliases[name] = body
+    a.assigned.append(key)
+    if doubtful or a.unsure or a.loop_depth:
+        a.doubt.add(key)
+        if a.loop_depth:
+            a.sticky.add(key)
+    elif key not in a.sticky:
+        a.doubt.discard(key)
+
+
+def alias_arguments(words):
+    """An `alias` or `unalias` line's words past its options (`alias -g X=y`, `alias -- a=b c=d`, `unalias -a`)."""
+    i = 1
+    while i < len(words) and words[i].startswith("-") and len(words[i]) > 1:
+        i += 1
+        if words[i - 1] == "--":
+            break
+    return words[i:]
+
+
+def record_alias_line(words, a):
+    """Read an `alias` line's definitions into the analysis's table (SPD-059).  A word with no `=` is a query and defines
+    nothing.  A body the hook cannot read (it holds an expansion or a substitution, whose value is not on the line) is
+    recorded with no body and doubted, so the name refuses a member where `eval` dispatches it; a name it cannot read leaves
+    every name of the line's in doubt, since the hook cannot tell which one this defines."""
+    for w in alias_arguments(words):
+        m = syntax.ALIAS_WORD_RE.match(w)
+        if m is None:
+            continue
+        name, value = m.group(1), m.group(2)
+        if expansion_word(name) or not syntax.IDENTIFIER_RE.match(prepare.deglob(name)):
+            a.alias_unknown = True
+            continue
+        readable = not expansion_word(value)
+        record_alias(a, prepare.deglob(name), prepare.deglob(value) if readable else None, doubtful=not readable)
+
+
+def clear_alias_line(words, a):
+    """`unalias NAME ...` and `unalias -a` clear what the line aliased; an argument the hook cannot read (an expansion, or a
+    pattern for zsh's `-m`) clears nothing and doubts every name instead (SPD-059)."""
+    rest = alias_arguments(words)
+    options = words[1 : len(words) - len(rest)]
+    if "-a" in options:
+        names, doubtful = list(a.aliases), False
+    elif "-m" in options or any(active_read_word(w) for w in rest):
+        names, doubtful = list(a.aliases), True
+    else:
+        names, doubtful = [prepare.deglob(w) for w in rest], False
+    for name in names:
+        record_alias(a, name, None, doubtful=doubtful)
+
+
+def alias_substitution(name, a):
+    """(the text an alias of this line's runs where `eval` dispatches its name, whether the hook cannot be sure of it), for a
+    command word inside an `eval` (SPD-059).  (None, False) when the name is no alias of the line's and the line defined none
+    the hook could not read; (None, True) when it may be one, or may have been cleared, and the hook cannot say what it runs."""
+    if name not in a.aliases:
+        return None, a.alias_unknown
+    key = syntax.ALIAS_KEY + name
+    return a.aliases[name], key in a.doubt or key in a.sticky or a.all_doubt
+
+
 def variable_readings(a, name):
     """(readings, doubtful) for a bare `$name` whose value the line assigned (SPD-043, probed in zsh 5.9 -f and bash 3.2 with a fake
     git): the words bash gives (the value split on blanks, each field's glob characters active even if quoted in the assignment,

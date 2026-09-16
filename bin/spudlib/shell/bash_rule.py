@@ -122,6 +122,12 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                     " condition, a compound command, a loop or function body, a pipeline, a background job, a subshell or substitution,"
                     " a command's prefix, or a builtin that assigns it), so the hook cannot resolve the words it becomes; spell them out"
                     % detail), analysis
+        elif kind == "alias":
+            return ("`eval` runs the command word %s, which this line defines as an alias the hook cannot resolve: its body holds"
+                    " an expansion or a substitution, or the definition or an `unalias` may not have run (a branch, a subshell, a"
+                    " pipeline, a background list, a loop or function body, a reading only one shell makes). A shell expands an"
+                    " alias when it parses the text, so the command that runs is not the one written; spell the command out, or"
+                    " define no alias on the line" % detail), analysis
         elif kind == "glob":
             return ("the word %s is a glob the shell expands before it runs the command, and it can become more than one command,"
                     " option or verb the hook checks at once, or more than the hook reads; spell the words out" % detail), analysis

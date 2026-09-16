@@ -32,17 +32,23 @@ def analyse_command(command, analysis=None, depth=0):
     # redirections (bash) and a group opening a word is read as shlex reads it, a subshell where one runs (mark_zsh_patterns).
     # Every command and target either reading finds is checked, zsh's first; the directories and variables after the line are
     # those of both.  The quotes are the same, so both tokenize.
-    cwds, variables, loop_depth = a.cwds, dict(a.vars), a.loop_depth
+    cwds, variables, loop_depth, aliases = a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases)
     walk.ShellWalk(a, inner, bodies, depth).walk(tokens)
     if other == marked:
         return a
-    zsh_cwds, zsh_vars = a.cwds, a.vars
-    a.cwds, a.vars, a.loop_depth, a.cd_uncertain = cwds, variables, loop_depth, False
+    zsh_cwds, zsh_vars, zsh_aliases = a.cwds, a.vars, a.aliases
+    a.cwds, a.vars, a.loop_depth, a.cd_uncertain, a.aliases = cwds, variables, loop_depth, False, aliases
     walk.ShellWalk(a, inner, bodies, depth).walk(syntax.shell_tokens(other) or [])
     a.cwds = directories.union_dirs(zsh_cwds, a.cwds)
     a.doubt.update(set(zsh_vars) ^ set(a.vars))  # a variable only one reading assigns (SPD-043)
     for name, value in zsh_vars.items():
         a.vars[name] = value if a.vars.get(name, value) == value else hookio.SUBST  # readings that disagree: a value the hook cannot know
+    for name in set(zsh_aliases) ^ set(a.aliases):
+        a.doubt.add(syntax.ALIAS_KEY + name)  # an alias only one reading defines (SPD-059)
+    for name, body in zsh_aliases.items():
+        if a.aliases.get(name, body) != body:
+            a.doubt.add(syntax.ALIAS_KEY + name)
+        a.aliases.setdefault(name, body)
     return a
 
 
@@ -61,11 +67,24 @@ def isolated(a, run):
 def analyse_isolated(a, command, depth):
     """analyse_command on a body that runs in its own process, once per body and starting state: both readings of a line walk
     its substitutions (SPD-039), and a nested line must not double its work at every level."""
-    key = (command, depth, a.cwds, a.loop_depth, tuple(sorted(a.vars.items())), frozenset(a.doubt), frozenset(a.sticky), a.all_doubt)
+    key = (command, depth, a.cwds, a.loop_depth, tuple(sorted(a.vars.items())), frozenset(a.doubt), frozenset(a.sticky),
+           a.all_doubt, a.alias_scope)
     if key in a.isolated_done:
         return
     a.isolated_done.add(key)
     isolated(a, lambda: analyse_command(command, a, depth))
+
+
+def analyse_new_shell(a, command, depth):
+    """A body another shell process reads: a `-c` string, a here-document fed to a shell, the words `env -S` or `script -c`
+    hand on.  An alias the line defined does not reach it (SPD-059, probed: `alias gp='git push'; eval 'sh -c gp'` ran
+    nothing, while `eval 'echo $(gp)'` ran it, the substitution being parsed by the shell that holds the alias)."""
+    state = (a.alias_scope, a.aliases, a.alias_unknown)
+    a.alias_scope, a.aliases, a.alias_unknown = 0, {}, False
+    try:
+        analyse_isolated(a, command, depth)
+    finally:
+        a.alias_scope, a.aliases, a.alias_unknown = state
 
 
 def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT):
@@ -105,6 +124,9 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
         return True
 
     prefix_names, wrapper_from, spelled_command = [], 1, False
+    # SPD-060: `coproc` was read; SPD-059: no word has taken the command position away yet, so an alias the line defined is
+    # still expanded here (a reserved word and an assignment keep it, a wrapper other than zsh's `time` does not).
+    coproc, command_position = False, True
     while words:
         w = words[0]
         m = None if fresh else syntax.ASSIGNMENT_WORD_RE.match(w)
@@ -125,8 +147,16 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 # a forked shell of the shell's own, not an external program: a builtin runs there (SPD-054), and its
                 # directory changes still never reach the line
                 effect = max(effect, "fork", key=directories.EFFECT_ORDER.get)
-                prefixed = True
+                prefixed = coproc = True
             words = words[1:]
+        elif coproc and len(words) > 1 and syntax.IDENTIFIER_RE.match(w) and words[1] in syntax.COPROC_COMPOUND_WORDS:
+            # bash 4 and later run `coproc NAME compound_command` in the forked shell, and the hook read NAME for the command
+            # (SPD-060, probed in bash 5.2): the group after the name is read exactly as the unnamed form's is.  A name the
+            # hook cannot resolve reaches this as the expansion it is and refuses a member; `coproc NAME echo x` is a simple
+            # command named NAME in every shell, and is left as it was.
+            # `fresh` goes back to 0: an expansion that gave the name gave none of the words after it, and the shell read the
+            # group's opener as the reserved word it is before it expanded anything (`N=NAME; coproc $N { git push; }`)
+            words, coproc, fresh = words[1:], False, 0
         elif m:
             name, append, value = m.groups()
             expansions.assign_variable(a, name, value, bool(append))
@@ -135,6 +165,7 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
         elif w == "-":
             effect = max(effect, "either", key=directories.EFFECT_ORDER.get)  # zsh's `-` precommand modifier; bash finds no `-`
             prefixed = True
+            command_position = False
             words = words[1:]
             fresh = max(fresh - 1, 0)
         elif os.path.basename(w).casefold() in syntax.WRAPPERS and w not in a.vars:
@@ -153,15 +184,31 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                     a.vars[aname] = avalue
                     a.doubt.add(aname)  # the command's environment, not the shell's (SPD-043)
             prefixed = True
+            # only zsh's `time` keeps the command position an alias is expanded in (SPD-059, probed: `eval 'time gp'` ran the
+            # alias, `eval 'command gp'` and `eval 'env gp'` ran nothing)
+            command_position = w in zsh.ZSH_COMMAND_POSITION_WORDS
             effect = max(effect, directories.prefix_effect(w, words[1] if len(words) > 1 else None), key=directories.EFFECT_ORDER.get)
             words, fresh = rest, 0
             for s in strings:
-                analyse_isolated(a, prepare.deglob(s), depth + 1)  # a shell reads the string with its own quotes (SPD-041)
+                analyse_new_shell(a, prepare.deglob(s), depth + 1)  # a shell reads the string with its own quotes (SPD-041)
         else:
             break
     if not words:
         return
     cmd = words[0]
+    if a.alias_scope and command_position:
+        # SPD-059: inside `eval`, a command word the line aliased runs the alias's body, not a command of its own.  The body
+        # is read as the shell text it is, with its own quotes and the words after it, as eval's rejoined words are.
+        body, doubtful = expansions.alias_substitution(cmd, a)
+        if body is not None or doubtful:
+            if body is not None:
+                rest = " ".join(prepare.deglob(w) for w in words[1:])
+                analyse_command(body + (" " + rest if rest else ""), a, depth + 1)
+            else:
+                a.kinds.append("other")
+            if doubtful:  # after the body, so a refusal the body itself earns keeps its own reason
+                a.findings.append(("alias", prepare.deglob(cmd)))
+            return
     if cmd in syntax.ASSIGNING_COMMANDS:
         for x in words[1:]:  # `read X`, `printf -v X`, `unset X`, `getopts o X`: X may now hold anything (SPD-043, probed)
             a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(x)))
@@ -204,17 +251,21 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
             w = words[i]
             if w.startswith("-") and "c" in w[1:] and not w.startswith("--"):
                 if i + 1 < len(words):
-                    analyse_isolated(a, prepare.deglob(words[i + 1]), depth + 1)  # read with its own quotes: `sh -c 'g?t push'` (SPD-041)
+                    analyse_new_shell(a, prepare.deglob(words[i + 1]), depth + 1)  # read with its own quotes: `sh -c 'g?t push'` (SPD-041)
                 break
             if not w.startswith("-"):
                 break
             i += 1
         for body in bodies:
-            analyse_isolated(a, body, depth + 1)
+            analyse_new_shell(a, body, depth + 1)
     elif base == "eval":
         a.kinds.append("eval")
         before = a.cwds
-        analyse_command(prepare.deglob(" ".join(words[1:])), a, depth + 1)  # eval reads its words again, their quotes gone (SPD-041)
+        a.alias_scope += 1  # an alias the line defined is expanded where eval parses its words again (SPD-059)
+        try:
+            analyse_command(prepare.deglob(" ".join(words[1:])), a, depth + 1)  # eval reads its words again, their quotes gone (SPD-041)
+        finally:
+            a.alias_scope -= 1
         a.cwds = directories.settle(effect, before, a.cwds)
     elif cmd in ("source", ".") and directories.builtin_runs_here(effect):
         a.kinds.append("other")
@@ -259,6 +310,14 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
         for w in words[1:]:
             if not w.startswith("-"):
                 a.redirects.append((w, a.cwds))
+    elif cmd in ("alias", "unalias") and directories.builtin_runs(effect):
+        # SPD-059: the builtin, spelled exactly, stores text the shell runs wherever it next parses this name in command
+        # position -- which on one line means `eval`.  Never a spud call, so an aliasing line is not allowed on its own.
+        a.kinds.append("other")
+        if cmd == "alias":
+            expansions.record_alias_line(words, a)
+        else:
+            expansions.clear_alias_line(words, a)
     elif cmd in syntax.DIRECTORY_COMMANDS and directories.builtin_runs_here(effect):
         a.kinds.append("cd")
         directories.directory_change(words, a, effect)

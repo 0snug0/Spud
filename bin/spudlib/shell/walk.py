@@ -14,9 +14,12 @@ class ShellFrame:
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
         self.pattern = kind == "case"  # a case command reads a pattern first, and again after each ;;
         self.mark = mark  # how many assignments the line had made when it opened (SPD-043)
-        # SPD-042: a loop's body form.  None for anything but a for, select or repeat; then "header" while its header is read,
-        # "pending" until the body's first word, and then "long" (`do ... done`), "compound" (a `{ ... }` or `( ... )` body that
-        # closes this frame with it) or "sublist" (zsh's SHORT_LOOPS: one and-or list, closing this frame where the list ends).
+        # SPD-042, SPD-061: a loop's or a conditional's body form.  None for anything but a for, select or repeat (which starts
+        # at "header") and an if, while or until (which starts at "cond", its condition list); then "pending" or "cond-pending"
+        # once that is complete, until the body's first word, and then "long" (`do ... done`, `then ... fi`), "compound" (a
+        # `{ ... }` or `( ... )` body) or "sublist" (zsh's SHORT_LOOPS and SHORT_REPEAT: one and-or list, closing this frame
+        # where the list ends).  A loop's compound body closes the loop with it; a conditional's becomes "sublist", since an
+        # `else` may still follow it (probed: `if [[ -n x ]] { echo a } else { echo b }` ran).
         self.body = None
 
 
@@ -33,7 +36,9 @@ class ShellWalk:
     - a compound command's redirections open where it started;
     - zsh's SHORT_LOOPS (on by default, SPD-042) run a loop body with no `do` and `done`: after `repeat word`, after
       `for name ( word ... )` and after a `for`/`select` list closed by `;` or a newline, the body is a `do ... done`, a
-      `{ list }`, a `( list )` or one sublist, and the loop ends where that sublist ends."""
+      `{ list }`, a `( list )` or one sublist, and the loop ends where that sublist ends;
+    - the same holds for an `if`, `while` or `until` whose condition ends in `[[ ... ]]` (SPD-061), which closes the condition
+      the way a terminator closes a loop header, so `then` and `do` are optional there too."""
 
     def __init__(self, a, inner, bodies, depth):
         self.a, self.inner, self.bodies, self.depth = a, list(inner), list(bodies), depth
@@ -94,7 +99,12 @@ class ShellWalk:
         if frame.kind != "sub":
             self.redirect_cwds = directories.union_dirs(frame.saved, after)
         if self.stack and self.stack[-1].body == "compound":
-            self.pop()  # the short loop whose body this `{ ... }` or `( ... )` was (SPD-042)
+            if self.stack[-1].kind == "cond":
+                # `if [[ -n x ]] { list }`: an `else` or an `elif` may still follow the group, so the conditional ends where a
+                # sublist body would, at the next terminator (SPD-061, probed: `if c { a } else { b }` and `if c { a }; echo`)
+                self.stack[-1].body = "sublist"
+            else:
+                self.pop()  # the short loop whose body this `{ ... }` or `( ... )` was (SPD-042)
 
     def branch(self):
         """then, else, elif, do, a case arm: the body may start from the directories the compound command started in."""
@@ -102,6 +112,8 @@ class ShellWalk:
         self.end_list()
         if self.stack and self.stack[-1].kind in ("cond", "case", "loop"):
             top = self.stack[-1]
+            if top.body in ("cond", "cond-pending"):
+                top.body, self.expect_body = "long", False  # `then` or `do`: the condition is over (SPD-061)
             top.seen = directories.union_dirs(top.seen, self.a.cwds)  # where the branch before this one ended
             self.a.doubt.update(self.a.assigned[top.mark :])  # a branch may run without what an earlier one assigned (SPD-043)
             self.a.cwds = directories.union_dirs(top.saved, self.a.cwds)
@@ -114,23 +126,39 @@ class ShellWalk:
         self.skip, self.header = True, "repeat" if t == "repeat" else "for"
         self.stack[-1].body = "header"
 
+    def open_conditional(self, t):
+        """An `if`, `while` or `until` in command position: its condition list, then its body, which a `[[ ... ]]` at the end
+        of that list may open with no `then` or `do` (SPD-061)."""
+        self.push("cond" if t == "if" else "loop", "fi" if t == "if" else "done")
+        self.stack[-1].body = "cond"
+
     def end_header(self):
-        """The loop's header is complete.  Its body may follow with no `do`, so the next word decides the body's form."""
+        """The loop's header, or an if/while/until condition ending in `]]`, is complete.  Its body may follow with no `do`
+        or `then`, so the next word decides the body's form (SPD-042, SPD-061)."""
         self.finish()
-        if self.stack and self.stack[-1].body == "header":
-            self.stack[-1].body, self.expect_body = "pending", True
+        if self.stack and self.stack[-1].body in ("header", "cond"):
+            self.stack[-1].body = "pending" if self.stack[-1].body == "header" else "cond-pending"
+            self.expect_body = True
+
+    def reopen_condition(self):
+        """A `&&`, `||`, `|` or `&` where a body was expected: the condition list goes on, so the `]]` before it did not end
+        it after all (SPD-061, probed: `if [[ -n x ]] && [[ -n y ]] echo both` ran the body, and only the last `]]` ends the
+        condition).  A loop header's `pending` is left alone: no operator stands inside one."""
+        if self.stack and self.stack[-1].body == "cond-pending":
+            self.stack[-1].body, self.expect_body = "cond", False
 
     def resolve_body(self, t):
-        """The first word after a complete header: `do` opens a `do ... done` body, `{` or `(` a compound one that closes the
-        loop with it, anything else a single sublist (probed in zsh 5.9: `repeat 2 echo a; echo b` ran `echo a` twice)."""
+        """The first word after a complete header or condition: `do` or `then` opens a `do ... done` or `then ... fi` body,
+        `{` or `(` a compound one, anything else a single sublist (probed in zsh 5.9: `repeat 2 echo a; echo b` ran `echo a`
+        twice; `if [[ -n x ]] then echo t; fi` and `while [[ $((n++)) -lt 2 ]] do echo t; done` both ran)."""
         self.expect_body = False
         frame = self.stack[-1] if self.stack else None
-        if frame is None or frame.body != "pending":
+        if frame is None or frame.body not in ("pending", "cond-pending"):
             return
-        frame.body = "long" if t == "do" else ("compound" if t in ("{", "(") else "sublist")
+        frame.body = "long" if t in ("do", "then") else ("compound" if t in ("{", "(") else "sublist")
 
     def close_sublists(self):
-        """A short loop whose body is one sublist ends where that sublist ends."""
+        """A short loop or conditional whose body is one sublist ends where that sublist ends."""
         while self.stack and self.stack[-1].body == "sublist":
             self.pop()
 
@@ -212,7 +240,7 @@ class ShellWalk:
                     self.pop()
                 return
             if t in ("if", "while", "until"):
-                self.push("cond" if t == "if" else "loop", "fi" if t == "if" else "done")
+                self.open_conditional(t)
                 return
             if t in ("for", "select", "repeat"):
                 self.open_loop(t)
@@ -233,12 +261,27 @@ class ShellWalk:
             self.push("func", "}")
             self.function_next = False
             return
-        if t in ("for", "select", "repeat") and not self.skip and self.words and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words):
-            self.discard()  # zsh runs a compound command after `coproc`, `time` and `!` (probed: `coproc repeat 1 git push` ran it)
-            self.open_loop(t)
+        if not self.skip and self.words and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words) and t in ("for", "select", "repeat", "if", "while", "until"):
+            # zsh runs a compound command after `coproc`, `time` and `!` (probed: `coproc repeat 1 git push`, `coproc if
+            # [[ -n x ]] git push`, `time if [[ -n x ]] git push` and `! if [[ -n x ]] git push` each ran it)
+            self.discard()
+            if t in ("if", "while", "until"):
+                self.open_conditional(t)
+            else:
+                self.open_loop(t)
+            return
+        if t == "}" and not self.skip and self.words and self.stack and self.stack[-1].closer == "}":
+            # zsh closes a `{ list }` at a `}` that follows a word with no terminator before it (probed: `if [[ -n x ]]
+            # { echo then } else { echo else }` printed then, and `repeat 2 { git push }` pushed twice); bash takes the `}`
+            # for an argument and leaves the group open, so closing it is the reading that sees what follows as well
+            self.pop()
             return
         self.words.append(t)
         if self.skip and self.header == "repeat":  # `repeat word`: one word of header, then the body (SPD-042)
+            self.end_header()
+        elif t == "]]" and "[[" in self.words and not self.skip and self.stack and self.stack[-1].body == "cond":
+            # zsh: `if [[ ... ]] git push`, `while [[ ... ]] { git push }`, `until [[ ... ]] git push` (SPD-061).  A quoted
+            # `]]` never reaches here as this word: neutralize_quoted_globs has replaced its brackets with sentinels.
             self.end_header()
 
     def walk(self, tokens):
@@ -246,7 +289,7 @@ class ShellWalk:
         i = 0
         while i < len(toks):
             t = toks[i]
-            if self.expect_body and t not in syntax.LIST_TERMINATORS:  # terminators may stand between a header and its body
+            if self.expect_body and t not in syntax.BODY_DEFERRING:  # a terminator or a list operator may stand between them
                 self.resolve_body(t)
             case = self.stack[-1] if self.stack and self.stack[-1].kind == "case" else None
             if t == ")" and case:
@@ -287,6 +330,7 @@ class ShellWalk:
                 else:
                     self.finish()
             elif t in ("&&", "||"):
+                self.reopen_condition()
                 self.finish()
                 self.end_pipeline()
                 if t == "||" and self.uncertain:
@@ -294,10 +338,12 @@ class ShellWalk:
                 self.conditional = True
                 self.pipeline_start = self.a.cwds
             elif t in ("|", "|&"):
+                self.reopen_condition()
                 self.finish(unsure=True)
                 self.a.cwds = self.pipeline_start  # that element ran in its own process
                 self.piped = True
             elif t == "&":
+                self.reopen_condition()
                 self.finish(unsure=True)
                 self.close_sublists()  # `repeat 2 git push &`: the `&` ends the body's sublist, and the loop with it
                 self.a.doubt.update(self.a.assigned[self.list_mark :])  # a background list assigns in its own process (SPD-043)

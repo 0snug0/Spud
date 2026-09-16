@@ -40,9 +40,20 @@ SHELL_OPERATORS = (";;&", "&>>", "<<<", "<<-", ";;", ";&", "&&", "||", "|&", "&>
                    ";", "&", "|", "(", ")", "<", ">")
 SHELL_PUNCTUATION = frozenset("();<>|&")
 LIST_TERMINATORS = {";", ";;", ";&", ";;&"}
+# What may stand between a complete header or condition and the body that follows it with no `do` or `then`: a terminator
+# separates the two (SPD-042), and a list operator says the condition is not complete after all, so the `]]` that looked
+# like its end was not (SPD-061, probed: `if [[ -n x ]] && [[ -n y ]] echo both` and `if true && [[ -n x ]] echo both` ran
+# the body, `if [[ -n x ]] | cat` is a parse error).
+BODY_DEFERRING = LIST_TERMINATORS | {"&&", "||", "|", "|&", "&"}
 # Words zsh lets stand before a compound command, so `coproc repeat 1 git push` runs the loop (probed; `nocorrect`, `noglob`,
 # `command` and `-` do not: zsh reports a parse error or looks for a program named repeat).  SPD-042.
 LOOP_PREFIX_WORDS = {"coproc", "time", "!"}
+# The compound commands bash 4 and later run in the forked shell of a named coproc, `coproc NAME compound_command` (SPD-060,
+# probed in bash 5.2 in the ubuntu:24.04 image: a `{ ... }` group, a `( ... )` subshell, `while`, `for`, `if`, `case` and
+# `[[ ... ]]` each ran after the name, and a name that is not a valid identifier ran nothing; `coproc NAME echo x` is a
+# simple command named NAME, and zsh, whose coproc takes a command only, is a parse error for every named form).
+COPROC_COMPOUND_WORDS = {"{", "(", "[[", "if", "while", "until", "for", "select", "case"}
+IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 DIRECTORY_COMMANDS = {"cd", "chdir", "pushd", "popd"}  # the builtins, spelled exactly: CD and /usr/bin/cd are programs
 SHELL_DECLARATIONS = {"export", "typeset", "declare", "local", "readonly"}
 # A redirection or tee target the shell expands is checked as every file it opens, not as its literal spelling (SPD-034).
@@ -76,6 +87,13 @@ ZSH_RANGE_RE = re.compile(r"<(\d*)-(\d*)>")  # zsh's numeric glob, read as one w
 GLOB_MATCH_CAP = 500   # the most files a redirection glob is expanded to before the hook refuses a member (SPD-034)
 GLOB_SCAN_CAP = 5000   # the most directory entries scanned expanding one glob, so `**` never walks a large tree unbounded
 ARRAY_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=$")
+# SPD-059: an `alias` definition word, `name=body`, as it reaches the analysis with its quotes taken (`alias gp='git push'`
+# is one word, `gp=git push`).  The shells take almost any name, so the name is everything before the first `=`; a bare word
+# is a query, which defines nothing.
+ALIAS_WORD_RE = re.compile(r"^([^=\s]+)=(.*)\Z", re.S)
+# The key an alias's name is recorded under in `assigned` and `doubt`, so every rule that doubts a variable the line assigned
+# doubts the alias too.  No variable name can hold it.
+ALIAS_KEY = "\x00alias\x00"
 ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)\Z", re.S)
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"}
 PYTHON_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?$")
@@ -160,6 +178,13 @@ class ShellAnalysis:
         self.doubt, self.sticky, self.assigned = set(), set(), []
         self.unsure = 0
         self.all_doubt = False
+        # SPD-059: `aliases`, what `alias NAME=body` defined on the line, name -> the body's text, None for one the hook
+        # cannot read and for one `unalias` cleared; `alias_scope`, how many `eval` re-analyses deep the reading is, the only
+        # place on one line where a name the line aliased is expanded (a shell expands an alias when it parses the text);
+        # `alias_unknown`, the line defined an alias whose name the hook cannot read.  Each name's doubt lives in `doubt`
+        # under ALIAS_KEY + name, so a definition in a branch, a subshell, a pipeline or a loop body is doubted as a
+        # variable's assignment there is.
+        self.aliases, self.alias_scope, self.alias_unknown = {}, 0, False
 
     @property
     def all_spud(self):

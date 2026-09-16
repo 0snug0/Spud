@@ -3896,6 +3896,539 @@ class TrapActionTest(BashHookCase):
         self.assertIn("may not hold", self.refused_for_members("X=ls; trap 'echo hi' EXIT; $X push", "").reason)
 
 
+# zsh's short conditionals (SPD-061): an if, while or until whose condition ends in `[[ ... ]]`, and the body that may
+# follow it with no `then` or `do`.  Each fills its `%s`.
+SHORT_CONDITIONS = ("if [[ -n x ]] %s", "n=0; while [[ $((n++)) -lt 2 ]] %s", "n=0; until [[ $((n++)) -ge 2 ]] %s",
+                    "if [[ -n x ]] && [[ -n y ]] %s", "if true && [[ -n x ]] %s", "if [[ -n x ]] || [[ -z y ]] %s")
+SHORT_CONDITION_BODIES = ("%s", "{ %s }", "{ %s; }", "( %s )", "true && %s", "false || %s", "%s | cat",
+                          "if true; then %s; fi", "case x in x) %s;; esac")
+
+
+class ZshShortConditionalTest(BashHookCase):
+    """SPD-061 (Caribe's SPD-042 proposal): zsh's SHORT_LOOPS give `if`, `while` and `until` a body with no `then` or `do`
+    too, and with a `[[ ... ]]` condition the hook read the whole line as one simple command whose command word was `[[`, so
+    the body's git verb or spud call was never checked (Laws 5, 6 and 7).  SPD-042 fixed `for`, `select` and `repeat` and
+    named these out of scope, believing they were read; they were not.  Probed in zsh 5.9 -f and zsh -f -o nobareglobqual
+    (this Mac's Bash tool), with bash 3.2 and sh as the controls that reject every one of these forms, in a scratchpad with a
+    fake git first on a scratch PATH:
+
+    - the condition is a list that ends in `[[ ... ]]`: `if [[ -n x ]] git push` pushed once, `n=0; while [[ $((n++)) -lt 2
+      ]] git push` and `until [[ $((n++)) -ge 2 ]] git push` twice, and only the last `]]` ends it (`if [[ -n x ]] && [[ -n y
+      ]] echo both`, `if true && [[ -n x ]] echo both` and the `||` form all ran their body, while `if [[ -n x ]] | cat` is a
+      parse error);
+    - the body is one sublist, a `{ list }`, a `( list )` or, with no terminator between, `then ... fi` or `do ... done`
+      (`if [[ -n x ]] then echo t; fi` and `while [[ $((n++)) -lt 2 ]] do echo t; done` both ran).  The sublist ends where a
+      short loop's does: `if [[ -n x ]] echo a; echo b` printed a once and b once, and `echo a > f1; echo b > f2` wrote one
+      line each;
+    - the body runs in the shell itself, so a cd in a sublist or a `{ }` body moves it and a `( )` body's does not (`cd /;
+      if [[ -n x ]] cd /tmp; pwd` printed /tmp, `if [[ -z x ]] cd /tmp; pwd` printed /), which is SPD-030's model: either
+      directory follows the conditional;
+    - the `{ }` body wants a terminator after it, so `if [[ -n x ]] { git push }` alone is a zsh parse error while `if c { a
+      }; echo after`, `if c { a } fi` and `if c { a } else { b }` all run (an `elif` needs a trailing `else`); `( )` takes no
+      else.  The hook reads the brace body wherever it stands, fail closed and at no real cost: the line is a shell error
+      where it is not one of the forms that run.  It also closes a `{ list }` at a `}` that follows a word with no terminator
+      before it, as zsh does and bash does not, so both branches of `if c { a } else { b }` are read;
+    - the single-bracket spelling runs nothing and is left alone: `if [ -n x ] git push` is a parse error, `while [ ... ]
+      body` never iterates, and `until [ -n x ] body` spins with an empty body.  `if true git push` and `if [[ -n x ]]; git
+      push` are parse errors too, and `if (( 1 )) git push` and `while (( n++ < 2 )) git push` were read before this ticket,
+      because `(( ))` splits into subshell frames.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **; note.txt is refused to AGENT_A at the home."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone", "bin"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("%s hook PreToolUse" % spud, "hook"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    # -- the hole ------------------------------------------------------------------------
+    def test_the_tickets_evidence_commands_are_refused(self):
+        """Caribe's four lines: each ran git push in zsh while the hook recorded no finding."""
+        for line in ("if [[ -n x ]] git push",
+                     "n=0; while [[ $((n++)) -lt 2 ]] git push",
+                     "n=0; while [[ $((n++)) -lt 2 ]] { git push }",
+                     "n=0; until [[ $((n++)) -ge 2 ]] git push"):
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+        self.assertEqual(self.analysis("if [[ -n x ]] git push").findings, [("git", ("push", "push"))])
+
+    def test_every_condition_reaches_its_body(self):
+        for condition in SHORT_CONDITIONS:
+            with self.subTest(condition=condition):
+                self.assertRefused(condition % "git push", "Law 7")
+                self.assertRefused(condition % "git push", "Law 7", AGENT_C)
+
+    def test_every_body_form_reaches_its_commands(self):
+        for condition in ("if [[ -n x ]] %s", "n=0; while [[ $((n++)) -lt 2 ]] %s", "n=0; until [[ $((n++)) -ge 2 ]] %s"):
+            for body in SHORT_CONDITION_BODIES:
+                with self.subTest(condition=condition, body=body):
+                    self.assertRefused(condition % (body % "git push"), "Law 7")
+        # `then` and `do` with no terminator before them, which zsh takes as the long body
+        self.assertRefused("if [[ -n x ]] then git push; fi", "Law 7")
+        self.assertRefused("n=0; while [[ $((n++)) -lt 2 ]] do git push; done", "Law 7")
+
+    def test_every_payload_in_every_body_for_every_caller(self):
+        for condition in ("if [[ -n x ]] %s", "n=0; while [[ $((n++)) -lt 2 ]] %s", "if true && [[ -n x ]] %s"):
+            for body in ("%s", "{ %s }", "( %s )"):
+                for command, needle in self.member_payloads():
+                    line = condition % (body % command)
+                    for agent_id in (AGENT_C, AGENT_A):
+                        with self.subTest(line=line, agent_id=agent_id):
+                            self.assertRefused(line, needle, agent_id)
+                for command, needle in self.spud_payloads():
+                    line = condition % (body % command)
+                    with self.subTest(line=line, agent_id="spud"):
+                        self.assertRefused(line, needle, agent_id=None)
+
+    def test_a_target_outside_a_narrow_members_deliverables(self):
+        """AGENT_A plans tests/** and bin/spud, so note.txt at the home is refused it and allowed the ** member."""
+        for condition in ("if [[ -n x ]] %s", "n=0; while [[ $((n++)) -lt 2 ]] %s", "if [[ -n x ]] && [[ -n y ]] %s"):
+            for body in ("%s", "{ %s }", "( %s )"):
+                line = condition % (body % "echo x > note.txt")
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")
+                    self.assertSilent(line, AGENT_C)
+
+    # -- the directory model ---------------------------------------------------------------
+    def test_either_directory_follows_a_short_conditional(self):
+        """The condition may be false, so what runs after the body may be in either directory (SPD-030's model, which pop
+        already computes for `if ... then ... fi`); a `( )` body's cd does not carry out at all."""
+        out, home = self.out, self.home.path
+        for condition in ("if [[ -n x ]] %s", "if [[ -n x ]] && [[ -n y ]] %s"):
+            for body in ("%s", "{ %s; }", "then %s; fi"):
+                with self.subTest(condition=condition, body=body):
+                    self.assertRefused((condition % (body % ("cd %s" % out))) + "; echo x > note.txt", "deliverables")
+                    self.assertRefused((condition % (body % ("cd %s/ledger" % home))) + "; echo x > tickets/SPD-001.md",
+                                       "generated", AGENT_C)
+            with self.subTest("a subshell body does not move the shell: " + condition):
+                self.assertSilent((condition % ("(cd %s)" % out)) + "; echo x > tests/zzone/k.py")
+        # a while or until body may repeat, so a relative cd there is unfollowable, as in the long form
+        for condition in ("n=0; while [[ $((n++)) -lt 2 ]] %s", "n=0; until [[ $((n++)) -ge 2 ]] %s"):
+            for body in ("%s", "{ %s; }"):
+                with self.subTest(condition=condition, body=body):
+                    self.assertRefused((condition % (body % "cd docs")) + "; echo x > note.txt", "cannot follow")
+                    self.assertRefused((condition % (body % ("cd %s" % out))) + "; echo x > note.txt", "deliverables")
+        self.assertEqual(self.analysis("if [[ -n x ]] (cd /tmp)").cwds, frozenset([str(self.home.path)]))
+        self.assertEqual(sorted(self.analysis("if [[ -n x ]] cd /tmp").cwds), sorted([str(self.home.path), "/tmp"]))
+
+    def test_the_sublist_body_ends_where_zsh_ends_it(self):
+        """`if [[ -n x ]] echo a > f1; echo b > f2` left one line in each, so what follows the sublist is outside the body."""
+        home = self.home.path
+        line = "if [[ -n x ]] echo a > ledger/tickets/SPD-001.md; echo b > tests/zzone/k.py"
+        self.assertEqual(len(self.analysis(line).redirects), 2, self.analysis(line).redirects)
+        self.assertRefused("if [[ -n x ]] true; echo x > ledger/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertSilent("if [[ -n x ]] true; echo x > tests/zzone/k.py")
+        self.assertRefused("if [[ -n x ]] git push; echo b", "Law 7")
+        self.assertSilent("if [[ -n x ]] git status; echo b")
+        # the `{ }` body ends at its brace, and an else may follow it
+        self.assertRefused("if [[ -n x ]] { git status } else { git push }", "Law 7")
+        self.assertRefused("if [[ -n x ]] { cd %s } else { cd %s/ledger }; echo x > tickets/SPD-001.md" % (self.out, home),
+                           "generated", AGENT_C)
+
+    # -- where a short conditional may stand ------------------------------------------------
+    def test_short_conditionals_nested_and_enclosed(self):
+        for line in ("if [[ -n x ]] if [[ -n y ]] git push",
+                     "if [[ -n x ]] if true; then git push; fi",
+                     "if [[ -n x ]] case x in x) git push;; esac",
+                     "if [[ -n x ]] repeat 2 git push",
+                     "repeat 1 if [[ -n x ]] git push",
+                     "for f (a) if [[ -n x ]] git push",
+                     "for f in a b; do if [[ -n x ]] git push; done",
+                     "if [[ -n x ]] true && git push",
+                     "if [[ -n x ]] false || git push",
+                     "if [[ -n x ]] git push | cat",
+                     "if [[ -n x ]] git push &",
+                     "n=0; while [[ $((n++)) -lt 2 ]] git push & wait",
+                     "if [[ -n x ]] git push > out 2>&1",
+                     "{ if [[ -n x ]] git push; }",
+                     "( if [[ -n x ]] git push )",
+                     "f() { if [[ -n x ]] git push; }; f",
+                     "eval 'if [[ -n x ]] git push'",
+                     "sh -c 'if [[ -n x ]] git push'",
+                     "zsh -c 'if [[ -n x ]] git push'",
+                     "echo $(if [[ -n x ]] git push)",
+                     "echo `while [[ -n x ]] git push`",
+                     "coproc if [[ -n x ]] git push",
+                     "time if [[ -n x ]] git push",
+                     "! if [[ -n x ]] git push",
+                     "case x in x) if [[ -n x ]] git push;; esac",
+                     "case x in x) if [[ -n x ]] git push;; y) git status;; esac",
+                     "if true; then if [[ -n x ]] git push; fi"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+        # a short conditional closed above a case frame must not swallow the arm's `;;`
+        ledger, out = self.home.path / "ledger", self.out
+        self.assertRefused("case x in a) if [[ -n x ]] cd %s;; b) cd %s;; esac; echo x > tickets/SPD-001.md" % (ledger, out),
+                           "generated", AGENT_C)
+
+    def test_bounded_on_pathological_input(self):
+        m = load_spud_module()
+        for line in ("if [[ -n x ]] " * 2000 + "git push", "if [[ -n x ]] { " * 500 + "git push" + " }" * 500,
+                     "while [[ -n x ]] ( " * 200 + "git push" + " )" * 200, "if [[ -n x ]] && " * 2000 + "[[ -n y ]] git push",
+                     "if [[ " * 2000, "while [[ -n x ]] " * 2000):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+    # -- controls -----------------------------------------------------------------------------
+    def test_the_forms_that_were_read_before_are_read_the_same_way(self):
+        home, out = self.home.path, self.out
+        for refused in ("if (( 1 )) git push", "n=0; while (( n++ < 2 )) git push", "n=0; while (( n++ < 2 )) { git push }",
+                        "if [[ -n x ]]; then git push; fi", "while [[ -n x ]]; do git push; done",
+                        "until [[ -n x ]]; do git push; done", "if [[ -n x ]]; then true; else git push; fi",
+                        "if [[ -n x ]]; then true; elif [[ -n y ]]; then git push; fi",
+                        "[[ -n x ]] && git push", "[[ -n x ]]; git push", "[[ -n x ]] || git push",
+                        "if true; then [[ -n x ]]; git push; fi", "for f in a; do [[ -n x ]]; git push; done"):
+            with self.subTest(refused):
+                self.assertRefused(refused, "Law 7")
+        # an ordinary `[[ ... ]]` test in command position is untouched, and so is the long form's directory model
+        for ok in ("[[ -n x ]] && git status", "[[ -n x ]]", "if [[ -n x ]]; then git status; fi",
+                   "if true; then [[ -n x ]] && git status; echo after; fi",
+                   "echo '[[ -n x ]] git push'", "echo \"if [[ -n x ]] git push\"",
+                   "grep -n 'if [[ -n x ]] git push' tests/zzone/k.py",
+                   "%s --as %s member log 'if [[ -n x ]] git push'" % (self.spud_cli, AGENT_A),
+                   "if [[ -n x ]]; then echo hi; fi", "if [ -n x ]; then git status; fi"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+        self.assertSilent("if [[ -n x ]]; then cd %s; fi; echo x > tests/zzone/k.py" % out)
+        self.assertRefused("if [[ -n x ]]; then cd %s; fi; echo x > note.txt" % out, "deliverables")
+        self.assertRefused("if [[ -n x ]]; then cd %s/ledger; fi; echo x > tickets/SPD-001.md" % home, "generated", AGENT_C)
+
+    def test_the_single_bracket_spellings_run_nothing_and_stay_silent(self):
+        """`[ ... ]` is an ordinary command, so zsh's short form never reaches a body through it (probed: `if [ -n x ] git
+        push` and `if true git push` are parse errors, `while [ $n -lt 0 ] git push` never iterates, and `until [ -n x ] git
+        push` spins with an empty body).  The hook leaves all of them as they were."""
+        for ok in ("if [ -n x ] git push", "if [ -n x ] { git push }", "n=0; while [ $n -lt 0 ] git push",
+                   "if true git push", "if grep -q ']]' tests/zzone/k.py; then git status; fi",
+                   "test -n x && git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        self.assertEqual(self.analysis("if [ -n x ] git push").findings, [])
+
+
+class AliasEvalTest(BashHookCase):
+    """SPD-059 (Burbank's SPD-054 proposal): `alias NAME=body` stores shell text the hook never read, and `eval NAME` on the
+    same line ran it, so a member's VCS write behind an alias reached the hook with no finding (Law 7).  Probed in bash 3.2,
+    zsh 5.9 -f, zsh -f -o nobareglobqual (this Mac's Bash tool) and sh, with a fake git first on a scratch PATH:
+
+    - `alias gp='git push'; eval gp` pushed in zsh, zsh-nbgq and sh.  bash 3.2 expands no alias non-interactively without
+      `shopt -s expand_aliases`, so it pushed nothing -- noted, and never relied on: the hook reads the line for the shells
+      that do;
+    - a shell expands an alias when it parses the text, before the line runs, so an alias defined on the line reaches only
+      text the line parses again.  `alias g=git; g push` ran in none of the four, and neither did `eval 'sh -c gp'` or `eval
+      'zsh -c gp'`; `eval 'echo $(gp)'` did, the substitution being parsed by the shell that holds the alias, and so did
+      `eval 'eval gp'`, a function body's eval and an eval in a subshell;
+    - the name is expanded in command position only: `eval 'X=1 gp'`, `eval 'time gp'`, `eval '! gp'` and `eval 'coproc gp'`
+      ran it, `eval 'command gp'` and `eval 'env gp'` ran nothing.  An alias shadows a function of the same name;
+    - the words after the name follow the body (`alias gp=git; eval 'gp push'` and `alias gp='git push'; eval gp extra` both
+      pushed), the body may hold operators and redirections of its own, aliases chain, zsh's `alias -g` and several
+      definitions on one `alias` line all take, and `unalias` and `unalias -a` clear.
+
+    The body is now read as the shell text it is, with its own quotes, as eval's rejoined words and a trap's action are: a
+    finding inside it is the finding it would be on the line.  A body the hook cannot read (it holds an expansion or a
+    substitution, whose value is not on the line), a definition or an `unalias` that may not have run, and a definition whose
+    name the hook cannot read each refuse a member where eval dispatches the name; Spud is refused by none of those, and
+    keeps his own checks inside the body (Law 1, Law 5's `--as`, the database).  The body runs in the line's own shell, so a
+    cd there moves the line, exactly as eval's own words do (probed: `alias cdd='cd /tmp'; eval cdd; pwd` printed /tmp, and
+    `echo x > note.txt` after it wrote /tmp/note.txt).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        for rel in ("tests/keep.py", "ledger/tickets/SPD-001.md"):
+            p = self.home.path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7", cwd=None):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id, cwd)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None, cwd=cwd)
+        return r
+
+    def silent_for_everyone(self, command, cwd=None):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id, cwd)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_the_tickets_evidence_command(self):
+        self.refused_for_members("alias gp='git push'; eval gp")
+        self.assertEqual(self.analysis("alias gp='git push'; eval gp").findings, [("git", ("push", "push"))])
+        self.assertEqual(self.analysis("alias gp='git status'; eval gp").findings, [("git", ("status", None))])
+        self.assertEqual(self.analysis("alias gp='git push'; eval gp").aliases, {"gp": "git push"})
+
+    def test_every_spelling_of_the_definition(self):
+        for cmd in ("alias gp='git push'; eval gp", 'alias gp="git push"; eval gp', "alias gp=git\\ push; eval gp",
+                    "alias -g GP='git push'; eval GP", "alias -- gp='git push'; eval gp",
+                    "alias gp='git push'\neval gp", "alias gp=git; eval 'gp push'",
+                    "alias gp='git push'; eval \"gp\"", "alias gp='git push'; eval 'gp'",
+                    "alias gp='git push'; eval gp extra", "alias gp='git '; eval 'gp push'",
+                    "builtin alias gp='git push'; eval gp", "alias gp='git push'; builtin eval gp"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_several_definitions_on_one_alias_line(self):
+        line = "alias gp='git push' gs='git status' e='echo hi'"
+        self.refused_for_members(line + "; eval gp")
+        self.assertEqual(self.analysis(line).aliases, {"gp": "git push", "gs": "git status", "e": "echo hi"})
+        self.assertEqual(self.analysis(line + "; eval gs").findings, [("git", ("status", None))])
+        self.silent_for_everyone(line + "; eval e")
+
+    def test_the_body_is_read_as_the_shell_text_it_is(self):
+        """Operators, redirections, a spud call and a nested construct inside the body are the findings they would be."""
+        spud, home = self.spud_cli, self.home.path
+        self.refused_for_members("alias gp='echo a; git push'; eval gp")
+        self.refused_for_members("alias gp='true && git push'; eval gp")
+        self.refused_for_members("alias gp='{ git push; }'; eval gp")
+        self.refused_for_members("alias gp='if true; then git push; fi'; eval gp")
+        self.refused_for_members("alias gp='sh -c \"git push\"'; eval gp")
+        self.refused_for_members("alias gp='eval \"git push\"'; eval gp")
+        self.refused_for_members("alias t='%s ticket new --title x'; eval t" % spud, "Law 6")
+        self.assertRefused("alias l='%s --as %s member log hi'; eval l" % (spud, AGENT_B), "--as", AGENT_A)
+        for agent_id in (AGENT_C, AGENT_A, None):  # the database is refused to everyone, Spud included
+            self.assertRefused("alias d='sqlite3 %s/.spud/ledger.db \"select 1\"'; eval d" % home, "spud sql --readonly", agent_id)
+        self.assertRefused("alias e='echo x > ledger/tickets/SPD-001.md'; eval e", "generated")
+        self.assertRefused("alias e='echo x > ledger/tickets/SPD-001.md'; eval e", "Law 1", agent_id=None)
+        self.assertRefused("alias e='echo x | tee ledger/tickets/SPD-001.md'; eval e", "generated")
+        self.assertRefused("alias e='echo x > note.txt'; eval e", "deliverables")
+        self.assertSilent("alias e='echo x > note.txt'; eval e", AGENT_C)
+        # a cd in the body moves the line's own shell, as eval's own words do
+        self.assertEqual(self.analysis("alias c='cd /tmp'; eval c").cwds, frozenset(["/tmp"]))
+        # ... so a relative target after the eval is checked where the shell really is (probed: it wrote /tmp/note.txt)
+        self.assertEqual([c for _, c in self.analysis("alias c='cd /tmp'; eval c; echo x > note.txt").redirects],
+                         [frozenset(["/tmp"])])
+
+    def test_the_line_inside_every_construct_that_reaches_the_alias(self):
+        for cmd in ("alias gp='git push'; eval 'eval gp'", "alias gp='git push'; eval 'echo $(gp)'",
+                    "alias gp='git push'; eval 'true && gp'", "alias gp='git push'; eval 'gp; gp'",
+                    "alias gp='git push'; eval '{ gp; }'", "alias gp='git push'; eval 'if true; then gp; fi'",
+                    "alias gp='git push'; eval 'for f in a; do gp; done'", "alias gp='git push'; eval 'X=1 gp'",
+                    "alias gp='git push'; eval 'time gp'", "alias gp='git push'; eval '! gp'",
+                    "alias gp='git push'; eval 'coproc gp'", "alias gp='git push'; f() { eval gp; }; f",
+                    "alias gp='git push'; (eval gp)", "alias a=b; alias b='git push'; eval a",
+                    "alias gp='git push'; X=gp; eval $X"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_a_definition_that_may_not_have_run_is_refused(self):
+        """A branch, a subshell, a pipeline, a background list, a loop or function body, and an `unalias` in any of them:
+        the hook cannot be sure which alias the shell holds, so it fails closed."""
+        for cmd in ("if true; then alias gp='git status'; fi; eval gp",
+                    "false && alias gp='git status'; eval gp",
+                    "true || alias gp='git status'; eval gp",
+                    "(alias gp='git status'); eval gp",
+                    "alias gp='git status' | cat; eval gp",
+                    "alias gp='git status' & wait; eval gp",
+                    "for f in a; do alias gp='git status'; done; eval gp",
+                    "f() { alias gp='git status'; }; f; eval gp",
+                    "case x in x) alias gp='git status';; esac; eval gp",
+                    "alias gp='git status'; if true; then unalias gp; fi; eval gp",
+                    "alias gp='git status'; (unalias gp); eval gp",
+                    "alias gp='git status'; unalias -m 'g*'; eval gp"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "cannot resolve")
+        # a refusal the body itself earns keeps its own reason
+        self.assertIn("Law 7", self.refused_for_members("if true; then alias gp='git push'; fi; eval gp", "").reason)
+
+    def test_a_body_or_a_name_the_hook_cannot_read_is_refused(self):
+        for cmd in ("alias gp=\"$UNSET git push\"; eval gp", "alias gp=\"$(echo git push)\"; eval gp",
+                    "alias gp=\"`echo git push`\"; eval gp", "X=git; alias gp=\"$X push\"; eval gp",
+                    "alias gp=$'git push'; eval gp", "N=gp; alias $N='git push'; eval gp",
+                    "alias ${N}='git push'; eval gp"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "cannot resolve")
+
+    def test_unalias_clears(self):
+        for ok in ("alias gp='git push'; unalias gp; eval gp",
+                   "alias gp='git push'; unalias -a; eval gp",
+                   "alias gp='git push' gs='git status'; unalias gp gs; eval gp"):
+            self.silent_for_everyone(ok)
+        self.assertEqual(self.analysis("alias gp='git push'; unalias gp").aliases, {"gp": None})
+
+    def test_an_alias_reaches_no_further_than_the_shell_that_holds_it(self):
+        """Nothing on the line but eval parses the name again, so nothing else expands it (each probed to run nothing)."""
+        for ok in ("alias gp='git push'; gp", "alias g=git; g push", "alias gp='git push'; echo gp",
+                   "alias gp='git push'; sh -c 'eval gp'", "alias gp='git push'; zsh -c 'eval gp'",
+                   "alias gp='git push'; eval 'command gp'", "alias gp='git push'; eval 'env gp'",
+                   "alias gp='git push'; sh -c gp", "alias gp='git push'; sh <<'EOF'\neval gp\nEOF",
+                   "eval gp", "alias", "alias -p", "alias gp", "unalias gp", "echo alias gp='git push'",
+                   "grep -n \"alias gp\" tests/keep.py", "env alias gp='git push'; eval gp"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+                self.assertNotEqual(self.bash(ok, agent_id=None).decision, "deny", ok)
+        # the words of a spud call are the call's, whatever they spell
+        self.assertAllowed("%s --as %s member log \"alias gp='git push'; eval gp\"" % (self.spud_cli, AGENT_A))
+
+    def test_an_aliasing_line_is_never_allowed_on_its_own(self):
+        """`alias` is not a spud call, so a line that defines one is read, never allowed."""
+        self.assertSilent("alias gp='git push'; %s --as %s member log hi" % (self.spud_cli, AGENT_A))
+        self.assertAllowed("%s --as %s member log hi" % (self.spud_cli, AGENT_A))
+
+    def test_spud_keeps_his_own_checks_inside_the_body(self):
+        spud = self.spud_cli
+        self.assertRefused("alias l='%s --as %s member log hi'; eval l" % (spud, AGENT_A), "Law 5", agent_id=None)
+        self.assertRefused("alias h='%s hook PreToolUse'; eval h" % spud, "hook", agent_id=None)
+        self.assertRefused("alias e='echo x | tee ledger/tickets/SPD-001.md'; eval e", "Law 1", agent_id=None)
+
+
+class NamedCoprocTest(BashHookCase):
+    """SPD-060: bash 4 and later accept a name before a coproc's compound command, `coproc NAME compound_command`, and run
+    the group in a forked shell; the hook read NAME for the command word, so `coproc NAME { git push; }` was kind other with
+    no finding, while `coproc { git push; }`, `coproc git push`, `coproc ( git push )` and `coproc sh -c 'git push'` each
+    found it.  No bash 4+ is on this Mac (bash 3.2 has no coproc and zsh's takes a command only), so the forms were probed in
+    bash 5.2 in the ubuntu:24.04 podman image, with a file side effect, since the group's own stdout goes to the pipe:
+
+    - `coproc NAME { echo ran >> /tmp/m; }` wrote the file, and so did the `( ... )`, `while`, `for`, `if`, `case` and
+      `[[ ... ]]` forms after a name, a group nested in the group, the form with a redirection after it, and one inside a
+      pipeline.  A name holding an expansion ran the group too (`N=NAME; coproc $N { ... }`, `${N}`, `$(echo NAME)`);
+    - a name that is not a valid identifier ran nothing (`coproc 1bad { ... }` and `coproc na-me { ... }` printed "not a
+      valid identifier"), and `coproc NAME{` with no blank is a syntax error;
+    - `coproc NAME echo ran` and `coproc NAME sh -c '...'` printed "NAME: command not found": a simple command named NAME,
+      not a named coproc.  That reading is left exactly as it was;
+    - a cd inside the group never reaches the line (`coproc NAME { cd /tmp; pwd; }; wait; pwd` printed /), as SPD-054 already
+      had it for the unnamed form;
+    - zsh 5.9 is a parse error for every named form, so nothing runs there.
+
+    The group after a valid identifier is now read exactly as the unnamed form's is, and a name the hook cannot resolve
+    refuses a member as SPD-043's command word does.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        for rel in ("tests/keep.py", "ledger/tickets/SPD-001.md"):
+            p = self.home.path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_the_tickets_evidence_command(self):
+        self.refused_for_members("coproc NAME { git push; }")
+        self.assertEqual(self.analysis("coproc NAME { git push; }").findings, [("git", ("push", "push"))])
+        self.assertEqual(self.analysis("coproc NAME { git status; }").findings, [("git", ("status", None))])
+
+    def test_every_compound_command_after_a_name(self):
+        for cmd in ("coproc NAME { git push; }", "coproc NAME { git push }", "coproc NAME ( git push )",
+                    "coproc NAME while true; do git push; done", "coproc NAME until false; do git push; done",
+                    "coproc NAME for i in 1; do git push; done", "coproc NAME select f in a; do git push; done",
+                    "coproc NAME if true; then git push; fi", "coproc NAME case x in x) git push;; esac",
+                    "coproc NAME { { git push; } }", "coproc NAME { git push; } 2>/dev/null",
+                    "coproc _n1 { git push; }", "coproc NAMe { git push; }", "coproc N2 { git push; }",
+                    "coproc NAME { sh -c 'git push'; }", "coproc NAME { eval 'git push'; }",
+                    "coproc NAME { trap 'git push' EXIT; }", "coproc NAME { for f in a; do git push; done; }"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_a_name_the_hook_cannot_resolve_is_refused(self):
+        for cmd in ("coproc $N { git push; }", "coproc ${N} { git push; }", "coproc $(echo NAME) { git push; }",
+                    "coproc `echo NAME` { git push; }"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "cannot resolve")
+        # a name the line assigned for certain resolves, and the group behind it is read
+        self.refused_for_members("N=NAME; coproc $N { git push; }")
+
+    def test_the_payloads_inside_a_named_group(self):
+        spud, home = self.spud_cli, self.home.path
+        self.refused_for_members("coproc NAME { %s ticket new --title x; }" % spud, "Law 6")
+        self.assertRefused("coproc NAME { %s --as %s member log hi; }" % (spud, AGENT_B), "--as", AGENT_A)
+        self.assertRefused("coproc NAME { %s --as %s member log hi; }" % (spud, AGENT_A), "Law 5", agent_id=None)
+        for agent_id in (AGENT_C, AGENT_A, None):  # the database is refused to everyone, Spud included
+            self.assertRefused("coproc NAME { sqlite3 %s/.spud/ledger.db 'select 1'; }" % home, "spud sql --readonly", agent_id)
+        self.assertRefused("coproc NAME { echo x > ledger/tickets/SPD-001.md; }", "generated")
+        self.assertRefused("coproc NAME { echo x > ledger/tickets/SPD-001.md; }", "Law 1", agent_id=None)
+        self.assertRefused("coproc NAME { echo x > note.txt; }", "deliverables")
+        self.assertSilent("coproc NAME { echo x > note.txt; }", AGENT_C)
+
+    def test_a_cd_in_the_group_never_reaches_the_line(self):
+        """The forked shell's directory is not the line's, as SPD-054 has it for the unnamed form."""
+        for cmd in ("coproc NAME { cd /tmp; }", "coproc NAME { cd /tmp }", "coproc NAME ( cd /tmp )",
+                    "coproc NAME { cd /tmp; git status; }"):
+            with self.subTest(cmd):
+                self.assertEqual(self.analysis(cmd).cwds, frozenset([str(self.home.path)]))
+        self.assertSilent("coproc NAME { cd /tmp; }; echo x > tests/keep.py")
+
+    def test_a_simple_command_named_by_the_word_is_read_as_before(self):
+        """`coproc word args` is a command named `word` in every shell, and an invalid identifier runs nothing anywhere."""
+        for ok in ("coproc NAME git push", "coproc NAME sh -c 'git push'", "coproc NAME echo x",
+                   "coproc 1bad { git push; }", "coproc na-me { git push; }", "coproc NAME.x { git push; }",
+                   "echo coproc NAME { git push; }", "grep -n 'coproc NAME' tests/keep.py",
+                   "%s --as %s member log 'coproc NAME { git push; }'" % (self.spud_cli, AGENT_A)):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+        self.assertEqual(self.analysis("coproc NAME git push").findings, [])
+
+    def test_the_unnamed_forms_are_unchanged(self):
+        for refused in ("coproc { git push; }", "coproc ( git push )", "coproc git push", "coproc sh -c 'git push'",
+                        "coproc repeat 1 git push", "coproc for f (a) git push", "coproc { trap 'git push' EXIT; }",
+                        "coproc while true; do git push; done"):
+            with self.subTest(refused):
+                self.refused_for_members(refused)
+        for cmd in ("coproc { cd /tmp; }", "coproc cd /tmp"):
+            with self.subTest(cmd):
+                self.assertEqual(self.analysis(cmd).cwds, frozenset([str(self.home.path)]))
+        for ok in ("coproc { echo hi; }", "coproc echo hi", "coproc git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+
+
 # =============================================================================
 # PreToolUse / Write|Edit|MultiEdit|NotebookEdit
 # =============================================================================
