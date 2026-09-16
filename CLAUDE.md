@@ -169,7 +169,7 @@ Open this repo as a vault and start at `ledger/Home.md`. Frontmatter and wikilin
 `spud` and `git` are the tools. There is no build; the test suite is `bin/spud`'s:
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests   # 842 tests, about nine minutes, leaves no bytecode
+python3.14 -I -S -m unittest discover -s tests -t tests   # 873 tests, about ten minutes, leaves no bytecode
 ```
 
 ```bash
