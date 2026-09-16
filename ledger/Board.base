@@ -179,3 +179,34 @@ views:
     columnSize:
       note.lead: 167
       note.proposed_by: 146
+basesVisuals:
+  schemaVersion: 7
+  options: {}
+  knownProperties: {}
+  propertyStrategies: {}
+  columnAppearances: {}
+  rules:
+    - id: parked-grey
+      name: Parked -> grey
+      enabled: true
+      propertyId: status
+      operator: equals
+      operand: parked
+      target: row
+      scope: base
+      color:
+        kind: custom
+        hex: "#9098a3"
+      backgroundOpacity: 25
+    - id: active-green
+      name: Active -> green
+      enabled: true
+      propertyId: status
+      operator: equals
+      operand: active
+      target: row
+      scope: base
+      color:
+        kind: custom
+        hex: "#4caf7d"
+      backgroundOpacity: 25
