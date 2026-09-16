@@ -10,6 +10,7 @@ created: YYYY-MM-DD
 tags: [ticket]
 ---
 <!-- the shape of a rendered ticket note: `spud render` writes ledger/tickets/SPD-nnn.md from the database; nobody edits the rendered file -->
+<!-- while parked (`ticket move --status parked --reason … [--until YYYY-MM-DD]`) the frontmatter carries `parked_until` and `parked_reason` right after `status`; every other note has neither -->
 # SPD-nnn — title
 
 ## Brief

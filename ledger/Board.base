@@ -1,5 +1,5 @@
 formulas:
-  status_rank: if(status == "active", 1, if(status == "queued", 2, if(status == "done", 3, 4)))
+  status_rank: if(status == "active", 1, if(status == "queued", 2, if(status == "parked", 3, if(status == "done", 4, 5))))
   Untitled: ""
 properties:
   file.name:
@@ -10,6 +10,10 @@ properties:
     displayName: Status
   priority:
     displayName: P
+  parked_until:
+    displayName: Until
+  parked_reason:
+    displayName: Why
   title:
     displayName: Title
   lead:
@@ -31,6 +35,7 @@ views:
             - file.inFolder("ledger/_templates")
         - file.inFolder("ledger/tickets")
         - status != "done"
+        - status != "parked"
     groupBy:
       property: status
       direction: ASC
@@ -64,7 +69,7 @@ views:
         - not:
             - file.inFolder("ledger/_templates")
         - file.inFolder("ledger/tickets")
-        - '!status.containsAny("done", "declined")'
+        - '!status.containsAny("done", "declined", "parked")'
     groupBy:
       property: project
       direction: ASC
@@ -96,6 +101,37 @@ views:
       note.title: 493
       note.lead: 140
       note.proposed_by: 146
+  - type: table
+    name: Parked
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+        - file.inFolder("ledger/tickets")
+        - status == "parked"
+    groupBy:
+      property: project
+      direction: ASC
+    order:
+      - file.name
+      - project
+      - priority
+      - title
+      - parked_until
+      - parked_reason
+      - lead
+      - created
+    sort:
+      - property: priority
+        direction: ASC
+      - property: parked_until
+        direction: ASC
+      - property: file.name
+        direction: ASC
+    columnSize:
+      note.title: 420
+      note.parked_reason: 360
+      note.lead: 140
   - type: table
     name: Reports
     filters:
