@@ -147,6 +147,11 @@ class ProjectEditRemoveTest(RepoMixin, SpudTestCase):
         proc = self.cli("project", "remove", "badtakes", actor="spud", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn(t["key"], proc.stderr)
+        self.cli("ticket", "move", t["key"], "--status", "parked", "--reason", "Eric's go", actor="spud")
+        proc = self.cli("project", "remove", "badtakes", actor="spud", check=False)  # SPD-096: parked is open
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn(t["key"], proc.stderr)
+        self.cli("ticket", "move", t["key"], "--status", "active", actor="spud")
         self.cli("ticket", "move", t["key"], "--status", "done", actor="spud")
         out = self.cli_json("project", "remove", "badtakes", actor="spud")
         self.assertTrue(out["archived"])

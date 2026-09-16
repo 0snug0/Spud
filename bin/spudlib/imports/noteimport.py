@@ -38,9 +38,13 @@ def store_prose_if_needed(con, entity, entity_id, section, text, rendered_from_r
     return True
 
 
-def ticket_layout(fm_keys, section_names):
+def ticket_layout(fm_keys, section_names, parked=False):
+    """The file's own key and section order, stored only where it differs from the template's.  The two parked
+    properties are in the template's order only while the ticket is parked (SPD-096), as `## Blocked` is on a member
+    note: a note that is not parked has neither, and still needs no layout of its own."""
+    default = list(kernel.TICKET_FM_KEYS) if parked else [k for k in kernel.TICKET_FM_KEYS if k not in kernel.PARKED_FM_KEYS]
     layout = {}
-    if fm_keys != kernel.TICKET_FM_KEYS:
+    if fm_keys != default:
         layout["fm_keys"] = fm_keys
     if section_names != kernel.TICKET_SECTIONS:
         layout["sections"] = section_names
@@ -92,7 +96,10 @@ def import_ticket_file(ctx, con, at, path, rel):
         con, at, "import", project, fm["title"], fm["priority"], fm["status"], origin=fm["origin"],
         brief=sections.get("Brief", ""), sizing=sections.get("Size, persona and model decision", ""),
         outcome=sections.get("Outcome", ""), tags=tags, heading=heading, created_at=fm["created"],
-        number=int(m.group(2)), layout=ticket_layout(list(fm.keys()), names),
+        number=int(m.group(2)), layout=ticket_layout(list(fm.keys()), names, fm["status"] == "parked"),
+        # SPD-096: an export from before the parked status has neither key, so require_keys does not grow; the CHECKs
+        # of migration 0003_parked refuse one that says parked with no reason, which is the right refusal
+        parked_until=fm.get("parked_until") or None, parked_reason=fm.get("parked_reason") or None,
     )
     # the file carries one date: updated_at takes it (closed_at stays NULL; the file has no close time)
     return {"ticket": t, "fm": fm, "sections": doc["sections"], "rel": rel, "derived": {"updated_at": "created"}}

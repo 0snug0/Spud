@@ -19,7 +19,7 @@ EXIT_TRANSITION = 5
 EXIT_CONFLICT = 6
 
 PRIORITIES = ("P0", "P1", "P2", "P3")
-TICKET_STATUSES = ("queued", "active", "done", "declined")
+TICKET_STATUSES = ("queued", "active", "parked", "done", "declined")
 MEMBER_STATUSES = ("planned", "active", "done", "blocked", "failed")
 MODELS = ("fable", "opus", "sonnet", "haiku")
 PERSONAS = ("researcher", "architect", "reviewer", "engineer", "designer", "writer", "scout", "contractor")
@@ -31,6 +31,15 @@ TICKET_TRANSITIONS = {
     ("active", "done"),
     ("queued", "declined"),
     ("active", "queued"),
+    # parked (SPD-096): important but deliberately not-now.  Reached from the queue and from work in hand, left for
+    # either or declined, and renewed in place with a new reason or date; never `done`, since nothing was done while
+    # parked — a wait that ends goes through `active`.
+    ("queued", "parked"),
+    ("active", "parked"),
+    ("parked", "queued"),
+    ("parked", "active"),
+    ("parked", "declined"),
+    ("parked", "parked"),
 }
 MEMBER_TRANSITIONS = {
     ("planned", "active"),
@@ -54,7 +63,9 @@ EVENT_KINDS = (
 
 # The markdown-v0 templates (ledger/_templates/) as the renderer's default layout.  `project` since SPD-014: every
 # note names its project, the home's included, so the Obsidian views group and filter without an empty bucket.
-TICKET_FM_KEYS = ["id", "title", "priority", "status", "origin", "project", "proposed_by", "lead", "created", "tags"]
+TICKET_FM_KEYS = ["id", "title", "priority", "status", "parked_until", "parked_reason", "origin", "project", "proposed_by", "lead", "created", "tags"]
+# The two a ticket note carries only while it is parked (SPD-096); every other note drops them.
+PARKED_FM_KEYS = ("parked_until", "parked_reason")
 TICKET_SECTIONS = ["Brief", "Size, persona and model decision", "Team", "Handoffs", "Proposals received", "Outcome"]
 MEMBER_SECTIONS = ["Brief", "Log", "Sub-agents", "Ticket proposals", "Result", "Blocked", "Outcome"]
 TICKET_COLUMN_SECTIONS = {"Brief": "brief", "Size, persona and model decision": "sizing", "Outcome": "outcome"}

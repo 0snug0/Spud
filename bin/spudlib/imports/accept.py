@@ -69,6 +69,10 @@ TICKET_SECTION_COMMANDS = {
 }
 MEMBER_OWN_SECTIONS = {"Log": "spud member log", "Result": "spud member result", "Blocked": "spud member block"}
 MEMBER_SECTION_COMMANDS = {"Sub-agents": "spud member new", "Ticket proposals": "spud proposal file"}
+# SPD-096: the status and the two properties that qualify it move together, and only through the command that carries
+# the reason; a hand edit has nowhere to put one, and the database's CHECKs would refuse half the change anyway.
+PARKED_BY_COMMAND = ("parked is set and cleared by `spud ticket move --status parked --reason …` and"
+                     " `ticket move --status queued|active|declined`; a hand edit cannot carry the reason")
 
 
 def accept_ticket_edit(ctx, con, at, t, base, doc, rel):
@@ -85,6 +89,8 @@ def accept_ticket_edit(ctx, con, at, t, base, doc, rel):
             refuse(rel, "lead is not editable by hand; the first member planned with `spud member new` is the lead")
         if key == "created":
             refuse(rel, "created is not editable by hand; timestamps come from the clock")
+        if key in kernel.PARKED_FM_KEYS:
+            refuse(rel, PARKED_BY_COMMAND)
     if list(fm.keys()) != list(base_fm.keys()):
         refuse(rel, "the order of the properties is generated; put them back as rendered")
     title_changed = "title" in keys
@@ -105,6 +111,8 @@ def accept_ticket_edit(ctx, con, at, t, base, doc, rel):
         updates["tags"] = json.dumps(tags)
     status_change = None
     if "status" in keys:
+        if "parked" in (t["status"], fm.get("status")):
+            refuse(rel, PARKED_BY_COMMAND)
         if fm.get("status") not in kernel.TICKET_STATUSES:
             refuse(rel, "status %r is not one of %s" % (fm.get("status"), ", ".join(kernel.TICKET_STATUSES)))
         ops.check_transition("tickets", t["status"], fm["status"], t["key"])

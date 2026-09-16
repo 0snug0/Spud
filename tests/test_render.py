@@ -46,6 +46,7 @@ class RenderShapeTest(SpudTestCase):
         )
         self.assertEqual(body[0], MARKER)
         self.assertEqual(body[1], "# SPD-001 — Shape")
+        self.assertNotIn("parked", "\n".join(fm))  # SPD-096: a note that is not parked carries neither key
         headings = [l for l in body if l.startswith("## ")]
         self.assertEqual(
             headings,
@@ -71,6 +72,45 @@ class RenderShapeTest(SpudTestCase):
             ),
         )
         self.assertTrue(text.endswith("\n"))
+
+    def test_a_parked_ticket_note_carries_the_two_keys_and_no_other_note_changes(self):
+        """SPD-096 section 4.3: parked_until and parked_reason render after status while the ticket is parked, and only
+        then; the migration and the render after it change no other note."""
+        t = self.new_ticket("Publish the label", priority="P2")
+        other = self.new_ticket("Untouched", priority="P3")
+        out = self.home.path / "out"
+        self.home.json("render", "--out", out)
+        note, elsewhere = out / "ledger" / "tickets" / "SPD-001.md", out / "ledger" / "tickets" / "SPD-002.md"
+        before = elsewhere.read_text(encoding="utf-8")
+        queued = note.read_text(encoding="utf-8")
+        self.home.json("ticket", "move", t["key"], "--status", "parked", "--reason", "App Store approval of iOS 1.0",
+                       "--until", "2026-10-16", actor="spud")
+        self.home.json("render", "--out", out)
+        fm, _ = frontmatter(note.read_text(encoding="utf-8"))
+        self.assertEqual(fm, [
+            "id: SPD-001",
+            'title: "Publish the label"',
+            "priority: P2",
+            "status: parked",
+            "parked_until: 2026-10-16",
+            'parked_reason: "App Store approval of iOS 1.0"',
+            "origin: eric",
+            "project: spud",
+            'proposed_by: ""',
+            'lead: ""',
+            "created: " + t["created_at"][:10],
+            "tags: [ticket]",
+        ])
+        self.assertEqual(elsewhere.read_text(encoding="utf-8"), before)  # no other note changes a byte
+        # parked with no date: the key stays, empty, as spawned and finished do on a member note
+        self.home.json("ticket", "move", t["key"], "--status", "parked", "--reason", "Eric's go", actor="spud")
+        self.home.json("render", "--out", out)
+        self.assertIn('\nparked_until: ""\nparked_reason: "Eric\'s go"\n', note.read_text(encoding="utf-8"))
+        # unparked, the note loses both keys and is what it was before it was ever parked
+        self.home.json("ticket", "move", t["key"], "--status", "queued", actor="spud")
+        self.home.json("render", "--out", out)
+        self.assertEqual(note.read_text(encoding="utf-8"), queued)
+        self.assertEqual(elsewhere.read_text(encoding="utf-8"), before)
 
     def test_member_file_shape_through_its_life(self):
         t = self.new_ticket("Life")
@@ -494,6 +534,31 @@ class HandEditAllowlistTest(SpudTestCase):
         shown = self.home.json("ticket", "show", self.t["key"])["ticket"]
         self.assertEqual(shown["status"], "done")
         self.assertRegex(shown["closed_at"], r"^\d{4}-\d{2}-\d{2}T")
+
+    def test_parked_is_never_reached_or_left_by_hand(self):
+        """SPD-096 section 4.3: the status and the two properties that qualify it move only through `ticket move`."""
+        self.edit(self.ticket_path, "status: queued", "status: parked")
+        proc = self.home.run("import", "--file", self.ticket_path, actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("parked is set and cleared by `spud ticket move --status parked --reason", proc.stderr)
+        self.assertEqual(self.home.json("ticket", "show", self.t["key"])["ticket"]["status"], "queued")
+        self.restore(self.ticket_path)
+        # from a parked note: unparking by hand, and editing either property, are refused the same way
+        self.home.json("member", "start", self.lead["ref"], actor="spud")
+        self.home.json("member", "finish", self.lead["ref"], "--status", "done", "--outcome", "ok", actor="spud")
+        self.home.json("member", "finish", self.child["ref"], "--status", "failed", "--outcome", "never spawned", actor=self.lead["ref"])
+        self.home.json("ticket", "move", self.t["key"], "--status", "parked", "--reason", "Eric's go", "--until", "2026-10-16", actor="spud")
+        self.home.json("render")
+        for old, new in (("status: parked", "status: queued"), ("parked_until: 2026-10-16", "parked_until: 2026-11-16"),
+                         ('parked_reason: "Eric\'s go"', 'parked_reason: "my own words"')):
+            with self.subTest(old):
+                self.edit(self.ticket_path, old, new)
+                proc = self.home.run("import", "--file", self.ticket_path, actor="spud", check=False)
+                self.assertEqual(proc.returncode, EXIT_ERROR, proc.stderr)
+                self.assertIn("a hand edit cannot carry the reason", proc.stderr)
+                self.restore(self.ticket_path)
+        shown = self.home.json("ticket", "show", self.t["key"])["ticket"]
+        self.assertEqual((shown["status"], shown["parked_until"], shown["parked_reason"]), ("parked", "2026-10-16", "Eric's go"))
 
     def test_member_status_goes_through_the_state_machine(self):
         self.edit(self.member_path, "status: planned", "status: done")

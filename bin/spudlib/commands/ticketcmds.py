@@ -13,7 +13,12 @@ from ..state import actors, ledgerdb, lookup, ops
 # the record they make: ticket new, ticket move, ticket edit when --priority changes the priority, member
 # finish of a root member, and proposal decide.  The title is generated and the body is `- ` lines; Spud
 # types only the Next line, with --next.  `report add` stays for what no command records (a merge, an install).
-TICKET_MOVE_VERBS = {"active": "started", "done": "done", "queued": "queued", "declined": "declined"}
+TICKET_MOVE_VERBS = {"active": "started", "done": "done", "queued": "queued", "parked": "parked", "declined": "declined"}
+
+
+def parked_tail(until, reason):
+    """What follows the word `parked` wherever one line carries it: ` until 2026-10-16: <reason>`, else `: <reason>`."""
+    return ((" until " + until) if until else "") + ": " + (reason or "")
 
 
 def cmd_ticket_new(ctx, args):
@@ -58,21 +63,43 @@ def cmd_ticket_move(ctx, args):
         actor = actors.resolve_actor(con, args.actor)
         actors.require_spud(con, actor, "moving a ticket")
         reportentry.check_next(con, actor, args)
+        # SPD-096: the reason qualifies the status, so it is required to park and refused to anything else, both before
+        # a row is read.  --reason on any other move keeps its old meaning: a note in the event body, stored nowhere.
+        parked = args.status == "parked"
+        if parked and not (args.reason or "").strip():
+            raise kernel.SpudError(kernel.EXIT_USAGE, "`--status parked` needs `--reason`: why it is parked"
+                            " (and `--until YYYY-MM-DD` when an outside event should bring it back)")
+        if args.until and not parked:
+            raise kernel.SpudError(kernel.EXIT_USAGE, "`--until` goes with `--status parked`")
         at = kernel.now()
         with ledgerdb.write_txn(con):
             t = lookup.get_ticket(con, args.key)
             ops.check_transition("tickets", t["status"], args.status, t["key"])
+            if parked:  # the brief board shows live members under active tickets alone, so a parked ticket has none
+                alive = [r["name"] for r in con.execute(
+                    "SELECT name FROM members WHERE ticket_id = ? AND status IN ('planned','active') ORDER BY lineage", (t["id"],)).fetchall()]
+                if alive:
+                    raise kernel.SpudError(kernel.EXIT_ERROR, "%s has %d member%s alive (%s); finish or fail them before parking it"
+                                    % (t["key"], len(alive), "" if len(alive) == 1 else "s", ", ".join(alive)))
             closed = at if args.status in ("done", "declined") else None
-            con.execute("UPDATE tickets SET status = ?, updated_at = ?, closed_at = ? WHERE id = ?", (args.status, at, closed, t["id"]))
-            ledgerdb.write_event(con, at, actor.label, "ticket.status", "%s %s -> %s%s" % (t["key"], t["status"], args.status, (": " + args.reason) if args.reason else ""),
-                        ticket_id=t["id"], data={"from": t["status"], "to": args.status})
+            # one statement, because the CHECKs of migration 0003_parked read status, parked_until and parked_reason as one row
+            con.execute("UPDATE tickets SET status = ?, parked_until = ?, parked_reason = ?, updated_at = ?, closed_at = ? WHERE id = ?",
+                        (args.status, args.until if parked else None, args.reason if parked else None, at, closed, t["id"]))
+            data = {"from": t["status"], "to": args.status}
+            if parked:
+                data.update(until=args.until, reason=args.reason)
+            tail = parked_tail(args.until, args.reason) if parked else ((": " + args.reason) if args.reason else "")
+            ledgerdb.write_event(con, at, actor.label, "ticket.status", "%s %s -> %s%s" % (t["key"], t["status"], args.status, tail),
+                        ticket_id=t["id"], data=data)
             entry = reportentry.write_report_entry(con, at, "%s %s: %s" % (t["key"], TICKET_MOVE_VERBS[args.status], t["title"]),
-                                       "ticket move", t["id"], next_line=args.next)
+                                       "ticket move", t["id"], lines=["parked" + parked_tail(args.until, args.reason)] if parked else (),
+                                       next_line=args.next)
             t = lookup.get_ticket_by_id(con, t["id"])
         d = lookup.ticket_dict(con, t)
     finally:
         con.close()
-    return reportentry.with_report_entry({"ticket": d}, "%s is now %s" % (d["key"], d["status"]), entry)
+    text = "%s is now %s" % (d["key"], d["status"]) + (parked_tail(d["parked_until"], d["parked_reason"]) if parked else "")
+    return reportentry.with_report_entry({"ticket": d}, text, entry)
 
 
 def cmd_ticket_edit(ctx, args):
@@ -122,6 +149,8 @@ def cmd_ticket_edit(ctx, args):
 def format_ticket(d):
     lines = ["%s (%s) %s %s: %s" % (d["key"], d["team_key"], d["status"], d["priority"], d["title"])]
     lines.append("origin: %s%s   lead: %s   created: %s" % (d["origin"], (" by " + d["proposed_by"]) if d["proposed_by"] else "", d["lead"] or "-", d["created_at"]))
+    if d["status"] == "parked":
+        lines.append("parked" + parked_tail(d["parked_until"], d["parked_reason"]))
     for name, key in (("Brief", "brief"), ("Size, persona and model decision", "sizing"), ("Outcome", "outcome")):
         if d[key]:
             lines.append("")

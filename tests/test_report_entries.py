@@ -116,7 +116,9 @@ class TicketEntryTest(EntryCase):
         t = self.new_ticket("Flow")
         for status, verb, extra, body in (
             ("active", "started", ["--next", "An engineer builds it."], ["- Next: An engineer builds it."]),
-            ("queued", "queued", ["--reason", "Eric parked it."], []),
+            ("queued", "queued", ["--reason", "Eric shelved it."], []),
+            # SPD-096: a park's entry carries the reason, so the day's report says why the ticket left the queue
+            ("parked", "parked", ["--reason", "Eric's go", "--until", "2026-10-16"], ["- parked until 2026-10-16: Eric's go"]),
             ("active", "started", [], []),
             ("done", "done", ["--next", "Nothing left."], ["- Next: Nothing left."]),
         ):

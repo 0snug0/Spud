@@ -65,6 +65,38 @@ Do it.
 """
 
 
+# SPD-096: a ticket exported while parked carries the two properties that qualify the status, right after it.
+PARKED_TICKET = """---
+id: SPD-002
+title: "Publish the label"
+priority: P2
+status: parked
+parked_until: 2026-10-16
+parked_reason: "App Store approval of iOS 1.0"
+origin: eric
+project: spud
+proposed_by: ""
+lead: ""
+created: 2026-09-14
+tags: [ticket]
+---
+# SPD-002 — Publish the label
+
+## Brief
+Waiting on the store.
+
+## Size, persona and model decision
+
+## Team
+
+## Handoffs
+
+## Proposals received
+
+## Outcome
+"""
+
+
 class SyntheticImportTest(SpudTestCase):
     def write_tree(self):
         root = self.home.path / "corpus"
@@ -100,6 +132,32 @@ class SyntheticImportTest(SpudTestCase):
             if want_team is not None:
                 # ## Team is generated from the members table (SPD-010): compared by the spec's rule
                 self.assertEqual(team_section_problems(want_team, got_team), [], rel)
+
+
+    def test_a_parked_ticket_round_trips_and_one_without_a_reason_is_refused(self):
+        from helpers import normalize_markdown
+
+        root = self.write_tree()
+        (root / "ledger" / "tickets" / "SPD-002.md").write_text(PARKED_TICKET, encoding="utf-8")
+        self.assertEqual(self.home.json("import", root)["tickets"], 2)
+        d = self.home.json("ticket", "show", "SPD-002")["ticket"]
+        self.assertEqual((d["status"], d["parked_until"], d["parked_reason"]),
+                         ("parked", "2026-10-16", "App Store approval of iOS 1.0"))
+        out = self.home.path / "out"
+        self.home.json("render", "--out", out)
+        self.assertEqual(normalize_markdown((out / "ledger" / "tickets" / "SPD-002.md").read_text(encoding="utf-8")),
+                         normalize_markdown(PARKED_TICKET))
+        # the two keys are the template's order while parked, so the file needs no layout of its own
+        self.assertIsNone(self.home.scalar("SELECT layout FROM tickets WHERE key = 'SPD-002'"))
+        # an export that says parked with no reason is refused by the CHECK of migration 0003_parked
+        bad = self.home.path / "corpus-bad"
+        (bad / "ledger" / "tickets").mkdir(parents=True)
+        (bad / "ledger" / "tickets" / "SPD-003.md").write_text(
+            PARKED_TICKET.replace("SPD-002", "SPD-003").replace('parked_reason: "App Store approval of iOS 1.0"\n', ""), encoding="utf-8")
+        proc = self.home.run("import", bad, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("CHECK", proc.stderr)
+        self.assertIsNone(self.home.scalar("SELECT id FROM tickets WHERE key = 'SPD-003'"))
 
 
 if __name__ == "__main__":
