@@ -103,6 +103,8 @@ numbers, and anything in the design note you found to be wrong.
 
 ## Log
 - 2026-09-16T09:24 Read the design note in full, the spudlib-modules skill, and the twelve files section 5 names. Starting step 1: schema and migration, tests first.
+- 2026-09-16T09:38 Steps 1-6 built. Design-note correction: DDL_0002 had to gain DROP VIEW v_board/v_fleet too — apply_migrations runs the newest VIEWS_AND_TRIGGERS after every migration, so on a fresh init v_board names parked_until before 0003 adds it, and 0002's ALTER TABLE events_new RENAME re-parses every view and fails. The note's probe only ran the 0003 DDL, not the 0001-0002-0003 chain. Targeted suites green: migrate_parked, tickets, report_entries, render, import, sessions, projects.
+- 2026-09-16T09:43 Second correction the design note misses: with parked_until and parked_reason in TICKET_FM_KEYS, imports/noteimport.ticket_layout stored an fm_keys layout for every unparked note that round-trips (test_heading_round_trip caught it). ticket_layout now takes parked and builds the conditional default, exactly as member_layout does for ## Blocked. Manual end-to-end in a scratch home matches every example in section 3 of the note.
 
 ## Sub-agents
 
