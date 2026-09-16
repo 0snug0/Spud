@@ -19,6 +19,12 @@ hooks: `spud hook <event>` is the harness's entry point (payload on stdin, answe
        Enforcing hooks fail closed (exit 2), recording hooks fail open (spool, then
        hook.error events).  Inspect the database with `spud sql --readonly '<statement>'`.
 
+deliverable globs (--deliverable): repository-relative, no leading slash and no `..`;
+       `*` and `?` match inside one path segment, `**` crosses segments, a trailing `/`
+       means everything under that directory, and `<key>:` in front names another
+       project's checkout.  Every other character is literal, brackets included: write
+       a Next.js segment plainly, admin/src/app/accounts/[email]/** (SPD-086).
+
 text values: an option value of @path reads the file, @- reads stdin.
 exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,
             5 transition refused, 6 render conflict (hand-edited file).
