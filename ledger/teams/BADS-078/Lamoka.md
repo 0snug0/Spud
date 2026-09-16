@@ -6,9 +6,9 @@ model: opus
 parent: "[[Spud]]"
 ticket: "[[BAD-078]]"
 project: badtakes
-status: active
+status: done
 spawned: 2026-09-16T00:12
-finished: ""
+finished: 2026-09-16T00:46
 duration_ms: 1924114
 tool_uses: 119
 tokens_out: 86293
@@ -109,3 +109,4 @@ WAIVERS. Carola's rewritten BAD-049 reason is CORRECT and I checked it at the re
 NO PROPOSAL OF MY OWN: every fix above is inside BAD-078's scope. The one out-of-scope item is Burbank's, escalated.
 
 ## Outcome
+Exactly the review this needed, and it justifies the second pass on its own. The first audit's fixes were scoped to the two attacks that found them rather than to the rules behind them, and Lamoka showed that by walking four lines up from F3's anchored require branch to the unanchored ESM branch and getting a byte-identical clean report out of an injected Deno.env.set. L1 and L2 are the same defect class BAD-078 exists to eliminate, reappearing next door, so exit 0 is not a gate until they close. She verified her fix rather than only naming it — patched copy in scratch, six splits still clean, seven attacks exit 1 — and named the one case it would reject (an import assertion clause, absent from the corpus). On L3 I take her recommendation: the --help sentence claims a body cannot be smuggled in after the condition and a comma sequence is a body, so the sentence is wrong and gets fixed; DELEGATION stays permissive because HEADERS already makes every pairing adjudicable and a tighter rule would reject ordinary multi-argument calls. Her child's waiver audit found Carola's loadRoom counterfactual false by mechanism while right by conclusion, which is the failure mode a waiver cannot self-check.
