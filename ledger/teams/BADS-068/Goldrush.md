@@ -37,6 +37,7 @@ The comment you write in `gate.ts` replaces an apology with a fact. The old one 
 
 ## Log
 - 2026-09-15T22:52 Baseline recorded before touching anything. `deno check --node-modules-dir=none server/supabase/functions/collab/index.ts` in the worktree prints exactly three errors, all TS7006 implicit-any parameters in collab/info.ts: 'm' at :73:27, 'c' at :88:25, 't' at :99:23 — 'Found 3 errors.', exit 1. No TS2345 on main.
+- 2026-09-15T22:54 Swept the tree for stale references to the removed reason: the only one is gate.ts:31-38 itself. browse.ts:64-67 points at cleanDisplay's *storage fallback* (a behaviour statement, still true after this change), not at the `any`; no other comment, doc or skill mentions TS2345 / 'no JSDoc' / 'untyped licence row'. So browse.ts likely needs no edit.
 
 ## Sub-agents
 
