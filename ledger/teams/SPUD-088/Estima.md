@@ -6,9 +6,9 @@ model: opus
 parent: "[[Spud]]"
 ticket: "[[SPD-088]]"
 project: spud
-status: active
+status: done
 spawned: 2026-09-15T23:35
-finished: ""
+finished: 2026-09-16T00:34
 duration_ms: 3448697
 tool_uses: 110
 tokens_out: 124856
@@ -67,7 +67,7 @@ Notes:
 ## Sub-agents
 
 ## Ticket proposals
-- **A spudagent in a worktree cannot probe a shell, so shell tickets have no fresh evidence** — suggested P3; open, with Spud.
+- **A spudagent in a worktree cannot probe a shell, so shell tickets have no fresh evidence** — suggested P3; created as [[SPD-094]] at P3 by Spud.
   Why: The shell modules' comments are built on probes ('probed in zsh 5.9 -f -o nobareglobqual and bash 3.2'), and briefs for them ask for the same ('name what you probed, in which shell, if you probe'). A spudagent working a code ticket is in a worktree, and the worktree-isolation harness refuses every command that runs zsh or bash, script file included, because what the shell reads cannot be shown not to run git. So the one member who is reading the shells' grammar is the one member who cannot ask them, and its comments either cite older recorded evidence or go unevidenced. Either the briefs should stop asking, or there should be a way to ask.
   Evidence: SPD-088, this worktree: 'zsh -f -o nobareglobqual <scratchpad>/shellprobe.sh' and 'bash --version' were both refused with 'runs zsh in a plain command; what it reads or is handed as shell text cannot be shown not to run git'. The script only ran arithmetic forms in a mktemp directory. The new ArithmeticCommandTest docstring says so in as many words and rests on the ticket's own recorded analyse_command evidence instead, where every sibling class in tests/test_hooks.py (SPD-039, SPD-042, SPD-045, SPD-061) names a live probe.
 
@@ -83,3 +83,4 @@ Verified: full suite 897 tests OK on the final tree (886 before, 11 new), run tw
 Left: nothing in the brief. Proposal 117 filed -- a spudagent in a worktree cannot run zsh or bash (the isolation harness refuses it), so the new test class cites the ticket's recorded evidence where every sibling class names a live probe. Code is uncommitted on worktree-spd-088-arith-command.
 
 ## Outcome
+Accepted. The fix lands where the ticket said it belonged and reuses the sentinel machinery rather than inventing a second one: arithmetic sentinels that deglob restores and GLOB_RE does not read, applied in both of mark_zsh_patterns' arithmetic branches and into both readings, so analyse_command's one-walk short circuit widens from 'marked == plain' to 'other == marked' and an arithmetic-only line still takes a single walk. The decision the brief asked for is made and pinned: several words for an arithmetic command, whose outer parentheses stay real for ShellWalk's frame and its for-header scan, one word for an expansion. Both boundaries it found are the right way round -- an expansion's leading dollar stays unmarked so SPD-043 still refuses '$((1)) push', and '(( x=1 ))' no longer recording x fails closed on a value that is a number and never a path. I re-ran the suite on the branch and probed analyse_command myself: the ticket's three forms, the for header, the shift and bitwise operators and 'x=$(( 1<2 )); (( 3 > 2 )) && echo y' all record no target, while '(( n > 2 )) > out.txt', '(( n > 2 )) && echo x > out.txt' and 'echo x > 2' still record theirs.
