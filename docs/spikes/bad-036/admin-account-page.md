@@ -292,6 +292,9 @@ node $S/verify-moves.cjs $S/page.old.tsx 'src/app/accounts/[email]/page.tsx' \
 - **JSX comments.** `verify-moves` does not see `{/* … */}` comments, and nothing renders them, so eyeball each in the diff; every one must travel with its block.
 
 **5. Render diff, the proof for the extraction.** The page is `force-dynamic`, so every request is a fresh server render.
+
+> **The normalisation below was corrected against BAD-054 PR 1's evidence** (BAD-074, BAD-070). The first draft stripped only `<script>` blocks and `relative()`'s outputs, which left three values that move on their own — the asset URLs, the Server Action ids and `countdown()` — in every document, so it failed on every run and could never reach a verdict about the split. This is the tested version; run it as written.
+
 - **Setup:** the local stack plus seed (`admin/README.md` § Local development: podman with `DOCKER_HOST`, or `npm run migrate` against any Postgres, then `npm run seed`).
 - **Before and after,** on the same machine and database:
   - `npm run build && npm run start` (port 3200)
@@ -305,17 +308,27 @@ node $S/verify-moves.cjs $S/page.old.tsx 'src/app/accounts/[email]/page.tsx' \
   for who in ada brody cass dev ekko fen gil hana ivo; do
     for q in 'tab=user' 'tab=logs' $(for m in scenes_imported scenes_created scenes_shared scenes_recorded takes_recorded takes_exported; do echo "tab=usage&metric=$m"; done); do
       curl -s -b "$COOKIE" "http://localhost:3200/accounts/$who@seed.badtakes.test?$q" \
-        | perl -0pe 's#<script\b.*?</script>##gs; s#\b(just now|\d+[mhd] ago)\b#AGE#g' \
+        | perl -0pe '
+            s#<script\b.*?</script>##gs;
+            s#/_next/static/[^"\s>]+#/_next/static/ASSET#g;
+            s#<input type="hidden" name="\$ACTION[^>]*>#<input type="hidden" name="ACTION"/>#g;
+            s#\b(just now|\d+[mhd] ago)\b#AGE#g;
+            s#\bin \d+h \d+m\b#AGE#g;
+            s#\bin \d+m\b#AGE#g;
+          ' \
         > "$S/render.$PHASE/$who.${q//[&=]/_}.html"
     done
   done
   diff -r $S/render.before $S/render.after
   ```
 
-- **Expected result:** no difference, across 9 accounts and 8 views. The accounts cover paid, free, both cooldowns, a shared licence, a refund, two licence rows, an empty account and a null `account_email`.
+- **Expected result:** `diff -r` prints nothing at all — every one of the 72 documents (9 accounts × 8 views) byte-identical. Any output is a failure; with the six rules above there is no expected noise left to read past. The accounts cover paid, free, both cooldowns, a shared licence, a refund, two licence rows, an empty account and a null `account_email`. What this check *cannot* see is in §10: a dropped `key` never reaches the HTML at all.
 - **Why the normalisation:**
-  - Scripts carry the build id and the RSC payload.
-  - `relative()` and `countdown()` read the clock (cass and dev are on cooldown).
+  - **Scripts** carry the build id and the RSC payload.
+  - **`/_next/static/` asset URLs** are content-hashed, and webpack's chunk ids shift as modules move, so splitting the page into a folder of modules changes every asset URL in the head. That is a build artifact, not a render difference. Collapsing the whole path (rather than just the hash) is deliberate: the chunk *names* move too.
+  - **The Server Action hidden inputs.** Every control is a `'use client'` form driven by `useActionState`, so React renders a bound action as `$ACTION_REF_<n>` plus `$ACTION_<n>:<i>` fields carrying the action id, alongside `$ACTION_KEY` (an unbound action renders `$ACTION_ID_<id>` instead). Those ids are minted fresh on every build: all twenty in `.next/server/server-reference-manifest.json` differ between two builds of the *same* source, including actions on pages this split never touches, and a control build of identical source at a second path reproduced exactly those differences and nothing else. The rule collapses each `$ACTION*` input to one token and leaves every other hidden input alone, so a control that stops rendering still shows up as a missing line.
+  - Those two rules are not optional tidying: without them, the asset URLs and the action ids alone produced **532 diff lines** on PR 1 — noise that arrives before the diff has said anything at all about the split.
+  - **`relative()` and `countdown()` read the clock.** cass and dev sit on the two cooldowns, so their pages carry a live countdown — `· next in 21h 4m`, or `in Nm` inside the last hour — that moves between the before and after captures. Both numeric forms are covered; the seeded cooldowns are about 21 hours out, so no capture crosses `countdown()`'s `now` boundary mid-run.
   - `admin/src` has no `useId` today; if one appears, also normalise `«r…»` ids, since the extraction adds component depth.
 
 **6. Hand check,** in `npm run dev`: open all three tabs for `gil` and `ekko`, and open one control dialog (Plan). The controls' props are unchanged, so this confirms only that they still hydrate.
@@ -352,12 +365,12 @@ Two PRs, because the two halves have different proofs: the move checker for move
   - **Adding `'use client'` to one of them** would pull `@/lib/shared` (`server-only`) into the client and fail the build, which is loud. But a client file that imported only `@/lib/format` or `@/lib/segments` would pass and ship those modules to the browser, which is quiet.
   - **The reverse direction.** A server file importing a non-component value from a client file reads `undefined` at render. admin-client-boundary catches that, and it has happened on this page. Never put `USAGE_RAIL`, `LOGS` or the stubs in a `'use client'` file.
 - **Props crossing into client components.** `JsonButton value={….raw}`, the controls' `email`, `licenseId`, `plan`, `status` and `preview`, and `Time iso` are unchanged values. Only the server component that passes them changes. Keep `raw` as the mapped plain object from `@/lib/accounts`, never a live Postgres row.
-- **Silent JSX drift.** The extraction is the one place a reviewer cannot rely on `verify-moves`:
-  - a dropped `key`
-  - a conditional wrapper (`claimed ? … : null`, `licenses.length > 1 ? … : null`) moved inside the component on one branch and left outside on another
-  - a JSX comment left behind
+- **Silent JSX drift.** The extraction is the one place a reviewer cannot rely on `verify-moves`. Three drifts, and each has exactly one check that sees it:
+  - **A conditional wrapper on the wrong side** (`claimed ? … : null`, `licenses.length > 1 ? … : null`), moved inside the component on one branch and left outside on another. **The render diff (§8 step 5) catches this.** Changing `licenses.length > 1` to `> 0` on a PR 1 build showed up immediately, on eight user tabs.
+  - **A dropped `key`.** **Only reading the diff catches this.** The render diff cannot, and it is not a matter of tuning the normalisation: React never writes a `key` into HTML, and the RSC payload that does carry one is inside the `<script>` blocks step 5 strips. Removing the `key` prop from the usage rail's `Link` on that same PR 1 build produced **zero** difference across every document in the run — while the wrong-side conditional above, in the same build, showed at once.
+  - **A JSX comment left behind.** **Only reading the diff catches this.** `verify-moves` does not see `{/* … */}` and nothing renders it.
 
-  The render diff catches the first two; only reading the diff catches the third.
+  On **PR 1**, `verify-moves` does catch a dropped `key`, but only because the declarations move whole and the checker compares their text. On **PR 2** it does not, because the ten new components are rebuilt rather than moved — so the `key` joins the JSX comment as a drift that **nothing but a human reading the diff will catch**. §8 step 4's block check and its JSX-comment eyeball are that reading; on PR 2 they are load-bearing, not a formality.
 - **`notFound()` and `requireAdmin()` order.** Both stay at the top of `AccountPage`. `notFound()` throws, and a sub-component must never call it after rendering has begun.
 - **Near-collision in names.** `_components/Controls.tsx` holds sections that wrap the client components in `@/components/AccountControls` and `@/components/ProfileControls`. Import those by the `@/components/…` alias, never relatively.
 - **What the build cannot see:** a render that differs, a component that fetches, and a JSX comment that went missing. Those are steps 5 and 6, and the pool rule above.
