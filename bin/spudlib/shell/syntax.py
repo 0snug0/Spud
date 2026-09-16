@@ -164,6 +164,59 @@ GIT_VERB_PROGRAM_OPTIONS = {
     "instaweb": (("--httpd", "--browser"), "db"),
     "web--browse": (("--browser", "--tool", "--config"), "btc"),
 }
+# SPD-049: what a git call writes beside the repository -- the environment and the options that name a file or directory
+# git creates or appends to, under a verb Law 7's table allows.  Each is checked with the path rule, like a redirection
+# target, against every directory the shell may be in; read by git_verbs.git_write_targets.
+#
+# The environment, probed on git 2.54.0 (Apple Git-157): every GIT_TRACE* variable set to an absolute path appended its
+# trace to that file (GIT_TRACE, GIT_TRACE_PERFORMANCE, GIT_TRACE_SETUP, GIT_TRACE_PACK_ACCESS, GIT_TRACE_REFS,
+# GIT_TRACE2, GIT_TRACE2_EVENT and GIT_TRACE2_PERF under a bare `git status`; the transport and packfile ones under
+# fetch, ls-remote and their kin), and GIT_TRACE2 pointed at a directory wrote one file per process inside it.  The
+# family is matched by its prefix, not by a list, so a sibling git adds is covered.  `0`, `1`, `2`, a small integer,
+# `true`, `false` and an empty value are a descriptor or off, and a relative value only warns ("unknown trace value for
+# 'GIT_TRACE'") and writes nothing, so only an absolute value (or a `~` the shell expanded before git saw it) is a file.
+GIT_TRACE_VAR_PREFIX = "GIT_TRACE"
+# The variables that name a path git writes whatever its shape: `GIT_INDEX_FILE=<file> git read-tree HEAD` wrote a 44 KB
+# index there and `GIT_OBJECT_DIRECTORY=<dir> git hash-object -w --stdin` a loose object under it (probed).
+GIT_WRITE_PATH_ENV_VARS = ("GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
+# `--output=<file>` is a diff option, so it is read on every verb rather than a list of them: probed opening its file
+# under diff, log, show, whatchanged, format-patch, range-diff, diff-tree, diff-index, diff-files and blame.  A verb that
+# does not take it errors ("unknown option") instead of writing, so reading it everywhere costs a refused path at worst.
+GIT_FILE_OPTIONS = ("--output",)
+# Per verb, the options that name a path git writes: (long options, short-option letters).  git's parse-options accepts
+# any unambiguous prefix of a long option and lets a short option carry its value attached or clustered (`-oF`, `-so D`,
+# probed), so a `--`-prefix of one of these and any cluster holding one of the letters is read as it, as SPD-046 reads a
+# program-naming option -- fail closed, at the price of an occasional cluster whose letter belonged to another option's
+# value.  `git init` and `git clone` make a directory wherever they are pointed too, but GIT_WRITE_VERBS refuses both to
+# a member whole and Spud's own `git init` is his, so they carry no entry.
+#
+# The list comes from `git <verb> -h` for every verb outside GIT_WRITE_VERBS, read for an option whose own help says git
+# writes what it names: archive and format-patch `-o`/`--output`/`--output-directory`, bugreport and diagnose `-o`
+# ("output-directory <path>"), checkout-index `--prefix` (probed: it wrote the whole tree there), mailsplit `-o<dir>`
+# ("directory in which to place the split mbox"), index-pack `-o <index-file>`, read-tree `--index-output <file>`
+# ("write resulting index to <file>"), fast-export `--export-marks <file>`, commit-graph and multi-pack-index
+# `--object-dir <dir>` (where git writes the graph and the index), repack `--expire-to`/`--filter-to <dir>` (packs) and
+# credential-store `--file <path>` ("fetch and store credentials in <path>").  An option that only reads a file it names
+# (`archive --add-file`, `grep -f`, `commit-tree -F`, `ls-files -X`) carries no entry.
+GIT_VERB_FILE_OPTIONS = {
+    "archive": (("--output",), "o"),
+    "format-patch": (("--output", "--output-directory"), "o"),
+    "bugreport": (("--output-directory",), "o"),
+    "diagnose": (("--output-directory",), "o"),
+    "checkout-index": (("--prefix",), ""),
+    "mailsplit": ((), "o"),
+    "index-pack": ((), "o"),
+    "read-tree": (("--index-output",), ""),
+    "fast-export": (("--export-marks",), ""),
+    "commit-graph": (("--object-dir",), ""),
+    "multi-pack-index": (("--object-dir",), ""),
+    "repack": (("--expire-to", "--filter-to"), ""),
+    "credential-store": (("--file",), ""),
+}
+# Per verb, (the subcommand the writing form takes or None, how many of its positional words name a path git writes):
+# `git bundle create <file> <rev-list-args>`, `git mailinfo <msg> <patch>` and `git pack-objects <base-name>` each wrote
+# what they name (probed; bundle create with `-q` and `--version=2` before the file too).
+GIT_VERB_FILE_POSITIONALS = {"bundle": ("create", 1), "mailinfo": (None, 2), "pack-objects": (None, 1)}
 BRANCH_READ_FLAGS = {"-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", "--all", "--remotes", "--verbose", "--color",
                      "--no-color", "--column", "--no-column", "-i", "--ignore-case", "--no-abbrev"}
 BRANCH_READ_VALUE_FLAGS = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--abbrev"}
@@ -206,6 +259,10 @@ class ShellAnalysis:
         # bash_reason can read the config in force at each target repository's local and worktree scopes.  Not a finding:
         # every git line has one, and the findings are the refusals a line has earned.
         self.git_calls = []
+        # SPD-049: one entry per file or directory a git call writes through an option or the environment, (the spelling
+        # a reason names it by, the target word as the line spells it, the directories the shell may be in when git
+        # opens it).  Checked in bash_reason with the path rule, like a redirection target, for every caller.
+        self.git_writes = []
         self.vars = {}
         self.cwds = frozenset([cwd]) if cwd else None
         self.unparseable = False

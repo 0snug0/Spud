@@ -152,6 +152,12 @@ def is_git_repo_var(name):
     return name in GIT_REPO_ENV_VARS
 
 
+def is_git_write_var(name):
+    """A variable that names a file or directory git writes -- a GIT_TRACE* sibling, GIT_INDEX_FILE,
+    GIT_OBJECT_DIRECTORY (SPD-049) -- so `env GIT_TRACE=... git ...` must record it into a.vars."""
+    return name.startswith(syntax.GIT_TRACE_VAR_PREFIX) or name in syntax.GIT_WRITE_PATH_ENV_VARS
+
+
 def git_env_defines_alias(variables):
     """The name of a variable in force that gives git config the hook cannot resolve (a file GIT_CONFIG, GIT_CONFIG_GLOBAL or
     GIT_CONFIG_SYSTEM points at; GIT_CONFIG_COUNT/GIT_CONFIG_KEY_n/GIT_CONFIG_VALUE_n and GIT_CONFIG_PARAMETERS set inline;
