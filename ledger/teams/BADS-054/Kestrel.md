@@ -115,6 +115,7 @@ result.
 
 ## Log
 - 2026-09-15T21:12 Read the spike (sections 1-10) as on disk; PR1 tree confirmed in the worktree: page.tsx 154 lines, 3 _lib, 5 _components, UserTab.tsx 558 lines. Next: the verification scripts and admin docs.
+- 2026-09-15T21:20 Split done: FlagsPanel/AccountCards/Controls/UserTables created, UserTab reduced to 147 lines (all 12 destructured names still used, so no trim was needed; lint shows no unused-vars). Steps 1-4 green: verify exit 0, 11 admin tests pass 0 skip, export diff empty, move check prints exactly 'CODE MISSING 1->0 UserTab' + 11 CODE ADDED and NO COMMENT LOST/ADDED, and all ten block diffs are wrapper-only additions. Hand check: 7 keys old = 7 keys new (same set), 6 JSX comments old = 6 new. Next: step 5 render diff.
 
 ## Sub-agents
 
