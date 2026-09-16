@@ -117,6 +117,7 @@ No `git commit`, `add`, `push`, `checkout`, `switch`, `rebase`, `stash` or any o
 - 2026-09-15T23:40 Tool + tests green: 25/25 in test/movecheck.test.js, all six corpus splits clean, both perturbations bite. Two findings while testing. (1) My first perturbation-1 attempt deleted new index.ts lines 22-63 rather than the doc's real home at new 15-56 — the tool was right and my test was wrong; the test now locates the doc by TEXT. (2) The corpus exposed a genuine weakness: a one-line region has no contiguity behind it, so three bare '//' separators find single-line matches in other modules' banners. Added an ISOLATED category rather than hiding them among 'moved' — named, counted and printed, and the perturbation now reports 39 unaccounted + 3 isolated = all 42 accounted for out loud. Also found a real semantic change inside landed BAD-049: old web-api.js:916 'containerMode && ...' became 'inContainer() && ...' (a load-time capture became a live read). Waived with that reason, not swept up.
 
 ## Sub-agents
+- [[BADS-078/Russet|Russet]] (01.01, reviewer, opus)
 
 ## Ticket proposals
 
