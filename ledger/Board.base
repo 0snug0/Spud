@@ -27,6 +27,57 @@ properties:
   file.mtime:
     displayName: Updated
 views:
+  - type: bases
+    name: By project
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+        - file.inFolder("ledger/tickets")
+        - '!status.containsAny("done", "declined")'
+    groupBy:
+      property: project
+      direction: ASC
+    order:
+      - file.name
+      - status
+      - priority
+      - title
+      - lead
+      - proposed_by
+      - origin
+      - created
+      - formula.Untitled
+      - tags
+    sort:
+      - property: status
+        direction: ASC
+      - property: priority
+        direction: ASC
+      - property: file.name
+        direction: ASC
+      - property: formula.status_rank
+        direction: ASC
+    columnSize:
+      note.project: 103
+      note.status: 76
+      note.priority: 66
+      note.title: 493
+      note.lead: 140
+      note.proposed_by: 146
+    pillProperties:
+      - status
+      - priority
+    verticalLines: true
+    pinnedColors:
+      - parked=red
+      - queued=yellow
+      - active=green
+      - P1=red
+      - P2=orange
+      - P3=yellow
+    columnWidths:
+      note.title: 386.0078125
   - type: table
     name: Board
     filters:
@@ -61,45 +112,6 @@ views:
     columnSize:
       note.title: 673
       note.lead: 193
-      note.proposed_by: 146
-  - type: table
-    name: By project
-    filters:
-      and:
-        - not:
-            - file.inFolder("ledger/_templates")
-        - file.inFolder("ledger/tickets")
-        - '!status.containsAny("done", "declined")'
-    groupBy:
-      property: project
-      direction: ASC
-    order:
-      - file.name
-      - project
-      - status
-      - priority
-      - title
-      - lead
-      - proposed_by
-      - origin
-      - created
-      - formula.Untitled
-      - tags
-    sort:
-      - property: status
-        direction: ASC
-      - property: priority
-        direction: ASC
-      - property: file.name
-        direction: ASC
-      - property: formula.status_rank
-        direction: ASC
-    columnSize:
-      note.project: 103
-      note.status: 76
-      note.priority: 66
-      note.title: 493
-      note.lead: 140
       note.proposed_by: 146
   - type: table
     name: Parked
@@ -179,34 +191,5 @@ views:
     columnSize:
       note.lead: 167
       note.proposed_by: 146
-basesVisuals:
-  schemaVersion: 7
-  options: {}
-  knownProperties: {}
-  propertyStrategies: {}
-  columnAppearances: {}
-  rules:
-    - id: parked-grey
-      name: Parked -> grey
-      enabled: true
-      propertyId: status
-      operator: equals
-      operand: parked
-      target: row
-      scope: base
-      color:
-        kind: custom
-        hex: "#9098a3"
-      backgroundOpacity: 25
-    - id: active-green
-      name: Active -> green
-      enabled: true
-      propertyId: status
-      operator: equals
-      operand: active
-      target: row
-      scope: base
-      color:
-        kind: custom
-        hex: "#4caf7d"
-      backgroundOpacity: 25
+  - type: bases
+    name: B
