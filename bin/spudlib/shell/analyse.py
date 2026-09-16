@@ -25,7 +25,7 @@ def analyse_command(command, analysis=None, depth=0):
             analyse_isolated(a, sub, depth + 1)
         a.unparseable = True
         return a
-    if marked == plain:
+    if other == marked:  # one reading: the line holds no zsh pattern, or only markings both shells make (SPD-088: arithmetic)
         walk.ShellWalk(a, inner, bodies, depth).walk(tokens)
         return a
     # Two readings of one line (SPD-039): zsh's, its groups and ranges kept whole, then the other shell's, where a range is two
@@ -34,8 +34,6 @@ def analyse_command(command, analysis=None, depth=0):
     # those of both.  The quotes are the same, so both tokenize.
     cwds, variables, loop_depth, aliases = a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases)
     walk.ShellWalk(a, inner, bodies, depth).walk(tokens)
-    if other == marked:
-        return a
     zsh_cwds, zsh_vars, zsh_aliases = a.cwds, a.vars, a.aliases
     a.cwds, a.vars, a.loop_depth, a.cd_uncertain, a.aliases = cwds, variables, loop_depth, False, aliases
     walk.ShellWalk(a, inner, bodies, depth).walk(syntax.shell_tokens(other) or [])

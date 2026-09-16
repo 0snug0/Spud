@@ -2537,14 +2537,165 @@ class ZshGlobOperatorTest(BashHookCase):
                    "noglob echo (a|b)", "echo a |(cat)", "! (true)", "{ (true) }"):
             with self.subTest(ok):
                 self.assertSilent(ok)
-        # The `>` of an arithmetic command is read as an output operator and the word after it as a target: `(( a > b ))`
-        # and `(( n >= 3 ))` were refused before SPD-045 too, and since it the literal forms are as well, the digit
-        # operand no longer being dropped as a descriptor.  Not this ticket's to fix (the parentheses are gone by the
-        # time separate_redirects sees the tokens); carried by proposal 103.
-        self.assertRefused("x=$(( 1<2 )); (( 3 > 2 )) && echo y", "a redirection or tee into 2")
-        self.assertRefused("(( a > b ))", "a redirection or tee into b")
+        # The `>` of an arithmetic command was read as an output operator and the word after it as a target (proposal 103,
+        # then SPD-088): marked as arithmetic since, and silent here.  ArithmeticCommandTest holds the whole reading.
+        self.assertSilent("x=$(( 1<2 )); (( 3 > 2 )) && echo y")
+        self.assertSilent("(( a > b ))")
         self.assertRefused("case x in (x) git push;; esac", "Law 7")
         self.assertAllowed("%s --as %s member log 'a (b|c) <1-2>'" % (self.spud_cli, AGENT_A))
+
+
+class ArithmeticCommandTest(BashHookCase):
+    """SPD-088: `(( ... ))` is an arithmetic command and `$(( ... ))` an arithmetic expansion, and both shells evaluate what
+    stands between the parentheses -- the `>` of `(( n > 2 ))` is a comparison, the `|` of `(( a | b ))` a bitwise or, the `;`
+    of a `for (( ... ))` header separates its three expressions -- so no file is opened and no second command runs.
+    mark_zsh_patterns already found the region and copied it into both readings verbatim, so shlex handed separate_redirects
+    `n`, `>`, `2`, and a member's `if (( retries > 3 ))` was refused as a write to a file named 2 wherever the shell's
+    directory lay outside its deliverables, and Spud's in a protected one.
+
+    Recorded on the ticket, from analyse_command on the working tree when SPD-088 was filed: `(( 3 > 2 ))`,
+    `if (( n > 2 )); then echo x; fi` and `x=$(( 1 > 2 ))` each recorded the target ['2'], `(( i > 0 ))` ['0'],
+    `(( n >= 3 ))` ['='] and `(( a > b ))` ['b'], while `let "n > 2"` and `[[ 3 -gt 2 ]]` recorded none; SPD-049's
+    differential had already found `x=$(( 1<2 )); (( 3 > 2 )) && echo y` among the 32 member lines that went silent -> deny.
+    No shell is probed here: this worktree session's harness refuses to run one, and what the fix restores is arithmetic
+    evaluation as bash(1) and zsh(1) define it, which the ticket's own evidence measures the hook against.
+
+    The marking (syntax._ARITH_SENTINELS, with the quoted-glob sentinels for `*?[]{},`, which already mean "not expanded
+    here", and _LITERAL_DOLLAR for a `$`) goes into both readings unchanged, arithmetic being arithmetic in both shells.  The
+    region's outer parenthesis and its match are left as they are, so ShellWalk opens and closes the frame it always opened
+    and its `for (( ... ))` header scan still finds the header's end; every character between them is marked, the inner `(`
+    of `((` included, so the segment's first word always begins with a sentinel and no word of an arithmetic command is read
+    as a command name, a variable, an assignment or a glob.  An arithmetic command keeps its blanks, so a `$( ... )` inside
+    it is still analysed and still stays out of the command word; an expansion is marked whole, blanks included, since it is
+    part of a word.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    EVIDENCE = ("(( n > 2 ))", "(( i > 0 ))", "(( 3 > 2 ))", "(( n >= 3 ))", "(( a > b ))",
+                "if (( retries > 3 )); then echo x; fi", "x=$(( 1 > 2 ))", "x=$(( 1<2 )); (( 3 > 2 )) && echo y")
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        home = self.home.path
+        for d in ("docs", "tests", "ledger/tickets"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_the_tickets_evidence_records_no_redirect_target(self):
+        for command in self.EVIDENCE:
+            with self.subTest(command):
+                a = self.analysis(command)
+                self.assertEqual([t for t, _cwds in a.redirects], [])
+                self.assertEqual(a.findings, [])
+
+    def test_the_tickets_evidence_is_silent_wherever_the_shell_stands(self):
+        for command in self.EVIDENCE:
+            with self.subTest(command):
+                self.assertSilent("cd docs && " + command)  # a member, its directory outside its deliverables
+                self.assertSilent("cd docs && " + command, AGENT_C)
+                self.assertSilent("cd ledger/tickets && " + command, agent_id=None)  # Spud, in a generated directory
+
+    def test_the_other_operators_are_read_as_arithmetic_too(self):
+        for command in ("(( n < 2 ))", "(( n >> 1 ))", "(( n << 1 ))", "(( a && b ))", "(( a || b ))", "(( a | b ))",
+                        "(( a & b ))", "(( a > b ? 1 : 0 ))", "(( a * b ))", "(( a*b ))", "(( a % b ))", "(( a ^ b ))",
+                        "(( ! a ))", "(( ~a ))", "(( n++ ))", "(( a[1] + 2 ))", "(( 16#ff ))", "(( (a) > 2 ))",
+                        "(( $n > 2 ))", "(( ${n} > 2 ))"):
+            with self.subTest(command):
+                a = self.analysis(command)
+                self.assertEqual([t for t, _cwds in a.redirects], [])  # nothing opened a target
+                self.assertEqual(a.kinds, ["other"])  # ... and nothing split the line into more commands
+                self.assertEqual(a.findings, [])
+                self.assertSilent("cd docs && " + command)
+
+    def test_a_for_arithmetic_header_is_still_a_header(self):
+        for header in ("for (( i = 0; i < 10; i++ )); do %s; done", "for (( i = 0; i < 10; i++ )) do %s; done",
+                       "for (( i=0; i<3; i++ )) %s"):
+            with self.subTest(header):
+                self.assertRefused(header % "git push", "Law 7")  # the body still runs in command position
+                self.assertRefused(header % "echo x > docs/x.md", "deliverables")
+                self.assertSilent(header % "echo x > tests/out.py")  # ... and the header's own `<` opens nothing
+                self.assertEqual([t for t, _c in self.analysis(header % "echo x > out.txt").redirects], ["out.txt"])
+        # the loop still closes where it closed: what follows `done` is outside the body
+        self.assertRefused("for (( i = 0; i < 2; i++ )); do echo x; done; git push", "Law 7")
+        self.assertSilent("for (( i = 0; i < 2; i++ )); do echo x; done")
+
+    def test_a_real_redirection_after_an_arithmetic_command_is_still_checked(self):
+        for command, targets in (("(( n > 2 )) > out.txt", ["out.txt"]), ("(( n > 2 )) && echo x > out.txt", ["out.txt"]),
+                                 ("x=$(( 1 + 1 )) > out.txt", ["out.txt"]), ("(( n > 2 )) 2> err.txt", ["err.txt"]),
+                                 ("(( a )) > f1 ; (( b )) >> f2", ["f1", "f2"])):
+            with self.subTest(command):
+                self.assertEqual([t for t, _cwds in self.analysis(command).redirects], targets)
+        for command in ("(( n > 2 )) > docs/x.md", "(( n > 2 )) && echo x > docs/x.md", "x=$(( 1 + 1 )) > docs/x.md"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables")
+                self.assertSilent(command, AGENT_C)
+        self.assertRefused("(( n > 2 )) > ledger/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertRefused("(( n > 2 )) > ledger/tickets/SPD-001.md", "Law 1", agent_id=None)
+
+    def test_a_redirection_outside_arithmetic_is_unchanged(self):
+        for command, targets in (("echo x > 2", ["2"]), ("echo x > b", ["b"]), ("echo x >> -", ["-"]),
+                                 ("echo x 2> 12", ["12"]), ("echo x >| 3", ["3"]), ("echo x >&3", []),
+                                 ("echo x 2>&1", []), ("echo x >&-", []), ("echo x >& out", ["out"])):
+            with self.subTest(command):
+                self.assertEqual([t for t, _cwds in self.analysis(command).redirects], targets)
+        for command in ("cd docs && echo x > 2", "cd docs && echo x > b", "cd docs && echo x 2> 12"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables")
+
+    def test_an_unbalanced_opener_is_no_crash_and_no_new_silence(self):
+        for command in ("(( ", "((", "(( 1 > ", "$(( 1 + ", "x=$(( 1 + ", "for (( i=0; i<3"):
+            with self.subTest(command):
+                self.assertEqual([t for t, _cwds in self.analysis(command).redirects], [])
+                self.assertSilent(command)
+        # ... and the reading that stood before SPD-088 still reads what follows an opener it cannot pair
+        self.assertRefused("(( 1 ; git push", "Law 7")
+        self.assertRefused("x=$(( 1 + ; echo x > docs/x.md", "deliverables")
+
+    def test_a_substitution_inside_arithmetic_is_still_analysed(self):
+        for command in ("(( x = $(git push) ))", "(( $(git push) > 2 ))", "x=$(( $(git push) + 1 ))",
+                        "(( $(git push) ))", "for (( i=0; i<$(git push); i++ )); do echo x; done"):
+            with self.subTest(command):
+                self.assertRefused(command, "Law 7")
+        self.assertRefused("(( x = $(echo y > docs/x.md) ))", "deliverables")
+        self.assertSilent("(( x = $(echo y > tests/out.py) ))")
+
+    def test_an_expansions_own_dollar_still_names_the_command_word(self):
+        """SPD-043's reading, deliberately left alone: only the arithmetic between the parentheses is marked, never the `$`
+        in front of them, so `$(( ... ))` standing in the command position still names a command the hook cannot read -- an
+        executable named by digits, found on a PATH of the line's own choosing -- and still refuses a member."""
+        self.assertRefused("$((1)) push", "the command word")
+        self.assertRefused("$(( 1 + 1 ))", "the command word")
+        self.assertSilent("echo $(( 1 > 2 ))")  # ... where an expansion that is not the command word is read by nobody
+        self.assertSilent("x=$(( 1 > 2 ))")
+        self.assertSilent("cd docs && echo $(( 1 > 2 ))")
+
+    def test_both_readings_carry_the_same_marking(self):
+        m = load_spud_module()
+        for command in ("(( n > 2 ))", "x=$(( 1 > 2 ))", "for (( i=0; i<3; i++ )); do echo x; done", "(( a | b ))"):
+            with self.subTest(command):
+                marked, other = m.mark_zsh_patterns(command)
+                self.assertEqual(marked, other)  # an arithmetic command is arithmetic in bash and zsh alike
+                self.assertNotEqual(marked, command)  # ... and it is marked in both
+                self.assertEqual(m.deglob(marked), command)  # deglob is its inverse, so a reason names what the line spells
+        # a line that holds a zsh pattern as well keeps the two readings, with the same arithmetic in each
+        line = "(( n > 2 )); echo x > (ledger|x)/tickets/SPD-001.md"
+        marked, other = m.mark_zsh_patterns(line)
+        self.assertNotEqual(marked, other)
+        self.assertEqual(m.deglob(marked), line)
+        self.assertEqual(m.deglob(other), line)
+        self.assertRefused(line, "generated", AGENT_C)  # the pattern's target is still expanded and checked
+
+    def test_an_arithmetic_assignment_is_no_longer_recorded(self):
+        """The other half of marking the whole region: `(( x=1 ))` used to reach analyse_words as the word `x=1` and record
+        x in the analysis's variables, and now reaches it behind the arithmetic sentinel that keeps the region inert.  This
+        is the half that fails closed -- a later `$x` refuses a member where it used to resolve to 1 -- and an arithmetic
+        value is a number, never a command word or a path."""
+        self.assertEqual(self.analysis("(( x=1 ))").vars, {})
+        self.assertRefused("(( x=1 )); $x", "the command word $x")
+        self.assertSilent("x=1; $x")  # an ordinary assignment is read as it always was
 
 
 class GlobCommandWordTest(BashHookCase):
@@ -3961,7 +4112,8 @@ class ZshShortConditionalTest(BashHookCase):
     - the single-bracket spelling runs nothing and is left alone: `if [ -n x ] git push` is a parse error, `while [ ... ]
       body` never iterates, and `until [ -n x ] body` spins with an empty body.  `if true git push` and `if [[ -n x ]]; git
       push` are parse errors too, and `if (( 1 )) git push` and `while (( n++ < 2 )) git push` were read before this ticket,
-      because `(( ))` splits into subshell frames.
+      because `(( ))` opens a subshell frame and closes it, leaving what follows in the condition list (still so since
+      SPD-088 marked the arithmetic between the parentheses: one frame there now, where it used to be two).
 
     AGENT_A plans tests/** and bin/spud; AGENT_C plans **; note.txt is refused to AGENT_A at the home."""
 

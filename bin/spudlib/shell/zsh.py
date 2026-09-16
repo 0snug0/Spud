@@ -1,4 +1,4 @@
-"""shell/zsh: zsh's own glob operators.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""shell/zsh: zsh's own glob operators, and the arithmetic both shells read as arithmetic.  Moved from bin/spud_ledger.py (SPD-065)."""
 
 import bisect
 import re
@@ -11,6 +11,34 @@ from . import syntax
 ZSH_COMMAND_POSITION_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "done", "{", "}", "!", "time", "coproc", "nocorrect"}
 _PLAIN_RUN_RE = re.compile(r"[^\s;&|<>()'\"\\$]+")  # characters a word copies as they are
 _ARRAY_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")  # `name=` or `name+=` before an array's parenthesis
+# SPD-088: how the text of an arithmetic command `(( ... ))` and of an arithmetic expansion `$(( ... ))` is marked.  Both
+# shells evaluate it as arithmetic and run no command in it, so every character shlex, separate_redirects or ShellWalk would
+# otherwise read as an operator is replaced with an arithmetic sentinel (syntax._ARITH_SENTINELS), every glob metacharacter
+# with the quoted-glob sentinel that already means "not expanded here", and every `$` between the parentheses with the mark
+# that says it expands to nothing the hook reads.  deglob restores all of them, so a reason still names what the line
+# spells.  Before this, `(( n > 2 ))` reached separate_redirects as `n`, `>`, `2` and was refused as a write to a file
+# named 2.
+#
+# _ARITH_WORD marks the blanks as well, so the whole of an expansion reaches shlex inside the word it is part of
+# (`x=$(( 1 > 2 ))` is one assignment word, where it used to be `x=$`, `((`, `1`, `>`, `2`, `))`).  _ARITH_COMMAND leaves
+# the blanks alone: an arithmetic command stands where a command stands, so its blanks separate the same words they always
+# separated -- each of them inert now -- and a `$( ... )` inside it stays out of the command word, where a substitution is
+# a refusal.  The command's outer parenthesis and its match are left as they are, for ShellWalk to open and close the frame
+# it already opened and closed and for its `for (( ... ))` header scan to find; every character between them is marked, the
+# inner `(` of `((` included, so the segment's first word always begins with a sentinel and can never be read as a command
+# name, a variable, an assignment or a glob.  `(( $n > 2 ))` is silent for that reason and not only for the marked `>`:
+# there is no command word in an arithmetic command, so the hook reads none.
+#
+# Two edges of that, both deliberate.  An expansion's own `$`, the one in front of the parentheses, is left unmarked: it
+# still says the word's value comes from an expansion, and `$((1)) push` names a command the hook cannot read -- arithmetic
+# yields a number, and a number names an executable on a PATH of the line's own choosing -- so SPD-043 still refuses it.
+# And `(( x=1 ))` no longer records x, its word now standing behind the sentinel: that is the half that fails closed, a
+# later `$x` refusing a member where it used to resolve to 1, and an arithmetic value is a number, never a path.
+_ARITH_MARKS = dict({c: syntax._ARITH_SENTINELS[c] for c in "()<>|&;\n"},
+                    **{c: syntax._GLOB_SENTINELS[c] for c in syntax._GLOB_META},
+                    **{"$": "$" + syntax._LITERAL_DOLLAR})
+_ARITH_COMMAND = str.maketrans(_ARITH_MARKS)
+_ARITH_WORD = str.maketrans(dict(_ARITH_MARKS, **{c: syntax._ARITH_SENTINELS[c] for c in " \t"}))
 
 
 def _scan_pairs(text):
@@ -125,7 +153,11 @@ def mark_zsh_patterns(text):
       header), `$((`, `name=(` and a reserved word in command position (bash runs `!(`, `{(`, `if(`, `time(`, `then(`, `do(`
       and `else(` as a subshell, zsh `{(` and `else(`);
     - `>(` and `2>(` stay a process substitution; `&>(` and `>|(` open a pattern target;
-    - case patterns, `[[ ... ]]`, `(( ... ))`, `${...}` and here-document delimiters are left as they are.
+    - case patterns, `[[ ... ]]`, `${...}` and here-document delimiters are left as they are.
+
+    An arithmetic command `(( ... ))` and an arithmetic expansion `$(( ... ))` are marked too (SPD-088), with the arithmetic
+    sentinels rather than the pattern ones: both shells evaluate what stands between the parentheses, so an operator there is
+    an operator of the arithmetic and never of the shell, and both readings get the same marking.
 
     Both texts are the input when it holds none of these."""
     if "(" not in text and "<" not in text:
@@ -155,8 +187,11 @@ def mark_zsh_patterns(text):
         elif c == "(":
             if text.startswith("((", i) and (command or arith_next) and i in parens:  # (( arithmetic )), or a for loop's header
                 end = parens[i] + 1
-                out.append(text[i:end])
-                other.append(text[i:end])
+                # SPD-088: the parenthesis and its match stay; everything between them is arithmetic in both shells, so no
+                # operator in it survives into either reading
+                arith = text[i] + text[i + 1 : end - 1].translate(_ARITH_COMMAND) + text[end - 1]
+                out.append(arith)
+                other.append(arith)
                 # a `for (( ... ))` header is followed by its body, in command position; a `(( ... ))` command is not
                 i, command, arith_next = end, arith_next and not command, False
                 continue
@@ -219,8 +254,16 @@ def mark_zsh_patterns(text):
                 continue
             elif ch == "(":
                 if j > start and text[j - 1] == "$" and j in parens:  # $(( arithmetic ))
-                    piece = text[j : parens[j] + 1]
-                elif j == start + 1 and text[start] == "=":
+                    # SPD-088: marked whole, blanks and parentheses included, so the expansion stays inside this word.  The
+                    # `$` the word already holds is left alone: it still says this word's value comes from an expansion, and
+                    # `$((1)) push` is refused for the command word it names, which is SPD-043's reading and not this
+                    # ticket's to change.  Only the `$`s inside the parentheses are marked, by the table.
+                    marked = text[j : parens[j] + 1].translate(_ARITH_WORD)
+                    word.append(marked)
+                    alternative.append(marked)
+                    j = parens[j] + 1
+                    continue
+                if j == start + 1 and text[start] == "=":
                     # zsh's `=(...)` process substitution runs its command (SPD-041, probed: `cat =(git push)` pushed): read as
                     # a subshell, as before SPD-039, not as a group glued to `=`
                     punctuation_next = True
