@@ -323,7 +323,8 @@ def cmd_project_remove(ctx, args):
         p = lookup.get_project(con, args.key)
         if p["id"] == 1:
             raise kernel.SpudError(kernel.EXIT_ERROR, "the home is project 1 and is never removed")
-        open_tickets = [r["key"] for r in con.execute("SELECT key FROM tickets WHERE project_id = ? AND status IN ('queued','active') ORDER BY id", (p["id"],)).fetchall()]
+        # a parked ticket is open (SPD-096): it is not-now, not over, so project remove waits for it too
+        open_tickets = [r["key"] for r in con.execute("SELECT key FROM tickets WHERE project_id = ? AND status IN ('queued','active','parked') ORDER BY id", (p["id"],)).fetchall()]
         if open_tickets:
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s has open tickets (%s); move them to done or declined first" % (p["key"], ", ".join(open_tickets)))
         changed, warnings = uninstall_project(ctx, con, p) if p["installed"] else ([], [])

@@ -1,6 +1,7 @@
-"""cli/cliparser: build_parser, normalize_argv, text_arg.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""cli/cliparser: build_parser, normalize_argv, text_arg, date_arg.  Moved from bin/spud_ledger.py (SPD-065)."""
 
 import sys
+from datetime import date
 from pathlib import Path
 
 from . import helptexts
@@ -31,6 +32,18 @@ def text_arg(value):
         if not path.is_file():
             raise lazy.argparse.ArgumentTypeError("no such file: %s" % path)
         return path.read_text(encoding="utf-8").rstrip("\n")
+    return value
+
+
+def date_arg(value):
+    """--until (SPD-096): a plain YYYY-MM-DD, the spelling every date in the ledger's frontmatter has.  A past date is
+    accepted: the ticket is due back at once."""
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        parsed = None
+    if parsed is None or value != parsed.isoformat():
+        raise lazy.argparse.ArgumentTypeError("--until is YYYY-MM-DD, not %r" % value)
     return value
 
 
@@ -183,8 +196,11 @@ def build_parser():
     q = ps.add_parser("move", help="change a ticket's status along the state machine")
     q.add_argument("key")
     q.add_argument("--status", required=True, choices=kernel.TICKET_STATUSES)
-    q.add_argument("--reason", type=text_arg)
-    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes: SPD-nnn started|done|queued|declined: <title>")
+    q.add_argument("--reason", type=text_arg, help="why; required for --status parked, where it is stored and shown wherever the ticket is")
+    q.add_argument("--until", type=date_arg, metavar="YYYY-MM-DD",
+                   help="with --status parked: the date from which `spud board --brief` shows the ticket as due back;"
+                        " without it the ticket stays parked until moved")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes: SPD-nnn started|done|queued|parked|declined: <title>")
     q.set_defaults(func=ticketcmds.cmd_ticket_move)
     q = ps.add_parser("edit", help="edit title, heading, priority, brief, sizing, outcome, tags")
     q.add_argument("key")
@@ -298,8 +314,14 @@ def build_parser():
     q.add_argument("--next", required=True, type=text_arg, help="Spud's Next line")
     q.set_defaults(func=proposalcmds.cmd_report_add)
 
-    p = sub.add_parser("board", help="the board (v_board)")
-    p.add_argument("--brief", action="store_true", help="open tickets and live members, one line each")
+    board_help = "the board (v_board): every ticket, active first, then queued, parked, done and declined, by priority inside each"
+    p = sub.add_parser("board", help=board_help, description=board_help)
+    p.add_argument("--brief", action="store_true",
+                   help="open tickets and live members, one line each, as SessionStart injects it: active tickets with their live"
+                        " members, then parked tickets that are due back, then queued, then one count line for the parked")
+    p.add_argument("--parked", action="store_true",
+                   help="parked tickets only, with why and until (with --brief, one line each); without it the board sorts them"
+                        " after queued and --brief counts them on its last line")
     p.add_argument("--project", help="only this project's tickets")
     p.set_defaults(func=views.cmd_board)
     p = sub.add_parser("fleet", help="every member (v_fleet)")

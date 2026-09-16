@@ -41,19 +41,23 @@ def ticket_key(prefix, number):
 
 
 def insert_ticket(con, at, actor_label, project, title, priority, status, origin="eric", proposal_id=None,
-                  brief="", sizing="", outcome="", tags=None, heading=None, created_at=None, number=None, layout=None):
+                  brief="", sizing="", outcome="", tags=None, heading=None, created_at=None, number=None, layout=None,
+                  parked_until=None, parked_reason=None):
     if number is None:
         number = next_ticket_number(con, project["id"])
     key = ticket_key(project["ticket_prefix"], number)
     team_key = ticket_key(project["team_prefix"], number)
     stamp = created_at or at
     tags = tags if tags is not None else ["ticket"]
+    # parked_until and parked_reason are the importer's (SPD-096): `ticket new` has no --status parked, so a ticket born
+    # parked is `ticket new` then `ticket move`, and the CHECKs of 0003_parked refuse anything else here.
     cur = con.execute(
         "INSERT INTO tickets (project_id, number, key, team_key, title, heading, priority, status, origin, proposal_id,"
-        " brief, sizing, outcome, tags, layout, created_at, updated_at, closed_at)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+        " brief, sizing, outcome, tags, layout, created_at, updated_at, closed_at, parked_until, parked_reason)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)",
         (project["id"], number, key, team_key, title, heading, priority, status, origin, proposal_id,
-         brief, sizing, outcome, json.dumps(tags), json.dumps(layout) if layout else None, stamp, stamp),
+         brief, sizing, outcome, json.dumps(tags), json.dumps(layout) if layout else None, stamp, stamp,
+         parked_until, parked_reason),
     )
     return con.execute("SELECT * FROM tickets WHERE id = ?", (cur.lastrowid,)).fetchone()
 

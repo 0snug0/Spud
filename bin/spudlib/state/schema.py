@@ -184,13 +184,13 @@ DROP TRIGGER IF EXISTS events_no_delete;
 
 CREATE VIEW v_board AS                            -- what Board.base shows, for the CLI and for rendering
 SELECT t.key, (SELECT pr.key FROM projects pr WHERE pr.id = t.project_id) AS project,
-       t.status, t.priority, t.title, l.name AS lead, t.origin,
+       t.status, t.parked_until, t.parked_reason, t.priority, t.title, l.name AS lead, t.origin,
        (SELECT t2.team_key || '/' || m.name
           FROM proposals p JOIN members m ON m.id = p.origin_member_id JOIN tickets t2 ON t2.id = m.ticket_id
          WHERE p.id = t.proposal_id) AS proposed_by,
        t.created_at, t.updated_at
   FROM tickets t LEFT JOIN members l ON l.id = t.lead_id
- ORDER BY CASE t.status WHEN 'active' THEN 1 WHEN 'queued' THEN 2 WHEN 'done' THEN 3 ELSE 4 END,
+ ORDER BY CASE t.status WHEN 'active' THEN 1 WHEN 'queued' THEN 2 WHEN 'parked' THEN 3 WHEN 'done' THEN 4 ELSE 5 END,
           t.priority, t.id DESC;
 
 CREATE VIEW v_fleet AS                            -- what Fleet.base shows
@@ -219,7 +219,12 @@ CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT
 # Cross-repository projects (SPD-014, docs/design/2026-09-14-cross-repository-projects.md section 8): five columns on
 # projects, the sessions a /spud claim makes Spud's, and seven event kinds.  SQLite cannot alter a CHECK, so events is
 # rebuilt with the kind list widened; its triggers are dropped first and VIEWS_AND_TRIGGERS re-creates them after.
+# The two views are dropped first as well (SPD-096): apply_migrations runs the newest VIEWS_AND_TRIGGERS after every
+# migration, so on a fresh init v_board already names the parked columns 0003 has not added yet, and the rename below
+# re-parses every view -- a rename fails on a view whose SELECT no longer resolves, whatever table is renamed.
 DDL_0002 = """
+DROP VIEW IF EXISTS v_board;
+DROP VIEW IF EXISTS v_fleet;
 ALTER TABLE projects ADD COLUMN default_branch TEXT NOT NULL DEFAULT 'main';
 ALTER TABLE projects ADD COLUMN landing  TEXT NOT NULL DEFAULT 'merge'  CHECK (landing  IN ('merge','pr'));
 ALTER TABLE projects ADD COLUMN sessions TEXT NOT NULL DEFAULT 'always' CHECK (sessions IN ('always','claim'));
@@ -264,5 +269,48 @@ CREATE INDEX events_agent  ON events(agent_id, id);
 CREATE INDEX events_kind   ON events(kind, id);
 """
 
-MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002)]
+# Parked tickets (SPD-096, docs/design/2026-09-16-parked-tickets.md section 4.1): a fifth status and the two columns
+# that qualify it.  SQLite cannot alter a CHECK, so tickets is rebuilt; the two views that name it are dropped first
+# (the rename re-parses every view, and one naming a missing table fails it), and VIEWS_AND_TRIGGERS re-creates them.
+# apply_migrations turns foreign keys off around the transaction: with them on, DROP TABLE tickets is refused because
+# members, events, handoffs, proposals and proposal_decisions point at it.
+DDL_0003 = """
+DROP VIEW IF EXISTS v_board;
+DROP VIEW IF EXISTS v_fleet;
+CREATE TABLE tickets_new (
+  id          INTEGER PRIMARY KEY,                -- surrogate; the number lives in `number`
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  number      INTEGER NOT NULL,                   -- per-project counter: max(number) + 1 in the insert transaction
+  key         TEXT    NOT NULL UNIQUE,            -- ticket_prefix || '-' || printf('%03d', number)
+  team_key    TEXT    NOT NULL UNIQUE,            -- team_prefix   || '-' || printf('%03d', number)
+  title       TEXT    NOT NULL,
+  heading     TEXT,                               -- the H1 tail when the file shortens it against title
+  priority    TEXT    NOT NULL CHECK (priority IN ('P0','P1','P2','P3')),
+  status      TEXT    NOT NULL CHECK (status IN ('queued','active','parked','done','declined')),
+  origin      TEXT    NOT NULL CHECK (origin IN ('eric','proposal')),
+  proposal_id INTEGER REFERENCES proposals(id),   -- set when origin = 'proposal'; renders as proposed_by
+  lead_id     INTEGER REFERENCES members(id),     -- the first member; NULL until one is planned
+  brief       TEXT    NOT NULL DEFAULT '',
+  sizing      TEXT    NOT NULL DEFAULT '',        -- "Size, persona and model decision"
+  outcome     TEXT    NOT NULL DEFAULT '',
+  tags        TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+  layout      TEXT    CHECK (layout IS NULL OR json_valid(layout)),  -- imported file's key and section order; NULL = template
+  created_at  TEXT    NOT NULL,
+  updated_at  TEXT    NOT NULL,
+  closed_at   TEXT,
+  parked_until  TEXT  CHECK (parked_until IS NULL OR (status = 'parked' AND parked_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')),
+                                                  -- YYYY-MM-DD from which the brief board shows the ticket as due back; NULL = until moved
+  parked_reason TEXT  CHECK ((parked_reason IS NOT NULL) = (status = 'parked')),   -- why it is parked; NULL unless parked
+  UNIQUE (project_id, number)
+) STRICT;
+INSERT INTO tickets_new (id, project_id, number, key, team_key, title, heading, priority, status, origin, proposal_id, lead_id,
+                         brief, sizing, outcome, tags, layout, created_at, updated_at, closed_at)
+  SELECT id, project_id, number, key, team_key, title, heading, priority, status, origin, proposal_id, lead_id,
+         brief, sizing, outcome, tags, layout, created_at, updated_at, closed_at FROM tickets;
+DROP TABLE tickets;
+ALTER TABLE tickets_new RENAME TO tickets;
+CREATE INDEX tickets_board ON tickets(status, priority);
+"""
+
+MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003)]
 SCHEMA_VERSION = len(MIGRATIONS)

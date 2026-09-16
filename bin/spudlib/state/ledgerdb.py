@@ -50,17 +50,27 @@ def apply_migrations(ctx, con, created):
         raise kernel.SpudError(kernel.EXIT_ERROR, "the database is ahead of this CLI (user_version %d > %d); a newer spud wrote it" % (version, schema.SCHEMA_VERSION))
     applied = []
     backups = []
-    for number, (name, sql) in enumerate(schema.MIGRATIONS, start=1):
-        if number <= version:
-            continue
-        if not created and version > 0:
-            backups.append(str(backup.do_backup(ctx, con, "pre-" + name)))
-        with write_txn(con):
-            con.executescript(sql)
-            con.executescript(schema.VIEWS_AND_TRIGGERS)
-            con.execute("PRAGMA user_version = %d" % number)
-        applied.append(name)
-        version = number
+    try:
+        for number, (name, sql) in enumerate(schema.MIGRATIONS, start=1):
+            if number <= version:
+                continue
+            if not created and version > 0:
+                backups.append(str(backup.do_backup(ctx, con, "pre-" + name)))
+            # SQLite's table-rebuild recipe (lang_altertable.html section 7), which 0003_parked needs and the others do
+            # not mind: foreign keys off before BEGIN, since the pragma is a no-op inside a transaction, and the check
+            # inside it, so a copy that lost a reference rolls back and leaves the database as it was.
+            con.execute("PRAGMA foreign_keys = OFF")
+            with write_txn(con):
+                con.executescript(sql)
+                con.executescript(schema.VIEWS_AND_TRIGGERS)
+                broken = con.execute("PRAGMA foreign_key_check").fetchall()
+                if broken:
+                    raise kernel.SpudError(kernel.EXIT_ERROR, "migration %s broke %d foreign key reference(s); rolled back" % (name, len(broken)))
+                con.execute("PRAGMA user_version = %d" % number)
+            applied.append(name)
+            version = number
+    finally:
+        con.execute("PRAGMA foreign_keys = ON")
     return applied, backups
 
 

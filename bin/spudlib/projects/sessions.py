@@ -17,22 +17,50 @@ def brief_state(m, today=None):
     return m["status"]
 
 
-def board_brief_text(con, rows=None):
-    """Open tickets and their live members, one line each (also the SessionStart context)."""
+def board_line(r, day):
+    """One ticket's line: key, status, priority, title, and what qualifies it in one parenthesis — its lead, and for a
+    parked ticket (SPD-096) the date, read as `due back` from the day it names, and the reason."""
+    inside = ["lead %s" % r["lead"]] if r["lead"] else []
+    if r["status"] == "parked":
+        until = r["parked_until"]
+        when = (("due back %s: " if until <= day else "until %s: ") % until) if until else ""
+        inside.append(when + (r["parked_reason"] or ""))
+    return "%s %s %s %s%s" % (r["key"], r["status"], r["priority"], r["title"], (" (%s)" % "; ".join(inside)) if inside else "")
+
+
+def board_brief_text(con, rows=None, parked=False):
+    """Open tickets and their live members, one line each (also the SessionStart context): active tickets with their live
+    members, then the parked tickets whose date has arrived, then queued, then one count line for the parked (SPD-096).
+    A due-back line sits above the queue and the count line last because a project's context keeps whole lines from the
+    top (fit_bytes): the line meant to nag must survive the cut, and the count may be cut.  With no parked ticket the
+    text is what it was before SPD-096, byte for byte.  `parked`: every parked ticket instead, due or not."""
     if rows is None:
         rows = [dict(r) for r in con.execute("SELECT * FROM v_board").fetchall()]
-    lines = []
-    today = kernel.now()
+    now = kernel.now()
+    day = now[:10]
+    if parked:  # spud board --parked --brief
+        return "\n".join(board_line(r, day) for r in rows if r["status"] == "parked") or "(no parked ticket)"
+    active, queued, shelved = [], [], []
     for r in rows:
         if r["status"] in ("done", "declined"):
             continue
-        lines.append("%s %s %s %s%s" % (r["key"], r["status"], r["priority"], r["title"], (" (lead %s)" % r["lead"]) if r["lead"] else ""))
-        if r["status"] == "active":
-            for m in con.execute(
-                "SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id WHERE t.key = ? AND m.status IN ('planned','active') ORDER BY m.lineage",
-                (r["key"],),
-            ).fetchall():
-                lines.append("  %s (%s, %s, %s) %s" % (m["name"], m["lineage"], lookup.persona_label(m), m["model"], brief_state(m, today)))
+        if r["status"] == "parked":
+            shelved.append(r)
+            continue
+        line = board_line(r, day)
+        if r["status"] != "active":
+            queued.append(line)
+            continue
+        active.append(line)
+        for m in con.execute(
+            "SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id WHERE t.key = ? AND m.status IN ('planned','active') ORDER BY m.lineage",
+            (r["key"],),
+        ).fetchall():
+            active.append("  %s (%s, %s, %s) %s" % (m["name"], m["lineage"], lookup.persona_label(m), m["model"], brief_state(m, now)))
+    due = [r for r in shelved if r["parked_until"] and r["parked_until"] <= day]
+    lines = active + [board_line(r, day) for r in due] + queued
+    if shelved:
+        lines.append("%d parked%s (spud board --parked)" % (len(shelved), (", %d due back" % len(due)) if due else ""))
     return "\n".join(lines) or "(no open tickets)"
 CLAIM_CARD_CAP = 1536        # bytes: what `session claim` prints
 SESSION_CONTEXT_CAP = 2048   # bytes: a project session's SessionStart context (the design's probe P2)

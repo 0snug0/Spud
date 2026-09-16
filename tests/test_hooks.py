@@ -6311,6 +6311,12 @@ class SessionStartTest(HookCase):
         self.assertIn(self.home.run("board", "--brief").stdout.strip(), r.context)
         for source in ("resume", "compact"):
             self.assertEqual(self.home.hook("SessionStart", self.session_start(source)).code, 0)
+        # SPD-096: a parked ticket that is not due leaves the injection for the count line alone
+        shelved = self.new_ticket("Shelved", status="queued")
+        self.home.json("ticket", "move", shelved["key"], "--status", "parked", "--reason", "Eric's go", "--until", "2099-01-01", actor="spud")
+        r = self.home.hook("SessionStart", self.session_start())
+        self.assertNotIn("Shelved", r.context)
+        self.assertIn("1 parked (spud board --parked)", r.context)
 
     def test_clear_injects_the_board_as_the_other_sources_do(self):
         # SPD-011: the matcher takes clear, and a /clear gets the same context as the other three
@@ -6858,7 +6864,7 @@ class SqlTest(SpudTestCase):
             proc = self.home.run("sql", "--readonly", stmt, check=False)
             self.assertEqual(proc.returncode, EXIT_ERROR, stmt)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM name_pool WHERE name = 'X'"), 0)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 2)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), 3)
 
     def test_one_statement_no_flag_no_actor_needed(self):
         proc = self.home.run("sql", "SELECT 1", check=False)

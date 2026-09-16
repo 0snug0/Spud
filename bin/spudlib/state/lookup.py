@@ -88,6 +88,8 @@ def ticket_dict(con, t):
         "heading": t["heading"],
         "priority": t["priority"],
         "status": t["status"],
+        "parked_until": t["parked_until"],
+        "parked_reason": t["parked_reason"],
         "origin": t["origin"],
         "proposed_by": proposed_by,
         "lead": member_ref(con, t["lead_id"]),

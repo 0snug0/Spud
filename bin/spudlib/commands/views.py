@@ -42,12 +42,17 @@ def cmd_board(ctx, args):
         if args.project:
             lookup.get_project(con, args.project)
             rows = [r for r in rows if r["project"] == args.project]
+        if args.parked:  # SPD-096: the bucket on its own, with the two columns the default table does not carry
+            rows = [r for r in rows if r["status"] == "parked"]
         if args.brief:
-            text = sessions.board_brief_text(con, rows)
+            text = sessions.board_brief_text(con, rows, parked=args.parked)
         else:
             for r in rows:
                 r["created"] = kernel.fm_date(r["created_at"])
-            columns = [("ticket", "key"), ("status", "status"), ("P", "priority"), ("title", "title"), ("lead", "lead"), ("origin", "origin"), ("proposed by", "proposed_by"), ("created", "created")]
+            if args.parked:  # every row is parked, so the status column says nothing and until and reason say it all
+                columns = [("ticket", "key"), ("P", "priority"), ("title", "title"), ("until", "parked_until"), ("reason", "parked_reason"), ("lead", "lead"), ("created", "created")]
+            else:
+                columns = [("ticket", "key"), ("status", "status"), ("P", "priority"), ("title", "title"), ("lead", "lead"), ("origin", "origin"), ("proposed by", "proposed_by"), ("created", "created")]
             if con.execute("SELECT count(*) FROM projects").fetchone()[0] > 1:  # SPD-014: the project column once there is more than one
                 columns.insert(1, ("project", "project"))
             text = kernel.table(rows, columns)

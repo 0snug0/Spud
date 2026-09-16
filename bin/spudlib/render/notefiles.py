@@ -13,12 +13,22 @@ def render_ticket(con, t, pricing=None):
     keys = list(layout.get("fm_keys") or kernel.TICKET_FM_KEYS)
     if "project" not in keys:  # an imported ticket's stored order, from before SPD-014: the key goes right after origin
         keys.insert(keys.index("origin") + 1 if "origin" in keys else len(keys), "project")
+    if t["status"] == "parked":  # SPD-096: the two keys that qualify the status, right after it and only while parked
+        at = keys.index("status") + 1 if "status" in keys else len(keys)
+        for key in kernel.PARKED_FM_KEYS:
+            if key not in keys:
+                keys.insert(at, key)
+            at = keys.index(key) + 1
+    else:
+        keys = [k for k in keys if k not in kernel.PARKED_FM_KEYS]
     d = lookup.ticket_dict(con, t)
     values = {
         "id": ("plain", t["key"]),
         "title": ("quoted", t["title"]),
         "priority": ("plain", t["priority"]),
         "status": ("plain", t["status"]),
+        "parked_until": ("stamp", t["parked_until"] or ""),
+        "parked_reason": ("quoted", t["parked_reason"] or ""),
         "origin": ("plain", t["origin"]),
         "project": ("plain", d["project"]),
         "proposed_by": ("quoted", "[[%s]]" % d["proposed_by"] if d["proposed_by"] else ""),

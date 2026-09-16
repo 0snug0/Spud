@@ -83,8 +83,8 @@ class MigrateProjectsTest(unittest.TestCase):
     def test_migrate_writes_the_pre_migration_backup_and_keeps_every_row(self):
         events_before = self.home.rows("SELECT * FROM events ORDER BY id")
         out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0002_projects"], 2))
-        self.assertEqual(len(out["backups"]), 1)
+        self.assertEqual((out["applied"], out["user_version"]), (["0002_projects", "0003_parked"], 3))
+        self.assertEqual(len(out["backups"]), 2)
         self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0002_projects\.db$")
         backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
         try:
@@ -170,7 +170,7 @@ class MigrateProjectsTest(unittest.TestCase):
         other = Home()
         self.addCleanup(other.cleanup)
         out = other.init()
-        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects"], 2, []))
+        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked"], 3, []))
         self.assertEqual(other.rows("SELECT key, landing, sessions FROM projects"), [{"key": "spud", "landing": "merge", "sessions": "always"}])
 
 

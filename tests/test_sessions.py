@@ -58,6 +58,18 @@ class SessionTest(RepoMixin, SpudTestCase):
         self.assertIn("BAD-040", card)  # the board lists the newest first
         self.assertIn("run `spud board --brief`", card)
 
+    def test_the_card_counts_the_parked_tickets_of_its_own_project(self):
+        """SPD-096: the count line is the project's, because the card calls board_brief_text with the project's rows."""
+        home = self.new_ticket("Home one")
+        self.home.json("ticket", "move", home["key"], "--status", "parked", "--reason", "Eric's go", actor="spud")
+        for n in range(2):
+            bad = self.cli_json("ticket", "new", "--project", "badtakes", "--title", "BadTakes %d" % n, actor="spud")["ticket"]
+            self.cli("ticket", "move", bad["key"], "--status", "parked", "--reason", "waiting", actor="spud")
+        card = self.cli("session", "claim", actor="spud", cwd=self.other, session=SESSION).stdout
+        self.assertIn("2 parked (spud board --parked)", card)
+        self.assertNotIn("Home one", card)
+        self.assertIn("3 parked (spud board --parked)", self.cli("board", "--brief", cwd=self.home.path).stdout)
+
     def test_show_release_and_the_mode(self):
         out = self.cli_json("session", "show", cwd=self.wt, session=SESSION)
         self.assertEqual((out["home"], out["project"]["key"], out["checkout"]["kind"], out["checkout"]["branch"], out["session_id"], out["mode"], out["claimed_at"]),
