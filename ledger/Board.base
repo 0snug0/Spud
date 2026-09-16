@@ -81,12 +81,12 @@ views:
       - formula.Untitled
       - tags
     sort:
+      - property: status
+        direction: ASC
       - property: priority
         direction: ASC
       - property: file.name
         direction: ASC
-      - property: status
-        direction: DESC
       - property: formula.status_rank
         direction: ASC
     columnSize:
