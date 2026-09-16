@@ -113,6 +113,7 @@ No `git commit`, `add`, `push`, `checkout`, `switch`, `rebase`, `stash` or any o
 
 ## Log
 - 2026-09-15T23:17 Read brief. Copying predecessor harness to own scratch; reading skills (implementing-changes, sizing-modules, script-groups) and scripts/web-api shape next.
+- 2026-09-15T23:25 Design settled, parser-free. Core is a longest-first contiguous region matcher with CONSUMPTION on both sides (each new line claimable once), region indent-delta constant. Prototype on all six: booth 1406/1406 leftover 0; app 1902/1909; collabweb 1577/1580; collab 1198/1230; web-api 974/1005; accounts 1669/1706 — all in 9-21ms. Leftovers are exactly the legit categories: imports, export-prefixed decl headers, block headers that became dispatch lines, blanks, and reworded banners. DECISIVE: comments must NOT be an auto-category, because BAD-047 perturbation 1 IS deleted comment lines. Banners get content-pinned waivers instead. SECOND FINDING: perturbation 2 changes new room.ts:88 'return { collabId, collab, me, ... }' which has NO old-side counterpart (loadRoom was inline, not a function) — so the old-side complement alone cannot catch it. The new side is therefore MANDATORY, not optional, and waivers must pin exact TEXT (not line ranges) so a change to an approved added line breaks its waiver.
 
 ## Sub-agents
 
