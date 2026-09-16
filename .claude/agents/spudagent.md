@@ -23,7 +23,7 @@ The ledger is a database written by one program, `python3.14 -I -S /Users/ericlu
 - In a project other than Spud's home, that repository's `CLAUDE.md` and skills govern how you build and verify (setup scripts, test tiers, style); Spud's laws still govern the ledger, delegation and who writes what.
 - Log progress with `spud --as <id> member log "…"` as short lines: decisions, dead ends, what you verified. You may be compacted; the ledger will not be. Timestamps are the CLI's; never type one.
 - Your persona shapes how you work, not what you may touch. A researcher gathers evidence and compares options. An architect designs and reviews structure. An engineer implements and tests. A designer specifies UI and visuals. A writer produces prose and docs. A reviewer checks work against its brief. A scout looks things up and summarizes.
-- Never `git commit`, `git add`, stash, or change branches; the Bash hook refuses them. Spud commits.
+- Run only git's read verbs (`status`, `log`, `diff`, `show`, `blame`, `grep`, `fetch`, a listing). The Bash hook refuses you every other name git answers to: `commit`, `add`, `stage`, `checkout`, `switch`, `rebase`, `reset`, `push`, `merge`, `cherry-pick`, `worktree`, and the plumbing that writes the index, the object database or the working tree. Spud commits.
 - Never create a ticket, never run `--as spud`. Ticket changes are Spud's; the hook refuses them inside a subagent.
 
 ## Sub-agents
