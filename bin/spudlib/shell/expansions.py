@@ -200,8 +200,9 @@ def first_read_index(words, start):
 
 
 def git_read_index(words, start=1):
-    """The index, from `start`, of the first word git's option scan, its verb or the arguments git_refused reads that holds a glob or
-    an expansion, or None."""
+    """The index, from `start`, of the first word git's option scan, its verb, the arguments git_refused reads, or the options
+    that name a program on the verbs of syntax.GIT_VERB_PROGRAM_OPTIONS (SPD-051) reads that holds a glob or an expansion, or
+    None."""
     i = 1
     while i < len(words):
         w = words[i]
@@ -219,7 +220,23 @@ def git_read_index(words, start=1):
             return i + 1 if i + 1 < len(words) and i + 1 >= start and active_read_word(words[i + 1]) else None
         if w in ("branch", "tag", "config"):
             return first_read_index(words, max(i + 1, start))
+        if w in syntax.GIT_VERB_PROGRAM_OPTIONS:
+            return verb_option_read_index(words, i, start)
         return None
+    return None
+
+
+def verb_option_read_index(words, verb_at, start):
+    """The index, from `start`, of the first option-shaped argument of the verb at `verb_at`, which carries a program-naming
+    option, that holds a glob or an expansion, or None (SPD-051).  Only the words before `--` that are spelled with a leading
+    `-` are read, so `git ls-remote --upload-pac? cmd .` is read as --upload-pack while a pattern or a path a member greps
+    for (`git grep '*.py'`) is left as the argument it is."""
+    for k in range(verb_at + 1, len(words)):
+        w = words[k]
+        if w == "--":
+            return None
+        if w.startswith("-") and k >= start and active_read_word(w):
+            return k
     return None
 
 

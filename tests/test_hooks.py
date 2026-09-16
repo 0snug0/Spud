@@ -1587,7 +1587,9 @@ class SpudAllowIdentityTest(BashHookCase):
     def test_the_interpreter_must_be_the_one_the_hook_runs_on(self):
         """The same file in the same directory as the hook's own interpreter (a symlink elsewhere is a file anyone who can
         write that directory swaps, and its pyvenv.cfg moves sys.prefix).  A bare name is looked up on the hook's PATH, which
-        the Bash tool shares, and a PATH the line changes, or a relative PATH entry ahead of the match, cannot be vouched for."""
+        the Bash tool shares, and a PATH the line changes, or a relative PATH entry ahead of the match, cannot be vouched for
+        -- and since SPD-062 a PATH the line changes, or a `hash` it sets, refuses a member outright rather than only
+        withholding the vouch."""
         exe = sys.executable
         launcher = self.launcher
         self.assertAllowedForBoth("python3.14 -I -S %s {tail}" % launcher)
@@ -1605,10 +1607,17 @@ class SpudAllowIdentityTest(BashHookCase):
                 spelled = "%s -I -S %s {tail}" % (interpreter, launcher)
                 self.assertSilentForBoth(spelled, cwd)
                 self.assertStillRefused(spelled, cwd)
+        # SPD-062: a PATH the line changes, and a name it hashes, no longer merely withhold the vouch -- the interpreter the
+        # hook read by name is not the one the shell would run, so a member is refused outright.  Spud, whom Law 7 does not
+        # bind, still sees the unvouched call and stays silent.
         for prefix in ("PATH=%s:$PATH " % other, "PATH=%s; " % other, "export PATH=%s:$PATH; " % other, "path=(%s $path); " % other,
-                       "hash -p %s/python3.14 python3.14; " % other, "alias python3.14=%s/python3.14; " % other):
+                       "hash -p %s/python3.14 python3.14; " % other):
             with self.subTest(prefix=prefix):
-                self.assertSilentForBoth("%spython3.14 -I -S %s {tail}" % (prefix, launcher))
+                spelled = "%spython3.14 -I -S %s {tail}" % (prefix, launcher)
+                self.assertRefused(spelled.format(tail=self.log), "Law 7", AGENT_A)
+                self.assertSilent(spelled.format(tail="--as spud board"), None)
+        # an alias reaches no command word outside `eval` (SPD-059), so it withholds the vouch and nothing more
+        self.assertSilentForBoth("alias python3.14=%s/python3.14; python3.14 -I -S %s {tail}" % (other, launcher))
         # SPD-043: the function body runs the other interpreter with "$@" as its options and script, words python reads by name,
         # so the lead is refused outright; Spud's call stays silent.  Neither is allowed.
         spelled = "python3.14() {{ %s/python3.14 \"$@\"; }}; python3.14 -I -S %s {tail}" % (other, launcher)
@@ -4425,6 +4434,363 @@ class NamedCoprocTest(BashHookCase):
             with self.subTest(cmd):
                 self.assertEqual(self.analysis(cmd).cwds, frozenset([str(self.home.path)]))
         for ok in ("coproc { echo hi; }", "coproc echo hi", "coproc git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+
+
+class PathInForceTest(BashHookCase):
+    """SPD-062: the hook reads a line's command words by name -- git, spud, python3.14, sqlite3, tee, a shell, a wrapper --
+    and the shell then finds each of them on PATH, so a member that puts a directory of its own first runs its own program
+    under a name the hook cleared (`PATH=<dir>:$PATH git status` runs <dir>/git).  Probed in zsh 5.9 -f, zsh -f -o
+    nobareglobqual as the Bash tool runs it, bash 3.2 and sh, with a fake program in a scratch directory: a prefix
+    assignment, a plain assignment, `export`, `typeset -x`, `declare -x`, `local -x` inside a function and
+    `env PATH=... cmd` each ran the scratch copy in all four shells, `readonly PATH=...` in bash and sh (zsh refuses to
+    write a read-only PATH), and zsh's `path=(<dir> $path)` and `path+=(<dir>)`, the array PATH is tied to.  The
+    subscripted forms zsh also takes (`path[1]=<dir>`, `path[1,0]=(<dir>)`) ran it too, but they reach the analysis as a
+    command word rather than an assignment and are left to a proposal, not closed here.  bash's `hash -p <path> <name>`
+    and zsh's `hash <name>=<path>` put a file of the line's choosing in the shell's command table for the same effect,
+    and both ran it.
+
+    A command run by a path (`/usr/bin/git status`, `./git`) is not looked for on PATH, so a PATH in force does not refuse
+    it, and a name the hook grants nothing for (`ls`) stays silent as before; GIT_EXEC_PATH keeps SPD-046's own reason.
+    The finding is appended after its own command's, so `PATH=<dir> git push` still answers with Law 7's verb; it carries no
+    entry in FINDING_LAST, so on a line of several commands it answers in the order the commands stand (`PATH=<dir> git
+    status; git push` names PATH, not push -- both refusals).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **; Law 7
+    does not bind Spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def finding(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_path_by_every_route_before_a_bare_git_is_refused(self):
+        for cmd in ("PATH=/tmp/x:$PATH git status", "PATH=/tmp/x git status", "PATH=/tmp/x; git status",
+                    "PATH=/tmp/x:$PATH; git status", "export PATH=/tmp/x:$PATH; git status",
+                    "typeset -x PATH=/tmp/x; git status", "declare -x PATH=/tmp/x; git status",
+                    "readonly PATH=/tmp/x; git status", "local -x PATH=/tmp/x; git status",
+                    "env PATH=/tmp/x git status", "/usr/bin/env PATH=/tmp/x:$PATH git status",
+                    "PATH=/tmp/x:$PATH git log --oneline", "PATH=/tmp/x:$PATH git diff"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("PATH", r.reason)
+
+    def test_the_zsh_path_array_is_refused(self):
+        # zsh ties `path` to PATH (probed): every form of the array assignment replaces the program a bare name finds.
+        for cmd in ("path=(/tmp/x $path); git status", "path+=(/tmp/x); git status", "path=(/tmp/x); git status",
+                    "path=(/tmp/x $path) git status", "PATH=/tmp/x path=(/tmp/y); git status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("path", r.reason)
+
+    def test_every_command_name_the_hook_reads_is_refused(self):
+        for cmd in ("PATH=/tmp/x:$PATH git status", "PATH=/tmp/x:$PATH sh -c 'echo hi'",
+                    "PATH=/tmp/x:$PATH bash -c 'echo hi'", "PATH=/tmp/x:$PATH zsh -c 'echo hi'",
+                    "PATH=/tmp/x:$PATH python3.14 -I -S bin/spud board", "PATH=/tmp/x:$PATH python3 x.py",
+                    "PATH=/tmp/x:$PATH tee /tmp/out", "PATH=/tmp/x:$PATH nice git status",
+                    "PATH=/tmp/x:$PATH nohup ls", "PATH=/tmp/x:$PATH env ls", "PATH=/tmp/x:$PATH node x.js",
+                    "PATH=/tmp/x:$PATH %s board"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd if "%s" not in cmd else cmd % self.spud_cli)
+        # sqlite3 is refused for everyone by the database rule, which is read before the findings; the finding is there.
+        self.assertIn(("path", ("PATH", "sqlite3")), self.finding("PATH=/tmp/x:$PATH sqlite3 x.db"))
+
+    def test_the_finding_names_the_variable_and_the_command(self):
+        self.assertEqual(self.finding("PATH=/tmp/x git status"),
+                         [("git", ("status", None)), ("path", ("PATH", "git"))])
+        self.assertEqual(self.finding("path=(/tmp/x); git status"),
+                         [("git", ("status", None)), ("path", ("path", "git"))])
+        self.assertEqual(self.finding("PATH=/tmp/x tee /tmp/out"), [("path", ("PATH", "tee"))])
+        r = self.refused_for_members("PATH=/tmp/x:$PATH git status")
+        self.assertIn("PATH", r.reason)
+        self.assertIn("git", r.reason)
+        self.assertNotIn("alias", r.reason)  # its own reason, not SPD-044's or SPD-046's
+
+    def test_a_refusal_the_words_as_spelled_earn_keeps_its_own_reason(self):
+        r = self.refused_for_members("PATH=/tmp/x:$PATH git push")
+        self.assertIn("git push", r.reason)
+        r = self.assertRefused("PATH=/tmp/x:$PATH %s --as spud board" % self.spud_cli, "Law 6")
+        self.assertIn("--as spud", r.reason)
+
+    def test_a_command_run_by_a_path_stays_silent(self):
+        # PATH is not searched for a word holding a slash, so the program the hook read is the one that runs.
+        for ok in ("PATH=/tmp/x:$PATH /usr/bin/git status", "PATH=/tmp/x:$PATH ./git status",
+                   "PATH=/tmp/x:$PATH /bin/sh -c 'echo hi'", "PATH=/tmp/x:$PATH /usr/bin/tee /tmp/out"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_a_name_the_hook_grants_nothing_for_stays_silent(self):
+        for ok in ("PATH=/tmp/x ls", "PATH=/tmp/x:$PATH ls -la", "PATH=/tmp/x echo hi", "PATH=/tmp/x:$PATH cd /tmp",
+                   "export PATH=/tmp/x:$PATH", "PATH=/tmp/x:$PATH", "path=(/tmp/x $path)"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_reading_path_without_assigning_it_stays_silent(self):
+        for ok in ("echo $PATH", "git status # $PATH", "echo \"$PATH\" > /tmp/out", "git -c color.ui=never status",
+                   "CDPATH=$PATH git status", "MYPATH=/tmp/x:$PATH git status", "PATHS=/tmp/x git status",
+                   "XPATH=/tmp/x git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_git_exec_path_keeps_its_own_reason(self):
+        r = self.refused_for_members("GIT_EXEC_PATH=/tmp/x git status")
+        self.assertIn("GIT_EXEC_PATH", r.reason)
+        self.assertEqual(self.finding("GIT_EXEC_PATH=/tmp/x git status"), [("git-program", "GIT_EXEC_PATH")])
+
+    def test_hash_shadowing_a_name_the_hook_reads_is_refused(self):
+        # bash: `hash -p <path> <name>`; zsh: `hash <name>=<path>` (both probed).
+        for cmd in ("hash -p /tmp/x/git git; git status", "hash git=/tmp/x/git; git status",
+                    "hash -p /tmp/x/sh sh; sh -c 'echo hi'", "hash tee=/tmp/x/tee; tee /tmp/out",
+                    "hash -p /tmp/x/git git; git log"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("hash", r.reason)
+        self.assertEqual(self.finding("hash git=/tmp/x/git; git status"),
+                         [("git", ("status", None)), ("hashed", "git")])
+
+    def test_hash_that_names_nothing_the_hook_reads_stays_silent(self):
+        for ok in ("hash; git status", "hash -r; git status", "hash -p /tmp/x/ls ls; git status",
+                   "hash ls=/tmp/x/ls; git status", "env hash git=/tmp/x/git; git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_path_inside_shell_strings_eval_and_subshells(self):
+        for cmd in ("sh -c 'PATH=/tmp/x:$PATH git status'", "eval 'PATH=/tmp/x git status'",
+                    "(PATH=/tmp/x:$PATH git status)", "true && PATH=/tmp/x:$PATH git status",
+                    "echo $(PATH=/tmp/x git status)"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+
+class WrapperCommandWordTest(BashHookCase):
+    """SPD-055: after strip_wrapper the prefix loop read the wrapper's remaining words as the shell's own, so
+    `nice x=./git push` took `x=./git` for an assignment and dispatched on `push` -- kind other, no finding -- while nice
+    execs that word and the shell ran ./git push out of a directory named `x=.`.  Probed in zsh 5.9 -f, zsh -f -o
+    nobareglobqual, bash 3.2 and sh with a program in such a directory: `command`, `exec`, `nohup`, `nice`, `caffeinate`,
+    `script`, `stdbuf`, `xargs` (with input) and zsh's `noglob` each ran it, while `env x=./prog status` set x and ran
+    `status` instead, wherever env stood; sudo(8) documents `sudo [VAR=value] [-i | -s] [command [arg ...]]` and takes it as
+    environment too (syntax.WRAPPER_TAKES_ASSIGNMENTS).  The shell's own `time` and zsh's `nocorrect` keep the command
+    position, so the shell reads the assignment after them -- but only where they stand in it, which the method below pins.
+    For every other wrapper the first remaining word is its command, assignment-shaped or not, and os.path.basename is what
+    the hook dispatches on (`x=./git` -> git).
+
+    A word an exec'ing wrapper is handed is no longer an assignment either, so `nice GIT_PAGER=less git log` now reads as
+    the command `GIT_PAGER=less` and stays silent: the shell looks for a program of that name and runs neither git nor a
+    pager (probed).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def finding(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_a_wrapper_execs_an_assignment_shaped_word(self):
+        for wrapper in ("nice", "command", "exec", "nohup", "timeout 5", "xargs", "builtin", "caffeinate", "doas",
+                        "stdbuf -o0", "chronic", "ionice", "setsid", "unbuffer", "script /dev/null", "noglob",
+                        "nice -n 5", "nohup nice", "command -p"):
+            cmd = "%s x=./git push" % wrapper
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("git push", r.reason)
+
+    def test_the_word_is_dispatched_by_its_base_name(self):
+        self.assertEqual(self.finding("nice x=./git push"), [("git", ("push", "push"))])
+        self.assertEqual(self.finding("nice x=../bin/git push"), [("git", ("push", "push"))])
+        self.assertEqual(self.finding("nice x=/usr/bin/git push"), [("git", ("push", "push"))])
+
+    def test_env_sudo_time_and_nocorrect_still_read_the_word_as_environment(self):
+        # env and sudo take NAME=value as the command's environment; `time` is a reserved word and zsh's `nocorrect` keeps
+        # the command position, so the shell's own assignment parsing still applies there (probed).
+        for ok in ("env x=./git push", "sudo x=./git push", "time x=./git push", "nocorrect x=./git push",
+                   "env -- x=./git push", "sudo -u root x=./git push"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        for refused in ("env GIT_PAGER=less git log", "sudo GIT_PAGER=less git log", "time GIT_PAGER=less git log",
+                        "nocorrect GIT_PAGER=less git log", "env x=./git git push", "sudo x=1 git push"):
+            with self.subTest(refused):
+                self.refused_for_members(refused)
+
+    def test_an_assignment_shaped_word_with_a_harmless_base_stays_silent(self):
+        for ok in ("nice x=./ls", "nice x=./ls -la", "nohup x=./make all", "command x=./echo hi",
+                   "timeout 5 x=/bin/echo hi", "nice x=1 ls", "nice FOO=1 ls"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_a_wrapper_no_longer_reads_its_word_as_an_assignment(self):
+        # The shell looks for a program named `GIT_PAGER=less` and runs nothing: neither git nor the pager (probed), so the
+        # hook says nothing either.  `env` and `sudo` keep the old reading, which the test above pins.
+        for ok in ("nice GIT_PAGER=less git log", "nohup GIT_SSH_COMMAND=cmd git fetch", "nice FOO=1 git push"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_time_and_nocorrect_take_the_assignment_only_in_the_command_position(self):
+        """`time` and zsh's `nocorrect` are the shell's own, so they keep the command position and the shell reads the
+        assignment -- but only where they stand in it.  Behind another wrapper `time` is /usr/bin/time, an external program
+        that execs its word: probed, `nice time x=./prog status`, `env time x=./prog status` and zsh's `- time x=./prog
+        status` each ran ./prog while `time x=./prog status` set x and ran `status`.  `nice nocorrect x=./git push` runs
+        nothing at all (nice finds no program called nocorrect), and is refused with it: fail closed."""
+        for ok in ("time x=./git push", "nocorrect x=./git push", "nice env x=./git push", "env sudo x=./git push"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        for refused in ("nice time x=./git push", "env time x=./git push", "sudo time x=./git push",
+                        "- time x=./git push", "nice nocorrect x=./git push", "time nice x=./git push"):
+            with self.subTest(refused):
+                r = self.refused_for_members(refused)
+                self.assertIn("git push", r.reason)
+
+    def test_a_spud_call_behind_a_wrapper_is_still_read(self):
+        r = self.assertRefused("nice x=%s/bin/spud --as spud board" % self.home.path, "Law 6")
+        self.assertIn("--as spud", r.reason)
+        self.assertSilent("nice x=%s/bin/spud --as %s board" % (self.home.path, AGENT_A))
+
+    def test_the_word_is_read_inside_shell_strings_eval_and_subshells(self):
+        for cmd in ("sh -c 'nice x=./git push'", "eval 'nice x=./git push'", "(nice x=./git push)",
+                    "true && nice x=./git push", "nice x=./git commit -m x"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+
+class GitVerbProgramOptionTest(BashHookCase):
+    """SPD-051: SPD-046's table of verb options that name a program git runs listed only ls-remote/fetch --upload-pack,
+    grep -O/--open-files-in-pager, difftool -x/--extcmd and archive --exec.  The same class lives on other verbs Law 7
+    allows.  Probed on git 2.54.0 (Apple Git-157), scratchpad only, no real remote: `git send-email --dry-run
+    --to-cmd=<prog> <patch>` and the same with `--cc-cmd` each ran <prog>, and so did the abbreviation `--to-cm=<prog>`;
+    `git send-email -h` lists `--sendmail-cmd` ("Command to run to send email") and `--smtp-server`, which
+    git-send-email(1) takes as a sendmail-like program when it is a path; `git web--browse` accepts `--browser`, `--tool`
+    and `--config` and their spaced short forms `-b`, `-t` and `-c`, each naming the browser or the config key whose value
+    git runs; `git instaweb` is not installed on this Mac (absent from `git --list-cmds=main`, so SPD-047 already refuses
+    it here as an unknown verb), and its `--httpd`/`-d` and `--browser`/`-b` come from git-instaweb(1).  `git help` names
+    no program on the line -- `-m`, `-w` and `-i` pick man, a browser or info, whose program comes from config the
+    allowlist already refuses -- but git-help(1) documents GIT_MAN_VIEWER, which was missing from GIT_PROGRAM_ENV_VARS.
+
+    git's parse-options takes any unambiguous prefix, so a `--`-prefix of one of these long options is refused whether or
+    not git would resolve it exactly: `git send-email --to=x` is refused because `--to` is a prefix of `--to-cmd` (fail
+    closed; a member never runs send-email).  Also pinned here: a clustered short option (`git grep -nO`), which SPD-046's
+    round 2 closed, and a glob that expands to one of these options, which took two changes -- GLOB_SAMPLES held none of
+    these verbs or options, and git_read_index stopped at the verb, so the option was never a read point at all."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def finding(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_send_email_program_options_are_refused(self):
+        for cmd in ("git send-email --sendmail-cmd=cmd p", "git send-email --sendmail-cmd cmd p",
+                    "git send-email --smtp-server=/tmp/x/sendmail p", "git send-email --smtp-server /tmp/x p",
+                    "git send-email --to-cmd=cmd p", "git send-email --cc-cmd=cmd p",
+                    "git send-email --sendmail=cmd p", "git send-email --to-cm=cmd p", "git send-email --cc-c cmd p",
+                    "git send-email --smtp-serv=/tmp/x p", "git send-email --to=x p", "git send-email --cc=x p"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.assertEqual(self.finding("git send-email --to-cmd=cmd p"),
+                         [("git-program", "send-email --to-cmd=cmd")])
+
+    def test_web_browse_program_options_are_refused(self):
+        for cmd in ("git web--browse --browser=x u", "git web--browse --browser x u", "git web--browse -b x u",
+                    "git web--browse --tool=x u", "git web--browse -t x u", "git web--browse --config=browser.x.cmd u",
+                    "git web--browse -c browser.x.cmd u", "git web--browse --brow=x u", "git web--browse -bt u",
+                    "git web--browse -ct browser.x.cmd u"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.assertEqual(self.finding("git web--browse --tool=x u"), [("git-program", "web--browse --tool=x")])
+
+    def test_instaweb_program_options_are_refused(self):
+        for cmd in ("git instaweb --httpd=lighttpd", "git instaweb --httpd lighttpd", "git instaweb -d lighttpd",
+                    "git instaweb --browser=x", "git instaweb -b x", "git instaweb --htt=x", "git instaweb -ld x",
+                    "git instaweb -pb x"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.assertEqual(self.finding("git instaweb --httpd=lighttpd"),
+                         [("git-program", "instaweb --httpd=lighttpd")])
+
+    def test_the_verbs_without_a_program_option_stay_silent(self):
+        for ok in ("git send-email --dry-run p", "git send-email --smtp-server-port=25 p",
+                   "git send-email --smtp-user=me p", "git send-email --dump-aliases", "git web--browse u",
+                   "git web--browse --version"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        # git instaweb is not installed on this Mac, so SPD-047's unknown-verb check refuses every form of it here; what
+        # SPD-051 decides is which finding a program-naming option earns, not whether the verb is refused at all.
+        for verb_only in ("git instaweb --port=1234", "git instaweb -p 1234", "git instaweb --local", "git instaweb stop"):
+            with self.subTest(verb_only):
+                self.assertEqual(self.finding(verb_only), [("git-verb", ("verb", "instaweb"))])
+
+    def test_git_man_viewer_is_refused(self):
+        for cmd in ("GIT_MAN_VIEWER=cmd git help git", "env GIT_MAN_VIEWER=cmd git status",
+                    "export GIT_MAN_VIEWER=cmd; git log"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("GIT_MAN_VIEWER", r.reason)
+
+    def test_git_help_names_no_program_on_the_line(self):
+        for ok in ("git help", "git help git", "git help -a", "git help -m git", "git help -w git", "git help -i git",
+                   "git help -c", "git help --all"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_clustered_short_options_stay_refused(self):
+        # SPD-046's round 2 closed the cluster; pinned here with SPD-051's other short-option verbs.
+        for cmd in ("git grep -nO foo", "git grep -nOcat foo", "git grep -inO foo", "git difftool -dx cmd A B"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_a_glob_that_expands_to_a_program_option_is_read(self):
+        for cmd in ("git ls-remote --upload-pac? cmd .", "git fetch --upload-pac? cmd r",
+                    "git send-email --to-cm? cmd p", "git difftool --extcm? cmd A B",
+                    "git archive --exe? cmd HEAD"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_the_old_table_is_unchanged(self):
+        for cmd in ("git ls-remote --upload-pack=cmd host:r", "git fetch --upload-pack cmd r", "git grep -O foo",
+                    "git difftool --extcmd=cmd A B", "git archive --exec=cmd HEAD"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        for ok in ("git fetch", "git ls-remote host:r", "git grep -n foo", "git difftool A B", "git archive HEAD"):
             with self.subTest(ok):
                 self.assertSilent(ok)
 

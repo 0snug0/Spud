@@ -101,7 +101,8 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
     word, a wrapper's options and command, git's options, verb and the arguments git_refused reads, a shell's options, python's
     options and script, a spud call's arguments) is read as each word it can become (SPD-041, resolve_glob), an expansion in it
     before a glob (SPD-043, resolve_expansion).  `fresh`: the leading words an expansion in the command word gave, none of which
-    the shell reads as an assignment or a reserved word, since it finds those before it expands."""
+    the shell reads as an assignment or a reserved word, since it finds those before it expands -- and the same for the words a
+    wrapper that execs its command word is handed (SPD-055: `nice x=./git push` runs git push, nice having exec'd `x=./git`)."""
 
     def read(i, wrapper_command=False, **kind):
         nonlocal fresh
@@ -124,6 +125,7 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
         return True
 
     prefix_names, wrapper_from, spelled_command = [], 1, False
+    path_names = []  # the wrapper names this command runs, which the shell finds on PATH like the command word (SPD-062)
     # SPD-060: `coproc` was read; SPD-059: no word has taken the command position away yet, so an alias the line defined is
     # still expanded here (a reserved word and an assignment keep it, a wrapper other than zsh's `time` does not).
     coproc, command_position = False, True
@@ -179,16 +181,24 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 continue
             wrapper_from = 1
             for aname, avalue in env_assignments:
-                # `env GIT_CONFIG_*/HOME/GIT_PAGER/GIT_SSH_COMMAND/GIT_DIR=... git ...` (SPD-044, SPD-046, SPD-047)
-                if git_programs.is_git_config_var(aname) or git_programs.is_git_program_var(aname) or git_programs.is_git_repo_var(aname):
+                # `env GIT_CONFIG_*/HOME/GIT_PAGER/GIT_SSH_COMMAND/GIT_DIR/PATH=... git ...` (SPD-044, SPD-046, SPD-047, SPD-062)
+                if (git_programs.is_git_config_var(aname) or git_programs.is_git_program_var(aname)
+                        or git_programs.is_git_repo_var(aname) or git_programs.is_path_var(aname)):
                     a.vars[aname] = avalue
                     a.doubt.add(aname)  # the command's environment, not the shell's (SPD-043)
+            path_names.append(w)
             prefixed = True
             # only zsh's `time` keeps the command position an alias is expanded in (SPD-059, probed: `eval 'time gp'` ran the
             # alias, `eval 'command gp'` and `eval 'env gp'` ran nothing)
+            shell_modifier = command_position and w in zsh.ZSH_COMMAND_POSITION_WORDS
             command_position = w in zsh.ZSH_COMMAND_POSITION_WORDS
             effect = max(effect, directories.prefix_effect(w, words[1] if len(words) > 1 else None), key=directories.EFFECT_ORDER.get)
-            words, fresh = rest, 0
+            # SPD-055: env and sudo read NAME=value as an assignment of their own, and the shell reads one after its own `time`
+            # or `nocorrect`, which keep the command position; every other wrapper -- and `time` anywhere but in the command
+            # position, where it is /usr/bin/time (probed) -- execs its first remaining word whatever it looks like, so none of
+            # the words it is handed is an assignment or a reserved word, which is what `fresh` says.
+            words = rest
+            fresh = 0 if (shell_modifier or os.path.basename(w).casefold() in syntax.WRAPPER_TAKES_ASSIGNMENTS) else len(rest)
             for s in strings:
                 analyse_new_shell(a, prepare.deglob(s), depth + 1)  # a shell reads the string with its own quotes (SPD-041)
         else:
@@ -318,6 +328,13 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
             expansions.record_alias_line(words, a)
         else:
             expansions.clear_alias_line(words, a)
+    elif cmd == "hash" and directories.builtin_runs(effect):
+        # SPD-062: the builtin, spelled exactly, puts a file of the line's own choosing in the shell's command table, so a
+        # later bare call of that name runs it whatever PATH holds.  Probed in bash 3.2 and sh (`hash -p <dir>/<name> <name>`)
+        # and zsh 5.9 -f and -o nobareglobqual (`hash <name>=<dir>/<name>`): both ran the scratch copy, and `hash`, `hash -r`
+        # and `hash -l` list or clear and name nothing.  Never a spud call, so a hashing line is not allowed on its own.
+        a.kinds.append("other")
+        a.hashed.update(hashed_names(words))
     elif cmd in syntax.DIRECTORY_COMMANDS and directories.builtin_runs_here(effect):
         a.kinds.append("cd")
         directories.directory_change(words, a, effect)
@@ -332,3 +349,43 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(w)))
     else:
         a.kinds.append("other")  # CD, /usr/bin/cd, env cd: /usr/bin/cd in its own process, and the shell stays
+    shadowed_name(a, [cmd] + path_names)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason
+
+
+def hashed_names(words):
+    """The command names a `hash` line puts in the shell's own table (SPD-062): every operand's name, `<name>` after bash's
+    `-p <pathname>` or `<name>=<path>` in zsh.  Read loosely -- a name after any option, `-d` and `-t` included -- so a line
+    that only prints or forgets an entry is refused with it: a member has no reason to hash a name the hook reads."""
+    names, i, options = [], 1, True
+    while i < len(words):
+        w = words[i]
+        if options and w.startswith("-") and len(w) > 1:
+            if w == "--":
+                options = False
+            elif not w.startswith("--") and "p" in w[1:]:
+                i += 1  # bash's `-p <pathname>`, whose value is the file, not a name
+            i += 1
+            continue
+        options = False
+        names.append(prepare.deglob(w).split("=", 1)[0])
+        i += 1
+    return [n for n in names if n]
+
+
+def shadowed_name(a, names):
+    """Record that the shell would not find the program the hook read by one of these names (SPD-062): the line assigned
+    PATH (or zsh's `path`, which is tied to it), so it searches a directory of the line's own choosing, or it hashed the
+    name to a file of its own.  Only the names the hook reads count (git, spud, python3.14, sqlite3, tee, a shell, a
+    wrapper): for any other name the hook grants nothing, so replacing its program takes a member no further than running
+    a program of its own.  A command run by a path is not looked for on PATH, and GIT_EXEC_PATH keeps SPD-046's reason."""
+    for word in names:
+        if not git_programs.path_dispatched(word):
+            continue
+        name = prepare.deglob(word)
+        if name in a.hashed:
+            a.findings.append(("hashed", name))
+            return
+        var = git_programs.path_in_force(a.vars)
+        if var is not None:
+            a.findings.append(("path", (var, name)))
+            return

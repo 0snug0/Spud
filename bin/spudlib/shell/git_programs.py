@@ -55,25 +55,51 @@ GIT_INERT_CONFIG_KEYS = {
 # name or enable a program git runs.  GIT_PAGER/PAGER are inert with an empty or `cat` value; the rest name a program outright,
 # except GIT_ALLOW_PROTOCOL, which enables the ext:: transport whose URL is a command git runs (probed via the harness) (SPD-046).
 GIT_PAGER_ENV_VARS = ("GIT_PAGER", "PAGER")
+# GIT_MAN_VIEWER is git-help(1)'s: "If everything fails, or if no viewer is configured, the viewer specified in the
+# GIT_MAN_VIEWER environment variable will be tried" -- a program git runs under the allowed verb `git help` (SPD-051).
 GIT_PROGRAM_ENV_VARS = ("GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "EDITOR", "VISUAL", "GIT_SSH", "GIT_SSH_COMMAND",
                         "GIT_EXTERNAL_DIFF", "GIT_ASKPASS", "SSH_ASKPASS", "GIT_PROXY_COMMAND", "GIT_EXEC_PATH",
-                        "GIT_TEMPLATE_DIR", "GIT_ALLOW_PROTOCOL")
+                        "GIT_TEMPLATE_DIR", "GIT_ALLOW_PROTOCOL", "GIT_MAN_VIEWER")
 # The global option `--exec-path=<dir>` is the command-line form of GIT_EXEC_PATH: git runs <dir>/git-* for its subprograms
 # (probed: `git --exec-path=<dir> ls-remote https://x` ran <dir>/git-remote-https).  Bare `--exec-path` only prints the path and
 # stays silent.  git accepts any unambiguous prefix (`--exec`, `--exec-p`), so a `=`-form prefix of this option is refused.
 GIT_EXEC_PATH_OPTION = "--exec-path"
-# Options that name a program on a verb git_refused otherwise allows (submodule, bisect and the other write verbs are already
-# refused whole, so they need no entry): verb -> (long options, short-option letters).  git's parse-options accepts any
-# unambiguous prefix of a long option (`--upload`, `--open`, probed) and lets short options cluster with the value attached
-# (`-nO<cmd>`, probed), so a `--`-prefix of one of these long options, and any short cluster containing one of the letters, is
-# refused whether or not the value is present (fail closed; an occasional refused pattern value is acceptable) (SPD-046).
-GIT_VERB_PROGRAM_OPTIONS = {
-    "ls-remote": (("--upload-pack",), ""),
-    "fetch": (("--upload-pack",), ""),
-    "grep": (("--open-files-in-pager",), "O"),
-    "difftool": (("--extcmd",), "x"),
-    "archive": (("--exec",), ""),
-}
+# The options that name a program on an otherwise allowed verb are syntax.GIT_VERB_PROGRAM_OPTIONS, beside the other word
+# tables, because GLOB_SAMPLES reads them too (SPD-051); git_verb_names_program below is what the git branch calls.
+
+# SPD-062: PATH, and zsh's `path`, which is tied to it.  Every name the hook reads a command by -- git, spud, python3.14,
+# sqlite3, tee, a shell, a wrapper -- the shell then looks for on PATH, so a member that puts a directory of its own first
+# runs its own program under a name the hook cleared, one level above SPD-046's config that names a program.  Probed in
+# zsh 5.9 -f, zsh -f -o nobareglobqual as the Bash tool runs it, bash 3.2 and sh with a fake program in a scratch
+# directory: a prefix assignment, a plain assignment, `export`, `typeset -x`, `declare -x`, `readonly`, `local -x` in a
+# function and `env PATH=... cmd` each ran the scratch copy, as did zsh's `path=(<dir> $path)` and `path+=(<dir>)`.
+PATH_VARS = ("PATH", "path")
+# The command names the shell finds on PATH and the hook reads by name: a name outside this set (`ls`, `make`) is one the
+# hook grants nothing for, so replacing its program takes a member no further than running any program of its own would.
+PATH_DISPATCH_NAMES = frozenset({"git", "spud", "sqlite3", "sqlite", "tee"} | syntax.SHELLS | syntax.JS_RUNTIMES | syntax.WRAPPERS)
+
+
+def is_path_var(name):
+    """A variable that decides which file a bare command name finds, so `env PATH=... cmd` must record it into a.vars."""
+    return name in PATH_VARS
+
+
+def path_in_force(variables):
+    """The name of a PATH variable the line assigns, or None.  A fixed order so the reason is deterministic."""
+    for name in PATH_VARS:
+        if name in variables:
+            return name
+    return None
+
+
+def path_dispatched(word):
+    """True when the shell looks this command word up on PATH and the hook reads it by name (SPD-062).  A word holding a
+    slash is a path the shell opens as spelled, so PATH does not decide it; the name is matched case-folded, as the
+    dispatch matches it (SPD-030: macOS finds GIT for git)."""
+    if "/" in word:
+        return False
+    base = word.casefold()
+    return base in PATH_DISPATCH_NAMES or syntax.PYTHON_RE.match(base) is not None
 
 
 def git_config_section(operand):
@@ -215,13 +241,15 @@ def git_env_names_program(variables):
 
 
 def git_verb_names_program(words):
-    """`verb option` when an allowed git verb carries an option that names a program git runs (SPD-046): ls-remote/fetch
-    --upload-pack, grep -O/--open-files-in-pager, difftool -x/--extcmd, archive --exec.  Write verbs (submodule, bisect ...) are
+    """`verb option` when an allowed git verb carries an option that names a program git runs (SPD-046, SPD-051):
+    ls-remote/fetch --upload-pack, grep -O/--open-files-in-pager, difftool -x/--extcmd, archive --exec, send-email
+    --sendmail-cmd/--smtp-server/--to-cmd/--cc-cmd, instaweb --httpd/-d and --browser/-b, web--browse --browser/-b,
+    --tool/-t and --config/-c (syntax.GIT_VERB_PROGRAM_OPTIONS).  Write verbs (submodule, bisect ...) are
     already refused whole by git_refused, so they are absent.  git accepts any unambiguous prefix of a long option and lets short
     options cluster with the value attached, so a `--`-prefix of one of the verb's long options (`--upload`, `--ext`, with or
     without `=value`) and any short cluster containing one of its letters (`-nO`, `-x`) are refused, value inspected or not."""
     verb, args = git_verbs.git_verb(words)
-    entry = GIT_VERB_PROGRAM_OPTIONS.get(verb)
+    entry = syntax.GIT_VERB_PROGRAM_OPTIONS.get(verb)
     if not entry:
         return None
     longs, shorts = entry

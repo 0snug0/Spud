@@ -15,6 +15,20 @@ RESERVED_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "d
 # zsh's precommand modifiers.
 WRAPPERS = {"env", "command", "exec", "builtin", "nohup", "nice", "time", "timeout", "caffeinate", "sudo", "doas",
             "xargs", "stdbuf", "chronic", "ionice", "setsid", "unbuffer", "script", "noglob", "nocorrect"}
+# The wrappers that read a NAME=value word as an assignment of their own rather than as the command they run (SPD-055): env,
+# whose environment POSIX defines that way, and sudo, whose usage line is `sudo [VAR=value] [-i | -s] [command [arg ...]]`.
+# Probed in zsh 5.9 -f, zsh -f -o nobareglobqual as the Bash tool runs it, bash 3.2 and sh, with a program in a directory
+# named `x=.`: `env x=./prog status` set x and ran `status`, wherever env stood (`nice env x=./prog status` too), while
+# `command`, `exec`, `nohup`, `nice`, `caffeinate`, `script`, `stdbuf`, `xargs` (with input) and zsh's `noglob` each ran
+# ./prog -- an external wrapper execs its first non-option word whatever it looks like, and so do the builtins that take a
+# command.  So for every wrapper outside this set the first remaining word is its command, assignment-shaped or not, and
+# os.path.basename is what the hook dispatches on (`nice x=./git push` runs git push out of a directory named `x=.`).
+#
+# The shell's own `time` and zsh's `nocorrect` keep the command position instead, so the shell reads the assignment itself --
+# but only where they stand in it: those are zsh.ZSH_COMMAND_POSITION_WORDS, which analyse_words already tracks for aliases.
+# Probed: `time x=./prog status` set x and ran `status`, while `nice time x=./prog status`, `env time x=./prog status` and
+# zsh's `- time x=./prog status` each ran ./prog, /usr/bin/time being an external program that execs its word.
+WRAPPER_TAKES_ASSIGNMENTS = {"env", "sudo"}
 # Per wrapper, the options whose value is the next word unless attached (macOS and GNU spellings): a value taken for the
 # command word hides the command (`timeout -s KILL 5 git push`), a command word taken for a value hides it too.
 WRAPPER_VALUE_OPTIONS = {
@@ -123,6 +137,33 @@ GIT_WRITE_VERBS = {"commit", "add", "checkout", "switch", "rebase", "reset", "pu
                    "apply", "revert", "restore", "rm", "mv", "clean", "notes", "replace", "update-ref", "symbolic-ref",
                    "filter-branch", "gc", "prune", "submodule", "init", "clone", "bisect", "mergetool", "citool", "gui"}
 GIT_GLOBAL_VALUE_FLAGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env", "--list-cmds"}
+# Options that name a program on a verb git_refused otherwise allows (submodule, bisect and the other write verbs are already
+# refused whole, so they need no entry): verb -> (long options, short-option letters).  git's parse-options accepts any
+# unambiguous prefix of a long option (`--upload`, `--open`, `--to-cm`, probed) and lets short options cluster with the value
+# attached (`-nO<cmd>`, probed), so a `--`-prefix of one of these long options, and any short cluster containing one of the
+# letters, is refused whether or not the value is present (fail closed; an occasional refused pattern value, and an exact
+# option that is also the prefix of a program-naming one -- `--to`, `--cc` -- is acceptable) (SPD-046, SPD-051).  Read by
+# git_verb_names_program; sampled by GLOB_SAMPLES, which is why the table lives here with the other word tables.
+#
+# Probed on git 2.54.0 (Apple Git-157): ls-remote/fetch --upload-pack, grep -O/--open-files-in-pager, difftool -x/--extcmd
+# and archive --exec each ran the named program (SPD-046); `git send-email --dry-run --to-cmd=<prog>` and `--cc-cmd=<prog>`
+# ran <prog>, and `git send-email -h` lists --sendmail-cmd ("Command to run to send email") and --smtp-server, which
+# git-send-email(1) takes as a sendmail-like program when it is a path; `git web--browse` accepted --browser, --tool and
+# --config and their spaced short forms -b, -t and -c, each naming the browser or the config key whose value git runs.
+# git instaweb is not installed on this Mac (it is absent from `git --list-cmds=main`, so an unknown verb refuses it here);
+# its --httpd/-d and --browser/-b come from git-instaweb(1), for a machine that has it.  `git help` names no program on the
+# line -- -m/-w/-i pick man, a browser or info, whose program comes from config the allowlist already refuses, and from
+# GIT_MAN_VIEWER, which GIT_PROGRAM_ENV_VARS now holds -- so it has no entry (SPD-051).
+GIT_VERB_PROGRAM_OPTIONS = {
+    "ls-remote": (("--upload-pack",), ""),
+    "fetch": (("--upload-pack",), ""),
+    "grep": (("--open-files-in-pager",), "O"),
+    "difftool": (("--extcmd",), "x"),
+    "archive": (("--exec",), ""),
+    "send-email": (("--sendmail-cmd", "--smtp-server", "--to-cmd", "--cc-cmd"), ""),
+    "instaweb": (("--httpd", "--browser"), "db"),
+    "web--browse": (("--browser", "--tool", "--config"), "btc"),
+}
 BRANCH_READ_FLAGS = {"-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", "--all", "--remotes", "--verbose", "--color",
                      "--no-color", "--column", "--no-column", "-i", "--ignore-case", "--no-abbrev"}
 BRANCH_READ_VALUE_FLAGS = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--abbrev"}
@@ -185,6 +226,10 @@ class ShellAnalysis:
         # under ALIAS_KEY + name, so a definition in a branch, a subshell, a pipeline or a loop body is doubted as a
         # variable's assignment there is.
         self.aliases, self.alias_scope, self.alias_unknown = {}, 0, False
+        # SPD-062: the command names a `hash` line put in the shell's own command table, so a later bare call of one of them
+        # runs the file the line chose whatever PATH holds.  Never cleared: a `hash` in a branch, a subshell or a loop body
+        # still leaves the hook unable to say which program a name finds, and the refusal is the safe answer.
+        self.hashed = set()
 
     @property
     def all_spud(self):
