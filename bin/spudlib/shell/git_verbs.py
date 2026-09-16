@@ -144,7 +144,10 @@ def git_write_option_targets(words):
 
     Read in every spelling git takes: spaced, `=`-attached, a short option with its value attached or clustered, and any
     `--`-prefix of a long option, git's parse-options resolving an unambiguous one.  A verb GIT_WRITE_VERBS refuses whole
-    carries no target: Law 7's verb is the reason a member gets, and `git init`/`git clone` are Spud's own."""
+    carries no target: Law 7's verb is the reason a member gets, and `git init`/`git clone` are Spud's own.  A verb Law 7
+    refuses through GIT_MEMBER_VERBS instead (SPD-087: read-tree, checkout-index, index-pack, repack, pack-objects,
+    commit-graph, multi-pack-index, credential-store ...) keeps its target and its entry: Law 7 does not bind Spud, and
+    the path rule still holds his own call to it."""
     verb, args = git_verb(words)
     if verb is None or verb in syntax.GIT_WRITE_VERBS:
         return []
@@ -250,8 +253,25 @@ def flag_list_refused(verb, args, read_flags, value_flags):
     return None
 
 
+def git_not_allowed(verb):
+    """The verb when Law 7 allows a member no form of it (SPD-087): every name git answers to outside
+    syntax.GIT_MEMBER_VERBS, so a plumbing verb the old denylist never held -- and one a later git adds -- is refused
+    rather than silent.
+
+    Read after git_refused, so Law 7's own table and its subcommand cases keep their reason when the hook cannot read
+    git's command list, and after git_unknown_verb, so the name here is one of git's own commands: a name git does not
+    know is SPD-047's, whose reason names the alias or the external `git-<verb>` program it must be.  A verb built from
+    an expansion is SPD-043's, which doubts the whole word."""
+    if verb is None or verb in syntax.GIT_MEMBER_VERBS:
+        return None
+    name = prepare.deglob(verb)
+    return None if (name in syntax.GIT_MEMBER_VERBS or spud_calls.unresolvable_word(name)) else verb
+
+
 def git_refused(verb, args):
-    """The verb when Law 7 refuses it for a spudagent, else None."""
+    """The verb when Law 7's own table or one of its subcommand cases refuses it for a spudagent, else None.  Every
+    other name git knows is refused by git_not_allowed; these are the ones whose refusal stands whatever git's command
+    list says (SPD-087)."""
     if verb is None:
         return None
     if verb in syntax.GIT_WRITE_VERBS:

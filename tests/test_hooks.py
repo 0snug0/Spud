@@ -20,6 +20,7 @@ import unicodedata
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from helpers import EXIT_ERROR, EXIT_USAGE, PROGRAM, SPUD, SpudTestCase, load_spud_module, real_config
 
@@ -3104,14 +3105,20 @@ class GitProgramTest(BashHookCase):
 
     def test_allowed_verbs_without_a_program_option_stay_silent(self):
         for ok in ("git fetch", "git fetch origin main", "git ls-remote host:r", "git grep x", "git grep -n foo",
-                   "git grep -i foo", "git grep -ni foo", "git difftool A B", "git difftool --no-prompt A B",
-                   "git difftool -d A B", "git archive HEAD", "git grep -- -Ofoo",  # after --, -Ofoo is a pattern, not grep -O
+                   "git grep -i foo", "git grep -ni foo",
+                   # `git difftool` runs the tool diff.tool names whether or not -x is on the line, so SPD-087 refuses
+                   # the verb to a member whole; what is pinned here is that no option of it earns a git-program finding
+                   "git archive HEAD", "git grep -- -Ofoo",  # after --, -Ofoo is a pattern, not grep -O
                    # options adjacent to a program option but not a prefix of it stay silent
                    "git ls-remote --tags .", "git fetch --unshallow r", "git fetch --update-head-ok r",
                    "git --exec-path", "git --exec-path status"):  # bare --exec-path prints the path, it does not set one
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
+        for refused in ("git difftool A B", "git difftool --no-prompt A B", "git difftool -d A B"):
+            with self.subTest(refused):
+                self.assertRefused(refused, "Law 7")  # SPD-087: the verb, with no program option to name
+                self.assertSilent(refused, agent_id=None)
 
 
 class GitAliasFileTest(BashHookCase):
@@ -4775,12 +4782,15 @@ class GitVerbProgramOptionTest(BashHookCase):
                          [("git-program", "instaweb --httpd=lighttpd")])
 
     def test_the_verbs_without_a_program_option_stay_silent(self):
-        for ok in ("git send-email --dry-run p", "git send-email --smtp-server-port=25 p",
-                   "git send-email --smtp-user=me p", "git send-email --dump-aliases", "git web--browse u",
-                   "git web--browse --version"):
+        # Silent for Spud, whom Law 7 does not bind.  Since SPD-087 a member runs neither verb at all (send-email hands
+        # the patch to a mailer, web--browse opens a browser), so what these pin is the finding: with no program-naming
+        # option on the line there is no git-program finding to earn, only Law 7's own verb.
+        for ok, verb in (("git send-email --dry-run p", "send-email"), ("git send-email --smtp-server-port=25 p", "send-email"),
+                         ("git send-email --smtp-user=me p", "send-email"), ("git send-email --dump-aliases", "send-email"),
+                         ("git web--browse u", "web--browse"), ("git web--browse --version", "web--browse")):
             with self.subTest(ok):
-                self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
+                self.assertEqual(self.finding(ok), [("git", (verb, verb))])
         # git instaweb is not installed on this Mac, so SPD-047's unknown-verb check refuses every form of it here; what
         # SPD-051 decides is which finding a program-naming option earns, not whether the verb is refused at all.
         for verb_only in ("git instaweb --port=1234", "git instaweb -p 1234", "git instaweb --local", "git instaweb stop"):
@@ -4819,7 +4829,7 @@ class GitVerbProgramOptionTest(BashHookCase):
                     "git difftool --extcmd=cmd A B", "git archive --exec=cmd HEAD"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd)
-        for ok in ("git fetch", "git ls-remote host:r", "git grep -n foo", "git difftool A B", "git archive HEAD"):
+        for ok in ("git fetch", "git ls-remote host:r", "git grep -n foo", "git archive HEAD"):  # difftool: SPD-087
             with self.subTest(ok):
                 self.assertSilent(ok)
 
@@ -4934,12 +4944,22 @@ class GitFileWriteTest(BashHookCase):
 
     def test_the_index_and_object_directory_variables_are_refused(self):
         home = self.home.path
-        for command in ("GIT_INDEX_FILE=%s/docs/idx git read-tree HEAD" % home,
-                        "env GIT_INDEX_FILE=%s/docs/idx git status" % home,
-                        "GIT_OBJECT_DIRECTORY=%s/docs/objects git hash-object -w --stdin" % home,
-                        "export GIT_OBJECT_DIRECTORY=%s/docs/objects; git hash-object -w f" % home):
+        for command in ("env GIT_INDEX_FILE=%s/docs/idx git status" % home,
+                        "GIT_INDEX_FILE=%s/docs/idx git diff" % home,
+                        "GIT_OBJECT_DIRECTORY=%s/docs/objects git status" % home):
             with self.subTest(command):
                 self.out_of_deliverables(command)
+        # SPD-087 made read-tree and hash-object Law 7's own, so a member is refused by the verb before the path is
+        # read; the variable still names the file Spud's own call writes, and Law 1 still refuses him a generated note.
+        for command in ("GIT_INDEX_FILE=%s/docs/idx git read-tree HEAD" % home,
+                        "GIT_OBJECT_DIRECTORY=%s/docs/objects git hash-object -w --stdin" % home,
+                        "export GIT_OBJECT_DIRECTORY=%s/docs/objects; git hash-object -w f" % home,
+                        "GIT_INDEX_FILE=%s/ledger/tickets/SPD-001.md git read-tree HEAD" % home):
+            with self.subTest(command):
+                self.assertRefused(command, "Law 7", AGENT_A)
+                self.assertRefused(command, "Law 7", AGENT_C)
+                self.assertRefused(command, "Law 1", agent_id=None)  # the variable is still read for Spud
+        self.assertSilent("GIT_INDEX_FILE=%s/CLAUDE.md git read-tree HEAD" % home, agent_id=None)
 
     def test_a_trace_into_a_generated_note_or_the_database_is_refused_for_spud_too(self):
         home = self.home.path
@@ -4994,59 +5014,91 @@ class GitFileWriteTest(BashHookCase):
         self.assertSilent("git log --output-indicator-new=x -1")
 
     def test_bundle_create_names_the_file_it_writes(self):
+        # SPD-087 made `git bundle` Law 7's own whole -- `unbundle` writes the objects and refs the bundle holds into
+        # the repository -- so a member runs no form of it; the file `create` names is still held to Spud's path rule.
         home = self.home.path
         for command in ("git bundle create %s/docs/b.bundle HEAD", "git bundle create -q %s/docs/b.bundle HEAD",
-                        "git bundle create --version=2 %s/docs/b.bundle HEAD"):
-            with self.subTest(command % home):
-                self.out_of_deliverables(command % home)
-        self.assertSilent("git bundle create tests/out/b.bundle HEAD")
-        for ok in ("git bundle verify %s/docs/b.bundle", "git bundle list-heads %s/docs/b.bundle",
-                   "git bundle unbundle %s/docs/b.bundle"):
-            with self.subTest(ok % home):
-                self.assertSilent(ok % home)
+                        "git bundle create --version=2 %s/docs/b.bundle HEAD", "git bundle verify %s/docs/b.bundle",
+                        "git bundle list-heads %s/docs/b.bundle", "git bundle unbundle %s/docs/b.bundle",
+                        "git bundle create tests/out/b.bundle HEAD"):
+            filled = command % home if "%s" in command else command
+            with self.subTest(filled):
+                self.assertRefused(filled, "Law 7", AGENT_A)
+                self.assertRefused(filled, "Law 7", AGENT_C)
+        for spud_reads_the_path in ("git bundle create %s/docs/b.bundle HEAD", "git bundle create -q %s/docs/b.bundle HEAD",
+                                    "git bundle create --version=2 %s/docs/b.bundle HEAD",
+                                    "git bundle create %s/ledger/tickets/SPD-001.md HEAD"):
+            with self.subTest(spud_reads_the_path % home):
+                self.assertRefused(spud_reads_the_path % home, "Law 1", agent_id=None)
+        for spud_writes_nothing in ("git bundle verify %s/docs/b.bundle", "git bundle list-heads %s/docs/b.bundle",
+                                    "git bundle unbundle %s/docs/b.bundle"):
+            with self.subTest(spud_writes_nothing % home):
+                self.assertSilent(spud_writes_nothing % home, agent_id=None)
 
     def test_the_other_verbs_that_name_a_path_they_write(self):
         home = self.home.path
         for command in ("git bugreport -o %s/docs", "git bugreport --output-directory=%s/docs",
                         "git diagnose -o %s/docs", "git diagnose --output-directory %s/docs",
-                        "git checkout-index -a --prefix=%s/docs/", "git checkout-index -a --prefix %s/docs/",
                         "git mailsplit -o%s/docs mbox", "git mailinfo %s/docs/msg %s/docs/patch",
-                        "git pack-objects %s/docs/pack", "git index-pack -o %s/docs/x.idx",
-                        "git read-tree --index-output=%s/docs/idx HEAD", "git read-tree --index-output %s/docs/idx HEAD",
-                        "git fast-export --export-marks=%s/docs/marks HEAD", "git commit-graph write --object-dir %s/docs",
-                        "git multi-pack-index --object-dir=%s/docs write", "git repack --expire-to=%s/docs",
-                        "git repack --filter-to %s/docs", "git credential-store --file %s/docs/creds get"):
+                        "git fast-export --export-marks=%s/docs/marks HEAD"):
             filled = command % ((home,) * command.count("%s"))
             with self.subTest(filled):
                 self.out_of_deliverables(filled)
         self.assertSilent("git bugreport -o tests/out")
-        self.assertSilent("git checkout-index -a --prefix=tests/out/")
-        self.assertSilent("git read-tree --index-output=tests/out/idx HEAD")
         # an option that only reads the file it names carries no entry
         for ok in ("git archive --add-file=%s/docs/x.md HEAD", "git grep -f %s/docs/patterns foo",
                    "git ls-files -X %s/docs/exclude"):
             with self.subTest(ok % home):
                 self.assertSilent(ok % home)
 
+    def test_a_verb_law_7_now_refuses_keeps_its_entry_for_spud(self):
+        """SPD-087 refuses these verbs to a member whole -- each writes the index, the object database, the pack files
+        or the credential file -- so the member is refused by the verb before the path is read.  Their entries in
+        GIT_VERB_FILE_OPTIONS and GIT_VERB_FILE_POSITIONALS stay, because Law 7 does not bind Spud: his own call still
+        names the file, and Law 1 still refuses him every path in the repository that is not his own."""
+        home = self.home.path
+        for command in ("git checkout-index -a --prefix=%s/docs/", "git checkout-index -a --prefix %s/docs/",
+                        "git pack-objects %s/docs/pack", "git index-pack -o %s/docs/x.idx",
+                        "git read-tree --index-output=%s/docs/idx HEAD", "git read-tree --index-output %s/docs/idx HEAD",
+                        "git commit-graph write --object-dir %s/docs", "git multi-pack-index --object-dir=%s/docs write",
+                        "git repack --expire-to=%s/docs", "git repack --filter-to %s/docs",
+                        "git credential-store --file %s/docs/creds get", "git checkout-index -a --prefix=tests/out/",
+                        "git read-tree --index-output=tests/out/idx HEAD",
+                        "git read-tree --index-output=%s/ledger/tickets/SPD-001.md HEAD",
+                        "git index-pack -o %s/reports/2026-09-15.md"):
+            filled = command % ((home,) * command.count("%s"))
+            with self.subTest(filled):
+                self.assertRefused(filled, "Law 7", AGENT_A)
+                self.assertRefused(filled, "Law 7", AGENT_C)
+                r = self.assertRefused(filled, "Law 1", agent_id=None)  # the path is still read for Spud
+                self.assertIn("this git call writes", r.reason)
+        self.assertRefused("git read-tree --index-output=%s/.spud/ledger.db HEAD" % home, "ledger database", agent_id=None)
+        self.assertSilent("git read-tree --index-output=%s/CLAUDE.md HEAD" % home, agent_id=None)  # one of Spud's own
+
     def test_an_option_target_the_hook_cannot_resolve_is_refused(self):
         for command in ("git archive -o $T HEAD", "git archive --output=$(echo x) HEAD",
-                        "git format-patch -o $D -1", "git bundle create $F HEAD"):
+                        "git format-patch -o $D -1", "git mailinfo $M $P"):
             with self.subTest(command):
                 self.assertRefused(command, "cannot resolve", AGENT_A)
                 self.assertSilent(command, agent_id=None)
+        # a verb SPD-087 refuses whole earns Law 7's reason first; Spud's own call keeps this one
+        self.assertRefused("git bundle create $F HEAD", "Law 7", AGENT_A)
+        self.assertSilent("git bundle create $F HEAD", agent_id=None)
 
     def test_a_relative_target_after_a_directory_the_hook_cannot_follow_is_refused(self):
-        for command in ("popd; git archive -o a.tar HEAD", "cd -; git bundle create b.bundle HEAD",
+        for command in ("popd; git archive -o a.tar HEAD", "cd -; git mailinfo m.txt p.patch",
                         "source x.sh; git diff --output=d.txt", "cd $DIR; git format-patch -o out -1"):
             with self.subTest(command):
                 self.assertRefused(command, "cannot follow", AGENT_A)
                 self.assertRefused(command, "cannot follow", agent_id=None)
+        self.assertRefused("cd -; git bundle create b.bundle HEAD", "Law 7", AGENT_A)  # the verb, before the path
+        self.assertRefused("cd -; git bundle create b.bundle HEAD", "cannot follow", agent_id=None)
 
     def test_the_directories_the_shell_may_be_in_are_followed(self):
         home = self.home.path
         self.assertRefused("cd ledger && git archive -o tickets/a.tar HEAD", "generated", AGENT_C)
         self.assertRefused("cd %s/ledger; git archive -o tickets/SPD-001.md HEAD" % home, "Law 1", agent_id=None)
-        self.assertRefused("cd docs && git bundle create b.bundle HEAD", "deliverables", AGENT_A)
+        self.assertRefused("cd docs && git bugreport -o .", "deliverables", AGENT_A)
         self.assertSilent("cd tests/out && git archive -o a.tar HEAD")
 
     def test_law_1_holds_for_spud_and_his_own_paths_do_not(self):
@@ -5090,6 +5142,171 @@ class GitFileWriteTest(BashHookCase):
                         "for f in a; do git archive -o %s/docs/a.tar HEAD; done"):
             with self.subTest(command % home):
                 self.assertRefused(command % home, "deliverables", AGENT_A)
+
+
+# The verbs `git --list-cmds=main` gives on this machine that a member may run, as SPD-087's sweep read them: every name
+# whose refusal is None for both git_refused and git_not_allowed with no argument on the line.  `stash` and `worktree`
+# are missing because their bare forms write (`git stash` stashes, `git worktree` prints usage but its subcommands add
+# and remove), so git_refused refuses them with no subcommand; `branch`, `tag`, `config`, `remote` and `reflog` list.
+SPD_087_ALLOWED = (
+    "annotate", "archive", "blame", "branch", "bugreport", "cat-file", "check-attr", "check-ignore", "check-mailmap",
+    "check-ref-format", "cherry", "column", "config", "count-objects", "describe", "diagnose", "diff", "diff-files",
+    "diff-index", "diff-pairs", "diff-tree", "fast-export", "fetch", "fmt-merge-msg", "for-each-ref", "format-patch",
+    "get-tar-commit-id", "grep", "help", "last-modified", "log", "ls-files", "ls-remote", "ls-tree", "mailinfo",
+    "mailsplit", "merge-base", "name-rev", "pack-redundant", "patch-id", "pickaxe", "range-diff", "reflog", "remote",
+    "repo", "request-pull", "rev-list", "rev-parse", "shortlog", "show", "show-branch", "show-index", "show-ref",
+    "status", "stripspace", "tag", "var", "verify-commit", "verify-pack", "verify-tag", "version", "whatchanged",
+)
+
+
+class GitVerbAllowlistTest(BashHookCase):
+    """SPD-087: Law 7's table named 31 verbs and git answers to about 170 (`git --list-cmds=main`: 174 on git 2.54.0,
+    Apple Git-157), so the rest ran silent for a member.  `git stage` is git's own spelling of `git add` (`git stage -h`
+    prints "usage: git add [<options>] [--] <pathspec>...") and `git init-db` of `git init` ("usage: git init [-q |
+    --quiet] [--bare] ..."), and the plumbing writes the index, the object database and the working tree under two dozen
+    more -- read-tree, update-index, write-tree, commit-tree, hash-object -w, checkout-index, repack, pack-refs,
+    fast-import, unpack-objects, index-pack, mktag, mktree, sparse-checkout, maintenance, subtree, send-pack,
+    receive-pack, update-server-info and their kin.  So the reading is inverted (the ticket's shape (b)):
+    syntax.GIT_MEMBER_VERBS names the verbs a member runs, git_verbs.git_not_allowed refuses every other name git knows,
+    and a writer a later git adds is refused before anyone has read it.
+
+    The sweep read every name of `git --list-cmds=main` with `git <name> -h` and with its line in `git help -a`, whose
+    own groups are git's reading of the same question -- "Low-level Commands / Manipulators" against "/ Interrogators",
+    "Syncing Repositories", "Internal Helpers" -- and agree with this one everywhere but two: `git for-each-repo
+    --config=<key> -- <arguments>` runs a git command of its own in every repository the key names, and `git unpack-file
+    <blob>` "Creates a temporary file with a blob's contents" in the current directory, which no option names, so both
+    are refused though git groups them as interrogators.  The synonyms the usage lines gave up: stage (add), init-db
+    (init), fsck-objects (fsck), pickaxe and annotate (blame).
+
+    The three refusals keep their own reasons, in this order: Law 7's own table (GIT_WRITE_VERBS, the verbs a member
+    would reach for, refused whatever git's command list says), SPD-047's unknown verb (a name git does not know, which
+    must be an alias or an external `git-<verb>`), then this allowlist.  AGENT_A plans tests/** and bin/spud; AGENT_C
+    plans **; Law 7 binds neither Spud nor a plain session."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)  # Law 7 does not bind Spud
+        return r
+
+    def finding(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_gits_own_spellings_of_add_and_init(self):
+        for command in ("git stage .", "git stage -p", "git stage -- f", "git init-db x", "git init-db --bare",
+                        "git -C . stage .", "sh -c 'git stage .'", "env git init-db x"):
+            with self.subTest(command):
+                r = self.refused_for_members(command)
+                self.assertIn("Spud commits", r.reason)
+        self.assertEqual(self.finding("git stage ."), [("git", ("stage", "stage"))])
+
+    def test_the_plumbing_that_writes_the_repository(self):
+        for verb in ("checkout-index -a -f", "read-tree HEAD", "update-index --refresh", "write-tree", "commit-tree",
+                     "hash-object -w -", "repack -ad", "pack-refs --all", "fast-import", "unpack-objects", "index-pack",
+                     "sparse-checkout set x", "maintenance run", "subtree add --prefix=p c", "send-pack host:r",
+                     "receive-pack .", "update-server-info", "mktag", "mktree", "prune-packed", "unpack-file abc",
+                     "merge-file a o b", "backfill", "history reword HEAD", "replay --onto x y", "fetch-pack host:r",
+                     "http-fetch url", "http-push r", "quiltimport", "pack-objects --stdout --revs", "apply x.patch"):
+            with self.subTest(verb):
+                r = self.refused_for_members("git " + verb)
+                self.assertIn("git " + verb.split()[0], r.reason)
+
+    def test_the_verbs_that_run_a_program_or_serve_the_repository(self):
+        for verb in ("for-each-repo --config=x -- push", "hook run pre-commit", "merge-index cmd -a", "merge-one-file",
+                     "merge-octopus", "merge-ours", "merge-recursive a", "merge-resolve", "merge-subtree a b",
+                     "p4 clone //depot", "shell -c x", "daemon --export-all", "http-backend", "upload-pack .",
+                     "upload-archive .", "upload-archive--writer .", "remote-ext r url", "remote-fd r url",
+                     "remote-http r url", "remote-https r url", "remote-ftp r url", "remote-ftps r url", "imap-send",
+                     "send-email p", "web--browse u", "difftool A B", "submodule--helper list", "checkout--worker",
+                     "difftool--helper", "fsmonitor--daemon start", "credential fill", "credential-cache exit",
+                     "credential-cache--daemon s", "credential-osxkeychain get", "credential-store store",
+                     "gui--askpass x", "gui--askyesno x", "sh-i18n--envsubst"):
+            with self.subTest(verb):
+                r = self.refused_for_members("git " + verb)
+                self.assertIn("git " + verb.split()[0], r.reason)
+
+    def test_a_verb_whose_reading_form_is_a_subcommand_or_a_flag_is_refused_whole(self):
+        # The verb is what Law 7 reads, and only the seven of git_refused's own cases are read by subcommand; every
+        # other name whose read and write forms are told apart that way is refused whole, read form included.
+        for verb in ("bundle verify f", "bundle list-heads f", "bundle unbundle f", "commit-graph verify",
+                     "commit-graph write", "multi-pack-index verify", "refs verify", "refs list", "refs migrate",
+                     "rerere status", "rerere diff", "rerere clear", "sparse-checkout list", "hash-object f",
+                     "credential-store get", "fsck", "fsck-objects", "merge-tree a b",
+                     "interpret-trailers f", "interpret-trailers --in-place f", "maintenance unregister"):
+            with self.subTest(verb):
+                self.refused_for_members("git " + verb)
+
+    def test_the_read_verbs_of_the_sweep_stay_silent(self):
+        for ok in ("git annotate f", "git pickaxe f", "git cherry", "git column", "git stripspace", "git patch-id",
+                   "git get-tar-commit-id", "git check-attr -a f", "git check-mailmap x", "git check-ref-format x",
+                   "git check-ref-format --branch x", "git diff-pairs -z", "git last-modified", "git repo info",
+                   "git repo structure", "git request-pull v1 url", "git show-branch", "git show-branch -a",
+                   "git show-index", "git verify-pack -v p.idx", "git verify-commit HEAD", "git fmt-merge-msg",
+                   "git pack-redundant --all", "git ls-tree HEAD", "git diff-files", "git diff-index HEAD",
+                   "git name-rev --all", "git merge-base a b", "git cat-file -p HEAD", "git var -l",
+                   "git format-patch -1", "git archive HEAD", "git mailsplit mbox", "git fast-export HEAD"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_every_name_git_lists_is_read_one_way_or_the_other(self):
+        """The sweep as data.  A git that lists a name neither table holds refuses it, which is the point of the
+        allowlist; this fails so the next reader sweeps the new name rather than leaving a member refused a read verb."""
+        m = load_spud_module()
+        names = subprocess.run(["git", "--list-cmds=main"], capture_output=True, text=True, check=True).stdout.split()
+        self.assertGreater(len(names), 100, names)
+        allowed = [n for n in names if m.git_refused(n, []) is None and m.git_not_allowed(n) is None]
+        self.assertEqual(allowed, sorted(SPD_087_ALLOWED), "git's command list changed: re-read the new names")
+        self.assertEqual(sorted(m.GIT_MEMBER_VERBS - set(names)), [])  # no name in the table that git does not have
+        self.assertEqual(sorted(m.GIT_MEMBER_VERBS & m.GIT_WRITE_VERBS), [])  # and none in both tables
+
+    def test_a_writer_a_later_git_adds_is_refused(self):
+        # git's own command list is the only thing that says a verb exists, so a later git is simulated by a longer one.
+        m = load_spud_module()
+        commands = frozenset({"status", "push", "stash", "graft-tree"})
+        with mock.patch("spudlib.shell.git_verbs.git_own_commands", lambda home=None: commands):
+            self.assertEqual(self.finding("git graft-tree HEAD"), [("git", ("graft-tree", "graft-tree"))])
+            self.assertEqual(self.finding("git status"), [("git", ("status", None))])
+            self.assertEqual(self.finding("git push"), [("git", ("push", "push"))])
+        self.assertEqual(m.git_not_allowed("graft-tree"), "graft-tree")
+
+    def test_a_glob_that_can_expand_to_a_refused_verb_is_read_as_it(self):
+        # `stage` is one of Law 7's own, so GLOB_SAMPLES holds it and the glob is read as the verb itself.  A name the
+        # allowlist refuses is not sampled and needs no sample: the reading as spelled is not one of git's commands
+        # either, which is SPD-047's refusal, so the glob is closed whatever it could expand to.
+        r = self.refused_for_members("git stag?")
+        self.assertIn("git stage", r.reason)
+        r = self.refused_for_members("git read-tre?", "not one of git's own commands")
+        self.assertIn("read-tre?", r.reason)
+        for command in ("git st?ge .", "git sta*", "git ini?-db x", "git updat?-index --refresh", "git *tree"):
+            with self.subTest(command):
+                self.refused_for_members(command)
+
+    def test_law_7s_own_table_keeps_its_reason_when_git_cannot_be_read(self):
+        # The hook fails closed either way; which reason a member gets is what the two tables decide.
+        path = self.home.env.get("PATH")
+        self.home.env["PATH"] = str(self.home.path / "no-git-here")
+        try:
+            r = self.assertRefused("git stage .", "Law 7")
+            self.assertIn("Spud commits", r.reason)
+            self.assertNotIn("--list-cmds=main", r.reason)
+            r = self.assertRefused("git read-tree HEAD", "Law 7")  # the allowlist defers to SPD-047's reason here
+            self.assertIn("--list-cmds=main", r.reason)
+            self.assertSilent("git read-tree HEAD", agent_id=None)
+        finally:
+            if path is None:
+                self.home.env.pop("PATH", None)
+            else:
+                self.home.env["PATH"] = path
+        self.assertRefused("git read-tree HEAD", "Law 7")
 
 
 class DescriptorRedirectTest(BashHookCase):

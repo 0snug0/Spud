@@ -246,8 +246,8 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 unknown = None if refused else git_verbs.git_unknown_verb(verb, a.home)
                 if unknown is not None:  # not one of git's own commands: an alias or an external git-<verb> (SPD-047)
                     a.findings.append(("git-verb", unknown))
-                else:
-                    a.findings.append(("git", (verb, refused)))
+                else:  # one of git's own: Law 7's table first, then its allowlist, which refuses every other name (SPD-087)
+                    a.findings.append(("git", (verb, refused or git_verbs.git_not_allowed(verb))))
         targets = git_verbs.git_repo_targets(words, a.vars)
         for spelled, target in targets:
             # another repository, whose .git/config the hook cannot read: resolved against the checkouts in bash_reason (SPD-047)

@@ -133,9 +133,61 @@ DYNAMIC_VARIABLES = {"_", "PWD", "OLDPWD", "REPLY", "OPTARG", "OPTIND", "MATCH",
                      "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "LINENO", "BASH_COMMAND", "FUNCNAME", "DIRSTACK",
                      "dirstack", "PIPESTATUS", "pipestatus", "status", "argv", "BASHPID", "COLUMNS", "LINES", "HISTCMD", "psvar", "reply"}
 HEREDOC_RE = re.compile(r"<<-?\s*(?:'([^']*)'|\"([^\"]*)\"|(\\?[A-Za-z_][\w.-]*))")
-GIT_WRITE_VERBS = {"commit", "add", "checkout", "switch", "rebase", "reset", "push", "merge", "cherry-pick", "pull", "am",
-                   "apply", "revert", "restore", "rm", "mv", "clean", "notes", "replace", "update-ref", "symbolic-ref",
-                   "filter-branch", "gc", "prune", "submodule", "init", "clone", "bisect", "mergetool", "citool", "gui"}
+# The verbs Law 7 refuses a member by name, whatever git's own command list says: the ones a member would reach for, so
+# the refusal keeps its own reason (`git push` is still "Spud commits" when the hook cannot run git at all, SPD-047).
+# Every other name git answers to is refused by GIT_MEMBER_VERBS below; this table is the named half, not the whole set,
+# and git_verbs.git_write_option_targets reads it to skip the SPD-049 target of a verb refused here -- which is why a
+# verb that names a file git writes (read-tree, checkout-index, index-pack, repack, commit-graph ...) is refused by the
+# allowlist instead and not added here: its GIT_VERB_FILE_OPTIONS entry stays live, and Law 7 does not bind Spud, whose
+# own call is still held to the path rule.  `stage` and `init-db` are git's own spellings of `add` and `init`, which the
+# table missed until SPD-087 (probed on git 2.54.0 (Apple Git-157): `git stage -h` prints "usage: git add [<options>]
+# [--] <pathspec>..." and `git init-db -h` prints "usage: git init [-q | --quiet] [--bare] ...").
+GIT_WRITE_VERBS = {"commit", "add", "stage", "checkout", "switch", "rebase", "reset", "push", "merge", "cherry-pick",
+                   "pull", "am", "apply", "revert", "restore", "rm", "mv", "clean", "notes", "replace", "update-ref",
+                   "symbolic-ref", "filter-branch", "gc", "prune", "submodule", "init", "init-db", "clone", "bisect",
+                   "mergetool", "citool", "gui"}
+# SPD-087: Law 7's answer for every other name.  git dispatches about 170 of them (`git --list-cmds=main`: 174 on git
+# 2.54.0 (Apple Git-157)), and the table above named 31; the rest were silent for a member -- `git stage .` and
+# `git init-db x` did what `git add` and `git init` do, and two dozen plumbing verbs wrote the index, the object
+# database and the working tree.  So the reading is inverted: a member runs the verbs named here, git_not_allowed
+# refuses every other name git knows, and a verb a later git adds is refused until someone reads it.  A name git does
+# not know at all is not refused here but by SPD-047, whose reason names the alias or external `git-<verb>` it must be.
+#
+# The sweep: every name of `git --list-cmds=main` read with `git <name> -h` and with its line in `git help -a`, whose
+# groups are git's own reading of the same question ("Low-level Commands / Manipulators" against "/ Interrogators").
+# A name is here when no form of it changes the repository -- the object database, the refs, the index, the config, the
+# hooks -- or the working tree, and it writes no file the line does not name.  Everything else is refused, including
+# every name whose read and write forms are told apart only by a subcommand or a flag (bundle, commit-graph,
+# multi-pack-index, refs, rerere, sparse-checkout, hash-object, credential-store, fsck, interpret-trailers): the verb is
+# what Law 7 reads, and `git stash`, `git worktree`, `git remote`, `git reflog`, `git branch`, `git tag` and
+# `git config` are the seven exceptions git_refused reads by subcommand, so they are here for that reading to be
+# reached.  Two names git itself groups as interrogators are refused anyway: `git for-each-repo --config=<key> --
+# <arguments>` runs a git command of its own in every repository the key names, and `git unpack-file <blob>` "Creates a
+# temporary file with a blob's contents" in the current directory, which no option names and the path rule cannot see.
+#
+# `fetch` writes -- FETCH_HEAD, the remote-tracking refs and the objects it downloads -- and is here because the ledger
+# has let a member fetch since SPD-044, not because it only reads.  `archive`, `bugreport`, `diagnose`, `fast-export`,
+# `format-patch`, `mailinfo` and `mailsplit` leave the repository alone and write only what the line names them to
+# write, which SPD-049's tables hold to the path rule for every caller, member and Spud alike; that is the division of
+# labour this table keeps.  `git format-patch -1`, `git bugreport` and `git diagnose` with no `-o` write into the
+# current directory under a name the line never spells, which neither rule sees; SPD-087 filed a proposal for it rather
+# than overturn SPD-049's division here.
+GIT_MEMBER_VERBS = frozenset({
+    # git's read verbs.  Probed with `-h`: each takes input, revisions, pathspecs and formatting alone, and the only
+    # file any of them names git to write is the diff `--output`, which GIT_FILE_OPTIONS checks on every verb.
+    "status", "log", "show", "diff", "diff-files", "diff-index", "diff-tree", "diff-pairs", "grep", "blame", "annotate",
+    "pickaxe", "shortlog", "describe", "range-diff", "whatchanged", "last-modified", "cherry", "count-objects",
+    "merge-base", "name-rev", "rev-list", "rev-parse", "repo", "request-pull", "help", "version", "var",
+    "cat-file", "ls-files", "ls-remote", "ls-tree", "for-each-ref", "show-branch", "show-index", "show-ref",
+    "check-attr", "check-ignore", "check-mailmap", "check-ref-format", "column", "fmt-merge-msg",
+    "get-tar-commit-id", "pack-redundant", "patch-id", "stripspace", "verify-commit", "verify-pack", "verify-tag",
+    # `git annotate -h` and `git pickaxe -h` both print "usage: git blame ...": git's own spellings of blame.
+    "fetch",  # writes; allowed since SPD-044 (above)
+    # SPD-049's: the repository is untouched and the file each writes is one the line names, checked by the path rule.
+    "archive", "bugreport", "diagnose", "fast-export", "format-patch", "mailinfo", "mailsplit",
+    # The seven git_refused reads by subcommand, above.
+    "branch", "config", "reflog", "remote", "stash", "tag", "worktree",
+})
 GIT_GLOBAL_VALUE_FLAGS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix", "--config-env", "--list-cmds"}
 # Options that name a program on a verb git_refused otherwise allows (submodule, bisect and the other write verbs are already
 # refused whole, so they need no entry): verb -> (long options, short-option letters).  git's parse-options accepts any

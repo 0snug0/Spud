@@ -123,8 +123,12 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
         if kind == "git":
             verb, refused = detail
             if refused:
-                return ("Law 7: spudagents never run `git %s` (commit, add, stash, checkout, switch, rebase, reset, push, merge, cherry-pick,"
-                        " worktree, branch, tag, pull, apply, restore, rm, mv, clean ...); Spud commits, after the outcome is recorded" % verb), analysis
+                return ("Law 7: spudagents never run `git %s`. A member runs git's read verbs (status, log, diff, show, blame, rev-parse,"
+                        " ls-files, grep, fetch, `stash list`, `worktree list`, a `branch`/`tag` listing, `config get` ...); every other name"
+                        " git answers to is Spud's -- the verbs that write the repository, the index, the object database or the working tree,"
+                        " and git's own spellings and plumbing for them (commit, add, stage, checkout, switch, rebase, reset, push, merge,"
+                        " cherry-pick, pull, init, init-db, read-tree, update-index, write-tree, checkout-index, hash-object, repack,"
+                        " pack-refs ...); Spud commits, after the outcome is recorded" % verb), analysis
         elif kind == "git-config":
             return ("Law 7: this git call takes config the hook cannot read (%s): an alias or include defined on the line, or a variable"
                     " that injects config or points git at a config file of its own (HOME and XDG_CONFIG_HOME move git's global config to"
