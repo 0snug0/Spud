@@ -29,6 +29,15 @@ WRAPPERS = {"env", "command", "exec", "builtin", "nohup", "nice", "time", "timeo
 # Probed: `time x=./prog status` set x and ran `status`, while `nice time x=./prog status`, `env time x=./prog status` and
 # zsh's `- time x=./prog status` each ran ./prog, /usr/bin/time being an external program that execs its word.
 WRAPPER_TAKES_ASSIGNMENTS = {"env", "sudo"}
+# The wrappers zsh still looks a shell function up after, so one shadows the command word behind them (SPD-084): a function
+# is looked up in command position, and these do not take it away.  Probed in zsh 5.9 -f, zsh -f -o nobareglobqual, bash 3.2
+# and sh with `foo` a name no command has: after `noglob`, `nocorrect` and `exec` a `foo() { echo SH; }` ran (zsh only for
+# noglob/nocorrect; `exec foo` ran the function in zsh -- `SH` and no line after it -- but skipped it in bash and sh, which
+# the hook refuses for, the Bash tool being zsh), and `time foo` ran it in all four (`time` is a keyword, /usr/bin/time is
+# not a wrapper here).  Every other wrapper (`command`, `builtin`, `env`, `nice`, `nohup`, `sudo`, `xargs`, ...) execs or
+# resolves its word itself and ran the real lookup, not the function.  zsh's `-` precommand modifier keeps it too, but is
+# handled where `-` is read, not as a wrapper.
+FUNCTION_KEEP_WRAPPERS = {"exec", "noglob", "nocorrect", "time"}
 # Per wrapper, the options whose value is the next word unless attached (macOS and GNU spellings): a value taken for the
 # command word hides the command (`timeout -s KILL 5 git push`), a command word taken for a value hides it too.
 WRAPPER_VALUE_OPTIONS = {
@@ -352,6 +361,12 @@ class ShellAnalysis:
         # runs the file the line chose whatever PATH holds.  Never cleared: a `hash` in a branch, a subshell or a loop body
         # still leaves the hook unable to say which program a name finds, and the refusal is the safe answer.
         self.hashed = set()
+        # SPD-084: the names a `name () { ... }`/`function name` definition earlier on the line bound to a shell function, so
+        # a later bare call of one of them (in command position) runs that function, not the program the hook read.  Kept as a
+        # set like `hashed`, but scoped: a definition in a branch, a loop or another function's body may exist at the call, so
+        # it is kept (refuse on doubt); one in a `( ... )` subshell does not reach a call after it, so ShellWalk restores this
+        # set when the subshell frame closes (probed: `(git(){ :; }); git status` ran the real git).
+        self.functions = set()
 
     @property
     def all_spud(self):

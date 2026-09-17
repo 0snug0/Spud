@@ -181,6 +181,12 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                     " the hook checked is not the one that would run. Hash none of the names the hook reads (git, spud,"
                     " python3.14, sqlite3, tee, a shell, a wrapper), or spell the program's path out; Spud commits, after"
                     " the outcome is recorded" % (detail, detail)), analysis
+        elif kind == "function":
+            return ("Law 7: this line defines a shell function `%s`, so a later bare `%s` runs that function and not the"
+                    " program the hook checked (a shell function shadows a command of the same name in command position)."
+                    " Define no function named for one of the names the hook reads (git, spud, python3.14, sqlite3, tee, a"
+                    " shell, a wrapper), or reach the program past the function (`command %s`, an absolute path); Spud"
+                    " commits, after the outcome is recorded" % (detail, detail, detail)), analysis
         elif kind == "var":
             return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
         elif kind == "var-word":

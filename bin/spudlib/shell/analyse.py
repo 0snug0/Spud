@@ -353,7 +353,7 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(w)))
     else:
         a.kinds.append("other")  # CD, /usr/bin/cd, env cd: /usr/bin/cd in its own process, and the shell stays
-    shadowed_name(a, [cmd] + path_names)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason
+    shadowed_name(a, cmd, path_names)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason
 
 
 def hashed_names(words):
@@ -376,13 +376,25 @@ def hashed_names(words):
     return [n for n in names if n]
 
 
-def shadowed_name(a, names):
-    """Record that the shell would not find the program the hook read by one of these names (SPD-062): the line assigned
-    PATH (or zsh's `path`, which is tied to it), so it searches a directory of the line's own choosing, or it hashed the
-    name to a file of its own.  Only the names the hook reads count (git, spud, python3.14, sqlite3, tee, a shell, a
-    wrapper): for any other name the hook grants nothing, so replacing its program takes a member no further than running
-    a program of its own.  A command run by a path is not looked for on PATH, and GIT_EXEC_PATH keeps SPD-046's reason."""
-    for word in names:
+def shadowed_name(a, cmd, path_names):
+    """Record that the shell would not run the program the hook read by name (SPD-062, SPD-084): the line bound the name to
+    a shell function, assigned PATH (or zsh's `path`, tied to it) so the shell searches a directory of the line's own
+    choosing, or hashed the name to a file of its own.  Only the names the hook reads count (git, spud, python3.14, sqlite3,
+    tee, a shell, a wrapper): for any other name the hook grants nothing, so replacing its program takes a member no further
+    than running a program of its own.  A command run by a path is not looked for on PATH, and GIT_EXEC_PATH keeps SPD-046's
+    reason.
+
+    A function is looked up in command position, so it shadows the command word `cmd` unless a wrapper that resolves its own
+    word (`command`, `builtin`, `env`, `nice`, ...) took the position; the wrappers zsh keeps looking a function up after
+    (`exec`, `noglob`, `nocorrect`, `time`) and its `-` modifier leave `cmd` in command position, and a function named for
+    the first such resolving wrapper shadows it in turn (SPD-084, probed in the four shells).  A PATH or a hash, in contrast,
+    decides the lookup of every one of these names, so both are read for the command word and the wrappers alike."""
+    bypass = [w for w in path_names if os.path.basename(w).casefold() not in syntax.FUNCTION_KEEP_WRAPPERS]
+    for word in bypass[:1] if bypass else [cmd]:
+        if git_programs.path_dispatched(word) and prepare.deglob(word) in a.functions:
+            a.findings.append(("function", prepare.deglob(word)))
+            return
+    for word in [cmd] + path_names:
         if not git_programs.path_dispatched(word):
             continue
         name = prepare.deglob(word)
