@@ -33,6 +33,8 @@ SCHEMA = 4  # user_version since SPD-098
 
 
 class InitTest(SpudTestCase):
+    warm_cache = False  # SPD-102: init runs as it does in a new home, before any .spud/ exists
+
     def test_init_creates_a_wal_database_under_spud_home(self):
         self.assertTrue(self.home.db.exists())
         self.assertEqual(self.home.scalar("PRAGMA user_version"), SCHEMA)

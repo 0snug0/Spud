@@ -100,7 +100,8 @@ One more property worth not breaking: a handler module that fails to import is s
 - **The entry installs `PackageFinder` on `sys.meta_path`.** It answers `spudlib` and `spudlib.*` from the directory beside the entry's **real** path and returns `None` for every other name, so no module here can shadow the standard library or be shadowed by it, and a checkout reached through a symlink still loads its own code. Each module gets a loader of the class that loaded the entry, which is how the launcher's cache rule reaches every module and the suite's plain loader writes none.
 - **Running `bin/spud_ledger.py` directly refuses** with exit 2 and imports nothing. Keep that.
 - **Never** add a `sys.path` entry, an absolute `import spudlib`, an `__init__.py`, or a file outside `bin/spudlib/` that the program imports.
-- **The repository ends every run with no bytecode.** `tests/helpers.py` sets `sys.dont_write_bytecode` and removes the caches at exit; a one-off script that loads the program should do the same. After the suite, `find bin tests -name '*.pyc' -o -name __pycache__` prints nothing.
+- **The repository ends every run with no bytecode.** `tests/suite.py` never writes any: it sets `sys.dont_write_bytecode` before it imports a test, runs the suite in a scratch copy of the tree, and only its own process removes that copy, so no two workers race on a cache directory (SPD-083, SPD-102). The serial command cannot stop its first test module and `tests/helpers.py` from being cached before the flag is set, so `tests/helpers.py` removes those caches at its exit. A one-off script that loads the program sets the flag first. After either, `find bin tests -name '*.pyc' -o -name __pycache__` prints nothing.
+- **The suite warms each scratch home's cache.** A `SpudTestCase` home starts with the program already compiled into its `.spud/pycache/` (hard links to one cache per run, built by `helpers.compile_program` the way the launcher writes it), so `spud init` and the first command skip the compile (measured on SPD-102: about 70 of the serial run's 678 seconds went to compiling; warm, it ran in 648). The classes that assert the launcher's own caching, `init` or backups set `warm_cache = False` and start empty; `tests/suite.py --cold` starts every home empty.
 
 ## 5. The one import cycle
 
@@ -156,7 +157,7 @@ Its reach has known gaps (SPD-079): it does not see an alias shadowed by a neste
 
 ## 9. Before you call the work done
 
-1. `python3.14 -I -S -m unittest discover -s tests -t tests` — the whole suite, about eight minutes. Run it in the background and keep working.
+1. `python3.14 -I -S tests/suite.py` — the whole suite on every core, about 80 seconds; run the modules you touched by name while you work (`tests/suite.py test_package test_hooks`) and the whole suite once at the end, and put its final line, with the tree's digest, in your result. The serial fallback, `python3.14 -I -S -m unittest discover -s tests -t tests`, takes about eleven minutes, prints no digest, and wants the checkout to itself.
 2. `find bin tests -name '*.pyc' -o -name __pycache__` prints nothing.
 3. If you touched the hook path: `HOOK_PATH` updated, and `tests/probes/hook_timing.py` within 1 ms of main.
 4. If you changed how the program is loaded or how a hook answers: `python3.14 -I -S tests/probes/session_diff.py /Users/ericlugo/Personal/Spud/bin/spud "$PWD/bin/spud"` — 44 CLI and hook calls against both launchers, every step identical after masking.

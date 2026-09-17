@@ -29,6 +29,8 @@ def cached_programs(root):
 
 
 class LauncherTest(SpudTestCase):
+    warm_cache = False  # SPD-102: these tests watch the launcher write its own cache into an empty one
+
     def payloads(self):
         common = {"session_id": SESSION, "transcript_path": "/tmp/x.jsonl", "cwd": str(self.home.path), "permission_mode": "default"}
         return (

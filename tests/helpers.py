@@ -11,6 +11,7 @@ import importlib.machinery
 import importlib.util
 import json
 import os
+import py_compile
 import shlex
 import shutil
 import sqlite3
@@ -39,13 +40,19 @@ os.environ["SPUD_TOOL_DIR"] = GUARD_HOME
 
 REPO = Path(__file__).resolve().parent.parent
 
+# SPD-102: tests/suite.py, the parallel runner, names in SPUD_SUITE_PYCACHE the warm bytecode cache of its run (below), or
+# `off`.  Set, this process is the runner or one of its workers, in a snapshot of the checkout that the runner alone removes;
+# none of them writes bytecode, so none removes any at exit, and concurrent workers never race on a cache directory (SPD-083).
+SUITE_PYCACHE = os.environ.get("SPUD_SUITE_PYCACHE")
+
 
 def _remove_bytecode():
     for cache in (REPO / "bin" / "__pycache__", REPO / "tests" / "__pycache__", *(REPO / "bin" / "spudlib").glob("**/__pycache__")):
         shutil.rmtree(cache, ignore_errors=True)
 
 
-atexit.register(_remove_bytecode)
+if SUITE_PYCACHE is None:  # the serial command: its first test module and this one were cached before the flag above was set
+    atexit.register(_remove_bytecode)
 
 SPUD = REPO / "bin" / "spud"  # the launcher: what the hooks, the allow rules and every test run
 PROGRAM = REPO / "bin" / "spud_ledger.py"  # the program it loads (SPD-016)
@@ -70,6 +77,67 @@ def real_config():
         return json.load(f)
 
 
+def compile_program(prefix):
+    """Compile every source file of bin/ into `prefix` as the launcher caches it under a home's .spud/pycache/ (SPD-102): a
+    tree mirroring each file's own path, timestamp-checked, so the launcher reads it only while the source is unchanged."""
+    before = sys.pycache_prefix
+    sys.pycache_prefix = str(prefix)
+    try:
+        for source in sorted((REPO / "bin").rglob("*.py")):
+            try:
+                py_compile.compile(str(source), cfile=importlib.util.cache_from_source(str(source)), doraise=True,
+                                   invalidation_mode=py_compile.PycInvalidationMode.TIMESTAMP)
+            except py_compile.PyCompileError:
+                pass  # the launcher compiles it again and the tests say what is wrong
+    finally:
+        sys.pycache_prefix = before
+
+
+_WARM = []  # [(the warm cache, its leaf directories, its files)], built once per process
+
+
+def warm_pycache():
+    """The run's warm cache: the runner's, else one this process compiles into a temporary directory it removes at exit."""
+    if not _WARM:
+        root = SUITE_PYCACHE
+        if root is None:
+            root = tempfile.mkdtemp(prefix="spud-test-pycache-")
+            atexit.register(shutil.rmtree, root, True)
+            compile_program(root)
+        leaves, files = [], []
+        for directory, subdirs, names in os.walk(root):
+            rel = os.path.relpath(directory, root)
+            if not subdirs:
+                leaves.append(rel)
+            files += [os.path.join(rel, n) for n in names]
+        _WARM.append((root, leaves, files))
+    return _WARM[0]
+
+
+def seed_pycache(home):
+    """Link the warm cache into <home>/.spud/pycache/ (SPD-102), before `spud init` creates .spud/: the launcher caches only
+    under a .spud/ that exists when it starts, so without this every home's init and first command compile the program.
+    Hard links cost a directory entry each; a pyc the launcher rewrites is replaced by a new file, never written through."""
+    root, leaves, files = warm_pycache()
+    cache = os.path.join(home, ".spud", "pycache")
+    for rel in leaves:
+        os.makedirs(os.path.join(cache, rel), exist_ok=True)
+    for rel in files:
+        try:
+            os.link(os.path.join(root, rel), os.path.join(cache, rel))
+        except OSError:
+            shutil.copyfile(os.path.join(root, rel), os.path.join(cache, rel))
+
+
+def wall_clock(test):
+    """Mark a test that asserts an upper bound on the wall time of work it does itself (SPD-102).  tests/suite.py runs such a
+    test only after every other test is done, beside no other work but the other marked tests, so the bound it asserts is
+    measured on an idle machine as it is in the serial run; 18 workers on this Mac's six performance and twelve efficiency
+    cores once took ZshGlobOperatorTest's 7.7 s past its 10 s bound.  The serial command ignores the mark."""
+    test.wall_clock = True
+    return test
+
+
 def load_spud_module():
     """Import the program, bin/spud_ledger.py, for unit tests (bin/spud is its launcher since SPD-016)."""
     loader = importlib.machinery.SourceFileLoader("spud_ledger", str(PROGRAM))
@@ -80,9 +148,10 @@ def load_spud_module():
 
 
 class Home:
-    """A temporary SPUD_HOME with a config file; runs the CLI against it."""
+    """A temporary SPUD_HOME with a config file; runs the CLI against it.  `warm`: its .spud/pycache/ starts as the run's warm
+    bytecode cache (SPD-102), unless SPUD_SUITE_PYCACHE is `off`."""
 
-    def __init__(self, config=None, name=None):
+    def __init__(self, config=None, name=None, warm=False):
         self._tmp = tempfile.TemporaryDirectory(prefix="spud-test-")
         self.path = Path(self._tmp.name).resolve()
         if name is not None:  # a home whose own directory has this name (SPD-029: a non-ASCII home, spelled NFC)
@@ -91,7 +160,10 @@ class Home:
         self.config = config if config is not None else real_config()
         with open(self.path / "spud.config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=2)
+        if warm and SUITE_PYCACHE != "off":
+            seed_pycache(self.path)
         self.env = dict(os.environ)
+        self.env.pop("SPUD_SUITE_PYCACHE", None)  # the runner's word to this module, not to the CLI
         self.env["SPUD_HOME"] = str(self.path)
         # `member new` records the session its Bash runs in (SPD-018): a suite run from a Claude Code session must
         # not stamp that live session on scratch rows, so a test that wants a session names it.
@@ -309,13 +381,15 @@ class HookResult:
 
 
 class SpudTestCase(unittest.TestCase):
-    """A test case with a fresh initialised Home per test."""
+    """A test case with a fresh initialised Home per test, its bytecode cache warm (SPD-102) unless the class sets warm_cache
+    False, as the classes do that assert what the launcher caches or what init or a backup leaves in .spud/."""
 
     config = None
     home_name = None
+    warm_cache = True
 
     def setUp(self):
-        self.home = Home(config=self.config, name=self.home_name)
+        self.home = Home(config=self.config, name=self.home_name, warm=self.warm_cache)
         self.addCleanup(self.home.cleanup)
         self.home.init()
 

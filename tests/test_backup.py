@@ -59,6 +59,8 @@ def user_version(path):
 
 
 class BackupCase(SpudTestCase):
+    warm_cache = False  # SPD-102: a backup's .spud/ holds only what init and the backups put there
+
     def setUp(self):
         super().setUp()
         self.backups = self.home.path / ".spud" / "backups"

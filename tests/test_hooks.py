@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from helpers import EXIT_ERROR, EXIT_USAGE, PROGRAM, SPUD, SpudTestCase, load_spud_module, real_config
+from helpers import EXIT_ERROR, EXIT_USAGE, PROGRAM, SPUD, SpudTestCase, load_spud_module, real_config, wall_clock
 
 
 def case_insensitive_fs(path):
@@ -2149,6 +2149,7 @@ class ZshShortLoopTest(BashHookCase):
         self.assertRefused("case x in a) repeat 1 cd %s;; b) cd %s;; esac; echo x > tickets/SPD-001.md" % (ledger, out),
                            "generated", AGENT_C)
 
+    @wall_clock
     def test_bounded_on_pathological_input(self):
         """Deep nesting and very long headers stay bounded and still find the write."""
         m = load_spud_module()
@@ -2482,6 +2483,7 @@ class ZshGlobOperatorTest(BashHookCase):
         self.assertRefused("{(echo x > ledger/tickets/SPD-001.md)}", "generated", AGENT_C)
         self.assertRefused("time -p (echo x > ledger/tickets/SPD-001.md)", "generated", AGENT_C)
 
+    @wall_clock
     def test_pathological_patterns_neither_raise_nor_grow_quadratic(self):
         """A hook that raises refuses everyone, and one that runs past the harness's timeout protects nothing: deep nesting, a line
         of unbalanced openings, huge range bounds and long qualifier lists are read in bounded time (robustness probe)."""
@@ -2847,6 +2849,7 @@ class GlobCommandWordTest(BashHookCase):
                 self.assertSilent(cmd, agent_id=None)
         self.refused_for_members("* push", "Law 7")  # one reading is git push
 
+    @wall_clock
     def test_pathological_glob_words_are_read_in_bounded_time(self):
         m = load_spud_module()
         home = str(self.home.path)
@@ -4278,6 +4281,7 @@ class ZshShortConditionalTest(BashHookCase):
         self.assertRefused("case x in a) if [[ -n x ]] cd %s;; b) cd %s;; esac; echo x > tickets/SPD-001.md" % (ledger, out),
                            "generated", AGENT_C)
 
+    @wall_clock
     def test_bounded_on_pathological_input(self):
         m = load_spud_module()
         for line in ("if [[ -n x ]] " * 2000 + "git push", "if [[ -n x ]] { " * 500 + "git push" + " }" * 500,
