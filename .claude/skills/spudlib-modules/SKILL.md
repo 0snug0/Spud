@@ -11,12 +11,12 @@ description: The rules the spud program's package bin/spudlib/ was built on. Rea
 bin/
   spud               the launcher, 58 lines: loads the entry by path, with today's bytecode rule
   spud_ledger.py     the entry, 191 lines: the finder, the public surface, HookCall, main, the refusal
-  spudlib/           the program: 58 modules in nine directories, no __init__.py
-    core/      kernel · lazy · markdown · homeconf
+  spudlib/           the program: 62 modules in nine directories, no __init__.py
+    core/      kernel · lazy · markdown · homeconf · launchagents
     state/     schema · ledgerdb · lookup · actors · ops · transcripts · backup
     render/    prices · teamcard · workedon · sectiontext · notefiles
     imports/   noteimport · bulkimport · accept
-    commands/  reportentry · admincmds · doctor · schedule · settings_sync · publish · ticketcmds · proposalcmds · membercmds · resumcmd · views
+    commands/  reportentry · admincmds · doctor · schedule · settings_sync · publish · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind
     projects/  sessions · registry · install
     hooks/     hookio · worktrees · pathrule · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
     shell/     syntax · prepare · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · walk · analyse · redirect_globs · bash_rule
@@ -76,9 +76,9 @@ A new module is a new file in one of these directories. Nothing registers it: no
 
 Every Bash, Edit and Agent call in every session runs `spud hook PreToolUse`, and `SessionStart`, `Stop`, `PostToolUse`, `SubagentStart`, `SubagentStop` and `UserPromptSubmit` run on their own events. A hook run is a whole process: about 23 ms, and every module it imports is part of that.
 
-`hooks/dispatch.HOOK_HANDLERS` maps an event to `(module, handler)` and imports that module only when it calls it, so a hook run imports its own event's modules alone: PreToolUse 32 of the 58, Stop 15, PostToolUse 16 (measured per event in `docs/spikes/spd-065/review.md`).
+`hooks/dispatch.HOOK_HANDLERS` maps an event to `(module, handler)` and imports that module only when it calls it, so a hook run imports its own event's modules alone: PreToolUse 32 of the 62, Stop 15, PostToolUse 16 (measured per event in `docs/spikes/spd-065/review.md`).
 
-`HOOK_PATH` in `tests/test_package.py` is the **exact** set of 35 modules the seven hooks import between them. The test runs each hook through the launcher and compares. So:
+`HOOK_PATH` in `tests/test_package.py` is the **exact** set of 36 modules the seven hooks import between them. The test runs each hook through the launcher and compares. So:
 
 - **To keep a new module off the path** (the default, and what you want): let nothing in `hooks/`, `shell/`, `state/`, `core/`, `projects/sessions` or `render/prices` import it. A module reached only from `commands/` or `cli/` is off it.
 - **To put one on it** is a reviewed edit: add it to `HOOK_PATH`, and run the timing probe below against `main` before you land.
