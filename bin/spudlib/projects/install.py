@@ -24,7 +24,7 @@ def install_files(ctx, p):
         "agent": user / "agents" / "spudagent.md",
         "skill": user / "skills" / "spud" / "SKILL.md",
         "pointer": homeconf.spud_config_dir() / "home",
-        "source_agent": ctx.home / ".claude" / "agents" / "spudagent.md",
+        "source_agent": ctx.tool / ".claude" / "agents" / "spudagent.md",  # SPD-097: the source lives in the tool repository
     }
 
 
@@ -92,9 +92,12 @@ def install_project(ctx, con, p):
     root = Path(worktrees.project_root(ctx, p))
     if not root.is_dir():
         raise kernel.SpudError(kernel.EXIT_ERROR, "project %s's root %s is not a directory; `spud --as spud project edit %s --root <path>`" % (p["key"], root, p["key"]))
+    if worktrees.file_identity(root) is not None and worktrees.file_identity(root) == worktrees.file_identity(ctx.home):
+        raise kernel.SpudError(kernel.EXIT_ERROR, "project %s's root is the home %s; the home's hooks are `spud --as spud settings sync`'s until"
+                               " `spud --as spud home move` separates the two (SPD-097)" % (p["key"], root))
     files = install_files(ctx, p)
     if not files["source_agent"].is_file():
-        raise kernel.SpudError(kernel.EXIT_ERROR, "no %s to install at user scope: the home's spudagent definition is the source" % files["source_agent"])
+        raise kernel.SpudError(kernel.EXIT_ERROR, "no %s to install at user scope: the tool repository's spudagent definition is the source" % files["source_agent"])
     if homeconf.run_git(root, "ls-files", "--error-unmatch", "--", SETTINGS_LOCAL, timeout=30).returncode == 0:
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is tracked in %s's git; install writes nothing in the tracked tree" % (SETTINGS_LOCAL, p["key"]))
     previous = json.loads(p["installed"]) if p["installed"] else {}
@@ -113,7 +116,7 @@ def install_project(ctx, con, p):
     agents = files["agent"].parent
     first_agent = not (agents.is_dir() and any(agents.glob("*.md")))
     agent_text = files["source_agent"].read_text(encoding="utf-8")
-    skill_text = sessions.skill_markdown(ctx.home)
+    skill_text = sessions.skill_markdown(ctx)
     for path, text in ((files["agent"], agent_text), (files["skill"], skill_text)):
         if not path.is_file() or path.read_text(encoding="utf-8") != text:
             kernel.write_whole(path, text)
@@ -209,7 +212,7 @@ def uninstall_project(ctx, con, p):
             changed.append("wrote %s" % settings_path)
     if record.get("added_exclude") and os.path.isdir(worktrees.project_root(ctx, p)) and remove_exclude_block(worktrees.project_root(ctx, p), p["key"]):
         changed.append("removed the exclude line for %s" % SETTINGS_LOCAL)
-    others = con.execute("SELECT count(*) FROM projects WHERE id NOT IN (1, ?) AND installed IS NOT NULL", (p["id"],)).fetchone()[0]
+    others = con.execute("SELECT count(*) FROM projects WHERE id != ? AND installed IS NOT NULL", (p["id"],)).fetchone()[0]
     if others == 0:
         for name, path, sha in (("agent", files["agent"], record.get("agent_sha256")), ("skill", files["skill"], record.get("skill_sha256"))):
             if not path.is_file():
@@ -232,8 +235,6 @@ def cmd_project_install(ctx, args):
         actors.require_spud(con, actor, "installing a project")
         reportentry.check_next(con, actor, args)
         p = lookup.get_project(con, args.key)
-        if p["id"] == 1:
-            raise kernel.SpudError(kernel.EXIT_ERROR, "the home's hooks come from `spud --as spud settings sync`, not project install")
         if p["archived_at"]:
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is archived" % p["key"])
         record, written, first_agent = install_project(ctx, con, p)
@@ -261,8 +262,6 @@ def cmd_project_uninstall(ctx, args):
         actors.require_spud(con, actor, "uninstalling a project")
         reportentry.check_next(con, actor, args)
         p = lookup.get_project(con, args.key)
-        if p["id"] == 1:
-            raise kernel.SpudError(kernel.EXIT_ERROR, "the home is not uninstalled: its hooks are Spud's own settings")
         if not p["installed"]:
             if args.next is not None:
                 raise reportentry.no_entry_for_next("project %s is not installed" % p["key"])
@@ -290,11 +289,11 @@ def cmd_project_sync(ctx, args):
         actors.require_spud(con, actor, "syncing a project's installation")
         if args.key:
             p = lookup.get_project(con, args.key)
-            if p["id"] == 1 or not p["installed"]:
+            if not p["installed"]:
                 raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is not installed; `spud --as spud project install %s`" % (p["key"], p["key"]))
             rows = [p]
         else:
-            rows = con.execute("SELECT * FROM projects WHERE id != 1 AND archived_at IS NULL AND installed IS NOT NULL ORDER BY id").fetchall()
+            rows = con.execute("SELECT * FROM projects WHERE archived_at IS NULL AND installed IS NOT NULL ORDER BY id").fetchall()
         results = []
         for p in rows:
             record, written, first_agent = install_project(ctx, con, p)
@@ -322,7 +321,7 @@ def cmd_project_remove(ctx, args):
         reportentry.check_next(con, actor, args)
         p = lookup.get_project(con, args.key)
         if p["id"] == 1:
-            raise kernel.SpudError(kernel.EXIT_ERROR, "the home is project 1 and is never removed")
+            raise kernel.SpudError(kernel.EXIT_ERROR, "project spud is the tool repository, project 1, and is never removed")
         # a parked ticket is open (SPD-096): it is not-now, not over, so project remove waits for it too
         open_tickets = [r["key"] for r in con.execute("SELECT key FROM tickets WHERE project_id = ? AND status IN ('queued','active','parked') ORDER BY id", (p["id"],)).fetchall()]
         if open_tickets:

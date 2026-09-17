@@ -14,41 +14,61 @@ from ..render import prices
 # ----------------------------------------------------------------------------
 
 
-def resolve_home(env, script_path):
-    """SPUD_HOME; else the git common dir of this script's real path; else the
-    ~/.config/spud/home pointer.  Returns (path, how)."""
+def resolve_home(env):
+    """SPUD_HOME, else the ~/.config/spud/home pointer (SPD-097: the home is a plain directory, so nothing about the running
+    script says where it is; the git fallback of SPD-007 is gone).  Returns (path, how)."""
     if env.get("SPUD_HOME"):
         return Path(env["SPUD_HOME"]).expanduser().resolve(), "SPUD_HOME"
-    try:
-        proc = lazy.subprocess.run(
-            ["git", "-C", str(Path(script_path).resolve().parent), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        common = proc.stdout.strip()
-        if common:
-            return Path(common).resolve().parent, "git common dir"
-    except (OSError, lazy.subprocess.CalledProcessError):
-        pass
     pointer = spud_config_dir(env) / "home"
     if pointer.is_file():
         target = pointer.read_text(encoding="utf-8").strip()
         if target:
             return Path(target).expanduser().resolve(), "~/.config/spud/home"
-    raise kernel.SpudError(kernel.EXIT_ERROR, "cannot find Spud's home: set SPUD_HOME to the main checkout")
+    raise kernel.SpudError(kernel.EXIT_ERROR, "cannot find Spud's home: set SPUD_HOME, or write the home's path to %s" % pointer)
+
+
+def tool_root(env=None):
+    """The checkout whose bin/spud is running: the parent of the bin/ directory this package sits in, symlinks resolved;
+    SPUD_TOOL_DIR overrides it, for tests (SPD-097).  What the hook lines, the allow rules, the LaunchAgents and the /spud
+    skill name, where the spudagent source is read, and project spud's root at `spud init`."""
+    env = os.environ if env is None else env
+    if env.get("SPUD_TOOL_DIR"):
+        return Path(os.path.abspath(os.path.expanduser(env["SPUD_TOOL_DIR"])))
+    return Path(__file__).resolve().parents[3]
+
+
+def tool_checkout_kind(tool):
+    """`main` when the tool is the main checkout of a git repository, `worktree` for a linked worktree, `none` when git names
+    no repository there.  A command that writes the tool's path somewhere durable warns on `worktree`: a worktree is deleted
+    when its ticket lands, and a hook line naming it would die with it (SPD-097)."""
+    if not os.path.lexists(os.path.join(str(tool), ".git")):
+        return "none"
+    try:
+        proc = run_git(tool, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir", timeout=30)
+    except kernel.SpudError:
+        return "none"
+    lines = proc.stdout.strip().split("\n") if proc.returncode == 0 else []
+    if len(lines) != 2:
+        return "none"
+    return "main" if os.path.realpath(lines[0]) == os.path.realpath(lines[1]) else "worktree"
 
 
 class Ctx:
     """Everything a command needs: home, config, database path, output mode."""
 
-    def __init__(self, home, resolved_by, json_mode):
+    def __init__(self, home, resolved_by, json_mode, tool=None):
         self.home = home
         self.resolved_by = resolved_by
         self.json = json_mode
         self.db_path = home / ".spud" / "ledger.db"
+        self.tool = tool_root() if tool is None else Path(tool)  # SPD-097: the tool repository; the home is not one
         self._config = None
         self.hook_project = None  # `spud hook <event> --project <key>`: the failure policy of a project's hook line (SPD-014)
+
+    @property
+    def launcher(self):
+        """The running tool's bin/spud: what every durable reference to the program names (SPD-097)."""
+        return self.tool / "bin" / "spud"
 
     @property
     def config_path(self):

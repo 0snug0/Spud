@@ -25,6 +25,10 @@ MODELS = ("fable", "opus", "sonnet", "haiku")
 PERSONAS = ("researcher", "architect", "reviewer", "engineer", "designer", "writer", "scout", "contractor")
 ALIVE = ("planned", "active")
 
+# SPD-097: the reserved key of Spud's home in a deliverable glob (home:<glob>) and in the path rule.  The home is not a
+# project and never a projects row; project 1, `spud`, is the tool repository.
+HOME_KEY = "home"
+
 # The two state machines, decided on SPD-007.
 TICKET_TRANSITIONS = {
     ("queued", "active"),

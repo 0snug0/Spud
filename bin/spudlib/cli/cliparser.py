@@ -8,9 +8,11 @@ from . import helptexts
 from ..commands import (
     admincmds,
     doctor,
+    homemove,
     membercmds,
     proposalcmds,
     publish,
+    renderwatch,
     resumcmd,
     schedule,
     settings_sync,
@@ -64,7 +66,7 @@ def build_parser():
     p.add_argument("--daily", action="store_true", help="write ledger-<stamp>-daily.db unless today's is there, quick_check it, then keep the newest --keep daily copies")
     p.add_argument("--keep", type=int, metavar="N", help="daily copies --daily keeps (default %d, at least 1)" % backup.DAILY_KEEP)
     p.set_defaults(func=schedule.cmd_backup)
-    p = sub.add_parser("schedule", help="the macOS LaunchAgent %s that runs `spud backup --daily` (Spud's)" % schedule.SCHEDULE_LABEL,
+    p = sub.add_parser("schedule", help="the macOS LaunchAgents %s (the daily backup) and %s (the render watcher) (Spud's)" % (schedule.SCHEDULE_LABEL, schedule.RENDER_LABEL),
                        description=helptexts.SCHEDULE_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
@@ -103,7 +105,7 @@ def build_parser():
     ps.required = True
     q = ps.add_parser("add", help="register a repository's main checkout as a project; installs nothing (Spud's)")
     q.add_argument("path", help="the repository's main checkout")
-    q.add_argument("--key", required=True, help="lower-case key, [a-z][a-z0-9-]{0,31}, not spud")
+    q.add_argument("--key", required=True, help="lower-case key, [a-z][a-z0-9-]{0,31}; home is reserved")
     q.add_argument("--ticket-prefix", required=True, help="upper-case ticket prefix (BAD gives BAD-001)")
     q.add_argument("--team-prefix", required=True, help="upper-case team prefix (BADS gives BADS-001)")
     q.add_argument("--landing", required=True, choices=("merge", "pr"), help="how a verified branch lands: merge into the default branch, or a pull request")
@@ -155,13 +157,15 @@ def build_parser():
     q = ps.add_parser("show", help="the home, the working directory's project and checkout, the session and its mode (any actor)")
     q.set_defaults(func=sessions.cmd_session_show)
 
-    p = sub.add_parser("ledger", help="the rendered ledger in git (SPD-014)")
+    p = sub.add_parser("home", help="Spud's home: the directory holding the database, the config and the vault (SPD-097)")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
-    q = ps.add_parser("commit", help="render, stage only ledger/ and reports/ at the home, commit on its default branch and push; refused from any linked worktree (Spud's)")
-    q.add_argument("--message", required=True, type=text_arg, help="the whole commit message (@file, @- accepted); its subject names the ticket")
-    q.add_argument("--no-push", action="store_true", help="commit without pushing")
-    q.set_defaults(func=publish.cmd_ledger_commit)
+    q = ps.add_parser("move", help="move the home to an empty directory outside every git work tree: backup, copy, re-point, re-sync hooks and agents, verify (Spud's)",
+                      description=helptexts.HOME_MOVE_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
+    q.add_argument("--to", required=True, help="the new home: a directory that does not exist or is empty, not inside a git work tree")
+    q.add_argument("--dry-run", action="store_true", help="check the preconditions and print the steps; move nothing")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry the move writes")
+    q.set_defaults(func=homemove.cmd_home_move)
 
     p = sub.add_parser("sql", help="run one read-only statement against the database (any actor; the inspection path)")
     p.add_argument("statement", help="SELECT, WITH, VALUES, EXPLAIN or a read-only PRAGMA")
@@ -173,10 +177,13 @@ def build_parser():
     p.add_argument("--file", help="accept a hand edit of this rendered file: title, priority, tags, status through the state machine, Brief/Size/Outcome; a member's Brief, Outcome and status; an appended report entry")
     p.set_defaults(func=admincmds.cmd_import)
 
-    p = sub.add_parser("render", help="regenerate ledger/ and reports/ from the database; a hand-edited file is left alone (exit 6), a note whose frontmatter only changed YAML style (Obsidian's rewrite) is rendered over and kept in the event")
+    p = sub.add_parser("render", help="regenerate ledger/ and reports/ from the database; a hand-edited file is left alone (exit 6), a note whose frontmatter only changed YAML style (Obsidian's rewrite) is rendered over and kept in the event; --watch keeps doing it (Spud's)")
     p.add_argument("--out", help="render into this directory instead of SPUD_HOME (no hash checks)")
     p.add_argument("--discard", metavar="PATH", help="overwrite this hand-edited file with the current render, keeping the discarded text in the event (Spud only)")
-    p.set_defaults(func=publish.cmd_render)
+    p.add_argument("--watch", action="store_true", help="run until SIGTERM, rendering whenever the event log moves: the LaunchAgent local.spud.render's run (SPD-097)")
+    p.add_argument("--interval", type=float, default=renderwatch.WATCH_INTERVAL, metavar="SECONDS", help="with --watch: seconds between reads of the event log (default %.0f)" % renderwatch.WATCH_INTERVAL)
+    p.add_argument("--ticks", type=int, metavar="N", help="with --watch: stop after N reads (tests)")
+    p.set_defaults(func=renderwatch.render_entry)
 
     p = sub.add_parser("ticket", help="tickets (Spud's)")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
@@ -190,7 +197,7 @@ def build_parser():
     q.add_argument("--outcome", type=text_arg)
     q.add_argument("--heading", help="a shorter H1 than the title")
     q.add_argument("--tag", action="append", help="extra tag (ticket is always first)")
-    q.add_argument("--project", help="project key (default: the project of the working directory, else spud)")
+    q.add_argument("--project", help="project key (default: the project of the working directory, else spud; the home is no project)")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes: SPD-nnn created (<status>, <priority>): <title>")
     q.set_defaults(func=ticketcmds.cmd_ticket_new)
     q = ps.add_parser("move", help="change a ticket's status along the state machine")
@@ -228,7 +235,7 @@ def build_parser():
     q.add_argument("--tier-reason", type=text_arg, help="required when the model is not the persona's default tier")
     q.add_argument("--agent-type", help="native agent type (required for a contractor)")
     q.add_argument("--brief", type=text_arg, help="the brief, required and non-empty (no brief, no spudagent); @file or @- accepted")
-    q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable)")
+    q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable): bare for the ticket's project, <key>:<glob> for another, home:<glob> for the home")
     q.set_defaults(func=membercmds.cmd_member_new)
     q = ps.add_parser("start", help="planned -> active (stamping spawned) or blocked -> active after a re-brief; the parent's")
     q.add_argument("ref")

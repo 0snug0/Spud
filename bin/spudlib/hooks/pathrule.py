@@ -5,6 +5,7 @@ import os
 import re
 
 from . import hookio, worktrees
+from ..core import kernel
 from ..state import lookup, ops
 
 
@@ -149,13 +150,15 @@ NOT_SPUD_HOME = ("a session that is not Spud does not write in Spud's home (%s i
                  " or work in a session opened in the home")
 
 
-def path_reason(rel, member, ref, fold=False, project_key="spud", ticket_project_key="spud", home=True):
+def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticket_project_key=None, home=True):
     """None when the actor may write the repository path `rel` of project `project_key`, else the reason.  The
     generated roots are the home's alone and are matched whatever the case (a case variant is refused on every
     filesystem), case-folded rather than lower-cased so that the simple folds APFS honours
     (reportſ is reports) count too (SPD-029); globs fold case only where the filesystem does.  In another project
     Spud has no own files (SPD-014): every path there is a deliverable, and a member's bare glob is relative to its
-    ticket's project, a `<key>:<glob>` to that project's."""
+    ticket's project, a `<key>:<glob>` to that project's, a `home:<glob>` to the home (SPD-097).  `home` is
+    worktrees.home_roots for the checkout the path was mapped into, so in the transition window a worktree of the tool
+    repository still carries the generated roots and Spud's own set, while its globs stay project spud's."""
     generated = home and rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS
     if member is None:
         if not home:
@@ -230,27 +233,27 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
         ref = lookup.member_ref(con, caller_member["id"])
         ticket_project = lookup.project_key_of(con, lookup.get_ticket_by_id(con, caller_member["ticket_id"]))
         for project, root, rel in inside:
-            reason = path_reason(rel, caller_member, ref, worktrees.folds_case(root), project["key"], ticket_project, project["id"] == 1)
+            reason = path_reason(rel, caller_member, ref, worktrees.folds_case(root), project["key"], ticket_project, worktrees.home_roots(project, ctx.home))
             if reason:
                 return reason, rel
         return None, first
     plain = mode == "plain"
     if caller_agent_id:  # the home's generated roots are Law 5's for every caller, bound or not, before the binding matters
         for project, _root, rel in inside:
-            if project["id"] == 1 and rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS:
+            if worktrees.home_roots(project, ctx.home) and rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS:
                 return path_reason(rel, {"deliverables": "[]"}, "agent_id %s" % caller_agent_id), rel
     if caller_agent_id and not plain:
         return ("your agent_id %s is not bound to a member yet (the PostToolUse(Agent) hook binds a background spawn right after launch;"
                 " a foreground spawn is bound at its first tool call or at its stop), so %s cannot be checked against your deliverables" % (caller_agent_id, first)), first
     for project, root, rel in inside:
-        home = project["id"] == 1
+        home = worktrees.home_roots(project, ctx.home)
         if plain:
             if not home:
                 continue
             generated = rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS
             reason = (path_reason(rel, None, "Spud", worktrees.folds_case(root)) if generated else None) or NOT_SPUD_HOME % rel
         else:
-            reason = path_reason(rel, None, "Spud", worktrees.folds_case(root), project["key"], "spud", home)
+            reason = path_reason(rel, None, "Spud", worktrees.folds_case(root), project["key"], None, home)
         if reason:
             return reason, rel
     return None, first

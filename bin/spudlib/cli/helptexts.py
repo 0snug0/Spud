@@ -21,9 +21,10 @@ hooks: `spud hook <event>` is the harness's entry point (payload on stdin, answe
 
 deliverable globs (--deliverable): repository-relative, no leading slash and no `..`;
        `*` and `?` match inside one path segment, `**` crosses segments, a trailing `/`
-       means everything under that directory, and `<key>:` in front names another
-       project's checkout.  Every other character is literal, brackets included: write
-       a Next.js segment plainly, admin/src/app/accounts/[email]/** (SPD-086).
+       means everything under that directory, `<key>:` in front names another
+       project's checkout and `home:` Spud's home (SPD-097).  Every other character is
+       literal, brackets included: write a Next.js segment plainly,
+       admin/src/app/accounts/[email]/** (SPD-086).
 
 text values: an option value of @path reads the file, @- reads stdin.
 exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,
@@ -77,9 +78,25 @@ exit codes: 0 a copy written, or today's daily copy already there; 1 the write o
 """
 
 SCHEDULE_DESCRIPTION = """\
-The macOS LaunchAgent local.spud.backup runs `spud --as spud backup --daily` at load and daily at the
---at time; launchd fires a run missed during sleep at wake, and backup --daily writes one copy a day
-however often it runs.  The plist is $SPUD_LAUNCH_AGENTS_DIR/local.spud.backup.plist (default
-~/Library/LaunchAgents), launchctl is $SPUD_LAUNCHCTL (default /bin/launchctl), and the run's output
-goes to ~/Library/Logs/spud-backup.log.  Every verb is Spud's (--as spud).
+Two macOS LaunchAgents (SPD-012, SPD-097).  local.spud.backup runs `spud --as spud backup --daily` at load and daily at
+the --at time; launchd fires a run missed during sleep at wake, and backup --daily writes one copy a day however often
+it runs.  local.spud.render runs `spud --as spud render --watch` at load and again whenever it exits (KeepAlive), so
+the vault follows the database within seconds; its log is <home>/.spud/logs/render.log, started afresh at each start.
+The plists are $SPUD_LAUNCH_AGENTS_DIR/<label>.plist (default ~/Library/LaunchAgents), launchctl is $SPUD_LAUNCHCTL
+(default /bin/launchctl), and the backup's output goes to ~/Library/Logs/spud-backup.log.  Every verb is Spud's
+(--as spud) and handles both agents.
+"""
+
+HOME_MOVE_DESCRIPTION = """\
+Move Spud's home to a plain directory (SPD-097, design section 5).  Refused while any member is planned or active, when
+--to exists and is not empty, lies inside a git work tree or inside the current home, when a rendered file is hand-edited
+(spud doctor lists them with the commands that settle each), when an earlier move left .spud-moved behind, and when the
+running bin/spud sits in a linked worktree.  Then, each step reported: a checked backup; the database copied with
+SQLite's online backup, integrity-checked and compared row by row; ledger/, reports/, docs/, .obsidian/, the config,
+CLAUDE.md, the two .claude settings files and the backups copied, and the copied vault checked against the copied
+database (zero files to render); ~/.config/spud/home re-pointed; project spud set to sessions claim, the new home's
+.claude/settings.json synced, the ledger's entries stripped from the tool's tracked .claude/settings.json (left
+uncommitted for the removal commit), project spud installed and every installed project re-synced; both LaunchAgents
+reinstalled; a render and spud doctor in the new home; the old .spud renamed .spud-moved.  Ends by printing what is
+left by hand and how to roll back until the removal commit.  --dry-run checks the preconditions and prints the steps.
 """

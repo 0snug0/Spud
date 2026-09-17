@@ -16,6 +16,7 @@ The unit tests load the program; the rest run the hook as a project's installed 
 
 import json
 import unittest
+from pathlib import Path
 
 from helpers import load_spud_module
 from test_hooks import AGENT_A, SESSION, common
@@ -63,11 +64,14 @@ class PromptMatchTest(unittest.TestCase):
                 self.assertFalse(spud.prompt_is_spud_command(prompt))
 
     def test_the_skill_and_the_hooks_steps_have_one_source(self):
-        home = "/Users/eric/Spud"
-        skill = spud.skill_markdown(home)
+        # SPD-097: the steps read the home's CLAUDE.md and run the tool's launcher, two directories now
+        ctx = spud.Ctx(Path("/Users/eric/SpudHome"), "SPUD_HOME", False, tool=Path("/Users/eric/Spud"))
+        home, launcher = ctx.home, ctx.launcher
+        skill = spud.skill_markdown(ctx)
         self.assertTrue(skill.startswith("---\nname: spud\n"), skill)
-        self.assertIn("You are becoming Spud in this session.\n\n1. Read /Users/eric/Spud/CLAUDE.md in full", skill)
-        hook = numbered(spud.skill_steps(home, spud.HOOK_CLAIM.format(home=home), "BAD-006 - <what this session does>"))
+        self.assertIn("You are becoming Spud in this session.\n\n1. Read /Users/eric/SpudHome/CLAUDE.md in full", skill)
+        self.assertIn("/Users/eric/Spud/bin/spud --as spud session claim", skill)
+        hook = numbered(spud.skill_steps(home, spud.HOOK_CLAIM.format(launcher=launcher), "BAD-006 - <what this session does>"))
         steps = numbered(skill)
         self.assertEqual((len(steps), len(hook)), (4, 4))
         self.assertEqual((hook[0], hook[2]), (steps[0], steps[2]))
@@ -135,7 +139,7 @@ class AutoClaimTest(ProjectHookCase):
         home = str(self.home.path)
         for needle in ("the prompt names BAD-001", "%s/CLAUDE.md in full, then %s/spud.config.json" % (home, home), "the project wins; about the second, Spud's laws win",
                        "Run the session ritual of CLAUDE.md from step 2", "do not run `session claim`", "--as spud session release",
-                       "rule: this repository's CLAUDE.md", "ledger commit: python3.14 -I -S %s/bin/spud" % home, "board (badtakes):"):
+                       "rule: this repository's CLAUDE.md", "board (badtakes):"):
             self.assertIn(needle, r.context)
         self.assertEqual(self.claims(SESSION_PLAIN), [{"session_id": SESSION_PLAIN, "cwd": str(self.bad)}])
         self.assertIn("by the UserPromptSubmit hook: the prompt names BAD-001", self.claim_events(SESSION_PLAIN)[0]["body"])

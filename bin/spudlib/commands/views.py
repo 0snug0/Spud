@@ -1,5 +1,6 @@
 """commands/views: events, board, fleet, card, member list.  Moved from bin/spud_ledger.py (SPD-065)."""
 
+from . import renderwatch
 from ..core import kernel
 from ..projects import sessions
 from ..render import prices, teamcard
@@ -46,6 +47,8 @@ def cmd_board(ctx, args):
             rows = [r for r in rows if r["status"] == "parked"]
         if args.brief:
             text = sessions.board_brief_text(con, rows, parked=args.parked)
+            if renderwatch.watcher_installed() and not renderwatch.watcher_alive(ctx):  # SPD-097: the vault is stale
+                text += "\nrender watcher: installed but not running; the vault is stale (spud --as spud schedule install reloads it)"
         else:
             for r in rows:
                 r["created"] = kernel.fm_date(r["created_at"])

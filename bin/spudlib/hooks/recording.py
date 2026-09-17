@@ -171,11 +171,10 @@ def hook_subagent_start(ctx, payload):
                 ticket = lookup.get_ticket_by_id(con, member["ticket_id"])
                 context += " You are %s/%s (%s, %s) on %s; your deliverables: %s." % (
                     ticket["team_key"], member["name"], member["lineage"], member["persona"], ticket["key"], ", ".join(json.loads(member["deliverables"])) or "none")
-                if ticket["project_id"] != 1:
-                    project = con.execute("SELECT * FROM projects WHERE id = ?", (ticket["project_id"],)).fetchone()
-                    context += (" Your ticket's project is `%s`; bare deliverables are relative to `%s` or a worktree of it, and `<key>:<glob>` names"
-                                " another project's checkout; that repository's CLAUDE.md and skills govern how you build and verify."
-                                % (project["key"], worktrees.project_root(ctx, project)))
+                project = con.execute("SELECT * FROM projects WHERE id = ?", (ticket["project_id"],)).fetchone()
+                context += (" Your ticket's project is `%s`; bare deliverables are relative to `%s` or a worktree of it, `<key>:<glob>` names"
+                            " another project's checkout and `home:<glob>` Spud's home (%s); that repository's CLAUDE.md and skills govern how"
+                            " you build and verify." % (project["key"], worktrees.project_root(ctx, project), ctx.home))
     finally:
         con.close()
     return hookio.HookOutput({"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": context}})

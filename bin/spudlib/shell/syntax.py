@@ -311,10 +311,12 @@ class ShellAnalysis:
     checked, or None when the hook cannot know it: where zsh and bash disagree, or a cd may not run or may fail, the hook
     keeps both the old directory and the new one rather than guess.
 
-    `home` (SPD-032) is the ledger root whose launcher a spud call must run for the hook to allow it."""
+    `launcher` (SPD-097) is the running tool's bin/spud, the file a spud call must run for the hook to allow it; `home`
+    (SPD-032) is what a SPUD_HOME assignment on the line must name."""
 
-    def __init__(self, cwd=None, home=None):
+    def __init__(self, cwd=None, home=None, launcher=None):
         self.home = home
+        self.launcher = launcher
         self.findings = []
         self.kinds = []
         self.redirects = []

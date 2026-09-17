@@ -19,7 +19,7 @@ def hook_session_start(ctx, payload):
         mode, project, claim = sessions.session_mode(ctx, con, payload)
         if mode == "plain":
             context = sessions.plain_session_notice(ctx, project)
-        elif project is not None and project["id"] != 1:
+        elif project is not None:
             context = sessions.project_session_context(ctx, con, project, claim, payload)
         else:
             context = "Ledger board (`spud board --brief` at %s, source %s):\n%s" % (kernel.now(), payload.get("source"), sessions.board_brief_text(con))
@@ -72,7 +72,7 @@ def released_by_command(con, session):
 def prompt_claim_context(ctx, con, project, ticket, session, at):
     head = ("Ledger: the prompt names %s, a ticket of Spud project `%s`, so the UserPromptSubmit hook claimed this session: it is Spud now."
             " Before anything else:\n" % (ticket["key"], project["key"]))
-    head += sessions.skill_steps(ctx.home, sessions.HOOK_CLAIM.format(home=ctx.home), "%s - <what this session does>" % ticket["key"])
+    head += sessions.skill_steps(ctx.home, sessions.HOOK_CLAIM.format(launcher=ctx.launcher), "%s - <what this session does>" % ticket["key"])
     card = sessions.claim_card(ctx, con, project, session, at, cap=max(PROMPT_CLAIM_CAP - len(head.encode("utf-8")) - 1, 0))
     return sessions.fit_bytes(head, card, PROMPT_CLAIM_CAP)  # a blank line between the steps and the card
 

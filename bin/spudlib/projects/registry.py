@@ -12,12 +12,14 @@ from ..state import actors, ledgerdb, lookup
 
 
 # ----------------------------------------------------------------------------
-# Projects, sessions and the ledger commit (SPD-014)
+# Projects and sessions (SPD-014)
 # ----------------------------------------------------------------------------
 #
-# docs/design/2026-09-14-cross-repository-projects.md.  A project is a registered repository; the home is project 1.
+# docs/design/2026-09-14-cross-repository-projects.md.  A project is a registered repository; project 1 is the tool
+# repository, `spud`; the home is no project (SPD-097).
 # A session launched in another project is Spud only after `/spud` claims it (projects.sessions = 'claim', the default
-# for `project add`, Eric 2026-09-14), or when its project is 'always', as the home is.
+# for `project add`, Eric 2026-09-14), or when its project is 'always', as project spud is until `home move`; a session
+# launched in the home is always Spud's.
 
 PROJECT_KEY_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 PREFIX_RE = re.compile(r"[A-Z][A-Z0-9]*")
@@ -45,6 +47,9 @@ def validate_project_root(ctx, con, path, exclude_id=None):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is not an existing directory" % path)
     if not root.is_dir():
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is not a directory" % root)
+    ident = worktrees.file_identity(root)
+    if ident == worktrees.file_identity(ctx.home):  # SPD-097: asked before git, since the home is no git repository
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s is Spud's home, which is not a project (SPD-097); register the tool repository or another checkout" % root)
     proc = homeconf.run_git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", timeout=30)
     lines = proc.stdout.strip().split("\n") if proc.returncode == 0 else []
     if len(lines) != 2:
@@ -54,9 +59,6 @@ def validate_project_root(ctx, con, path, exclude_id=None):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is inside the repository %s, not its root; register the root" % (root, toplevel))
     if worktrees.file_identity(common) != worktrees.file_identity(os.path.join(toplevel, ".git")):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is a linked worktree; register the main checkout, %s" % (root, os.path.dirname(common.rstrip("/"))))
-    ident = worktrees.file_identity(root)
-    if ident == worktrees.file_identity(ctx.home):
-        raise kernel.SpudError(kernel.EXIT_ERROR, "%s is Spud's home, project spud" % root)
     chain = identity_chain(root)
     for other in con.execute("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall():
         if other["id"] == exclude_id:
@@ -75,8 +77,8 @@ def validate_project_root(ctx, con, path, exclude_id=None):
 def check_project_key(con, key):
     if not PROJECT_KEY_RE.fullmatch(key or ""):
         raise kernel.SpudError(kernel.EXIT_ERROR, "--key %r must be lower-case letters, digits and hyphens, starting with a letter, at most 32 characters" % key)
-    if key == "spud":
-        raise kernel.SpudError(kernel.EXIT_ERROR, "the key spud is the home's")
+    if key == kernel.HOME_KEY:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "the key %s is reserved: it names Spud's home in a deliverable glob (home:<glob>), and the home is not a project (SPD-097)" % key)
     if con.execute("SELECT 1 FROM projects WHERE key = ?", (key,)).fetchone():
         raise kernel.SpudError(kernel.EXIT_ERROR, "project %s exists already" % key)
 
@@ -106,13 +108,14 @@ def origin_head_branch(root):
 
 def project_dict(ctx, con, p):
     root = worktrees.project_root(ctx, p)
-    settings = os.path.join(root, ".claude", "settings.json" if p["id"] == 1 else "settings.local.json")
+    # SPD-097: every project's hooks live in its untracked local settings; the home's own .claude/settings.json belongs to no project.
+    settings = os.path.join(root, ".claude", "settings.local.json")
     record = json.loads(p["installed"]) if p["installed"] else None
     return {
         "key": p["key"], "name": p["name"], "ticket_prefix": p["ticket_prefix"], "team_prefix": p["team_prefix"], "root": root,
         "default_branch": p["default_branch"], "landing": p["landing"], "sessions": p["sessions"], "remote": p["remote"],
         "tickets": con.execute("SELECT count(*) FROM tickets WHERE project_id = ?", (p["id"],)).fetchone()[0],
-        "settings_file": settings, "installed": settings_sync.settings_hold_hooks(ctx, settings, None if p["id"] == 1 else p["key"]),
+        "settings_file": settings, "installed": settings_sync.settings_hold_hooks(ctx, settings, p["key"]),
         "install_record": None if record is None else {k: v for k, v in record.items() if k != "original"},
         "created_at": p["created_at"], "archived_at": p["archived_at"],
     }
@@ -197,31 +200,27 @@ def cmd_project_edit(ctx, args):
         at = kernel.now()
         with ledgerdb.write_txn(con):
             p = lookup.get_project(con, args.key)
-            home = p["id"] == 1
+            tool_project = p["id"] == 1  # SPD-097: project spud, whose name and prefixes are spud.config.json's
             updates = {}
             if args.name is not None:
-                if home:
-                    raise kernel.SpudError(kernel.EXIT_ERROR, "the home's name comes from spud.config.json (identity.name)")
+                if tool_project:
+                    raise kernel.SpudError(kernel.EXIT_ERROR, "project spud's name comes from spud.config.json (identity.name)")
                 updates["name"] = args.name
             if args.landing is not None:
                 updates["landing"] = args.landing
             if args.sessions is not None:
-                if home and args.sessions != "always":
-                    raise kernel.SpudError(kernel.EXIT_ERROR, "every session in the home is Spud: the home's sessions stays always")
                 updates["sessions"] = args.sessions
             if args.default_branch is not None:
                 updates["default_branch"] = args.default_branch
             if args.root is not None:
-                if home:
-                    raise kernel.SpudError(kernel.EXIT_ERROR, "the home's root is the home itself (SPUD_HOME)")
                 root = validate_project_root(ctx, con, args.root, exclude_id=p["id"])
                 clash = con.execute("SELECT key FROM projects WHERE root_path = ? AND id != ?", (root, p["id"])).fetchone()
                 if clash:
                     raise kernel.SpudError(kernel.EXIT_ERROR, "%s is already the root of project %s" % (root, clash["key"]))
                 updates["root_path"] = root
             if args.ticket_prefix is not None or args.team_prefix is not None:
-                if home:
-                    raise kernel.SpudError(kernel.EXIT_ERROR, "the home's prefixes come from spud.config.json (`spud config sync`)")
+                if tool_project:
+                    raise kernel.SpudError(kernel.EXIT_ERROR, "project spud's prefixes come from spud.config.json (`spud config sync`)")
                 if con.execute("SELECT 1 FROM tickets WHERE project_id = ? LIMIT 1", (p["id"],)).fetchone():
                     raise kernel.SpudError(kernel.EXIT_ERROR, "project %s has tickets, so its prefixes are fixed: they are in rendered file names and wikilinks" % p["key"])
                 tp, tm = args.ticket_prefix or p["ticket_prefix"], args.team_prefix or p["team_prefix"]

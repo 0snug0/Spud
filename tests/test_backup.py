@@ -4,10 +4,11 @@
 same VACUUM INTO as `spud backup`, runs PRAGMA quick_check on it, and then keeps the newest N daily
 copies (14 by default): it unlinks regular files in .spud/backups/ whose whole name is a daily copy's
 and nothing else.  `spud doctor` reports the copies from the directory listing and never counts them
-as problems.  `spud schedule show|install|uninstall` manages the LaunchAgent local.spud.backup that
-runs the daily backup.  Every case runs in a scratch SPUD_HOME, and every schedule case points
-SPUD_LAUNCH_AGENTS_DIR at a scratch directory and SPUD_LAUNCHCTL at a fake that records its
-arguments, so no test reaches this Mac's LaunchAgents or launchctl.
+as problems.  `spud schedule show|install|uninstall` manages both LaunchAgents: local.spud.backup,
+which runs the daily backup, and local.spud.render, the render watcher (SPD-097).  Every case runs in
+a scratch SPUD_HOME whose SPUD_LAUNCH_AGENTS_DIR is a directory of its own, and every schedule case
+points that at its scratch and SPUD_LAUNCHCTL at a fake that records its arguments, so no test reaches
+this Mac's LaunchAgents or launchctl.
 """
 
 import contextlib
@@ -16,21 +17,20 @@ import json
 import os
 import plistlib
 import re
-import shlex
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE, REPO, SPUD, Home, SpudTestCase, load_spud_module
+from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE, REPO, SPUD, Home, LaunchdMixin, SpudTestCase, load_spud_module
 
 DAILY_NAME = re.compile(r"ledger-[0-9]{8}T[0-9]{6}-daily\.db")
 LABEL = "local.spud.backup"
+RENDER_LABEL = "local.spud.render"
 PLIST_KEYS = {"Label", "ProgramArguments", "EnvironmentVariables", "RunAtLoad", "StartCalendarInterval",
               "StandardOutPath", "StandardErrorPath", "ProcessType"}
 
@@ -371,63 +371,15 @@ class DoctorBackupsTest(BackupCase):
 # schedule: the LaunchAgent, against a scratch directory and a fake launchctl
 # =============================================================================
 
-FAKE_LAUNCHCTL = r'''"""A stand-in for launchctl: records each call's arguments and keeps the job's loaded state in a file."""
-import json
-import os
-import sys
-
-state = os.environ["FAKE_LAUNCHCTL_STATE"]
-calls_path = os.path.join(state, "calls.jsonl")
-loaded = os.path.join(state, "loaded")
-args = sys.argv[1:]
-with open(calls_path, "a", encoding="utf-8") as f:
-    f.write(json.dumps(args) + "\n")
-verb = args[0] if args else ""
-if verb == "bootout":
-    if os.path.exists(loaded):
-        os.remove(loaded)
-        sys.exit(0)
-    sys.stderr.write("Boot-out failed: 3: No such process\n")
-    sys.exit(3)
-if verb == "bootstrap":
-    with open(calls_path, encoding="utf-8") as f:
-        attempt = sum(1 for line in f if json.loads(line)[:1] == ["bootstrap"])
-    failures = os.environ.get("FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES", "0")
-    if failures == "all" or attempt <= int(failures) or os.path.exists(loaded):
-        sys.stderr.write("Bootstrap failed: 5: Input/output error\n")
-        sys.exit(5)
-    open(loaded, "w").close()
-    sys.exit(0)
-if verb == "print":
-    if os.path.exists(loaded):
-        sys.stdout.write("gui/501/local.spud.backup = {\n}\n")
-        sys.exit(0)
-    sys.stderr.write('Could not find service "local.spud.backup" in domain for user gui: 501\n')
-    sys.exit(113)
-sys.stderr.write("fake launchctl: unexpected arguments %r\n" % (args,))
-sys.exit(64)
-'''
-
-
-class ScheduleTest(SpudTestCase):
+class ScheduleTest(LaunchdMixin, SpudTestCase):
     def setUp(self):
         super().setUp()
-        scratch = tempfile.TemporaryDirectory(prefix="spud-schedule-")
-        self.addCleanup(scratch.cleanup)
-        self.scratch = Path(scratch.name).resolve()
-        self.agents = self.scratch / "LaunchAgents"
-        self.state = self.scratch / "launchctl-state"
-        self.state.mkdir()
-        fake = self.scratch / "fake_launchctl.py"
-        fake.write_text(FAKE_LAUNCHCTL, encoding="utf-8")
-        self.launchctl = self.scratch / "launchctl"
-        self.launchctl.write_text('#!/bin/sh\nexec %s -I -S %s "$@"\n' % (shlex.quote(sys.executable), shlex.quote(str(fake))), encoding="utf-8")
-        self.launchctl.chmod(0o755)
-        self.home.env.update({"SPUD_LAUNCH_AGENTS_DIR": str(self.agents), "SPUD_LAUNCHCTL": str(self.launchctl), "FAKE_LAUNCHCTL_STATE": str(self.state)})
-        self.home.env.pop("FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES", None)
+        self.setup_launchd()
         self.plist_path = self.agents / (LABEL + ".plist")
         self.uid = os.getuid()
         self.service = "gui/%d/%s" % (self.uid, LABEL)
+        self.render_plist_path = self.agents / (RENDER_LABEL + ".plist")
+        self.render_service = "gui/%d/%s" % (self.uid, RENDER_LABEL)
         self.interpreter = self.home.json("doctor")["interpreter"]["path"]  # the CLI's own sys.executable
 
     def schedule(self, *args, actor="spud", json_mode=True):
@@ -466,7 +418,7 @@ class ScheduleTest(SpudTestCase):
         self.assertEqual({k: out[k] for k in ("label", "path", "at", "exists", "matches", "loaded")},
                          {"label": LABEL, "path": str(self.plist_path), "at": "03:00", "exists": False, "matches": False, "loaded": False})
         self.assertFalse(self.agents.exists())
-        self.assertEqual(self.calls(), [["print", self.service]])
+        self.assertEqual(self.calls(), [["print", self.service], ["print", self.render_service]])
         text = self.schedule("show", json_mode=False).stdout
         xml = text[text.index("<?xml"):text.index("</plist>") + len("</plist>")]
         self.assertEqual(plistlib.loads(xml.encode("utf-8")), self.expected_plist())
@@ -510,9 +462,10 @@ class ScheduleTest(SpudTestCase):
         code, out, proc = self.answer("install")
         self.assertEqual(code, EXIT_OK, proc)
         self.assertEqual(plistlib.loads(self.plist_path.read_bytes()), self.expected_plist())
-        self.assertEqual(os.listdir(self.agents), [LABEL + ".plist"])  # the temporary file was renamed over it
+        self.assertEqual(sorted(os.listdir(self.agents)), [LABEL + ".plist", RENDER_LABEL + ".plist"])  # the temporary file was renamed over it
         self.assertEqual(self.plist_path.stat().st_mode & 0o777, 0o644)
-        self.assertEqual(self.calls(), [["bootout", self.service], ["bootstrap", "gui/%d" % self.uid, str(self.plist_path)]])
+        self.assertEqual(self.calls(), [["bootout", self.service], ["bootstrap", "gui/%d" % self.uid, str(self.plist_path)],
+                                        ["bootout", self.render_service], ["bootstrap", "gui/%d" % self.uid, str(self.render_plist_path)]])
         self.assertEqual({k: out[k] for k in ("label", "path", "at", "replaced", "booted_out", "attempts")},
                          {"label": LABEL, "path": str(self.plist_path), "at": "03:00", "replaced": False, "booted_out": False, "attempts": 1})
         code, shown, proc = self.answer("show")
@@ -546,8 +499,8 @@ class ScheduleTest(SpudTestCase):
         self.assertEqual(code, EXIT_OK, proc)
         self.assertEqual((out["replaced"], out["booted_out"], out["attempts"]), (True, True, 1))
         self.assertEqual(plistlib.loads(self.plist_path.read_bytes()), self.expected_plist(5, 15))
-        self.assertEqual(os.listdir(self.agents), [LABEL + ".plist"])
-        self.assertEqual([c[0] for c in self.calls()], ["bootout", "bootstrap", "bootout", "bootstrap"])
+        self.assertEqual(sorted(os.listdir(self.agents)), [LABEL + ".plist", RENDER_LABEL + ".plist"])
+        self.assertEqual([c[0] for c in self.calls()], ["bootout", "bootstrap"] * 4)  # both agents, twice
 
     def test_uninstall_boots_out_and_removes_the_plist(self):
         self.assertEqual(self.schedule("install").returncode, EXIT_OK)
@@ -556,7 +509,7 @@ class ScheduleTest(SpudTestCase):
         self.assertEqual({k: out[k] for k in ("label", "path", "booted_out", "removed")},
                          {"label": LABEL, "path": str(self.plist_path), "booted_out": True, "removed": True})
         self.assertFalse(self.plist_path.exists())
-        self.assertEqual(self.calls()[-1], ["bootout", self.service])
+        self.assertEqual(self.calls()[-2:], [["bootout", self.service], ["bootout", self.render_service]])
         code, shown, proc = self.answer("show")
         self.assertEqual((shown["exists"], shown["matches"], shown["loaded"]), (False, False, False))
         code, out, proc = self.answer("uninstall")
@@ -581,9 +534,32 @@ class ScheduleTest(SpudTestCase):
         code, out, proc = self.answer("install")
         self.assertEqual(code, EXIT_OK, proc)
         self.assertEqual(out["attempts"], 3)
-        self.assertEqual([c[0] for c in self.calls()], ["bootout", "bootstrap", "bootstrap", "bootstrap"])
+        self.assertEqual([c[0] for c in self.calls()], ["bootout"] + ["bootstrap"] * 3 + ["bootout"] + ["bootstrap"] * 3)
         code, shown, proc = self.answer("show")
         self.assertTrue(shown["loaded"])
+
+    def test_install_writes_and_loads_the_render_watcher_too(self):
+        code, out, proc = self.answer("install")
+        self.assertEqual(code, EXIT_OK, proc)
+        render_path = self.agents / (RENDER_LABEL + ".plist")
+        self.assertEqual((out["render"]["label"], out["render"]["path"], out["render"]["replaced"]), (RENDER_LABEL, str(render_path), False))
+        plist = plistlib.loads(render_path.read_bytes())
+        self.assertEqual(plist["ProgramArguments"], [self.interpreter, "-I", "-S", str(self.home.path / "bin" / "spud"), "--as", "spud", "render", "--watch"])
+        self.assertEqual((plist["RunAtLoad"], plist["KeepAlive"], plist["EnvironmentVariables"], plist["StandardOutPath"], plist["StandardErrorPath"]),
+                         (True, True, {"SPUD_HOME": str(self.home.path)}, str(self.home.path / ".spud" / "logs" / "render.log"), str(self.home.path / ".spud" / "logs" / "render.log")))
+        self.assertTrue((self.home.path / ".spud" / "logs").is_dir())
+        calls = [c[:2] for c in self.calls()]
+        self.assertEqual(calls, [["bootout", self.service], ["bootstrap", "gui/%d" % self.uid], ["bootout", "gui/%d/%s" % (self.uid, RENDER_LABEL)], ["bootstrap", "gui/%d" % self.uid]])
+        shown = self.answer("show")[1]
+        self.assertEqual((shown["render"]["exists"], shown["render"]["matches"], shown["render"]["loaded"]), (True, True, True))
+        self.assertIn("KeepAlive", shown["render"]["plist"])
+        text = self.schedule("show", json_mode=False).stdout
+        self.assertIn("label       %s" % RENDER_LABEL, text)
+        self.assertIn("whenever it exits (KeepAlive)", text)
+        gone = self.answer("uninstall")[1]
+        self.assertFalse(render_path.exists())
+        self.assertFalse(self.plist_path.exists())
+        self.assertEqual((gone["removed"], gone["render"]["removed"]), (True, True))
 
     def test_schedule_is_spuds_in_the_cli(self):
         t = self.new_ticket("Backups", status="active")

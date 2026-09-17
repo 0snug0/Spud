@@ -6,7 +6,7 @@ import shlex
 import sys
 from pathlib import Path
 
-from ..core import kernel
+from ..core import homeconf, kernel
 from ..state import ledgerdb
 
 
@@ -30,25 +30,36 @@ ALLOW_RULE_MARK = re.compile(r"^Bash\(.*bin/spud(?: \*|:\*)\)$")
 
 
 def hook_command(ctx, event, project_key=None):
-    """`SPUD_HOME=<home> <interpreter> -I -S <home>/bin/spud hook <event>`, absolute, resolved at sync time; a project's
-    line (SPD-014) ends in `--project <key>`, which sets the failure policy of the design's section 6.4."""
+    """`SPUD_HOME=<home> <interpreter> -I -S <tool>/bin/spud hook <event>`, absolute, resolved at sync time (SPD-097: the
+    launcher is the tool repository's and the home is a plain directory SPUD_HOME alone names); a project's line (SPD-014)
+    ends in `--project <key>`, which sets the failure policy of the design's section 6.4."""
     home = str(ctx.home)
-    line = "SPUD_HOME=%s %s -I -S %s hook %s" % (shlex.quote(home), shlex.quote(sys.executable), shlex.quote(str(ctx.home / "bin" / "spud")), event)
+    line = "SPUD_HOME=%s %s -I -S %s hook %s" % (shlex.quote(home), shlex.quote(sys.executable), shlex.quote(str(ctx.launcher)), event)
     return line + (" --project %s" % shlex.quote(project_key) if project_key else "")
 
 
 def cli_allow_rules(ctx):
-    """The permission rules for the CLI in the prescribed form, `python3.14 -I -S <home>/bin/spud ...`: by the documented
+    """The permission rules for the CLI in the prescribed form, `python3.14 -I -S <tool>/bin/spud ...`: by the documented
     interpreter name and by the absolute interpreter.  None for the script alone: its #! line runs the interpreter with
     neither -I nor -S, so PYTHONPATH and user-site .pth files inherited from the shell load code before the program, and
     that spelling gets the harness's prompt (SPD-038).  merge_allow_rules drops an older sync's rule for it."""
-    script = str(ctx.home / "bin" / "spud")
+    script = str(ctx.launcher)
     rules = ["Bash(python3.14 -I -S %s *)" % script, "Bash(%s -I -S %s *)" % (sys.executable, script)]
     out = []
     for r in rules:
         if r not in out:
             out.append(r)
     return out
+
+
+def tool_warning(ctx):
+    """The stderr line of a command that writes the tool's path somewhere durable (settings sync, project install, schedule
+    install) when that path is a linked worktree (SPD-097): a worktree is deleted when its ticket lands, and a hook line
+    naming it would die with it.  None otherwise; a tool with no git at all is deliberate (a copied tree) and says nothing."""
+    if homeconf.tool_checkout_kind(ctx.tool) != "worktree":
+        return None
+    return ("the running bin/spud is in a linked worktree, %s: the lines written name it and will break when the worktree is removed;"
+            " rerun this from the main checkout's bin/spud before relying on them" % ctx.tool)
 
 
 def is_ledger_hook(entry):
@@ -189,7 +200,8 @@ def cmd_settings_sync(ctx, args):
         finally:
             con.close()
     text = "%s%s\n%s" % (path, " (dry run)" if args.dry_run else (" written" if written else " unchanged"), rendered.rstrip("\n"))
-    return kernel.Result({"path": str(path), "written": written, "dry_run": bool(args.dry_run), "settings": settings, "hooks": hook_count}, text)
+    return kernel.Result({"path": str(path), "written": written, "dry_run": bool(args.dry_run), "settings": settings, "hooks": hook_count}, text,
+                         stderr=tool_warning(ctx) or "")
 
 
 def settings_hold_hooks(ctx, path, key=None):

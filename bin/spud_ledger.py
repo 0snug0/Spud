@@ -24,7 +24,6 @@ import os
 import sqlite3
 import sys
 from importlib.machinery import ModuleSpec
-from pathlib import Path
 
 PACKAGE = "spudlib"
 
@@ -144,7 +143,7 @@ def main(argv=None):
         args = cliparser.build_parser().parse_args(cliparser.normalize_argv(argv))
     ctx = None
     try:
-        home, how = homeconf.resolve_home(os.environ, Path(__file__))
+        home, how = homeconf.resolve_home(os.environ)
         ctx = homeconf.Ctx(home, how, args.json)
         actors.ACTIVE_CTX[:] = [ctx]
         result = args.func(ctx, args)

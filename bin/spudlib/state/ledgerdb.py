@@ -75,7 +75,8 @@ def apply_migrations(ctx, con, created):
 
 
 def sync_config_rows(ctx, con, at):
-    """Mirror naming.pool into name_pool and the home project's prefixes."""
+    """Mirror naming.pool into name_pool and project spud's prefixes; project spud is inserted at the tool's root (SPD-097:
+    the home is no project)."""
     config = ctx.config
     pool = config.get("naming", {}).get("pool", [])
     ticket_prefix = config.get("tickets", {}).get("prefix", "SPD")
@@ -86,13 +87,13 @@ def sync_config_rows(ctx, con, at):
             "INSERT INTO name_pool (name, active) VALUES (?, 1) ON CONFLICT(name) DO UPDATE SET active = 1",
             (name,),
         )
-    home_key = "spud"
+    tool_key = "spud"
     row = con.execute("SELECT id FROM projects WHERE id = 1").fetchone()
     if row is None:
         con.execute(
             "INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at)"
             " VALUES (1, ?, ?, ?, ?, ?, ?)",
-            (home_key, config.get("identity", {}).get("name", "Spud"), str(ctx.home), ticket_prefix, team_prefix, at),
+            (tool_key, config.get("identity", {}).get("name", "Spud"), str(ctx.tool), ticket_prefix, team_prefix, at),
         )
     else:
         con.execute(
@@ -100,7 +101,7 @@ def sync_config_rows(ctx, con, at):
             (ticket_prefix, team_prefix),
         )
     if con.execute("SELECT remote FROM projects WHERE id = 1").fetchone()["remote"] is None:  # SPD-014: informational
-        remote = homeconf.git_remote_url(ctx.home)
+        remote = homeconf.git_remote_url(ctx.tool)
         if remote:
             con.execute("UPDATE projects SET remote = ? WHERE id = 1 AND remote IS NULL", (remote,))
     return {"pool": len(pool), "ticket_prefix": ticket_prefix, "team_prefix": team_prefix}
