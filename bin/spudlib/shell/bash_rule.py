@@ -208,7 +208,8 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
             if call["command"] in hookio.SPUD_ONLY_COMMANDS or (call["command"], call["subcommand"]) in hookio.SPUD_ONLY_SUBCOMMANDS:
                 what = call["command"] + ((" " + call["subcommand"]) if call["subcommand"] and (call["command"], call["subcommand"]) in hookio.SPUD_ONLY_SUBCOMMANDS else "")
                 return ("Law 6: `spud %s` is Spud's (tickets are created, moved and edited by Spud alone; init, migrate, import, render, backup,"
-                        " settings sync, config sync and member resum are ledger-wide, and schedule installs the ledger's daily backup on this Mac);"
+                        " settings sync, config sync and member resum are ledger-wide, schedule installs the ledger's daily backup and its render"
+                        " watcher on this Mac, and home move moves the home);"
                         " file a proposal instead: spud proposal file --as %s" % (what, caller_agent_id)), analysis
             if call["actor"] is not None:
                 if caller_member is None:

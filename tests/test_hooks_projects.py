@@ -213,7 +213,7 @@ class ProjectHookCase(HookCase):
                     self.assertDenied(r, expected, (s.label, agent_id, label, tool))
 
     # -- a BAD-001 team --------------------------------------------------------------------
-    def plan_bad(self, name=None, deliverables=("src/**", "spud:docs/x.md"), session=SESSION_CLAIMED):
+    def plan_bad(self, name=None, deliverables=("src/**", "home:docs/x.md"), session=SESSION_CLAIMED):
         args = ["member", "new", "--ticket", self.bad_ticket["key"], "--persona", "scout", "--model", "haiku", "--brief", "Do the BadTakes thing."]
         for glob in deliverables:
             args += ["--deliverable", glob]
@@ -247,7 +247,7 @@ class ProjectHookCase(HookCase):
 
 class PathTableTest(ProjectHookCase):
     """Every cell of the section 3.2 table, through PreToolUse(Write) and through a shell redirection, for a member of
-    BAD-001 whose globs are `src/**` (bare: relative to badtakes, in any checkout of it) and `spud:docs/x.md` (qualified:
+    BAD-001 whose globs are `src/**` (bare: relative to badtakes, in any checkout of it) and `home:docs/x.md` (qualified:
     the home's checkout), bound in the claimed session."""
 
     def setUp(self):
@@ -267,7 +267,7 @@ class PathTableTest(ProjectHookCase):
             ("home, Spud's set: CLAUDE.md",                       home / "CLAUDE.md",                   None,    NOT_SPUD, LAW_5,  NOT_BOUND,     NOT_SPUD),
             ("home, Spud's set: .claude/settings.json",           home / ".claude" / "settings.json",   None,    NOT_SPUD, LAW_5,  NOT_BOUND,     NOT_SPUD),
             ("home: bin/x",                                       home / "bin" / "x",                   LAW_1,   NOT_SPUD, LAW_5,  NOT_BOUND,     NOT_SPUD),
-            ("home: docs/x.md (spud:docs/x.md)",                  home / "docs" / "x.md",               LAW_1,   NOT_SPUD, None,   NOT_BOUND,     NOT_SPUD),
+            ("home: docs/x.md (home:docs/x.md)",                  home / "docs" / "x.md",               LAW_1,   NOT_SPUD, None,   NOT_BOUND,     NOT_SPUD),
             ("home: src/a.txt (a bare glob is BAD-001's project)", home / "src" / "a.txt",              LAW_1,   NOT_SPUD, LAW_5,  NOT_BOUND,     NOT_SPUD),
             ("home: ledger/x.md",                                 home / "ledger" / "x.md",             LAW_5,   LAW_5,    LAW_5,  LAW_5,         LAW_5),
             ("home: reports/2026-09-14.md",                       home / "reports" / "2026-09-14.md",   LAW_5,   LAW_5,    LAW_5,  LAW_5,         LAW_5),

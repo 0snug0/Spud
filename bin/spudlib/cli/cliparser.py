@@ -103,7 +103,7 @@ def build_parser():
     ps.required = True
     q = ps.add_parser("add", help="register a repository's main checkout as a project; installs nothing (Spud's)")
     q.add_argument("path", help="the repository's main checkout")
-    q.add_argument("--key", required=True, help="lower-case key, [a-z][a-z0-9-]{0,31}, not spud")
+    q.add_argument("--key", required=True, help="lower-case key, [a-z][a-z0-9-]{0,31}; home is reserved")
     q.add_argument("--ticket-prefix", required=True, help="upper-case ticket prefix (BAD gives BAD-001)")
     q.add_argument("--team-prefix", required=True, help="upper-case team prefix (BADS gives BADS-001)")
     q.add_argument("--landing", required=True, choices=("merge", "pr"), help="how a verified branch lands: merge into the default branch, or a pull request")
@@ -155,14 +155,6 @@ def build_parser():
     q = ps.add_parser("show", help="the home, the working directory's project and checkout, the session and its mode (any actor)")
     q.set_defaults(func=sessions.cmd_session_show)
 
-    p = sub.add_parser("ledger", help="the rendered ledger in git (SPD-014)")
-    ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
-    ps.required = True
-    q = ps.add_parser("commit", help="render, stage only ledger/ and reports/ at the home, commit on its default branch and push; refused from any linked worktree (Spud's)")
-    q.add_argument("--message", required=True, type=text_arg, help="the whole commit message (@file, @- accepted); its subject names the ticket")
-    q.add_argument("--no-push", action="store_true", help="commit without pushing")
-    q.set_defaults(func=publish.cmd_ledger_commit)
-
     p = sub.add_parser("sql", help="run one read-only statement against the database (any actor; the inspection path)")
     p.add_argument("statement", help="SELECT, WITH, VALUES, EXPLAIN or a read-only PRAGMA")
     p.add_argument("--readonly", action="store_true", help="required: the database is opened mode=ro with query_only on")
@@ -190,7 +182,7 @@ def build_parser():
     q.add_argument("--outcome", type=text_arg)
     q.add_argument("--heading", help="a shorter H1 than the title")
     q.add_argument("--tag", action="append", help="extra tag (ticket is always first)")
-    q.add_argument("--project", help="project key (default: the project of the working directory, else spud)")
+    q.add_argument("--project", help="project key (default: the project of the working directory, else spud; the home is no project)")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes: SPD-nnn created (<status>, <priority>): <title>")
     q.set_defaults(func=ticketcmds.cmd_ticket_new)
     q = ps.add_parser("move", help="change a ticket's status along the state machine")
@@ -228,7 +220,7 @@ def build_parser():
     q.add_argument("--tier-reason", type=text_arg, help="required when the model is not the persona's default tier")
     q.add_argument("--agent-type", help="native agent type (required for a contractor)")
     q.add_argument("--brief", type=text_arg, help="the brief, required and non-empty (no brief, no spudagent); @file or @- accepted")
-    q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable)")
+    q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable): bare for the ticket's project, <key>:<glob> for another, home:<glob> for the home")
     q.set_defaults(func=membercmds.cmd_member_new)
     q = ps.add_parser("start", help="planned -> active (stamping spawned) or blocked -> active after a re-brief; the parent's")
     q.add_argument("ref")

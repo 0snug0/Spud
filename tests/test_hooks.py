@@ -240,7 +240,9 @@ class HookCase(SpudTestCase):
 
     # -- team ---------------------------------------------------------------------
     def plan(self, actor="spud", persona="scout", model="haiku", name=None, **kw):
-        kw.setdefault("deliverable", ["tests/**", "bin/spud"])
+        # SPD-097: these members write inside the home, which is no project, so their globs name it: `home:<glob>`.
+        # A bare glob is relative to the ticket's project checkout, which after `home move` is the tool repository.
+        kw.setdefault("deliverable", ["home:tests/**", "home:bin/spud"])
         if name:
             kw["name"] = name
         return self.new_member(self.t["key"], actor=actor, persona=persona, model=model, **kw)
@@ -1790,7 +1792,7 @@ class ShellModelTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
         self.addCleanup(shutil.rmtree, self.out, True)
         home = self.home.path
@@ -2000,7 +2002,7 @@ class ZshShortLoopTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
         self.addCleanup(shutil.rmtree, self.out, True)
         home = self.home.path
@@ -2220,7 +2222,7 @@ class GlobRedirectTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
         self.addCleanup(shutil.rmtree, self.out, True)
         home = self.home.path
@@ -2334,7 +2336,7 @@ class ZshGlobOperatorTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         home = self.home.path
         for rel in ("ledger/tickets/SPD-001.md", "ledger/tickets/SPD-002.md", "ledger/tickets/SPD-010.md", "tests/keep.py", "tests/other.py", "docs/x.md"):
             p = home / rel
@@ -2574,7 +2576,7 @@ class ArithmeticCommandTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         home = self.home.path
         for d in ("docs", "tests", "ledger/tickets"):
             (home / d).mkdir(parents=True, exist_ok=True)
@@ -2710,7 +2712,7 @@ class GlobCommandWordTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         home = self.home.path
         for rel in ("ledger/tickets/SPD-001.md", "tests/keep.py", "docs/x.md"):
             p = home / rel
@@ -2888,7 +2890,7 @@ class ReadWriteRedirectTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         home = self.home.path
         for rel in ("ledger/tickets/SPD-001.md", "ledger/tickets/SPD-002.md", "tests/keep.py", "docs/x.md"):
             p = home / rel
@@ -3006,7 +3008,7 @@ class GitConfigAliasTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
 
     def refused_for_members(self, command, needle="Law 7", cwd=None):
         r = None
@@ -3126,7 +3128,7 @@ class GitProgramTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
 
     def refused_for_members(self, command, needle="Law 7", cwd=None):
         r = None
@@ -3294,7 +3296,7 @@ class GitAliasFileTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         # A repository outside every checkout the ledger knows, built by hand (git init is a write verb): git reads its
         # config, and the hook cannot.
         self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
@@ -3495,7 +3497,7 @@ class GitConfigFileTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         self.tests = self.home.path / "tests"
         self.tests.mkdir(exist_ok=True)
 
@@ -3514,7 +3516,7 @@ class GitConfigFileTest(BashHookCase):
                 r = self.home.hook("PreToolUse", self.pre_edit(p, agent_id=AGENT_A))
                 self.assertEqual((r.code, r.decision), (0, "deny"), (str(p), r))
                 self.assertIn(GIT_FILE_WORDING, r.reason)
-        self.assertEqual(self.wide["deliverables"], ["**"])
+        self.assertEqual(self.wide["deliverables"], ["home:**"])
 
     def test_every_edit_tool_and_every_redirection_form(self):
         p = self.tests / ".git" / "config"
@@ -3590,7 +3592,7 @@ class GitLocalConfigTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         self.repo = self.home.path / "tests" / "fake"  # a repository inside the home: git reads it, the ledger knows it
         (self.repo / ".git" / "objects").mkdir(parents=True)
         (self.repo / ".git" / "refs" / "heads").mkdir(parents=True)
@@ -3730,7 +3732,7 @@ class ParameterExpansionCommandWordTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         for rel in ("tests/keep.py", "ledger/tickets/SPD-001.md"):
             p = self.home.path / rel
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -3924,7 +3926,7 @@ class TrapActionTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         for rel in ("tests/keep.py", "ledger/tickets/SPD-001.md"):
             p = self.home.path / rel
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -4119,7 +4121,7 @@ class ZshShortConditionalTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
         self.addCleanup(shutil.rmtree, self.out, True)
         home = self.home.path
@@ -4354,7 +4356,7 @@ class AliasEvalTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         for rel in ("tests/keep.py", "ledger/tickets/SPD-001.md"):
             p = self.home.path / rel
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -4522,7 +4524,7 @@ class NamedCoprocTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         for rel in ("tests/keep.py", "ledger/tickets/SPD-001.md"):
             p = self.home.path / rel
             p.parent.mkdir(parents=True, exist_ok=True)
@@ -4633,7 +4635,7 @@ class PathInForceTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
 
     def refused_for_members(self, command, needle="Law 7"):
         r = None
@@ -4783,7 +4785,7 @@ class WrapperCommandWordTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
 
     def refused_for_members(self, command, needle="Law 7"):
         r = None
@@ -4889,7 +4891,7 @@ class GitVerbProgramOptionTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
 
     def refused_for_members(self, command, needle="Law 7"):
         r = None
@@ -5026,7 +5028,7 @@ class GitFileWriteTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         home = self.home.path
         for d in ("ledger/tickets", "docs", "tests/out", "bin"):
             (home / d).mkdir(parents=True, exist_ok=True)
@@ -5337,7 +5339,7 @@ class GitVerbAllowlistTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
 
     def refused_for_members(self, command, needle="Law 7"):
         r = None
@@ -5476,7 +5478,7 @@ class DescriptorRedirectTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         for d in ("ledger/tickets", "docs", "tests"):
             (self.home.path / d).mkdir(parents=True, exist_ok=True)
 
@@ -5536,7 +5538,7 @@ class UnenterableDirTest(BashHookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         home = self.home.path
         for d in ("ledger/tickets", "docs", "tests"):
             (home / d).mkdir(parents=True, exist_ok=True)
@@ -5684,7 +5686,7 @@ class StateDirAsserts(PathAliasAsserts):
 class PreEditTest(PathRuleAsserts, HookCase):
     def setUp(self):
         super().setUp()
-        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud", "docs/x/*.md", "notes/"]), AGENT_A)
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:tests/**", "home:bin/spud", "home:docs/x/*.md", "home:notes/"]), AGENT_A)
         self.wt = self.home.path / ".claude" / "worktrees" / "spd-099-thing"
         self.wt.mkdir(parents=True)
 
@@ -5706,8 +5708,8 @@ class PreEditTest(PathRuleAsserts, HookCase):
         deliverable, quoted back at it in the refusal -- because `[` opened a character class, so the glob matched only a
         one-letter directory.  The same plan and the same writes, through `member new` and the PreToolUse edit hook."""
         home = self.home.path
-        m = self.spawn(self.plan(deliverable=["admin/src/app/accounts/[email]/**", "app/[...slug]/page.tsx"]), AGENT_B)
-        self.assertEqual(m["deliverables"], ["admin/src/app/accounts/[email]/**", "app/[...slug]/page.tsx"])
+        m = self.spawn(self.plan(deliverable=["home:admin/src/app/accounts/[email]/**", "home:app/[...slug]/page.tsx"]), AGENT_B)
+        self.assertEqual(m["deliverables"], ["home:admin/src/app/accounts/[email]/**", "home:app/[...slug]/page.tsx"])
         for ok in ("admin/src/app/accounts/[email]/page.tsx", "admin/src/app/accounts/[email]/_components/UserTab.tsx",
                    "app/[...slug]/page.tsx"):
             for tool in ("Write", "Edit", "MultiEdit"):
@@ -5721,7 +5723,7 @@ class PreEditTest(PathRuleAsserts, HookCase):
     def test_case_variants_cannot_reach_generated_files_or_spuds_set(self):
         """Rooster's HIGH-2: the protected roots are matched whatever the case, on every filesystem."""
         home = self.home.path
-        wide = self.spawn(self.plan(deliverable=["**"]), AGENT_B)
+        wide = self.spawn(self.plan(deliverable=["home:**"]), AGENT_B)
         for bad in ("Ledger/tickets/SPD-001.md", "LEDGER/x.md", "Reports/x.md", "Ledger/Home.md", "ledger/Tickets/SPD-001.md"):
             self.assertRefused(home / bad, "generated", agent_id=AGENT_B)
         self.assertSilent(home / "docs" / "x.md", agent_id=AGENT_B)
@@ -5729,7 +5731,7 @@ class PreEditTest(PathRuleAsserts, HookCase):
         if case_insensitive_fs(home):
             self.assertSilent(home / "Ledger" / "Home.md", agent_id=None)  # the same file as Spud's ledger/Home.md
             self.assertRefused(home / "Ledger" / "Tickets" / "x.md", "generated", agent_id=None)
-        self.assertEqual(wide["deliverables"], ["**"])
+        self.assertEqual(wide["deliverables"], ["home:**"])
 
     def test_every_edit_tool_is_covered_and_denials_are_recorded(self):
         home = self.home.path
@@ -5820,11 +5822,18 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
     """SPD-016: every worktree `git worktree list --porcelain` names for the home maps to repository-relative paths,
     wherever `git worktree add` put it, so the deliverable globs and the generated roots bind there too.  The home is
     a real repository here; the list is cached under .spud/ until a worktree is added, moved or removed, and a list
-    that cannot be read fails the enforcing hook closed."""
+    that cannot be read fails the enforcing hook closed.
+
+    SPD-097: the home of these tests is also project spud's root (SPUD_TOOL_DIR), the transition window's shape, and a
+    worktree of it is that project's checkout.  Its generated roots are the home's (worktrees.home_roots: the vault is
+    checked out in every worktree of the tool until `home move`), but its deliverable globs are project spud's, so the
+    lead is planned with both scopes: `home:tests/**` binds at the home and the bare `tests/**`, the ticket's project,
+    in the worktree.  test_a_home_glob_does_not_bind_in_a_worktree_of_the_tool pins that half."""
 
     def setUp(self):
         super().setUp()
-        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud"]), AGENT_A)
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus",
+                                         deliverable=["home:tests/**", "home:bin/spud", "tests/**", "bin/spud"]), AGENT_A)
         self.git("init", "-q", "-b", "main")
         self.git("commit", "-q", "--allow-empty", "-m", "root")
         self.elsewhere = self.add_worktree("elsewhere")
@@ -5898,10 +5907,43 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
     def test_a_worktree_elsewhere_under_the_data_volume_firmlink(self):
         self.assertRootHolds(self.alias_or_skip(self.elsewhere, FIRMLINK + str(self.elsewhere), "the %s firmlink prefix" % FIRMLINK))
 
+    def test_a_linked_worktree_is_fingerprinted_like_the_main_checkout(self):
+        """SPD-097: a linked worktree's `.git` is a gitfile, not a directory, so worktrees_fingerprint answered None there,
+        checkout_worktrees never wrote its cache, and every hook run that mapped a path shelled out to `git worktree list`
+        again -- +13.36 ms on PreToolUse(Write) in the timing probe, which runs the branch's own launcher from a worktree.
+        The gitfile is resolved to the repository directory now, so a checkout that is a worktree caches like a root."""
+        m = load_spud_module()
+        home, wt = str(self.home.path), str(self.elsewhere)
+        self.assertTrue(os.path.isfile(os.path.join(wt, ".git")), "a linked worktree's .git is a gitfile")
+        self.assertEqual(os.path.realpath(m.repository_dir(wt)), os.path.realpath(os.path.join(home, ".git")))
+        fingerprint = m.worktrees_fingerprint(wt)
+        self.assertIsNotNone(fingerprint)
+        self.assertEqual(fingerprint, m.worktrees_fingerprint(home))
+        self.add_worktree("third")  # what the fingerprint exists to notice, from either checkout
+        self.assertNotEqual(m.worktrees_fingerprint(wt), fingerprint)
+        self.assertEqual(m.worktrees_fingerprint(wt), m.worktrees_fingerprint(home))
+        self.assertIsNone(m.repository_dir(self.home.path.parent / "no-such-checkout"))
+        self.assertIsNone(m.worktrees_fingerprint(self.home.path.parent / "no-such-checkout"))
+
+    def test_a_home_glob_does_not_bind_in_a_worktree_of_the_tool(self):
+        """SPD-097: a worktree elsewhere is project spud's checkout, so a member whose deliverables name the home is refused
+        there and is free at the home; the generated roots hold in both, because in the window the vault is checked out in
+        every worktree of the tool.  The reverse for a bare glob, which is the ticket's project's."""
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_B)
+        self.assertRefused(self.elsewhere / "tests" / "x.py", "deliverables", agent_id=AGENT_B)
+        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated", agent_id=AGENT_B)
+        self.assertSilent(self.home.path / "tests" / "x.py", agent_id=AGENT_B)
+        self.assertRefused(self.home.path / "ledger" / "x.md", "generated", agent_id=AGENT_B)
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.assertSilent(self.elsewhere / "tests" / "x.py", agent_id=AGENT_C)
+        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated", agent_id=AGENT_C)
+        self.assertRefused(self.home.path / "tests" / "x.py", "deliverables", agent_id=AGENT_C)
+
     def test_the_state_directory_holds_at_the_home_and_at_a_worktree_elsewhere(self):
         """SPD-031: the worktree cache this class exercises, which the hook itself writes, and a worktree elsewhere's own state
-        directory, refused to a member whose glob is ** and to Spud."""
-        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_B)
+        directory, refused to a member whose glob is ** and to Spud.  Both scopes since SPD-097, so the globs really do reach
+        every path the state directory is refused at: `home:**` at the home, the bare `**` in project spud's worktree."""
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**", "**"]), AGENT_B)
         self.assertSilent(self.elsewhere / "tests" / "x.py", agent_id=AGENT_B)  # lists the worktrees, writing the cache
         cache = self.home.path / STATE / "worktrees" / "spud.json"  # one cache per project since SPD-014
         self.assertTrue(cache.is_file())
@@ -5921,7 +5963,7 @@ class PathAliasTest(PathAliasAsserts, HookCase):
 
     def setUp(self):
         super().setUp()
-        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud"]), AGENT_A)
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:tests/**", "home:bin/spud"]), AGENT_A)
         self.wt = self.home.path / ".claude" / "worktrees" / "spd-099-thing"
         self.wt.mkdir(parents=True)
 
@@ -5951,7 +5993,7 @@ class PathAliasTest(PathAliasAsserts, HookCase):
 
     def test_a_generated_root_spelled_with_a_simple_case_fold(self):
         """APFS folds U+017F (long s) to s, as Unicode simple case folding does; str.lower() does not."""
-        self.spawn(self.plan(deliverable=["**"]), AGENT_B)
+        self.spawn(self.plan(deliverable=["home:**"]), AGENT_B)
         spelled = str(self.home.path / "reportſ" / "2026-09-13.md")
         self.assertRefused(spelled, "generated", agent_id=AGENT_B)
         self.assertBashRefused("echo x > %s" % spelled, "generated", agent_id=AGENT_B)
@@ -5976,7 +6018,7 @@ class NonAsciiHomeTest(PathAliasAsserts, HookCase):
 
     def setUp(self):
         super().setUp()
-        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud"]), AGENT_A)
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:tests/**", "home:bin/spud"]), AGENT_A)
 
     def test_the_nfc_home_holds(self):
         self.assertTrue(unicodedata.is_normalized("NFC", str(self.home.path)))
@@ -5996,8 +6038,8 @@ class StateDirTest(StateDirAsserts, HookCase):
 
     def setUp(self):
         super().setUp()
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_A)
-        self.named = self.spawn(self.plan(persona="engineer", model="opus", deliverable=[STATE + "/**", STATE + "/ledger.db"]), AGENT_B)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_A)
+        self.named = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:" + STATE + "/**", "home:" + STATE + "/ledger.db"]), AGENT_B)
         self.state = self.home.path / STATE
         self.pyc = sorted((self.state / "pycache").rglob("*.pyc"))
         self.targets = {
@@ -6010,7 +6052,7 @@ class StateDirTest(StateDirAsserts, HookCase):
         }
 
     def test_every_edit_tool_is_refused_for_everyone_whatever_the_globs(self):
-        self.assertEqual((self.wide["deliverables"], self.named["deliverables"]), (["**"], [STATE + "/**", STATE + "/ledger.db"]))
+        self.assertEqual((self.wide["deliverables"], self.named["deliverables"]), (["home:**"], ["home:" + STATE + "/**", "home:" + STATE + "/ledger.db"]))
         self.assertTrue(self.targets["database"].is_file())
         self.assertTrue(self.pyc, "the launcher caches its bytecode under the state directory")
         for what, target in self.targets.items():
@@ -6112,8 +6154,8 @@ class OutsideProjectTest(PathAliasAsserts, HookCase):
 
     def setUp(self):
         super().setUp()
-        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud"]), AGENT_A)
-        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:tests/**", "home:bin/spud"]), AGENT_A)
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         self.fake_home = "/Users/nobody"  # a HOME outside every project and every temp root; nothing here is created
         self.home.env["HOME"] = self.fake_home
         self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
@@ -6137,7 +6179,7 @@ class OutsideProjectTest(PathAliasAsserts, HookCase):
                 for agent_id in (AGENT_A, AGENT_C):
                     r = self.assertRefused(p, OUTSIDE, agent_id=agent_id)
                     self.assertIn(p, r.reason)  # the reason names the path
-        self.assertEqual(self.wide["deliverables"], ["**"])  # not even a ** member: outside a project there is no glob
+        self.assertEqual(self.wide["deliverables"], ["home:**"])  # not even a ** member: outside a project there is no glob
 
     def test_the_git_config_files_outside_every_project_are_refused_too(self):
         for p in (self.fake_home + "/.gitconfig", self.fake_home + "/.config/git/config"):
@@ -6230,8 +6272,8 @@ class DeliverableGlobTest(SpudTestCase):
             proc = self.home.run("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--brief", "x", "--deliverable", bad, actor="spud", check=False)
             self.assertEqual(proc.returncode, EXIT_ERROR, bad)
             self.assertIn("deliverable", proc.stderr)
-        m = self.new_member(t["key"], deliverable=["./tests/**", "docs/", "bin/spud"])
-        self.assertEqual(m["deliverables"], ["tests/**", "docs/**", "bin/spud"])
+        m = self.new_member(t["key"], deliverable=["home:./tests/**", "home:docs/", "home:bin/spud"])
+        self.assertEqual(m["deliverables"], ["home:tests/**", "home:docs/**", "home:bin/spud"])
         proc = self.home.run("member", "edit", m["ref"], "--deliverable", "../y", actor="spud", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
 
@@ -6890,7 +6932,7 @@ class LateBindingTest(HookCase):
         return str(self.home.path / "projects" / ("%s.jsonl" % SESSION))
 
     def test_first_tool_call_binds_a_foreground_spawn(self):
-        m = self.plan(deliverable=["tests/**"])
+        m = self.plan(deliverable=["home:tests/**"])
         pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), tool_use_id="toolu_fg", run_in_background=False))
         self.assertEqual(pre.decision, "allow")
         transcript = self.write_meta(AGENT_B, "toolu_fg", self.description(m))
@@ -6916,7 +6958,7 @@ class LateBindingTest(HookCase):
     def test_a_forged_meta_cannot_bind_someone_elses_member(self):
         """Rooster's MEDIUM-4: the meta.json must describe the request it names, and the
         harness's subagent files are not writable by spudagents."""
-        victim = self.plan(name="Cara", deliverable=["tests/**"])
+        victim = self.plan(name="Cara", deliverable=["home:tests/**"])
         self.home.hook("PreToolUse", self.pre_agent(self.description(victim), tool_use_id="toolu_victim", run_in_background=False))
         # a meta naming the victim's request but describing something else: no binding
         meta = self.home.path / "projects" / SESSION / "subagents" / ("agent-%s.meta.json" % AGENT_D)

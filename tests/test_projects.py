@@ -75,7 +75,7 @@ class ProjectAddTest(RepoMixin, SpudTestCase):
                      needle="contains project child's root")
 
     def test_rule_4_the_key(self):
-        for key, needle in (("Bad", "lower-case"), ("1bad", "lower-case"), ("spud", "home's"), ("b" * 33, "lower-case")):
+        for key, needle in (("Bad", "lower-case"), ("1bad", "lower-case"), ("spud", "exists already"), ("home", "reserved"), ("b" * 33, "lower-case")):
             with self.subTest(key=key):
                 self.refused("project", "add", self.other, "--key", key, "--ticket-prefix", "BAD", "--team-prefix", "BADS", "--landing", "pr", actor="spud", needle=needle)
         self.add_project(self.other)
@@ -129,14 +129,14 @@ class ProjectEditRemoveTest(RepoMixin, SpudTestCase):
         self.assertIn("has tickets", proc.stderr)
         self.assertEqual(len(self.home.json("events", "--kind", "project.edited")["events"]), 1)
 
-    def test_the_home_keeps_its_name_root_prefixes_and_always(self):
-        for args, needle in ((["--sessions", "claim"], "always"), (["--name", "X"], "spud.config.json"), (["--ticket-prefix", "ZZ"], "spud.config.json"),
-                             (["--root", self.other], "home itself")):
+    def test_project_spud_keeps_its_name_and_prefixes(self):
+        for args, needle in ((["--name", "X"], "spud.config.json"), (["--ticket-prefix", "ZZ"], "spud.config.json")):
             with self.subTest(args=args):
                 proc = self.cli("project", "edit", "spud", *args, actor="spud", check=False)
                 self.assertEqual(proc.returncode, EXIT_ERROR, proc)
                 self.assertIn(needle, proc.stderr)
         self.assertEqual(self.cli_json("project", "edit", "spud", "--default-branch", "trunk", actor="spud")["changed"], ["default_branch"])
+        self.assertEqual(self.cli_json("project", "edit", "spud", "--sessions", "claim", actor="spud")["changed"], ["sessions"])
 
     def test_remove_deletes_an_empty_project_and_archives_one_with_tickets(self):
         out = self.cli_json("project", "remove", "badtakes", actor="spud")
@@ -199,8 +199,8 @@ class TicketProjectTest(RepoMixin, SpudTestCase):
     def test_qualified_deliverables(self):
         t = self.cli_json("ticket", "new", "--project", "badtakes", "--title", "Globs", "--status", "active", actor="spud")["ticket"]
         m = self.cli_json("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--brief", "x",
-                          "--deliverable", "src/", "--deliverable", "spud:docs/x.md", "--deliverable", "./test/**", actor="spud")["member"]
-        self.assertEqual(m["deliverables"], ["src/**", "spud:docs/x.md", "test/**"])
+                          "--deliverable", "src/", "--deliverable", "home:docs/x.md", "--deliverable", "./test/**", actor="spud")["member"]
+        self.assertEqual(m["deliverables"], ["src/**", "home:docs/x.md", "test/**"])
         for bad, needle in (("nope:x.md", "no active project"), ("spud:/abs", "not absolute"), ("spud:../x", "`..`"), ("badtakes:", "non-empty")):
             with self.subTest(bad=bad):
                 proc = self.cli("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--brief", "x", "--deliverable", bad, actor="spud", check=False)

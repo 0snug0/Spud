@@ -21,9 +21,10 @@ hooks: `spud hook <event>` is the harness's entry point (payload on stdin, answe
 
 deliverable globs (--deliverable): repository-relative, no leading slash and no `..`;
        `*` and `?` match inside one path segment, `**` crosses segments, a trailing `/`
-       means everything under that directory, and `<key>:` in front names another
-       project's checkout.  Every other character is literal, brackets included: write
-       a Next.js segment plainly, admin/src/app/accounts/[email]/** (SPD-086).
+       means everything under that directory, `<key>:` in front names another
+       project's checkout and `home:` Spud's home (SPD-097).  Every other character is
+       literal, brackets included: write a Next.js segment plainly,
+       admin/src/app/accounts/[email]/** (SPD-086).
 
 text values: an option value of @path reads the file, @- reads stdin.
 exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,

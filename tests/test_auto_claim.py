@@ -139,7 +139,7 @@ class AutoClaimTest(ProjectHookCase):
         home = str(self.home.path)
         for needle in ("the prompt names BAD-001", "%s/CLAUDE.md in full, then %s/spud.config.json" % (home, home), "the project wins; about the second, Spud's laws win",
                        "Run the session ritual of CLAUDE.md from step 2", "do not run `session claim`", "--as spud session release",
-                       "rule: this repository's CLAUDE.md", "ledger commit: python3.14 -I -S %s/bin/spud" % home, "board (badtakes):"):
+                       "rule: this repository's CLAUDE.md", "board (badtakes):"):
             self.assertIn(needle, r.context)
         self.assertEqual(self.claims(SESSION_PLAIN), [{"session_id": SESSION_PLAIN, "cwd": str(self.bad)}])
         self.assertIn("by the UserPromptSubmit hook: the prompt names BAD-001", self.claim_events(SESSION_PLAIN)[0]["body"])

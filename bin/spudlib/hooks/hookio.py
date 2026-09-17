@@ -34,11 +34,11 @@ GENERATED_ROOTS = ("ledger", "reports")
 DESCRIPTION = re.compile(r"^\s*(?P<team>[A-Z][A-Z0-9]*-\d+)/(?P<name>[A-Za-z][\w-]*)\s*\(\s*(?P<lineage>\d+(?:\.\d+)*)\s*,\s*(?P<persona>[a-z]+)\s*\)\s*$")
 AGENT_ID_RE = re.compile(r"^[0-9a-f]{17}$")
 SPUD_COMMANDS = ("init", "migrate", "backup", "schedule", "doctor", "config", "settings", "import", "render", "ticket", "member",
-                 "proposal", "handoff", "report", "board", "fleet", "card", "events", "sql", "hook", "project", "session", "ledger")
+                 "proposal", "handoff", "report", "board", "fleet", "card", "events", "sql", "hook", "project", "session")
 SPUD_ONLY_COMMANDS = ("init", "migrate", "import", "render", "backup", "schedule")
 SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"), ("member", "resum"),
                          ("project", "add"), ("project", "edit"), ("project", "install"), ("project", "uninstall"), ("project", "sync"),
-                         ("project", "remove"), ("session", "claim"), ("session", "release"), ("ledger", "commit"))
+                         ("project", "remove"), ("session", "claim"), ("session", "release"))
 # The spud calls that write nothing (SPD-014): a plain session in another project may run them with `--as spud`.
 READ_ONLY_COMMANDS = ("board", "fleet", "card", "events", "sql", "doctor")
 READ_ONLY_SUBCOMMANDS = (("ticket", "show"), ("member", "show"), ("member", "list"), ("proposal", "list"), ("project", "list"), ("project", "show"),

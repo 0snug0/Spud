@@ -231,14 +231,14 @@ def scenario_spud(s):
     prompt = """This is a scripted probe. Do these steps in order, one tool call each, without improvising; quote each tool's first output line as you go.
 Step 1. Bash: %(cli)s --as spud session claim
 Step 2. Bash: %(cli)s --as spud ticket new --title "Probe ticket" --status active --brief "A headless probe."
-Step 3. Bash: %(cli)s --as spud member new --ticket BAD-001 --persona scout --model haiku --name Russet --brief "Write the four probe files and record a result." --deliverable 'src/**' --deliverable 'spud:docs/x.md'
+Step 3. Bash: %(cli)s --as spud member new --ticket BAD-001 --persona scout --model haiku --name Russet --brief "Write the four probe files and record a result." --deliverable 'src/**' --deliverable 'home:docs/x.md'
 Step 4. Agent tool with subagent_type "spudagent", model "haiku", description "BADS-001/Russet (01, scout)", and this exact prompt:
 <<<
 %(child)s
 >>>
 Wait for it to finish.
 Step 5. Bash: %(cli)s --as spud member finish BADS-001/Russet --status done --outcome "Probe run." --summary "Wrote the probe files in the stand-in repository and in the home as its globs allowed, and recorded its result through the ledger CLI from the child session."
-Step 6. Bash: %(cli)s --as spud ledger commit --message "BAD-001: headless probe ticket run"
+Step 6. Bash: %(cli)s --as spud render
 Step 7. Reply with one line per step: the step number and its first output line or refusal.""" % {"cli": cli(s), "child": child}
     session, messages, result = s.claude("project-spud", prompt, max_turns=60)
     calls = tool_calls(messages)
@@ -284,10 +284,10 @@ Wait for it to finish.
 Step 7. Agent tool with subagent_type "probeagent", model "haiku", description "Probe agent", prompt "Reply ok."
 Step 8. Bash: git -C %(home)s log --oneline -1
 Step 9. Bash: %(cli)s --as spud project show badtakes
-Step 10. Bash: %(cli)s --as spud ledger commit --message "BAD-001: worktree probe"
+Step 10. Bash: %(cli)s --as spud render
 Step 11. ExitWorktree with action "keep".
 Step 12. Bash: %(cli)s --as spud member finish BADS-001/Yukon --status done --outcome "Probe run." --summary "Wrote src/w.txt in a worktree of the stand-in repository, bound from the worktree's working directory, and recorded its result through the ledger CLI."
-Step 13. Bash: %(cli)s --as spud ledger commit --message "BAD-001: worktree probe"
+Step 13. Bash: %(cli)s --as spud render
 Step 14. Reply with one line per step: the step number and its first output line or refusal.""" % {"cli": cli(s), "child": child, "home": s.home}
     session, messages, result = s.claude("project-worktree", prompt, max_turns=70)
     calls = tool_calls(messages)

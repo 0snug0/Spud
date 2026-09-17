@@ -182,7 +182,10 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.install()
         self.assertEqual(self.cli_json("doctor")["problems"], [])
         projects = self.cli_json("doctor")["projects"]
-        self.assertEqual([(p["key"], p["checks"]) for p in projects], [("badtakes", ["main checkout", "hooks", "ignored", "agent", "skill"])])
+        # SPD-097: doctor covers every project, project spud included; here its root is still the home (before `home move`).
+        self.assertEqual([(p["key"], p["checks"]) for p in projects],
+                         [("spud", ["root is the home (before home move)", "not installed"]),
+                          ("badtakes", ["main checkout", "hooks", "ignored", "agent", "skill"])])
         (self.home.path / ".claude" / "agents" / "spudagent.md").write_text(AGENT + "A new rule.\n", encoding="utf-8")
         proc = self.cli("--json", "doctor", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)

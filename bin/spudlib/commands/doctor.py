@@ -18,6 +18,7 @@ def cmd_doctor(ctx, args):
         "interpreter": {"path": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3], "flags": {"isolated": bool(sys.flags.isolated), "no_site": bool(sys.flags.no_site)}},
         "sqlite": {"library": sqlite3.sqlite_version, "module": sqlite3.version if hasattr(sqlite3, "version") else None},
         "spud_home": {"path": str(ctx.home), "resolved_by": ctx.resolved_by, "config": str(ctx.config_path), "config_exists": ctx.config_path.is_file()},
+        "tool": {"path": str(ctx.tool), "launcher": str(ctx.launcher), "checkout": homeconf.tool_checkout_kind(ctx.tool)},
         "database": {"path": str(ctx.db_path), "exists": ctx.db_path.is_file()},
         "schema_version": schema.SCHEMA_VERSION,
     }
@@ -75,6 +76,8 @@ def cmd_doctor(ctx, args):
     daily, other = backup.backup_listing(backup.backups_dir(ctx))
     report["backups"] = {"dir": str(backup.backups_dir(ctx)), "daily": {"count": len(daily), "newest": daily[-1] if daily else None, "oldest": daily[0] if daily else None}, "other": other}
     notes = []
+    if report["tool"]["checkout"] == "worktree":
+        notes.append("the running bin/spud is in a linked worktree: hook lines written from here name it")
     report["projects"] = doctor_projects(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else []
     report["notes"] = notes
     report["problems"] = problems
@@ -82,6 +85,7 @@ def cmd_doctor(ctx, args):
         "python      %s (%s; isolated=%s, no_site=%s)" % (report["interpreter"]["path"], report["interpreter"]["version"], report["interpreter"]["flags"]["isolated"], report["interpreter"]["flags"]["no_site"]),
         "SQLite      %s" % report["sqlite"]["library"],
         "SPUD_HOME   %s (via %s)" % (report["spud_home"]["path"], report["spud_home"]["resolved_by"]),
+        "tool        %s (bin/spud; %s)" % (ctx.tool, {"main": "main checkout", "worktree": "linked worktree", "none": "no git checkout"}[report["tool"]["checkout"]]),
         "config      %s%s" % (report["spud_home"]["config"], "" if report["spud_home"]["config_exists"] else " (missing)"),
         "database    %s%s" % (db["path"], "" if db["exists"] else " (missing)"),
     ]
@@ -111,13 +115,14 @@ def cmd_doctor(ctx, args):
 
 
 def doctor_projects(ctx, problems, notes):
-    """doctor's projects section (SPD-014): each active project but the home, its root a main checkout, and when it is
-    installed its local settings carrying this home's hooks, the file ignored, the user-scope agent matching the tool's
-    and the /spud skill present.  The home pointer and the superseded worktree cache are notes, never problems."""
+    """doctor's projects section (SPD-014): each active project, its root a main checkout (or the home itself, before
+    `home move`), and when it is installed its local settings carrying this home's hooks, the file ignored, the
+    user-scope agent matching the tool's and the /spud skill present.  The home pointer and the superseded worktree
+    cache are notes, never problems."""
     out = []
     con = ledgerdb.open_connection(ctx.db_path)
     try:
-        rows = con.execute("SELECT * FROM projects WHERE id != 1 AND archived_at IS NULL ORDER BY id").fetchall()
+        rows = con.execute("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall()
     finally:
         con.close()
     source_agent = ctx.tool / ".claude" / "agents" / "spudagent.md"  # SPD-097: the tool repository's copy is the source
@@ -125,6 +130,8 @@ def doctor_projects(ctx, problems, notes):
         root, checks, bad = p["root_path"], [], []
         if not os.path.isdir(root):
             bad.append("root %s is not a directory" % root)
+        elif worktrees.file_identity(root) == worktrees.file_identity(ctx.home):
+            checks.append("root is the home (before home move)")  # SPD-097: project spud during the transition window
         else:
             try:
                 proc = homeconf.run_git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", timeout=10)

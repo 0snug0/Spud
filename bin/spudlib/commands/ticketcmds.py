@@ -31,12 +31,12 @@ def cmd_ticket_new(ctx, args):
             project = con.execute("SELECT * FROM projects WHERE key = ?", (args.project,)).fetchone()
             if project is None:
                 raise kernel.SpudError(kernel.EXIT_ERROR, "no project %r" % args.project)
-        else:  # SPD-014: the project of the working directory, else the home
+        else:  # SPD-014: the project of the working directory, else project spud (the home is none, SPD-097)
             try:
                 mapped = worktrees.cli_project_of(ctx, con, os.getcwd())
             except OSError:
                 mapped = None
-            project = mapped[0] if mapped else con.execute("SELECT * FROM projects WHERE id = 1").fetchone()
+            project = mapped[0] if mapped and not worktrees.is_home(mapped[0]) else con.execute("SELECT * FROM projects WHERE id = 1").fetchone()
         if project["archived_at"]:
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is archived (%s); no ticket is created in it" % (project["key"], kernel.fm_date(project["archived_at"])))
         for field in ("brief", "sizing", "outcome"):

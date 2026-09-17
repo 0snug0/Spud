@@ -113,13 +113,14 @@ def pending_spawn(con, session_id):
 def session_mode(ctx, con, payload, env=None):
     """(mode, launch project row or None, claim row or None), once per hook call (design section 6.1).  The launch project
     is the project of CLAUDE_PROJECT_DIR, which stays at the launch directory after EnterWorktree (probe P5), else of the
-    payload's cwd.  `outside`: it is in no active project, and a hook behaves as `spud` there, today's strict behaviour.
-    `spud`: the session holds a claim, or its project's sessions is `always` (the home's is).  `plain` otherwise."""
+    payload's cwd.  `outside`: it is in no active project and not the home, and a hook behaves as `spud` there, today's
+    strict behaviour.  `spud`: launched in the home (SPD-097: the home is not a project, so the row is None), or the session
+    holds a claim, or its project's sessions is `always`.  `plain` otherwise."""
     env = os.environ if env is None else env
     session = payload.get("session_id")
     claim = actors.claim_of(con, session) if isinstance(session, str) and session else None
-    if con.execute("SELECT 1 FROM projects WHERE archived_at IS NULL AND id != 1 LIMIT 1").fetchone() is None:
-        return "spud", None, claim  # the home alone: launched in it or outside it, every session behaves as Spud's
+    if con.execute("SELECT 1 FROM projects WHERE archived_at IS NULL AND sessions = 'claim' LIMIT 1").fetchone() is None:
+        return "spud", None, claim  # no claim project: every session, wherever it is launched, is Spud's, and no path is mapped
     launch = env.get("CLAUDE_PROJECT_DIR") or payload.get("cwd")
     if not isinstance(launch, str) or not launch:
         return "outside", None, claim
@@ -127,6 +128,8 @@ def session_mode(ctx, con, payload, env=None):
     if mapped is None:
         return "outside", None, claim
     project = mapped[0]
+    if worktrees.is_home(project):
+        return "spud", None, claim
     if claim is not None or project["sessions"] == "always":
         return "spud", project, claim
     return "plain", project, None
@@ -200,8 +203,6 @@ def claim_card(ctx, con, project, session, at, cap=CLAIM_CARD_CAP):
             root, project["ticket_prefix"], project["team_prefix"], project["default_branch"], project["landing"], project["sessions"]),
         "rule: this repository's CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed; Spud's laws"
         " govern delegation, the ledger, and who writes what.",
-        "ledger commit: python3.14 -I -S %s/bin/spud --as spud ledger commit --message '%s-nnn: <what>' (from a main checkout, never a worktree)"
-        % (ctx.home, project["ticket_prefix"]),
         "board (%s):" % project["key"],
     ])
     rows = [dict(r) for r in con.execute("SELECT * FROM v_board WHERE project = ?", (project["key"],)).fetchall()]
@@ -230,7 +231,7 @@ def cmd_session_claim(ctx, args):
             project = mapped[0]
         if project["archived_at"]:
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is archived" % project["key"])
-        if project["id"] == 1:
+        if worktrees.is_home(project):
             return kernel.Result({"session_id": session, "project": project["key"], "claimed": False}, "every session in the home is Spud; nothing to claim")
         at = kernel.now()
         with ledgerdb.write_txn(con):
@@ -280,7 +281,9 @@ def cmd_session_show(ctx, args):
         except hookio.HookError as e:
             raise kernel.SpudError(kernel.EXIT_ERROR, str(e))
         project = checkout = None
-        if mapped is not None:
+        if mapped is not None and worktrees.is_home(mapped[0]):  # SPD-097: launched in the home, which is not a project
+            checkout = {"path": str(ctx.home), "kind": "home", "branch": None}
+        elif mapped is not None:
             p, checkout_root, _rel = mapped
             project = {"key": p["key"], "root": worktrees.project_root(ctx, p), "ticket_prefix": p["ticket_prefix"], "team_prefix": p["team_prefix"],
                        "landing": p["landing"], "sessions": p["sessions"]}
@@ -296,6 +299,9 @@ def cmd_session_show(ctx, args):
         lines.append("project   %s: %s (%s-nnn tickets, %s-nnn teams; landing %s, sessions %s)" % (
             project["key"], project["root"], project["ticket_prefix"], project["team_prefix"], project["landing"], project["sessions"]))
         lines.append("checkout  %s (%s%s)" % (checkout["path"], checkout["kind"], ", branch %s" % checkout["branch"] if checkout["branch"] else ""))
+    elif checkout:
+        lines.append("project   none: %s is in Spud's home, not a project" % cwd)
+        lines.append("checkout  %s (home)" % checkout["path"])
     else:
         lines.append("project   none: %s is in no registered project's checkout" % cwd)
     lines.append("session   %s" % (session or "none (outside a Claude Code session)"))

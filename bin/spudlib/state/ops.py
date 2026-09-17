@@ -101,18 +101,19 @@ def glob_scope(glob):
 
 
 def check_deliverable_projects(con, globs):
-    """A qualified deliverable must name an active project."""
-    keys = {r["key"] for r in con.execute("SELECT key FROM projects WHERE archived_at IS NULL").fetchall()}
+    """A qualified deliverable must name an active project, or the home by its reserved key (SPD-097)."""
+    keys = {r["key"] for r in con.execute("SELECT key FROM projects WHERE archived_at IS NULL").fetchall()} | {kernel.HOME_KEY}
     for g in globs:
         key = glob_scope(g)[0]
         if key is not None and key not in keys:
-            raise kernel.SpudError(kernel.EXIT_ERROR, "deliverable %r names project %r, which is no active project (spud project list)" % (g, key))
+            raise kernel.SpudError(kernel.EXIT_ERROR, "deliverable %r names project %r, which is no active project and not the home (spud project list)" % (g, key))
 
 
 def normalize_deliverable(glob):
     """A deliverable is a repository-relative path glob: no leading slash, no `..`,
     `**` allowed; a trailing slash means everything under that directory.  An optional
-    `<key>:` in front names the project whose checkout it is relative to (SPD-014).
+    `<key>:` in front names the project whose checkout it is relative to (SPD-014), or
+    `home:` Spud's home (SPD-097).
     `*` and `?` stay inside one path segment, `**` crosses segments, and every other
     character is literal, brackets included: a Next.js `[email]` segment is written
     plainly, and nothing in a glob has to be escaped (SPD-086, pathrule.glob_to_regex)."""

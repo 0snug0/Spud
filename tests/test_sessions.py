@@ -25,7 +25,7 @@ class SessionTest(RepoMixin, SpudTestCase):
         proc = self.cli("session", "claim", actor="spud", cwd=self.other, session=SESSION)
         card = proc.stdout
         self.assertLessEqual(len(card.encode("utf-8")), 1536 + 1, card)
-        for needle in ("badtakes", "BAD-nnn", "BADS-nnn", "landing pr", str(self.home.path), "ledger commit", "Spud's laws govern delegation"):
+        for needle in ("badtakes", "BAD-nnn", "BADS-nnn", "landing pr", str(self.home.path), "Spud's laws govern delegation"):
             self.assertIn(needle, card)
         row = self.home.rows("SELECT s.session_id, p.key, s.released_at, s.cwd FROM sessions s JOIN projects p ON p.id = s.project_id")
         self.assertEqual(row, [{"session_id": SESSION, "key": "badtakes", "released_at": None, "cwd": str(self.other)}])
@@ -86,7 +86,7 @@ class SessionTest(RepoMixin, SpudTestCase):
         self.assertFalse(self.cli_json("session", "release", actor="spud", cwd=self.other, session=SESSION)["released"])
         self.assertEqual(len(self.home.json("events", "--kind", "session.released")["events"]), 1)
         home = self.cli_json("session", "show", cwd=self.home.path, session=SESSION)
-        self.assertEqual((home["project"]["key"], home["mode"]), ("spud", "spud"))
+        self.assertEqual((home["project"], home["checkout"]["kind"], home["mode"]), (None, "home", "spud"))
 
     def test_spuds_commands_refuse_an_unclaimed_session_in_a_claim_project(self):
         proc = self.cli("ticket", "new", "--title", "Too early", actor="spud", cwd=self.other, session=SESSION, check=False)

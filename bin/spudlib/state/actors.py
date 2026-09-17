@@ -66,19 +66,19 @@ def claim_of(con, session_id):
 
 def unclaimed_session_project(ctx, con):
     """The project a CLI command runs in when that makes its session not Spud (design section 6.1): CLAUDE_CODE_SESSION_ID
-    is set, the working directory is in a `claim` project other than the home, and the session holds no claim.  None
+    is set, the working directory is in a `claim` project (the home is none, SPD-097), and the session holds no claim.  None
     otherwise, and always outside a Claude Code session (tests, a terminal)."""
     session = planning_session(os.environ)
     if ctx is None or session is None:
         return None
-    if con.execute("SELECT 1 FROM projects WHERE archived_at IS NULL AND sessions = 'claim' AND id != 1 LIMIT 1").fetchone() is None:
+    if con.execute("SELECT 1 FROM projects WHERE archived_at IS NULL AND sessions = 'claim' LIMIT 1").fetchone() is None:
         return None
     try:
         cwd = os.getcwd()
     except OSError:
         return None
     mapped = worktrees.cli_project_of(ctx, con, cwd)
-    if mapped is None or mapped[0]["id"] == 1 or mapped[0]["sessions"] != "claim" or claim_of(con, session) is not None:
+    if mapped is None or worktrees.is_home(mapped[0]) or mapped[0]["sessions"] != "claim" or claim_of(con, session) is not None:
         return None
     return mapped[0]
 

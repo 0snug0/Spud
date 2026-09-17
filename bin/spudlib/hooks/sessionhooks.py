@@ -19,7 +19,7 @@ def hook_session_start(ctx, payload):
         mode, project, claim = sessions.session_mode(ctx, con, payload)
         if mode == "plain":
             context = sessions.plain_session_notice(ctx, project)
-        elif project is not None and project["id"] != 1:
+        elif project is not None:
             context = sessions.project_session_context(ctx, con, project, claim, payload)
         else:
             context = "Ledger board (`spud board --brief` at %s, source %s):\n%s" % (kernel.now(), payload.get("source"), sessions.board_brief_text(con))
