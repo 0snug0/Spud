@@ -1,9 +1,5 @@
 {
   "model": "claude-fable-5-1",
-  "env": {
-    "CLAUDE_CODE_MAX_SUBAGENT_SPAWN_DEPTH": "2",
-    "CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS": "9"
-  },
   "permissions": {
     "allow": [
       "Bash(date:*)",
@@ -11,115 +7,7 @@
       "Bash(git status:*)",
       "Bash(git log:*)",
       "Bash(git diff:*)",
-      "Bash(git show:*)",
-      "Bash(python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud *)",
-      "Bash(/opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud *)"
-    ],
-    "deny": [
-      "Agent(isolation:*)",
-      "Agent(model:inherit)"
-    ]
-  },
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook PreToolUse",
-            "timeout": 30
-          }
-        ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook PreToolUse",
-            "timeout": 30
-          }
-        ]
-      },
-      {
-        "matcher": "Write|Edit|MultiEdit|NotebookEdit",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook PreToolUse",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "PostToolUse": [
-      {
-        "matcher": "Agent",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook PostToolUse",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "SubagentStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook SubagentStart",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "SubagentStop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook SubagentStop",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "SessionStart": [
-      {
-        "matcher": "startup|resume|clear|compact",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook SessionStart",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook Stop",
-            "timeout": 30
-          }
-        ]
-      }
-    ],
-    "UserPromptSubmit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "SPUD_HOME=/Users/ericlugo/Personal/Spud /opt/homebrew/bin/python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud hook UserPromptSubmit",
-            "timeout": 30
-          }
-        ]
-      }
+      "Bash(git show:*)"
     ]
   }
 }
