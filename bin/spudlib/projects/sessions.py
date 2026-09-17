@@ -31,8 +31,8 @@ def board_line(r, day):
 def board_brief_text(con, rows=None, parked=False):
     """Open tickets and their live members, one line each (also the SessionStart context): active tickets with their live
     members, then the parked tickets whose date has arrived, then queued, then one count line for the parked (SPD-096).
-    A due-back line sits above the queue and the count line last because a project's context keeps whole lines from the
-    top (fit_bytes): the line meant to nag must survive the cut, and the count may be cut.  With no parked ticket the
+    A due-back line sits above the queue and the count line last because every SessionStart context keeps whole lines
+    from the top (fit_bytes): the line meant to nag must survive the cut, and the count may be cut.  With no parked ticket the
     text is what it was before SPD-096, byte for byte.  `parked`: every parked ticket instead, due or not."""
     if rows is None:
         rows = [dict(r) for r in con.execute("SELECT * FROM v_board").fetchall()]
@@ -62,8 +62,16 @@ def board_brief_text(con, rows=None, parked=False):
     if shelved:
         lines.append("%d parked%s (spud board --parked)" % (len(shelved), (", %d due back" % len(due)) if due else ""))
     return "\n".join(lines) or "(no open tickets)"
+
+
 CLAIM_CARD_CAP = 1536        # bytes: what `session claim` prints
-SESSION_CONTEXT_CAP = 2048   # bytes: a project session's SessionStart context (the design's probe P2)
+# Bytes of UTF-8: every SessionStart context, the home's, outside's and a project's (SPD-048).  The harness keeps a hook's
+# additionalContext inline up to 10,000 UTF-16 code units and past that gives the model a ~2 KB preview and a file path
+# (code.claude.com/docs/en/hooks, "JSON output"; the design's probe P2 saw that preview).  tests/probes/context_limit.py
+# measured the edge on Claude Code 2.1.274: 10,000 units inline, 10,001 persisted, 18,886 bytes of 10,000 two-byte
+# characters inline, 6,000 four-byte characters (11,320 units) persisted.  UTF-8 never has fewer bytes than UTF-16 has
+# units, so a cap in bytes holds whatever the text, and 8,000 is 80% of the limit.
+SESSION_CONTEXT_CAP = 8000
 PLAIN_NOTICE_CAP = 300       # bytes: the one line a session that is not Spud gets
 # The /spud skill's steps, the one source of the installed SKILL.md and of the context the UserPromptSubmit hook gives a
 # session it claims (SPD-057), so the two cannot drift.  Step 2 is the claim: the skill runs it, the hook has made it.
@@ -136,23 +144,40 @@ def session_mode(ctx, con, payload, env=None):
     return "plain", project, None
 
 
-def fit_bytes(head, body, cap, note="(cut to fit; run `spud board --brief` for the rest)"):
-    """head, then as many whole lines of body as fit in cap bytes of UTF-8 with the note after them."""
+def cut_note(count):
+    """The closing line of a cut: how many of the body's lines it left out, and where the rest is (SPD-048)."""
+    return "(%d more line%s cut to fit; run `spud board --brief` for the rest)" % (count, "" if count == 1 else "s")
+
+
+def fit_bytes(head, body, cap):
+    """head, then as many whole lines of body from the top as fit in cap bytes of UTF-8 with cut_note after them, counting
+    the lines it cut.  Keeping one more line never makes the text shorter (the line costs at least its newline, and the
+    note shrinks by at most one byte), so the first line that does not fit ends the cut.  A head that leaves no room even
+    for the note is itself cut to cap bytes, on a character boundary."""
     text = head + ("\n" + body if body else "")
     if len(text.encode("utf-8")) <= cap:
         return text
-    tail = "\n" + note
-    budget = cap - len(head.encode("utf-8")) - len(tail.encode("utf-8"))
-    if budget <= 0:
-        return head.encode("utf-8")[:cap].decode("utf-8", "ignore")
-    kept, used = [], 0
-    for line in body.split("\n"):
-        n = len(("\n" + line).encode("utf-8"))
-        if used + n > budget:
+    size = len(head.encode("utf-8"))
+    lines = body.split("\n") if body else []
+    kept, used = 0, 0
+    while kept < len(lines) - 1:  # keeping every line is the whole text, which does not fit
+        n = len(("\n" + lines[kept]).encode("utf-8"))
+        if size + used + n + len(("\n" + cut_note(len(lines) - kept - 1)).encode("utf-8")) > cap:
             break
-        kept.append(line)
         used += n
-    return head + "".join("\n" + line for line in kept) + tail
+        kept += 1
+    tail = "\n" + cut_note(len(lines) - kept)
+    if not lines or size + used + len(tail.encode("utf-8")) > cap:
+        return head.encode("utf-8")[:cap].decode("utf-8", "ignore")
+    return head + "".join("\n" + line for line in lines[:kept]) + tail
+
+
+def home_session_context(con, payload, alerts=()):
+    """The SessionStart context of a session in the home, or outside every project: `alerts` (the render watcher's line when
+    it is down), the board's header, and the board, cut to SESSION_CONTEXT_CAP (SPD-048).  With no alert and a board that
+    fits, the text is what the hook injected before SPD-048, byte for byte."""
+    head = "\n".join(list(alerts) + ["Ledger board (`spud board --brief` at %s, source %s):" % (kernel.now(), payload.get("source"))])
+    return fit_bytes(head, board_brief_text(con), SESSION_CONTEXT_CAP)
 
 
 def plain_session_notice(ctx, project):
@@ -165,7 +190,10 @@ def plain_session_notice(ctx, project):
     return text.encode("utf-8")[:PLAIN_NOTICE_CAP].decode("utf-8", "ignore")
 
 
-def project_session_context(ctx, con, project, claim, payload):
+def project_session_context(ctx, con, project, claim, payload, alerts=()):
+    """A Spud session's SessionStart context in a project: the header naming the project, `alerts` under it (the render
+    watcher's line when it is down), then the board, cut to SESSION_CONTEXT_CAP.  The alerts are in the head, which a cut
+    never reaches."""
     root = worktrees.project_root(ctx, project)
     if claim is not None:
         head = ("Ledger: this session is Spud in project `%s` (%s), claimed %s; root %s; tickets %s-nnn, teams %s-nnn; landing %s."
@@ -175,7 +203,7 @@ def project_session_context(ctx, con, project, claim, payload):
         head = ("Ledger: `%s` is Spud project `%s` (sessions always; tickets %s-nnn). This session is Spud: run /spud now to load his instructions."
                 % (root, project["key"], project["ticket_prefix"]))
     board = "Ledger board (`spud board --brief` at %s, source %s):\n%s" % (kernel.now(), payload.get("source"), board_brief_text(con))
-    return fit_bytes(head, board, SESSION_CONTEXT_CAP)
+    return fit_bytes("\n".join([head] + list(alerts)), board, SESSION_CONTEXT_CAP)
 
 
 def record_claim(con, at, actor_label, session, project, cwd, ticket=None):
