@@ -8,10 +8,9 @@ import shlex
 import sqlite3
 import sys
 import time
-from pathlib import Path
 
 from . import settings_sync
-from ..core import kernel, lazy
+from ..core import kernel, launchagents, lazy
 from ..state import backup, ledgerdb
 
 
@@ -81,10 +80,8 @@ def daily_backup(ctx, con, keep):
 
 # schedule (SPD-012): the macOS LaunchAgents.  Eric chose launchd over a Claude scheduled task: the CLI runs alone, with
 # the app closed, and a run missed during sleep fires at wake.  Two agents since SPD-097: the daily backup, and the
-# render watcher that keeps the vault current (RunAtLoad and KeepAlive, so launchd restarts it whenever it exits).
-SCHEDULE_LABEL = "local.spud.backup"
-RENDER_LABEL = "local.spud.render"
-LABELS = {"backup": SCHEDULE_LABEL, "render": RENDER_LABEL}
+# render watcher that keeps the vault current (RunAtLoad and KeepAlive, so launchd restarts it whenever it exits).  Their
+# labels and plist paths are core/launchagents' since SPD-048.
 SCHEDULE_AT = "03:00"
 SCHEDULE_LOG = "~/Library/Logs/spud-backup.log"
 RENDER_LOG = ".spud/logs/render.log"  # under the home; the watcher truncates it at each start
@@ -109,15 +106,9 @@ def require_spud_flag(args, what):
         raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "`%s` is Spud's; %s may not (use --as spud)" % (what, args.actor))
 
 
-def agent_plist_path(agent):
-    """$SPUD_LAUNCH_AGENTS_DIR/<label>.plist for `backup` or `render`, default ~/Library/LaunchAgents."""
-    agents = os.environ.get("SPUD_LAUNCH_AGENTS_DIR") or "~/Library/LaunchAgents"
-    return Path(os.path.abspath(os.path.expanduser(agents))) / (LABELS[agent] + ".plist")
-
-
 def schedule_plist_path():
     """The backup agent's plist: the name every caller from before SPD-097 knows."""
-    return agent_plist_path("backup")
+    return launchagents.agent_plist_path("backup")
 
 
 def schedule_plist(ctx, at):
@@ -128,7 +119,7 @@ def schedule_plist(ctx, at):
         raise kernel.SpudError(kernel.EXIT_ERROR, "cannot tell which Python runs spud: sys.executable is empty")
     log = os.path.abspath(os.path.expanduser(SCHEDULE_LOG))
     return {
-        "Label": SCHEDULE_LABEL,
+        "Label": launchagents.SCHEDULE_LABEL,
         "ProgramArguments": [sys.executable, "-I", "-S", str(ctx.launcher), "--as", "spud", "backup", "--daily"],
         "EnvironmentVariables": {"SPUD_HOME": str(ctx.home)},
         "RunAtLoad": True,
@@ -146,7 +137,7 @@ def render_plist(ctx):
         raise kernel.SpudError(kernel.EXIT_ERROR, "cannot tell which Python runs spud: sys.executable is empty")
     log = str(ctx.home / RENDER_LOG)
     return {
-        "Label": RENDER_LABEL,
+        "Label": launchagents.RENDER_LABEL,
         "ProgramArguments": [sys.executable, "-I", "-S", str(ctx.launcher), "--as", "spud", "render", "--watch"],
         "EnvironmentVariables": {"SPUD_HOME": str(ctx.home)},
         "RunAtLoad": True,
@@ -229,7 +220,7 @@ def install_agents(ctx, at):
         (ctx.home / RENDER_LOG).parent.mkdir(parents=True, exist_ok=True)  # launchd opens the log itself; its directory must exist
     out = []
     for agent, plist in agent_plists(ctx, at):
-        path = agent_plist_path(agent)
+        path = launchagents.agent_plist_path(agent)
         replaced = os.path.lexists(path)
         try:
             write_plist(path, plistlib.dumps(plist))
@@ -252,7 +243,7 @@ def cmd_schedule_show(ctx, args):
     at = "%02d:%02d" % args.at
     blocks, lines = {}, []
     for agent, plist in agent_plists(ctx, args.at):
-        path = agent_plist_path(agent)
+        path = launchagents.agent_plist_path(agent)
         exists, matches, loaded = plist_state(path, plist)
         xml = plistlib.dumps(plist).decode("utf-8")
         blocks[agent] = {"label": plist["Label"], "path": str(path), "exists": exists, "matches": matches, "loaded": loaded, "plist": xml}
@@ -287,16 +278,16 @@ def cmd_schedule_install(ctx, args):
             "launchctl bootout %s/%s: %s" % (domain, record["label"], "booted out the loaded job" if record["booted_out"] else "no job was loaded"),
             "launchctl bootstrap %s %s: loaded%s" % (domain, record["path"], "" if record["attempts"] == 1 else " on attempt %d" % record["attempts"]),
         ]
-    lines.append("%s runs `spud backup --daily` at load and daily at %s; its output goes to %s" % (SCHEDULE_LABEL, at, os.path.abspath(os.path.expanduser(SCHEDULE_LOG))))
-    lines.append("%s runs `spud render --watch` at load and again whenever it exits; its output goes to %s" % (RENDER_LABEL, ctx.home / RENDER_LOG))
+    lines.append("%s runs `spud backup --daily` at load and daily at %s; its output goes to %s" % (launchagents.SCHEDULE_LABEL, at, os.path.abspath(os.path.expanduser(SCHEDULE_LOG))))
+    lines.append("%s runs `spud render --watch` at load and again whenever it exits; its output goes to %s" % (launchagents.RENDER_LABEL, ctx.home / RENDER_LOG))
     return kernel.Result(data, "\n".join(lines), stderr=settings_sync.tool_warning(ctx) or "")
 
 
 def cmd_schedule_uninstall(ctx, args):
     require_spud_flag(args, "spud schedule uninstall")
     records, lines = {}, []
-    for agent, label in LABELS.items():
-        path = agent_plist_path(agent)
+    for agent, label in launchagents.LABELS.items():
+        path = launchagents.agent_plist_path(agent)
         service = "gui/%d/%s" % (os.getuid(), label)
         booted_out = launchctl("bootout", service)[0] == 0  # a job that was not loaded is fine
         removed = False

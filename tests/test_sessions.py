@@ -56,7 +56,12 @@ class SessionTest(RepoMixin, SpudTestCase):
         card = self.cli("session", "claim", actor="spud", cwd=self.other, session=SESSION).stdout.rstrip("\n")
         self.assertLessEqual(len(card.encode("utf-8")), 1536)
         self.assertIn("BAD-040", card)  # the board lists the newest first
-        self.assertIn("run `spud board --brief`", card)
+        # SPD-048: the note counts the board lines it cut, exactly
+        board = self.cli("board", "--brief", "--project", "badtakes").stdout.rstrip("\n").split("\n")
+        shown = card.split("\nboard (badtakes):\n", 1)[1].split("\n")
+        self.assertRegex(shown[-1], r"\A\(\d+ more lines? cut to fit; run `spud board --brief` for the rest\)\Z")
+        self.assertEqual(shown[:-1], board[:len(shown) - 1])
+        self.assertEqual(shown[-1], "(%d more lines cut to fit; run `spud board --brief` for the rest)" % (len(board) - (len(shown) - 1)))
 
     def test_the_card_counts_the_parked_tickets_of_its_own_project(self):
         """SPD-096: the count line is the project's, because the card calls board_brief_text with the project's rows."""

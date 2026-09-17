@@ -21,9 +21,9 @@ TESTS = REPO / "tests"
 DISPATCH = "hooks.dispatch"
 # Every module some `spud hook <event>` imports.  A hook that needs one more module adds it here and runs
 # tests/probes/hook_timing.py against main: the commands, render and import, the parser, project install, schedule and
-# doctor stay off this list (Eric, SPD-065).
+# doctor stay off this list (Eric, SPD-065).  core.launchagents joined for SessionStart's render watcher line (SPD-048).
 HOOK_PATH = {
-    "core.homeconf", "core.kernel", "core.lazy",
+    "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
     "render.prices", "projects.sessions",
     "hooks.dispatch", "hooks.hookio", "hooks.pathrule", "hooks.pretool", "hooks.recording", "hooks.sessionhooks",

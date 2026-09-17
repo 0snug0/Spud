@@ -1,7 +1,7 @@
 """commands/views: events, board, fleet, card, member list.  Moved from bin/spud_ledger.py (SPD-065)."""
 
-from . import renderwatch, worktreebind
-from ..core import kernel
+from . import worktreebind
+from ..core import kernel, launchagents
 from ..projects import sessions
 from ..render import prices, teamcard
 from ..state import ledgerdb, lookup
@@ -49,8 +49,9 @@ def cmd_board(ctx, args):
             r["worktree"] = worktreebind.worktree_state(r["worktree"])
         if args.brief:
             text = sessions.board_brief_text(con, rows, parked=args.parked)
-            if renderwatch.watcher_installed() and not renderwatch.watcher_alive(ctx):  # SPD-097: the vault is stale
-                text += "\nrender watcher: installed but not running; the vault is stale (spud --as spud schedule install reloads it)"
+            down = launchagents.watcher_down_line(ctx)  # SPD-097: the vault is stale; the SessionStart context carries the same line (SPD-048)
+            if down:
+                text += "\n" + down
         else:
             for r in rows:
                 r["created"] = kernel.fm_date(r["created_at"])

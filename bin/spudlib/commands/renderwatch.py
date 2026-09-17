@@ -1,4 +1,5 @@
-"""commands/renderwatch: render --watch, the loop LaunchAgent local.spud.render runs, and whether a watcher is alive (SPD-097)."""
+"""commands/renderwatch: render --watch, the loop LaunchAgent local.spud.render runs (SPD-097).  Whether a watcher is alive is
+core/launchagents' since SPD-048."""
 
 import contextlib
 import fcntl
@@ -9,44 +10,16 @@ import stat
 import sys
 import time
 
-from . import publish, schedule
-from ..core import kernel
+from . import publish
+from ..core import kernel, launchagents
 from ..state import ledgerdb
 
-WATCH_LOCK = "watch.lock"  # <home>/.spud/watch.lock, held for the watcher's life: doctor and board ask it whether a watcher is alive
-WATCH_INTERVAL = 2.0       # seconds between two reads of the event log
+WATCH_INTERVAL = 2.0  # seconds between two reads of the event log
 
 
 def render_entry(ctx, args):
     """The parser's `render`: the watcher with --watch, else one pass."""
     return cmd_render_watch(ctx, args) if args.watch else publish.cmd_render(ctx, args)
-
-
-def watch_lock_path(ctx):
-    return ctx.home / ".spud" / WATCH_LOCK
-
-
-def watcher_alive(ctx):
-    """True when a watcher holds the watch lock: taken non-blocking and released at once.  False with no lock file (no
-    watcher ever ran for this home) and before `spud init`."""
-    path = watch_lock_path(ctx)
-    if not path.is_file():
-        return False
-    fd = os.open(str(path), os.O_RDWR)
-    try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return False
-    finally:
-        os.close(fd)
-
-
-def watcher_installed():
-    """Whether the render watcher's LaunchAgent plist is installed: `down` means installed and not alive."""
-    return schedule.agent_plist_path("render").is_file()
 
 
 def latest_event_id(con):
@@ -80,12 +53,12 @@ def cmd_render_watch(ctx, args):
         raise kernel.SpudError(kernel.EXIT_USAGE, "--watch renders into the home on its own: no --out, no --discard")
     if not ctx.db_path.is_file():
         raise kernel.SpudError(kernel.EXIT_ERROR, "no ledger at %s; run `spud init`" % ctx.db_path)
-    fd = os.open(str(watch_lock_path(ctx)), os.O_RDWR | os.O_CREAT, 0o644)
+    fd = os.open(str(launchagents.watch_lock_path(ctx)), os.O_RDWR | os.O_CREAT, 0o644)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
         os.close(fd)
-        raise kernel.SpudError(kernel.EXIT_ERROR, "a render watcher is already running for %s (it holds %s)" % (ctx.home, watch_lock_path(ctx)))
+        raise kernel.SpudError(kernel.EXIT_ERROR, "a render watcher is already running for %s (it holds %s)" % (ctx.home, launchagents.watch_lock_path(ctx)))
     stop = []
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda signum, frame: stop.append(signum))

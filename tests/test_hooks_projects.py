@@ -413,19 +413,21 @@ class SessionStartProjectTest(ProjectHookCase):
                 self.assertIn("/spud", context)
                 self.assertIn(KEY, context)
 
-    def test_a_claimed_session_is_told_it_is_spud_in_at_most_2_kb(self):
-        """P2: a large additionalContext reaches the model as a 2 KB preview, so the header and the board fit in 2048 bytes
-        whatever the board holds."""
+    def test_a_claimed_session_is_told_it_is_spud_within_the_inline_cap(self):
+        """P2: an additionalContext past the harness's inline limit reaches the model as a 2 KB preview, so the header and
+        the board fit in 8000 bytes whatever the board holds (SPD-048 measured the limit: 10,000 UTF-16 code units)."""
         for n in range(20):
             self.cli("ticket", "new", "--project", KEY, "--status", "active", "--title",
-                     "BadTakes ticket %02d with a long title that makes the board brief grow well past two kilobytes" % n, actor="spud")
+                     "BadTakes ticket %02d with a long title that makes the board brief grow well past eight kilobytes %s" % (n, "and on " * 45), actor="spud")
         for source in ("resume", "compact", "clear"):
             with self.subTest(source=source):
                 r = self.hook_in(self.CLAIMED, "SessionStart", self.session_start_p(self.CLAIMED, source))
                 self.assertEqual(r.code, 0, r)
-                self.assertLessEqual(len(r.context.encode("utf-8")), 2048, len(r.context.encode("utf-8")))
+                self.assertLessEqual(len(r.context.encode("utf-8")), 8000, len(r.context.encode("utf-8")))
+                self.assertGreater(len(r.context.encode("utf-8")), 7000, len(r.context.encode("utf-8")))
                 self.assertIn(KEY, r.context)
                 self.assertIn("you are Spud here", r.context)
+                self.assertRegex(r.context, r"\n\(\d+ more lines? cut to fit; run `spud board --brief` for the rest\)\Z")
 
     def test_a_home_session_gets_the_board_as_today(self):
         for source in ("startup", "resume"):

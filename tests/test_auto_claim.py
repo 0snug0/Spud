@@ -15,6 +15,7 @@ The unit tests load the program; the rest run the hook as a project's installed 
 """
 
 import json
+import re
 import unittest
 from pathlib import Path
 
@@ -25,7 +26,7 @@ from test_hooks_projects import KEY, LAW_1, NOT_SPUD, SESSION_CLAIMED, SESSION_P
 spud = load_spud_module()
 
 SESSION_OTHER = "d9e3f4a5-6b7c-4d8e-8f9a-1b2c3d4e5f6a"
-CAP = 2048
+CAP = 8000  # SessionStart's cap, which the claim context shares: 80% of the harness's measured inline limit (SPD-048)
 SPUD_EXPANDED = "<command-message>spud</command-message>\n<command-name>/spud</command-name>\n<command-args>%s</command-args>"  # as a transcript records /spud
 
 
@@ -257,10 +258,16 @@ class AutoClaimTest(ProjectHookCase):
 
     def test_the_context_fits_the_inline_limit_with_a_long_board(self):
         for n in range(20):
-            self.new_bad("BadTakes ticket %02d with a long title that makes the board brief grow well past two kilobytes" % n)
+            self.new_bad("BadTakes ticket %02d with a long title that makes the board brief grow well past eight kilobytes %s" % (n, "and on " * 45))
         r = self.assertClaims(self.PLAIN, "Work on BAD-001", "BAD-001")
-        self.assertIn("run `spud board --brief`", r.context)
+        self.assertGreater(len(r.context.encode("utf-8")), CAP - 1000, len(r.context.encode("utf-8")))
         self.assertIn("4. Run the session ritual", r.context)
+        # SPD-048: the note counts what it cut, exactly: the card's board is `board --brief` of the project, from the top
+        board = self.cli("board", "--brief", "--project", KEY).stdout.rstrip("\n").split("\n")
+        shown = r.context.split("\nboard (%s):\n" % KEY, 1)[1].split("\n")
+        count = int(re.fullmatch(r"\((\d+) more lines? cut to fit; run `spud board --brief` for the rest\)", shown[-1]).group(1))
+        self.assertEqual(shown[:-1], board[:len(shown) - 1])
+        self.assertEqual(count, len(board) - (len(shown) - 1))
 
 
 if __name__ == "__main__":

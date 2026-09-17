@@ -9,7 +9,7 @@ import sqlite3
 from pathlib import Path
 
 from . import doctor, publish, reportentry, schedule, settings_sync
-from ..core import homeconf, kernel, lazy
+from ..core import homeconf, kernel, launchagents, lazy
 from ..hooks import worktrees
 from ..projects import install, registry
 from ..state import actors, backup, ledgerdb, schema
@@ -71,7 +71,7 @@ def move_steps(ctx, target):
         "write %s" % (homeconf.spud_config_dir() / "home"),
         "set project spud's sessions to claim; settings sync into %s; strip the ledger's entries from %s; project install spud and re-sync"
         " every installed project and the ~/.claude copies" % (target / ".claude" / "settings.json", ctx.tool / ".claude" / "settings.json"),
-        "install %s and %s with the new paths" % (schedule.SCHEDULE_LABEL, schedule.RENDER_LABEL),
+        "install %s and %s with the new paths" % (launchagents.SCHEDULE_LABEL, launchagents.RENDER_LABEL),
         "render again (the move's own events) and run doctor on %s" % target,
         "rename %s to %s" % (ctx.home / ".spud", ctx.home / MOVED_STATE),
         "print what is left by hand",
