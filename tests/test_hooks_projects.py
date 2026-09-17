@@ -39,6 +39,7 @@ LAW_5 = "Law 5"  # a member outside its globs; the home's generated ledger/** an
 NOT_SPUD = "not Spud"  # a plain session, or an unbound agent_id of one, writing in Spud's home
 NOT_BOUND = "not bound"  # an unbound agent_id in a Spud session writing a project path
 STATE_WORDING = "ledger database"  # the state directory .spud/ at any project root, for everyone
+BOUND_WORKTREE = "SPD-098"  # a member of a bound ticket writing its project's path outside the worktree the ticket is bound to
 
 # The columns of the section 3.2 table, in its order.
 SPUD_COL, PLAIN_COL, MEMBER_COL, UNBOUND_SPUD_COL, UNBOUND_PLAIN_COL = range(5)
@@ -219,7 +220,8 @@ class ProjectHookCase(HookCase):
             args += ["--deliverable", glob]
         if name:
             args += ["--name", name]
-        return self.cli_json(*args, actor="spud", session=session)["member"]
+        # SPD-098: planned from the worktree bad_wt, which binds BAD-001 to it, as a claimed session in its worktree would
+        return self.cli_json(*args, actor="spud", session=session, cwd=self.bad_wt)["member"]
 
     def bad_description(self, m):
         return "%s/%s (%s, %s)" % (self.bad_ticket["team_key"], m["name"], m["lineage"], m["persona"])
@@ -247,8 +249,8 @@ class ProjectHookCase(HookCase):
 
 class PathTableTest(ProjectHookCase):
     """Every cell of the section 3.2 table, through PreToolUse(Write) and through a shell redirection, for a member of
-    BAD-001 whose globs are `src/**` (bare: relative to badtakes, in any checkout of it) and `home:docs/x.md` (qualified:
-    the home's checkout), bound in the claimed session."""
+    BAD-001 whose globs are `src/**` (bare: relative to badtakes, in the worktree BAD-001 is bound to since SPD-098, and in
+    no other checkout of it) and `home:docs/x.md` (qualified: the home's checkout), bound in the claimed session."""
 
     def setUp(self):
         super().setUp()
@@ -258,7 +260,7 @@ class PathTableTest(ProjectHookCase):
         state = (STATE_WORDING,) * 5
         self.table = (
             # target                                              path                                  Spud     plain     member  unbound, Spud  unbound, plain
-            ("badtakes root: src/a.txt",                          bad / "src" / "a.txt",                LAW_1,   None,     None,   NOT_BOUND,     None),
+            ("badtakes root: src/a.txt",                          bad / "src" / "a.txt",                LAW_1,   None,     BOUND_WORKTREE, NOT_BOUND, None),
             ("badtakes root: README.md",                          bad / "README.md",                    LAW_1,   None,     LAW_5,  NOT_BOUND,     None),
             ("badtakes root: docs/x.md (the glob names the home)", bad / "docs" / "x.md",              LAW_1,   None,     LAW_5,  NOT_BOUND,     None),
             ("badtakes root: ledger/x.md (ordinary code there)",  bad / "ledger" / "x.md",              LAW_1,   None,     LAW_5,  NOT_BOUND,     None),
@@ -312,9 +314,10 @@ class PathTableTest(ProjectHookCase):
                     self.assertNotIn("Law", r.reason)
 
     def test_a_worktree_under_claude_worktrees_maps_to_badtakes(self):
-        """EnterWorktree's own spelling, .claude/worktrees/<name>/ in the badtakes root, is a checkout of badtakes too."""
+        """EnterWorktree's own spelling, .claude/worktrees/<name>/ in the badtakes root, is a checkout of badtakes too: Spud's and
+        a plain session's writes there are the root's, and a member of BAD-001, bound to bad_wt, is refused it (SPD-098)."""
         wt = self.add_worktree_inside(self.bad, "bad-001-inside")
-        self.expect(self.CLAIMED, AGENT_A, "inside worktree: src/a.txt", wt / "src" / "a.txt", None)
+        self.expect(self.CLAIMED, AGENT_A, "inside worktree: src/a.txt", wt / "src" / "a.txt", BOUND_WORKTREE)
         self.expect(self.CLAIMED, AGENT_A, "inside worktree: README.md", wt / "README.md", LAW_5)
         self.expect(self.CLAIMED, None, "inside worktree: src/a.txt", wt / "src" / "a.txt", LAW_1)
         self.expect(self.PLAIN, None, "inside worktree: src/a.txt", wt / "src" / "a.txt", None)
@@ -532,6 +535,7 @@ class AgentHookProjectTest(ProjectHookCase):
         self.assertIn("%s/%s" % (self.bad_ticket["team_key"], m["name"]), r.context)
         self.assertIn(KEY, r.context)
         self.assertIn(str(self.bad), r.context)
+        self.assertIn("bound to its worktree `%s`" % os.path.realpath(self.bad_wt), r.context)  # SPD-098
 
     def test_a_bound_members_stop_is_recorded_and_held_in_a_plain_session_as_today(self):
         m = self.spawn_in(self.CLAIMED, self.plan_bad(), AGENT_A)

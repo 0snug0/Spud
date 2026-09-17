@@ -142,10 +142,14 @@ def normalize_deliverables(globs):
     return [normalize_deliverable(g) for g in (globs or [])]
 
 
-def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_reason=None, agent_type=None, brief="", deliverables=None, session_id=None):
+def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_reason=None, agent_type=None, brief="", deliverables=None, session_id=None,
+                binder=None):
     """member new: the four limit checks, the lineage and the name draw, all inside
     one BEGIN IMMEDIATE, reading the ticket and the parent inside it too.  session_id is
-    the Claude Code session planning it (SPD-018), None outside one."""
+    the Claude Code session planning it (SPD-018), None outside one.  `binder` is the
+    command's commands/worktreebind.Binder, prepared before this call: its decision runs
+    last, inside the transaction, so a plan refused for its worktree writes nothing and a
+    binding is written only with the member it binds for (SPD-098)."""
     limits = ctx.limits
     deliverables = normalize_deliverables(deliverables)
     if persona not in ctx.personas():
@@ -199,6 +203,8 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
         pad = ctx.id_pad()
         lineage = ((parent["lineage"] + ".") if parent else "") + str(ever + 1).zfill(pad)
         chosen = draw_name(con, ticket["id"], name)
+        if binder is not None:
+            binder.decide(con, at, actor, ticket, deliverables)
         cur = con.execute(
             "INSERT INTO members (ticket_id, lineage, depth, parent_id, name, persona, agent_type, model, tier_reason,"
             " status, brief, deliverables, planned_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)",

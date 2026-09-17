@@ -190,7 +190,7 @@ class TicketProjectTest(RepoMixin, SpudTestCase):
 
     def test_a_proposal_from_a_bad_ticket_creates_a_bad_ticket(self):
         t = self.cli_json("ticket", "new", "--project", "badtakes", "--title", "Origin", "--status", "active", actor="spud")["ticket"]
-        m = self.cli_json("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--brief", "Look.", "--deliverable", "src/**", actor="spud")["member"]
+        m = self.cli_json("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--brief", "Look.", "--deliverable", "src/**", actor="spud", cwd=self.wt)["member"]
         self.cli("member", "start", m["ref"], actor="spud")
         p = self.cli_json("proposal", "file", "--title", "Follow-up", "--why", "Found it.", actor=m["ref"])["proposal"]
         out = self.cli_json("proposal", "decide", str(p["id"]), "--decision", "create", "--priority", "P2", actor="spud")
@@ -199,7 +199,7 @@ class TicketProjectTest(RepoMixin, SpudTestCase):
     def test_qualified_deliverables(self):
         t = self.cli_json("ticket", "new", "--project", "badtakes", "--title", "Globs", "--status", "active", actor="spud")["ticket"]
         m = self.cli_json("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--brief", "x",
-                          "--deliverable", "src/", "--deliverable", "home:docs/x.md", "--deliverable", "./test/**", actor="spud")["member"]
+                          "--deliverable", "src/", "--deliverable", "home:docs/x.md", "--deliverable", "./test/**", actor="spud", cwd=self.wt)["member"]
         self.assertEqual(m["deliverables"], ["src/**", "home:docs/x.md", "test/**"])
         for bad, needle in (("nope:x.md", "no active project"), ("spud:/abs", "not absolute"), ("spud:../x", "`..`"), ("badtakes:", "non-empty")):
             with self.subTest(bad=bad):
@@ -218,7 +218,7 @@ class ProjectRenderTest(RepoMixin, SpudTestCase):
         self.home_ticket = self.new_ticket("Home", status="active")
         self.bad = self.cli_json("ticket", "new", "--project", "badtakes", "--title", "Bad one", "--status", "active", actor="spud")["ticket"]
         self.member = self.cli_json("member", "new", "--ticket", self.bad["key"], "--persona", "scout", "--model", "haiku", "--brief", "x", "--name", "Russet",
-                                    "--deliverable", "src/**", actor="spud")["member"]
+                                    "--deliverable", "src/**", actor="spud", cwd=self.add_worktree(self.other, "bad-001"))["member"]  # SPD-098: binds it
 
     def test_render_writes_the_project_property_and_projects_md(self):
         out = self.home.json("render", actor="spud")

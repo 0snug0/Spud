@@ -52,7 +52,7 @@ class HomeMoveCase(LaunchdMixin, RepoMixin, SpudTestCase):
         self.add_project(self.bad)
         self.cli("project", "install", "badtakes", actor="spud")
         t = self.new_ticket("Before the move", status="active")
-        m = self.new_member(t["key"], name="Russet", deliverable=["bin/**"])
+        m = self.new_member(t["key"], name="Russet", deliverable=["bin/**"], cwd=self.add_worktree(home, "spd-001-before"))  # SPD-098: binds it
         self.cli("member", "start", m["ref"], actor="spud")  # planned -> active -> done: a member is finished from active
         self.cli("member", "finish", m["ref"], "--status", "done", "--outcome", "fine", "--summary", "Did the thing before the move.", actor="spud")
         self.cli("render", actor="spud")

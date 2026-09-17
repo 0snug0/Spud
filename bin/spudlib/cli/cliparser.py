@@ -227,7 +227,9 @@ def build_parser():
     p = sub.add_parser("member", help="team members")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
-    q = ps.add_parser("new", help="plan a member (the actor is its parent): limits, lineage, name draw")
+    member_new_help = ("plan a member (the actor is its parent): limits, lineage, name draw; a code ticket binds the linked worktree it runs"
+                       " in, and it refuses from the main checkout, outside the project or another worktree (SPD-098)")
+    q = ps.add_parser("new", help=member_new_help, description=member_new_help)
     q.add_argument("--ticket", help="ticket key (required for Spud; implied for a member)")
     q.add_argument("--persona", required=True)
     q.add_argument("--model", required=True, choices=kernel.MODELS)
@@ -235,7 +237,8 @@ def build_parser():
     q.add_argument("--tier-reason", type=text_arg, help="required when the model is not the persona's default tier")
     q.add_argument("--agent-type", help="native agent type (required for a contractor)")
     q.add_argument("--brief", type=text_arg, help="the brief, required and non-empty (no brief, no spudagent); @file or @- accepted")
-    q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable): bare for the ticket's project, <key>:<glob> for another, home:<glob> for the home")
+    q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable): bare for the ticket's project, in the worktree the ticket"
+                                                          " is bound to; home:<glob> for the home; <key>:<glob> naming another project is refused")
     q.set_defaults(func=membercmds.cmd_member_new)
     q = ps.add_parser("start", help="planned -> active (stamping spawned) or blocked -> active after a re-brief; the parent's")
     q.add_argument("ref")
@@ -256,7 +259,7 @@ def build_parser():
     q.add_argument("--summary", type=text_arg, help="one paragraph for the card")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry a root member's finish writes: SPD-nnn: <Name> (<lineage>, <persona>, <model>) <status>, then its summary; refused for a nested member")
     q.set_defaults(func=membercmds.cmd_member_finish)
-    q = ps.add_parser("edit", help="edit brief, deliverables, model, summary (the parent's)")
+    q = ps.add_parser("edit", help="edit brief, deliverables, model, summary (the parent's); new deliverables bind and refuse as member new's do")
     q.add_argument("ref")
     q.add_argument("--brief", type=text_arg)
     q.add_argument("--deliverable", action="append")
@@ -321,7 +324,8 @@ def build_parser():
     q.add_argument("--next", required=True, type=text_arg, help="Spud's Next line")
     q.set_defaults(func=proposalcmds.cmd_report_add)
 
-    board_help = "the board (v_board): every ticket, active first, then queued, parked, done and declined, by priority inside each"
+    board_help = ("the board (v_board): every ticket, active first, then queued, parked, done and declined, by priority inside each;"
+                  " then each open ticket's bound worktree and its branch, read from git")
     p = sub.add_parser("board", help=board_help, description=board_help)
     p.add_argument("--brief", action="store_true",
                    help="open tickets and live members, one line each, as SessionStart injects it: active tickets with their live"
@@ -333,7 +337,7 @@ def build_parser():
     p.set_defaults(func=views.cmd_board)
     p = sub.add_parser("fleet", help="every member (v_fleet)")
     p.set_defaults(func=views.cmd_fleet)
-    p = sub.add_parser("card", help="a ticket's team tree")
+    p = sub.add_parser("card", help="a ticket's team tree, and the worktree it is bound to with that worktree's branch, read from git")
     p.add_argument("key")
     p.add_argument("--project", help="refuse unless the ticket is this project's")
     p.set_defaults(func=views.cmd_card)

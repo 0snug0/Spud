@@ -100,6 +100,7 @@ def ticket_dict(con, t):
         "created_at": t["created_at"],
         "updated_at": t["updated_at"],
         "closed_at": t["closed_at"],
+        "worktree": t["worktree"],  # SPD-098: the bound linked worktree, None while unbound; never rendered into a note
     }
 
 

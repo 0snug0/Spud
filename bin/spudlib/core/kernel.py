@@ -63,6 +63,8 @@ EVENT_KINDS = (
     # cross-repository projects (SPD-014, migration 0002_projects)
     "project.added", "project.edited", "project.installed", "project.uninstalled", "project.removed",
     "session.claimed", "session.released",
+    # ticket-bound worktrees (SPD-098, migration 0004_ticket_worktree)
+    "ticket.worktree",
 )
 
 # The markdown-v0 templates (ledger/_templates/) as the renderer's default layout.  `project` since SPD-014: every

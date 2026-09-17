@@ -150,7 +150,15 @@ NOT_SPUD_HOME = ("a session that is not Spud does not write in Spud's home (%s i
                  " or work in a session opened in the home")
 
 
-def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticket_project_key=None, home=True):
+OUTSIDE_BOUND_WORKTREE = (
+    "Law 5: %(rel)s is in %(checkout)s, a checkout of project %(project)s, and %(ref)s's ticket %(key)s is bound to %(bound)s: a"
+    " member of a bound ticket writes its project's paths there alone, never in the main checkout or another worktree (SPD-098). %(tail)s")
+OUTSIDE_BOUND_WORKTREE_TAIL = "Write the same path under %s"
+OUTSIDE_GONE_WORKTREE_TAIL = ("That worktree is gone, so no checkout is open to you: ask your parent, since Spud rebinds the ticket by"
+                              " planning a member from the worktree the work continues in")
+
+
+def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticket_project_key=None, home=True, elsewhere=None):
     """None when the actor may write the repository path `rel` of project `project_key`, else the reason.  The
     generated roots are the home's alone and are matched whatever the case (a case variant is refused on every
     filesystem), case-folded rather than lower-cased so that the simple folds APFS honours
@@ -158,7 +166,9 @@ def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticke
     Spud has no own files (SPD-014): every path there is a deliverable, and a member's bare glob is relative to its
     ticket's project, a `<key>:<glob>` to that project's, a `home:<glob>` to the home (SPD-097).  `home` is
     worktrees.home_roots for the checkout the path was mapped into, so in the transition window a worktree of the tool
-    repository still carries the generated roots and Spud's own set, while its globs stay project spud's."""
+    repository still carries the generated roots and Spud's own set, while its globs stay project spud's.  `elsewhere`
+    is (ticket key, bound worktree, checkout) when the member's ticket is bound (SPD-098) and the path lies in another
+    checkout of the ticket's own project: no glob of the member's matches there, whatever it says."""
     generated = home and rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS
     if member is None:
         if not home:
@@ -174,6 +184,10 @@ def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticke
     if generated:
         return ("Law 5: %s is outside every member's deliverables; ledger/** and reports/** are generated from the ledger database"
                 " (rendered by `spud render`), so record through the CLI: spud member log | result | block, spud proposal file" % rel)
+    if elsewhere is not None:
+        ticket_key, bound, checkout = elsewhere
+        tail = OUTSIDE_BOUND_WORKTREE_TAIL % bound if os.path.isdir(bound) else OUTSIDE_GONE_WORKTREE_TAIL
+        return OUTSIDE_BOUND_WORKTREE % {"rel": rel, "checkout": checkout, "project": project_key, "ref": ref, "key": ticket_key, "bound": bound, "tail": tail}
     globs = json.loads(member["deliverables"]) if member["deliverables"] else []
     for g in globs:
         key, bare = ops.glob_scope(g)
@@ -231,9 +245,15 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
     first = inside[0][2]
     if caller_member is not None:
         ref = lookup.member_ref(con, caller_member["id"])
-        ticket_project = lookup.project_key_of(con, lookup.get_ticket_by_id(con, caller_member["ticket_id"]))
+        ticket = lookup.get_ticket_by_id(con, caller_member["ticket_id"])
+        ticket_project = lookup.project_key_of(con, ticket)
+        bound = ticket["worktree"]  # SPD-098: NULL for a ticket no plan has bound, which keeps the rule it had
         for project, root, rel in inside:
-            reason = path_reason(rel, caller_member, ref, worktrees.folds_case(root), project["key"], ticket_project, worktrees.home_roots(project, ctx.home))
+            elsewhere = None
+            if bound is not None and project["key"] == ticket_project and not worktrees.same_directory(root, bound):
+                elsewhere = (ticket["key"], bound, root)
+            reason = path_reason(rel, caller_member, ref, worktrees.folds_case(root), project["key"], ticket_project, worktrees.home_roots(project, ctx.home),
+                                 elsewhere)
             if reason:
                 return reason, rel
         return None, first

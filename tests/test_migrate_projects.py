@@ -83,8 +83,8 @@ class MigrateProjectsTest(unittest.TestCase):
     def test_migrate_writes_the_pre_migration_backup_and_keeps_every_row(self):
         events_before = self.home.rows("SELECT * FROM events ORDER BY id")
         out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0002_projects", "0003_parked"], 3))
-        self.assertEqual(len(out["backups"]), 2)
+        self.assertEqual((out["applied"], out["user_version"]), (["0002_projects", "0003_parked", "0004_ticket_worktree"], 4))
+        self.assertEqual(len(out["backups"]), 3)
         self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0002_projects\.db$")
         backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
         try:
@@ -166,11 +166,11 @@ class MigrateProjectsTest(unittest.TestCase):
         member = (self.home.path / "ledger" / "teams" / "SPUD-001" / "Russet.md").read_text(encoding="utf-8")
         self.assertIn('\nticket: "[[SPD-001]]"\nproject: spud\n', member)
 
-    def test_a_fresh_init_applies_both_migrations(self):
+    def test_a_fresh_init_applies_every_migration(self):
         other = Home()
         self.addCleanup(other.cleanup)
         out = other.init()
-        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked"], 3, []))
+        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree"], 4, []))
         self.assertEqual(other.rows("SELECT key, landing, sessions FROM projects"), [{"key": "spud", "landing": "merge", "sessions": "always"}])
 
 
