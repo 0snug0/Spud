@@ -65,6 +65,12 @@ work had landed, because its session had stopped and nothing in the ledger knew 
              not stop the run, and is listed by `spud doctor`.  A settled pull request is never read again.
   list       what is recorded, read-only.
 
+Since SPD-116 the rendered ticket note carries it as well: the properties `pr` (the number the URL gave) and
+`pr_state` right after the status, which the Obsidian views filter on, and a generated `## Landing` section of
+one sentence per recorded pull request -- the number as a link on its URL, the state in these same words, and
+what a merge leaves owed.  It renders from the table alone, never says when the row was last read, and so a
+read that found nothing new rewrites no note.
+
 Four things none of this does: it never merges a pull request; it never acts on one the ledger did not record;
 it runs no git, so the worktree and local-branch cleanup is named as owed and performed by Spud; and it never
 moves a ticket to done, because that is a judgment -- the job here is to make sure the judgment gets asked for.

@@ -66,6 +66,7 @@ TICKET_SECTION_COMMANDS = {
     "Team": "spud member new|start|finish",
     "Handoffs": "spud handoff add",
     "Proposals received": "spud proposal decide",
+    kernel.LANDING_SECTION: "spud pr record|reconcile",
 }
 MEMBER_OWN_SECTIONS = {"Log": "spud member log", "Result": "spud member result", "Blocked": "spud member block"}
 MEMBER_SECTION_COMMANDS = {"Sub-agents": "spud member new", "Ticket proposals": "spud proposal file"}
@@ -73,6 +74,11 @@ MEMBER_SECTION_COMMANDS = {"Sub-agents": "spud member new", "Ticket proposals": 
 # the reason; a hand edit has nowhere to put one, and the database's CHECKs would refuse half the change anyway.
 PARKED_BY_COMMAND = ("parked is set and cleared by `spud ticket move --status parked --reason …` and"
                      " `ticket move --status queued|active|declined`; a hand edit cannot carry the reason")
+# SPD-116: the two keys are the landing pull request's number and state, read from `pull_requests`.  The number comes
+# from the URL `spud pr record` was given and the state from what `gh pr view` last said; neither is a judgment a hand
+# edit could carry, and a note that named another pull request would name one the ledger has no row for.
+PR_BY_COMMAND = ("pr and pr_state are the landing pull request the ledger recorded; they change through"
+                 " `spud pr record` and `spud pr reconcile`, and a hand edit cannot record a pull request")
 
 
 def accept_ticket_edit(ctx, con, at, t, base, doc, rel):
@@ -91,6 +97,8 @@ def accept_ticket_edit(ctx, con, at, t, base, doc, rel):
             refuse(rel, "created is not editable by hand; timestamps come from the clock")
         if key in kernel.PARKED_FM_KEYS:
             refuse(rel, PARKED_BY_COMMAND)
+        if key in kernel.PR_FM_KEYS:
+            refuse(rel, PR_BY_COMMAND)
     if list(fm.keys()) != list(base_fm.keys()):
         refuse(rel, "the order of the properties is generated; put them back as rendered")
     title_changed = "title" in keys

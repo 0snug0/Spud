@@ -172,6 +172,15 @@ def pull_requests(con, ticket_ids=None, settled_only=False):
     return con.execute(sql, params).fetchall()
 
 
+def ticket_landing(con, ticket_id):
+    """The one pull request a ticket's note describes in its two frontmatter keys (SPD-116): the newest row recorded,
+    which is the one `pr record` last said the ticket lands through; None when none is recorded.  The newest row, not
+    the unsettled one, because that is the value that changes only when Spud records another pull request -- a
+    reconciled state moves `pr_state` and never `pr`.  A ticket carries several rows over its life; every one of them
+    renders in ## Landing, and `spud pr list` stays the whole record."""
+    return con.execute("SELECT * FROM pull_requests WHERE ticket_id = ? ORDER BY id DESC LIMIT 1", (ticket_id,)).fetchone()
+
+
 def pr_dict(con, p):
     ticket = get_ticket_by_id(con, p["ticket_id"])
     return {

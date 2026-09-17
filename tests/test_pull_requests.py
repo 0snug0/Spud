@@ -1,10 +1,14 @@
-"""Landing pull requests (SPD-077): `pr record`, `pr reconcile`, and what board, card and doctor say.
+"""Landing pull requests (SPD-077): `pr record`, `pr reconcile`, what board, card and doctor say, and since SPD-116 what
+the rendered ticket note carries.
 
 BAD-058 showed as `active` for 44 minutes after its work had landed: its session opened the pull request, recorded the
 outcome and stopped, the pull request squash-merged later, and no session was left to move the ticket, write the Outcome
 or delete the worktree and its branch.  Nothing in the ledger knew a pull request existed.  So Spud records the one a
 ticket lands through, the reconciler reads each recorded, still-open one with a single `gh pr view` off every hook path,
 and the board -- the full one and the `--brief` line SessionStart injects -- says what a merge leaves owed.
+
+None of it reached the vault, which is the one place Eric reads: SPD-116 puts the two frontmatter keys `pr` and
+`pr_state` and a generated `## Landing` section on the ticket note, from `pull_requests` alone.
 
 Every `gh` call here goes to tests/helpers.py's stand-in (GhMixin), and a Home that does not set one up has SPUD_GH=off
 and reads nothing: no test in this suite can reach the network.
@@ -13,13 +17,26 @@ and reads nothing: no test in this suite can reach the network.
 import json
 import unittest
 
-from helpers import EXIT_ERROR, EXIT_OWNERSHIP, EXIT_TRANSITION, EXIT_USAGE, GhMixin, SpudTestCase
+from helpers import EXIT_CONFLICT, EXIT_ERROR, EXIT_OWNERSHIP, EXIT_TRANSITION, EXIT_USAGE, GhMixin, Home, SpudTestCase
 from test_hooks import HookCase
 
 URL = "https://github.com/0snug0/BadTakes/pull/361"
 URL2 = "https://github.com/0snug0/BadTakes/pull/362"
 BRANCH = "feat/bad-058-landing"
 MERGED_AT = "2026-09-16T17:12:34Z"
+
+
+def frontmatter(text):
+    lines = text.split("\n")
+    return lines[1:lines.index("---", 1)]
+
+
+def section(text, name):
+    return text.split("## %s\n" % name, 1)[1].split("\n## ", 1)[0].strip()
+
+
+def headings(text):
+    return [line for line in text.split("\n") if line.startswith("## ")]
 
 
 class PullRequestCase(SpudTestCase):
@@ -461,7 +478,7 @@ class HelpTest(PullRequestCase):
         self.assertIn("pr ", top)
         self.assertIn("landing pull requests", top)
         family = self.home.run("pr", "--help").stdout
-        for word in ("record", "reconcile", "list", "never merges a pull request", "SPUD_GH"):
+        for word in ("record", "reconcile", "list", "never merges a pull request", "SPUD_GH", "## Landing"):
             self.assertIn(word, family)
         for sub in ("record", "reconcile", "list"):
             with self.subTest(sub):
@@ -480,6 +497,303 @@ class HelpTest(PullRequestCase):
         self.record()
         self.assertEqual(len(self.home.json("events", "--kind", "pr.recorded")["events"]), 1)
         self.assertEqual(self.home.json("events", "--kind", "pr.state")["events"], [])
+
+
+# =============================================================================
+# the rendered note: the two keys and ## Landing (SPD-116)
+# =============================================================================
+
+
+class LandingCase(GhMixin, PullRequestCase):
+    """A ticket, a recorded pull request, and the note the render writes for it."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_gh()
+        self.note = self.home.path / "ledger" / "tickets" / ("%s.md" % self.t["key"])
+
+    def settle(self, url=URL, state="MERGED", number=361, merged_at=MERGED_AT):
+        self.answer_pr(url, state=state, merged_at=merged_at if state == "MERGED" else None, number=number)
+        self.home.json("pr", "reconcile")
+
+    def rendered(self):
+        self.home.json("render")
+        return self.note.read_text(encoding="utf-8")
+
+
+class LandingNoteTest(LandingCase):
+    """What Eric reads in Obsidian.  A ticket with a recorded pull request carries the number and the state as
+    properties a Bases view can filter and sort on, and one paragraph per pull request in ## Landing with the URL as a
+    link -- never as a property value, which Obsidian would read as a URL scheme (Ledger v1's `word:text` rule)."""
+
+    def test_an_open_pull_request_renders_the_two_keys_and_one_sentence(self):
+        self.record()
+        text = self.rendered()
+        self.assertEqual(frontmatter(text), [
+            "id: " + self.t["key"],
+            'title: "A ticket that lands by pull request"',
+            "priority: P2",
+            "status: active",
+            "pr: 361",
+            "pr_state: open",
+            "origin: eric",
+            "project: spud",
+            'proposed_by: ""',
+            'lead: ""',
+            "created: " + self.t["created_at"][:10],
+            "tags: [ticket]",
+        ])
+        self.assertEqual(section(text, "Landing"), "Pull request [#361](%s) — open." % URL)
+        self.assertEqual(headings(text), ["## Brief", "## Size, persona and model decision", "## Team", "## Handoffs",
+                                          "## Proposals received", "## Landing", "## Outcome"])
+        self.assertNotIn("http", "\n".join(frontmatter(text)))  # the URL stays out of the frontmatter
+
+    def test_a_merge_renders_its_state_its_minute_and_what_it_owes(self):
+        self.record()
+        self.settle()
+        text = self.rendered()
+        self.assertIn("pr: 361", frontmatter(text))
+        self.assertIn("pr_state: merged", frontmatter(text))
+        self.assertEqual(section(text, "Landing").split("\n\n"), [
+            "Pull request [#361](%s) — merged 2026-09-16T17:12." % URL,
+            "Owed: the done move, with the pull request URL in %s's Outcome; `git worktree remove /tmp/wt-bad-058`;"
+            " `git branch -D %s`." % (self.t["key"], BRANCH),
+        ])
+
+    def test_a_closed_unmerged_pull_request_renders_and_owes_nothing(self):
+        self.record()
+        self.settle(state="CLOSED")
+        text = self.rendered()
+        self.assertIn("pr_state: closed", frontmatter(text))
+        landing = section(text, "Landing")
+        self.assertTrue(landing.startswith("Pull request [#361](%s) — closed unmerged " % URL), landing)
+        self.assertTrue(landing.endswith("."), landing)
+        self.assertNotIn("Owed:", text)
+
+    def test_a_done_ticket_keeps_the_landing_and_owes_nothing(self):
+        self.record()
+        self.settle()
+        self.home.json("ticket", "move", self.t["key"], "--status", "done", actor="spud")
+        text = self.rendered()
+        self.assertIn("pr_state: merged", frontmatter(text))
+        self.assertIn("merged 2026-09-16T17:12.", section(text, "Landing"))
+        self.assertNotIn("Owed:", text)
+
+    def test_the_note_carries_no_relative_time_and_no_read(self):
+        """The trap named in the brief: the watcher renders within seconds of every write, so a stamp that is never
+        identical twice would churn every ticket note forever.  The read behind the state is `spud board`'s and `spud
+        doctor`'s, live; the note carries the landing alone."""
+        self.record()
+        self.settle()
+        self.home.run("board")
+        text = self.rendered()
+        checked = self.home.json("pr", "list")["pull_requests"][0]["checked_at"]
+        for word in (" ago", "just now", "never read", "last read", checked):
+            self.assertNotIn(word, text)
+
+    def test_a_second_render_writes_nothing_and_a_re_read_changes_no_note(self):
+        self.record()
+        self.home.json("render")
+        snapshot = lambda: (self.home.scalar("SELECT max(id) FROM events"),
+                            self.home.rows("SELECT path, sha256, rendered_at FROM renders ORDER BY path"))
+        before = snapshot()
+        again = self.home.json("render")
+        self.assertEqual((again["written"], again["conflicts"], again["restyled"]), ([], [], []))
+        self.assertEqual(snapshot(), before)
+        # a reconcile read that found the pull request still open writes the row it read, and no note changes by a byte
+        self.answer_pr(URL, state="OPEN", number=361)
+        text = self.note.read_text(encoding="utf-8")
+        for _ in range(2):
+            self.home.json("pr", "reconcile", "--stale", "0")
+            self.assertEqual(self.home.json("render")["written"], [])
+        self.assertEqual(self.note.read_text(encoding="utf-8"), text)
+
+    def test_a_ticket_with_no_pull_request_renders_exactly_as_it_did(self):
+        other = self.new_ticket("No landing of its own")
+        self.home.json("render")
+        elsewhere = self.home.path / "ledger" / "tickets" / ("%s.md" % other["key"])
+        untouched, before = elsewhere.read_bytes(), self.note.read_text(encoding="utf-8")
+        for word in ("pr:", "pr_state:", "## Landing"):
+            self.assertNotIn(word, before)
+        self.assertNotIn("pr:", elsewhere.read_text(encoding="utf-8"))
+        self.record()
+        out = self.home.json("render")
+        self.assertEqual(out["written"], ["ledger/tickets/%s.md" % self.t["key"]])  # the other note is not even rewritten
+        self.assertEqual(elsewhere.read_bytes(), untouched)
+        self.assertNotIn("## Landing", elsewhere.read_text(encoding="utf-8"))
+
+    def test_the_keys_name_the_newest_pull_request_and_the_section_lists_every_one(self):
+        """A ticket carries several rows over its life (one closed unmerged, a second opened), and two scalar keys
+        cannot hold several: they name the newest recorded row, the one `pr record` last said the ticket lands
+        through.  ## Landing lists them all in record order, and `pr list` stays the whole record."""
+        self.record()
+        self.settle(state="CLOSED")
+        self.record(url=URL2, branch="feat/second-try")
+        text = self.rendered()
+        self.assertIn("pr: 362", frontmatter(text))
+        self.assertIn("pr_state: open", frontmatter(text))
+        paragraphs = section(text, "Landing").split("\n\n")
+        self.assertEqual(len(paragraphs), 2)
+        self.assertIn("[#361](%s) — closed unmerged" % URL, paragraphs[0])
+        self.assertEqual(paragraphs[1], "Pull request [#362](%s) — open." % URL2)
+        self.settle(url=URL2, number=362)
+        self.assertIn("pr_state: merged", frontmatter(self.rendered()))
+
+    def test_a_url_that_carried_no_number_leaves_the_key_empty(self):
+        self.record(url="https://git.example.com/badtakes/merge_requests")
+        text = self.rendered()
+        self.assertIn('pr: ""', frontmatter(text))
+        self.assertIn("pr_state: open", frontmatter(text))
+        self.assertEqual(section(text, "Landing"),
+                         "Pull request [https://git.example.com/badtakes/merge_requests]"
+                         "(https://git.example.com/badtakes/merge_requests) — open.")
+
+    def test_a_parked_ticket_carries_both_pairs_in_the_templates_order(self):
+        self.record()
+        self.home.json("ticket", "move", self.t["key"], "--status", "parked", "--reason", "Eric's review",
+                       "--until", "2026-10-16", actor="spud")
+        fm = frontmatter(self.rendered())
+        self.assertEqual(fm[3:8], ["status: parked", "parked_until: 2026-10-16", 'parked_reason: "Eric\'s review"',
+                                   "pr: 361", "pr_state: open"])
+
+    def test_the_section_lands_before_the_outcome_of_a_note_whose_layout_predates_it(self):
+        """An imported note's stored layout has no ## Landing (the import never rebuilds pull_requests), so the render
+        puts the section where the template has it the moment a pull request is recorded."""
+        con = self.home.connect()
+        try:
+            with con:
+                con.execute("UPDATE tickets SET layout = ? WHERE key = ?", (json.dumps(
+                    {"sections": ["Brief", "Size, persona and model decision", "Team", "Handoffs", "Proposals received", "Outcome"]}),
+                    self.t["key"]))
+        finally:
+            con.close()
+        self.assertNotIn("## Landing", self.rendered())
+        self.record()
+        self.assertEqual(headings(self.rendered())[-3:], ["## Proposals received", "## Landing", "## Outcome"])
+
+
+class LandingHandEditTest(LandingCase):
+    """The new section and the new keys are inside the hand-edit machinery like everything else the render owns: the
+    render refuses to overwrite the edit and logs the conflict once, `doctor` lists it with the two commands that
+    settle it, `render --discard` puts the render back, and `import --file` refuses each of them by name."""
+
+    def setUp(self):
+        super().setUp()
+        self.record()
+        self.settle()
+        self.home.json("render")
+
+    def hand_edit(self, old, new):
+        text = self.note.read_text(encoding="utf-8")
+        self.assertEqual(text.count(old), 1, old)
+        self.note.write_text(text.replace(old, new), encoding="utf-8")
+        return text
+
+    def test_an_edit_of_the_section_is_a_conflict_doctor_lists_and_discard_settles(self):
+        rendered = self.hand_edit("— merged 2026-09-16T17:12.", "— merged, I think.")
+        for _ in range(3):
+            self.assertEqual(self.home.run("render", check=False).returncode, EXIT_CONFLICT)
+        conflicts = self.home.rows("SELECT data FROM events WHERE kind = 'render' AND json_extract(data, '$.conflict') = 1")
+        self.assertEqual(len(conflicts), 1)  # once per path and on-disk hash
+        self.assertEqual(json.loads(conflicts[0]["data"])["path"], "ledger/tickets/%s.md" % self.t["key"])
+        proc = self.home.run("doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+        self.assertIn("hand-edited ledger/tickets/%s.md" % self.t["key"], proc.stderr)
+        self.assertIn("render --discard ledger/tickets/%s.md" % self.t["key"], proc.stderr)
+        out = self.home.json("render", "--discard", self.note, actor="spud")
+        self.assertEqual((out["discarded"], out["conflicts"]), (["ledger/tickets/%s.md" % self.t["key"]], []))
+        self.assertEqual(self.note.read_text(encoding="utf-8"), rendered)
+        discarded = self.home.rows("SELECT data FROM events WHERE kind = 'render' AND json_extract(data, '$.discarded') = 1")
+        self.assertIn("— merged, I think.", json.loads(discarded[0]["data"])["text"])
+        self.assertEqual(self.home.json("render")["written"], [])
+
+    def test_import_file_refuses_each_of_them_by_name(self):
+        cases = [
+            ("pr: 361", "pr: 362", "pr and pr_state are the landing pull request"),
+            ("pr_state: merged", "pr_state: open", "pr and pr_state are the landing pull request"),
+            ("Pull request [#361]", "Pull request, maybe, [#361]", "## Landing is generated from the ledger"),
+            ("Owed: the done move", "Owed: nothing at all", "spud pr record|reconcile"),
+        ]
+        rendered = self.note.read_text(encoding="utf-8")
+        for old, new, message in cases:
+            with self.subTest(old):
+                self.hand_edit(old, new)
+                self.assertEqual(self.home.run("render", check=False).returncode, EXIT_CONFLICT)  # each one is seen
+                proc = self.home.run("import", "--file", self.note, actor="spud", check=False)
+                self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+                self.assertIn(message, proc.stderr)
+                self.note.write_text(rendered, encoding="utf-8")
+        self.assertEqual(self.home.json("render")["written"], [])  # nothing was accepted, so nothing changed
+
+    def test_an_edit_of_a_section_eric_owns_is_still_accepted_beside_it(self):
+        """The new section refuses its own edits without standing in the way of the ones `import --file` allows: the
+        Brief of a note that carries a ## Landing is accepted, and the landing renders on untouched."""
+        self.hand_edit("## Brief\n", "## Brief\nEric wrote this by hand.\n")
+        accepted = self.home.json("import", "--file", self.note, actor="spud")
+        self.assertEqual(accepted["changed"], ["brief"])
+        self.assertEqual(self.home.json("ticket", "show", self.t["key"])["ticket"]["brief"], "Eric wrote this by hand.")
+        text = self.rendered()
+        self.assertIn("merged 2026-09-16T17:12.", section(text, "Landing"))
+        self.assertIn("pr: 361", frontmatter(text))
+
+    def test_deleting_the_section_by_hand_is_refused(self):
+        text = self.note.read_text(encoding="utf-8")
+        before, rest = text.split("## Landing\n", 1)
+        self.note.write_text(before + "## Outcome" + rest.split("## Outcome", 1)[1], encoding="utf-8")
+        proc = self.home.run("import", "--file", self.note, actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+        self.assertIn("the note's sections are fixed", proc.stderr)
+        self.assertIn("deleted: Landing", proc.stderr)
+
+
+class LandingImportTest(LandingCase):
+    """The rendered markdown is the ledger's disaster-recovery import source, and `pull_requests` is the one table it
+    cannot rebuild: the note carries the number, the state and the URL, but not the branch, the worktree, who recorded
+    the pull request or when it was last read -- and a merged row whose ticket is done shows no owed line at all, so
+    the columns that make a row actionable are exactly the ones the note drops.  A rebuilt row would claim a `pr
+    record` and a `gh pr view` that never happened.  So the import reads past the two keys and the section, names them
+    in its event, and Spud re-records the pull request with one `spud pr record` -- its URL is in the note."""
+
+    def test_the_tree_import_reads_past_the_landing_and_the_note_renders_without_it(self):
+        self.record()
+        self.settle()
+        first = self.home.path / "first"
+        self.home.json("render", "--out", first)
+        source = (first / "ledger" / "tickets" / ("%s.md" % self.t["key"])).read_text(encoding="utf-8")
+        self.assertIn("pr: 361", source)
+        other = Home()
+        self.addCleanup(other.cleanup)
+        other.init()
+        counts = other.json("import", first / "ledger")
+        self.assertEqual((counts["tickets"], counts["prose_sections"]), (1, 0))  # no ## Landing prose is ever stored
+        self.assertEqual(other.scalar("SELECT count(*) FROM pull_requests"), 0)
+        self.assertEqual(other.rows("SELECT layout FROM tickets"), [{"layout": None}])  # nor is it part of the layout
+        data = [json.loads(r["data"]) for r in other.rows("SELECT data FROM events WHERE kind = 'import' AND ticket_id IS NOT NULL")]
+        self.assertEqual([d.get("dropped") for d in data], [["pr", "pr_state", "Landing"]])
+        second = other.path / "second"
+        other.json("render", "--out", second)
+        before, rest = source.replace("pr: 361\n", "").replace("pr_state: merged\n", "").split("## Landing\n", 1)
+        want = before + "## Outcome" + rest.split("## Outcome", 1)[1]
+        self.assertEqual((second / "ledger" / "tickets" / ("%s.md" % self.t["key"])).read_text(encoding="utf-8"), want)
+        # and the pull request is one command away, its URL in the note Eric is looking at
+        other.json("pr", "record", "--ticket", self.t["key"], "--url", URL, "--branch", BRANCH, actor="spud")
+        other.json("render")
+        self.assertIn("## Landing", (other.path / "ledger" / "tickets" / ("%s.md" % self.t["key"])).read_text(encoding="utf-8"))
+
+    def test_a_ticket_note_with_no_landing_imports_and_renders_byte_for_byte(self):
+        first = self.home.path / "first"
+        self.home.json("render", "--out", first)
+        other = Home()
+        self.addCleanup(other.cleanup)
+        other.init()
+        other.json("import", first / "ledger")
+        second = other.path / "second"
+        other.json("render", "--out", second)
+        rel = "ledger/tickets/%s.md" % self.t["key"]
+        self.assertEqual((second / rel).read_bytes(), (first / rel).read_bytes())
+        self.assertEqual(other.rows("SELECT layout FROM tickets"), [{"layout": None}])
+        data = [json.loads(r["data"]) for r in other.rows("SELECT data FROM events WHERE kind = 'import' AND ticket_id IS NOT NULL")]
+        self.assertEqual([d.get("dropped") for d in data], [None])
 
 
 if __name__ == "__main__":

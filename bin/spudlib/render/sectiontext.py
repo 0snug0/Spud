@@ -20,6 +20,27 @@ def render_team_section(con, t, pricing=None):
     return "\n".join(lines)
 
 
+def render_landing_section(con, t):
+    """## Landing (SPD-116): every pull request recorded against the ticket, in record order, each as one sentence --
+    the number as a link on its URL, and the state in the words the board uses -- with what a merge leaves owed under
+    it, from `lookup.pr_owed`, so the wording of an owed landing has one definition.  Empty without a pull request, so
+    a ticket that never had one renders as it did before this section existed.
+
+    Stored columns only.  No `gh` call: the render reads `pull_requests`, and reading GitHub is `pr reconcile`'s alone.
+    And nothing here says when the row was last read, or that the last read failed -- `spud board` and `spud doctor`
+    carry that, live, where it belongs.  A relative stamp would make every render a change (the watcher renders within
+    seconds of every write, and "4 min ago" is never identical twice); an absolute read stamp would rewrite the note
+    on every reconcile pass that found nothing new.  What renders here moves only when the landing itself does."""
+    parts = []
+    for p in lookup.pull_requests(con, [t["id"]]):
+        d = lookup.pr_dict(con, p)
+        parts.append("Pull request [%s](%s) — %s." % (lookup.pr_name(d), d["url"], lookup.pr_state_text(d)))
+        owed = lookup.pr_owed(d)
+        if owed:
+            parts.append("Owed: %s." % "; ".join(owed))
+    return "\n\n".join(parts)
+
+
 def handoff_party(con, member_id):
     if member_id is None:
         return "Spud"
@@ -117,6 +138,8 @@ def ticket_section_text(con, t, name, pricing=None):
         return t[kernel.TICKET_COLUMN_SECTIONS[name]] or ""
     if name == "Team":
         return render_team_section(con, t, pricing)  # from members alone: stored Team prose is not rendered
+    if name == kernel.LANDING_SECTION:
+        return render_landing_section(con, t)  # from pull_requests alone, the same way (kernel.TICKET_GENERATED_SECTIONS)
     prose, after = teamcard.prose_for(con, "ticket", t["id"], name)
     if name == "Handoffs":
         return teamcard.join_prose(prose, render_handoff_rows(con, t, after))
