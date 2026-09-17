@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/python3.14
 """Headless probes for the ledger hooks (real `claude -p` sessions, real API usage).
 
-Each scenario builds a scratch SPUD_HOME (a copy of bin/spud and spud.config.json, `spud init`,
+Each scenario builds a scratch SPUD_HOME (a copy of bin/spud and tests/fixtures/spud.config.json, `spud init`,
 a ticket, the planned members it needs), generates a settings file with `spud settings sync`
 on top of a capture hook that appends every raw payload, stamped with the capture time, to
 hooks.jsonl, then runs one `claude -p` session in that home with `--settings` and an `--agents`
@@ -35,7 +35,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SPUD = REPO / "bin" / "spud"
-CONFIG = REPO / "spud.config.json"
+CONFIG = REPO / "tests" / "fixtures" / "spud.config.json"  # the suite's fixture: the tool keeps no home config (SPD-097)
 PYTHON = sys.executable
 
 HOOK_TABLE = (

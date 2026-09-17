@@ -8,9 +8,9 @@ Run one scenario at a time, from any directory:
 scenarios, but it was taken, so they live beside it.)
 
 Each scenario builds a scratch directory under the system temp directory: a scratch home (a git repository holding a copy of
-this checkout's bin/spud, bin/spud_ledger.py, spud.config.json and .claude/agents/spudagent.md, with a bare origin, `spud
-init`) and a scratch "other" repository standing in for BadTakes (key badtakes, prefixes BAD / BADS, Eric 2026-09-14), with
-a commit and a bare origin.  It runs `project add` and `project install` with SPUD_USER_CLAUDE_DIR and SPUD_CONFIG_DIR in the
+this checkout's bin/spud, bin/spud_ledger.py and .claude/agents/spudagent.md and of the suite's
+tests/fixtures/spud.config.json, with a bare origin, `spud init`) and a scratch "other" repository standing in for BadTakes
+(key badtakes, prefixes BAD / BADS, Eric 2026-09-14), with a commit and a bare origin.  It runs `project add` and `project install` with SPUD_USER_CLAUDE_DIR and SPUD_CONFIG_DIR in the
 scratch directory, then launches `claude -p --model haiku --setting-sources project,local` in the other repository, so the
 installed local settings are the settings that load.  `spudagent` is passed with --agents, since a headless run cannot
 redirect user scope.  Nothing touches Spud's or BadTakes' repositories.  The stream of each run, the scratch ledger's
@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[2]
+CONFIG = REPO / "tests" / "fixtures" / "spud.config.json"  # the suite's fixture: the tool keeps no home config (SPD-097)
 PY = sys.executable
 MODEL = "haiku"
 IDENTITY = {"GIT_AUTHOR_NAME": "Spud probe", "GIT_AUTHOR_EMAIL": "probe@example.invalid", "GIT_COMMITTER_NAME": "Spud probe", "GIT_COMMITTER_EMAIL": "probe@example.invalid"}
@@ -75,8 +76,9 @@ class Scratch:
     def build(self):
         self.home.mkdir()
         (self.home / "bin").mkdir()
-        for rel in ("bin/spud", "bin/spud_ledger.py", "spud.config.json"):
+        for rel in ("bin/spud", "bin/spud_ledger.py"):
             shutil.copyfile(REPO / rel, self.home / rel)
+        shutil.copyfile(CONFIG, self.home / "spud.config.json")
         shutil.copytree(REPO / "bin" / "spudlib", self.home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
         os.chmod(self.home / "bin" / "spud", 0o755)
         (self.home / ".claude" / "agents").mkdir(parents=True)
