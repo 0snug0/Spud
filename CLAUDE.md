@@ -23,10 +23,10 @@ Read `.claude/skills/spudlib-modules/SKILL.md` first: the import rule (a module 
 The full suite, from the checkout or a worktree root:
 
 ```bash
-python3.14 -I -S tests/suite.py   # 986 tests on 18 workers, about 80 seconds; the last line names the tree it ran
+python3.14 -I -S tests/suite.py   # the full suite on every core, about 80 seconds; the last line names the tree it ran
 ```
 
-`tests/suite.py` (SPD-102) reads every file `git ls-files -c -o --exclude-standard` lists (tracked, or untracked and not ignored) into a scratch copy, runs the suite there in one worker interpreter per core, and removes the copy; it writes nothing into the checkout, bytecode included. A file edited during a run reaches no worker, so a run tests exactly the tree it started from, and two runs in one checkout share no file, only the cores (SPD-083). Failures print as unittest prints them, and the run ends with one line on stdout, for example `OK: 986 tests in 79.8 s on 18 workers; tree 7ac5aaaa712f01ed`: the result and the digest of the tree it covered. `python3.14 -I -S tests/suite.py --digest` prints the checkout's digest now, running nothing. It changes when any listed file's content, mode or presence changes, and never for bytecode, scratch files or anything else git ignores. A member records its green run's final line in its `member result`.
+`tests/suite.py` (SPD-102) reads every file `git ls-files -c -o --exclude-standard` lists (tracked, or untracked and not ignored) into a scratch copy, runs the suite there in one worker interpreter per core, and removes the copy; it writes nothing into the checkout, bytecode included. A file edited during a run reaches no worker, so a run tests exactly the tree it started from, and two runs in one checkout share no file, only the cores (SPD-083). Failures print as unittest prints them, and the run ends with one line on stdout, for example `OK: 1013 tests in 79.8 s on 18 workers; tree 7ac5aaaa712f01ed`: the result and the digest of the tree it covered. `python3.14 -I -S tests/suite.py --digest` prints the checkout's digest now, running nothing. It changes when any listed file's content, mode or presence changes, and never for bytecode, scratch files or anything else git ignores. A member records its green run's final line in its `member result`.
 
 While iterating, run only the modules, classes or tests you touched, `python3.14 -I -S tests/suite.py test_members test_hooks.StopTest` (seconds; about a minute for all of `test_hooks`), and run the whole suite once at the end. A named run's final line says `partial`, and it proves nothing at landing. `-j N` overrides the worker count; `--cold` gives every scratch home an empty bytecode cache, as before SPD-102. Two rules keep the parallel run honest: a test that asserts an upper bound on wall time carries `helpers.wall_clock` and runs after every other test is done, and a `SpudTestCase` that asserts what the launcher caches or what `init` or a backup leaves in `.spud/` sets `warm_cache = False`.
 
@@ -40,9 +40,10 @@ Either way the suite runs entirely against scratch homes built from `tests/fixtu
 
 - `hook_timing.py [ROUNDS] LAUNCHER [LAUNCHER ...]` — hook-run medians, interleaved across launchers; run it against main's launcher after any change to the hook path, and pass only when every hook case's median lands within 1 ms of main's in the same run.
 - `module_sizes.py [PATH ...]` — application-code line counts and each file's largest definition, banded at 250 and 1000 lines; advisory, always exits 0.
-- `session_diff.py LAUNCHER_A LAUNCHER_B` — 44 scripted CLI and hook calls compared step by step after masking; run after a refactor meant to leave behavior alone.
+- `session_diff.py LAUNCHER_A LAUNCHER_B` — scripted CLI and hook calls compared step by step after masking; run after a refactor meant to leave behavior alone.
 - `render_timing.py [TICKETS] [MEMBERS_PER_TICKET] [LAUNCHER]` — a full pass and a no-change pass of `spud render` over a synthetic ledger, timed.
 - `headless.py <scenario> [--root DIR] [--model haiku]` and `headless_projects.py <scenario>` — real `claude -p` sessions against a scratch home, real API usage (roughly $0.10 to $0.50 a scenario on haiku); run one scenario at a time.
+- `context_limit.py SIZE [--filler ascii|latin|emoji] [--model haiku] [--root DIR]` — a real `claude -p` session measuring how large a SessionStart hook's `additionalContext` reaches the model whole, and whether the harness counts code points, UTF-16 units or bytes; real API usage, a few cents a run on haiku; run one size at a time.
 
 ## Landing
 

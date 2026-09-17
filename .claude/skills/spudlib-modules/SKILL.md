@@ -9,21 +9,21 @@ description: The rules the spud program's package bin/spudlib/ was built on. Rea
 
 ```
 bin/
-  spud               the launcher, 58 lines: loads the entry by path, with today's bytecode rule
-  spud_ledger.py     the entry, 191 lines: the finder, the public surface, HookCall, main, the refusal
-  spudlib/           the program: 58 modules in nine directories, no __init__.py
-    core/      kernel · lazy · markdown · homeconf
+  spud               the launcher: loads the entry by path, with today's bytecode rule
+  spud_ledger.py     the entry: the finder, the public surface, HookCall, main, the refusal
+  spudlib/           the program in nine directories, no __init__.py
+    core/      kernel · lazy · markdown · homeconf · launchagents
     state/     schema · ledgerdb · lookup · actors · ops · transcripts · backup
     render/    prices · teamcard · workedon · sectiontext · notefiles
     imports/   noteimport · bulkimport · accept
-    commands/  reportentry · admincmds · doctor · schedule · settings_sync · publish · ticketcmds · proposalcmds · membercmds · resumcmd · views
+    commands/  reportentry · admincmds · doctor · schedule · settings_sync · publish · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind
     projects/  sessions · registry · install
     hooks/     hookio · worktrees · pathrule · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
     shell/     syntax · prepare · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · walk · analyse · redirect_globs · bash_rule
     cli/       helptexts · cliparser
 ```
 
-It was one file — 10663 lines when the ticket was cut, 11133 at the split. The design is `docs/spikes/spd-065/spud-ledger.md`, the independent review `docs/spikes/spd-065/review.md`, and `tests/test_package.py` is the guard test that keeps the shape. Everything below is a constraint that bites: breaking one of them either fails the suite, costs every hook run milliseconds, or makes a test pass by luck.
+It was one file before SPD-065, and `tests/test_package.py` is the guard test that keeps the shape. Everything below is a constraint that bites: breaking one of them either fails the suite, costs every hook run milliseconds, or makes a test pass by luck.
 
 ## 1. A module imports modules, never names
 
@@ -76,9 +76,9 @@ A new module is a new file in one of these directories. Nothing registers it: no
 
 Every Bash, Edit and Agent call in every session runs `spud hook PreToolUse`, and `SessionStart`, `Stop`, `PostToolUse`, `SubagentStart`, `SubagentStop` and `UserPromptSubmit` run on their own events. A hook run is a whole process: about 23 ms, and every module it imports is part of that.
 
-`hooks/dispatch.HOOK_HANDLERS` maps an event to `(module, handler)` and imports that module only when it calls it, so a hook run imports its own event's modules alone: PreToolUse 32 of the 58, Stop 15, PostToolUse 16 (measured per event in `docs/spikes/spd-065/review.md`).
+`hooks/dispatch.HOOK_HANDLERS` maps an event to `(module, handler)` and imports that module only when it calls it, so a hook run imports its own event's modules alone.
 
-`HOOK_PATH` in `tests/test_package.py` is the **exact** set of 35 modules the seven hooks import between them. The test runs each hook through the launcher and compares. So:
+`HOOK_PATH` in `tests/test_package.py` is the **exact** set of modules the seven hooks import between them. The test runs each hook through the launcher and compares. So:
 
 - **To keep a new module off the path** (the default, and what you want): let nothing in `hooks/`, `shell/`, `state/`, `core/`, `projects/sessions` or `render/prices` import it. A module reached only from `commands/` or `cli/` is off it.
 - **To put one on it** is a reviewed edit: add it to `HOOK_PATH`, and run the timing probe below against `main` before you land.
@@ -101,11 +101,11 @@ One more property worth not breaking: a handler module that fails to import is s
 - **Running `bin/spud_ledger.py` directly refuses** with exit 2 and imports nothing. Keep that.
 - **Never** add a `sys.path` entry, an absolute `import spudlib`, an `__init__.py`, or a file outside `bin/spudlib/` that the program imports.
 - **The repository ends every run with no bytecode.** `tests/suite.py` never writes any: it sets `sys.dont_write_bytecode` before it imports a test, runs the suite in a scratch copy of the tree, and only its own process removes that copy, so no two workers race on a cache directory (SPD-083, SPD-102). The serial command cannot stop its first test module and `tests/helpers.py` from being cached before the flag is set, so `tests/helpers.py` removes those caches at its exit. A one-off script that loads the program sets the flag first. After either, `find bin tests -name '*.pyc' -o -name __pycache__` prints nothing.
-- **The suite warms each scratch home's cache.** A `SpudTestCase` home starts with the program already compiled into its `.spud/pycache/` (hard links to one cache per run, built by `helpers.compile_program` the way the launcher writes it), so `spud init` and the first command skip the compile (measured on SPD-102: about 70 of the serial run's 678 seconds went to compiling; warm, it ran in 648). The classes that assert the launcher's own caching, `init` or backups set `warm_cache = False` and start empty; `tests/suite.py --cold` starts every home empty.
+- **The suite warms each scratch home's cache.** A `SpudTestCase` home starts with the program already compiled into its `.spud/pycache/` (hard links to one cache per run, built by `helpers.compile_program` the way the launcher writes it), so `spud init` and the first command skip the compile. The classes that assert the launcher's own caching, `init` or backups set `warm_cache = False` and start empty; `tests/suite.py --cold` starts every home empty.
 
 ## 5. The one import cycle
 
-Ten `shell/` modules are one strongly connected component: `analyse`, `bash_rule`, `directories`, `expansions`, `git_config`, `git_programs`, `git_verbs`, `globbing`, `redirect_globs`, `walk`. That is real recursion — `analyse_words` builds a `ShellWalk` whose segments call `analyse_words` again — not tangled layering, and breaking it would take either one 2,590-line module or function-local imports that hide the edges.
+These `shell/` modules are one strongly connected component: `analyse`, `bash_rule`, `directories`, `expansions`, `git_config`, `git_programs`, `git_verbs`, `globbing`, `redirect_globs`, `walk`. That is real recursion — `analyse_words` builds a `ShellWalk` whose segments call `analyse_words` again — not tangled layering, and breaking it would take either one large module or function-local imports that hide the edges.
 
 It is safe under one condition the guard test enforces: **no module reads another module's name while that module is being imported, unless the module read cannot reach the reader.** In practice, a cross-module read belongs **inside a function body**. These run at import time and can fail depending on which module a run imports first:
 
@@ -113,7 +113,7 @@ It is safe under one condition the guard test enforces: **no module reads anothe
 - a module-level constant built from a peer's table (`GLOB_SAMPLES`),
 - a top-level call of your own function that reads a peer.
 
-That is why `_CURRENT` and the git flag tables live in `shell/syntax`, which imports nothing of the package: the seven import-time reads that do exist all point at a module that cannot reach back.
+That is why `_CURRENT` and the git flag tables live in `shell/syntax`, which imports nothing of the package: the import-time reads that do exist all point at a module that cannot reach back.
 
 **A second cycle is a smell, not a precedent.** Two directories importing each other means a shared name is sitting too high; move it down a layer, into `core/` or `state/`. Do not reach for a function-local import — it hides the edge from the test that would have caught the problem.
 
@@ -131,9 +131,9 @@ python3.14 -I -S tests/probes/module_sizes.py        # advisory; it always exits
 
 It bands what it finds (250 and over, 1000 and over — the size that started SPD-065 here and BAD-036 in BadTakes) and names each file's largest top-level definition and that definition's share, which is the evidence the rule asks for. It is a report and never a gate: no band is a failure and nothing depends on it.
 
-Thirteen modules are over 250 today, the largest `projects/install` at 348, and §7 of the spike argues each one. The shape of the argument, from those thirteen:
+When a module passes 250, the argument takes one of these shapes:
 
-- **Keep whole** when the file is one class whose methods share state (`shell/walk`, 93% one class), one function and its way in (`shell/analyse`, `cli/cliparser`), one scanner (`shell/zsh`), one body of data read as one (`state/schema`: 170 lines of SQL), or one pair that drifts apart if separated (install and uninstall; parsing and emitting frontmatter).
+- **Keep whole** when the file is one class whose methods share state (`shell/walk`), one function and its way in (`shell/analyse`, `cli/cliparser`), one scanner (`shell/zsh`), one body of data read as one (`state/schema`), or one pair that drifts apart if separated (install and uninstall; parsing and emitting frontmatter).
 - **Take the seam** when the file is a list of things and some caller wants only part of it — and then the seam is a real one, with its own name and its own users, not a page break.
 - **Write the reason down** where the next reader will look: the module's docstring, or the ticket.
 
@@ -160,5 +160,5 @@ Its reach has known gaps (SPD-079): it does not see an alias shadowed by a neste
 1. `python3.14 -I -S tests/suite.py` — the whole suite on every core, about 80 seconds; run the modules you touched by name while you work (`tests/suite.py test_package test_hooks`) and the whole suite once at the end, and put its final line, with the tree's digest, in your result. The serial fallback, `python3.14 -I -S -m unittest discover -s tests -t tests`, takes about eleven minutes, prints no digest, and wants the checkout to itself.
 2. `find bin tests -name '*.pyc' -o -name __pycache__` prints nothing.
 3. If you touched the hook path: `HOOK_PATH` updated, and `tests/probes/hook_timing.py` within 1 ms of main.
-4. If you changed how the program is loaded or how a hook answers: `python3.14 -I -S tests/probes/session_diff.py /Users/ericlugo/Personal/Spud/bin/spud "$PWD/bin/spud"` — 44 CLI and hook calls against both launchers, every step identical after masking.
+4. If you changed how the program is loaded or how a hook answers: `python3.14 -I -S tests/probes/session_diff.py /Users/ericlugo/Personal/Spud/bin/spud "$PWD/bin/spud"` — scripted CLI and hook calls against both launchers, every step identical after masking.
 5. If you added a module or grew one: `tests/probes/module_sizes.py`, and the reason written down.
