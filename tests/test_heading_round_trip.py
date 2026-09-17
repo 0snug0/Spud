@@ -236,6 +236,8 @@ class HeadingRefusalTest(SpudTestCase):
             (("ticket", "edit", key, "--brief", "B.\n```\n## Team\n```"), "spud", "## Team"),
             (("ticket", "edit", key, "--sizing", "S.\n\n## Size, persona and model decision\nx"), "spud", "## Size, persona and model decision"),
             (("ticket", "edit", key, "--outcome", "Done.\n\n## Outcome\nmore"), "spud", "## Outcome"),
+            # SPD-116: ## Landing is a ticket section like the rest, generated from pull_requests
+            (("ticket", "edit", key, "--brief", "B.\n\n## Landing\nnot the generated section"), "spud", "## Landing"),
             # a proposal's why and evidence become a ticket's brief when Spud creates it
             (("proposal", "file", "--title", "P", "--why", "x\n\n## Handoffs\ny"), ref, "## Handoffs"),
             (("proposal", "file", "--title", "P", "--why", "x", "--evidence", "a\n## Proposals received"), ref, "## Proposals received"),
