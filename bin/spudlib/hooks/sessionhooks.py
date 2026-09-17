@@ -3,15 +3,17 @@
 import re
 
 from . import hookio
-from ..core import kernel
+from ..core import kernel, launchagents
 from ..projects import sessions
 from ..state import actors, ledgerdb, ops
 
 
 def hook_session_start(ctx, payload):
     """The board for a Spud session in the home (and outside every project); in another project (SPD-014) the one-line
-    notice for a session that is not Spud, and for a Spud one a header naming the project with the board, at most 2 KB
-    in all, since a larger additionalContext reaches the model only as a preview (the design's probe, P2)."""
+    notice for a session that is not Spud, and for a Spud one a header naming the project with the board.  A Spud
+    session's context is cut on whole lines to sessions.SESSION_CONTEXT_CAP, since a larger additionalContext reaches the
+    model only as a preview (the design's probe P2; measured on SPD-048), and carries the render watcher's line above the
+    board when the watcher is down, where no cut reaches it."""
     if not ctx.db_path.is_file():
         return hookio.SILENT
     con = ledgerdb.connect(ctx)
@@ -19,10 +21,13 @@ def hook_session_start(ctx, payload):
         mode, project, claim = sessions.session_mode(ctx, con, payload)
         if mode == "plain":
             context = sessions.plain_session_notice(ctx, project)
-        elif project is not None:
-            context = sessions.project_session_context(ctx, con, project, claim, payload)
         else:
-            context = "Ledger board (`spud board --brief` at %s, source %s):\n%s" % (kernel.now(), payload.get("source"), sessions.board_brief_text(con))
+            down = launchagents.watcher_down_line(ctx)
+            alerts = (down,) if down else ()
+            if project is not None:
+                context = sessions.project_session_context(ctx, con, project, claim, payload, alerts)
+            else:
+                context = sessions.home_session_context(con, payload, alerts)
     finally:
         con.close()
     return hookio.HookOutput({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}})

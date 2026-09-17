@@ -4,15 +4,15 @@ import os
 import sqlite3
 import sys
 
-from . import publish, renderwatch, schedule, settings_sync
-from ..core import homeconf, kernel
+from . import publish, settings_sync
+from ..core import homeconf, kernel, launchagents
 from ..hooks import hookio, worktrees
 from ..projects import install
 from ..render import prices
 from ..state import backup, ledgerdb, lookup, schema
 
 WATCHER_DOWN = ("the render watcher %s is installed but not running: the vault is stale until `spud --as spud schedule install` reloads it"
-                % schedule.RENDER_LABEL)
+                % launchagents.RENDER_LABEL)
 
 
 def cmd_doctor(ctx, args):
@@ -187,12 +187,12 @@ def doctor_render(ctx, problems, notes):
     """doctor's render section (SPD-097): whether the watcher is alive (a problem when its plist is installed and it is not,
     a note when it was never installed), and every rendered file whose on-disk text is neither the last render's nor the
     current one, each with the two commands that settle it."""
-    installed = renderwatch.watcher_installed()
-    alive = renderwatch.watcher_alive(ctx)
+    installed = launchagents.watcher_installed()
+    alive = launchagents.watcher_alive(ctx)
     if installed and not alive:
         problems.append(WATCHER_DOWN)
     elif not installed:
-        notes.append("no render watcher installed (%s): `spud --as spud schedule install`" % schedule.RENDER_LABEL)
+        notes.append("no render watcher installed (%s): `spud --as spud schedule install`" % launchagents.RENDER_LABEL)
     con = ledgerdb.connect(ctx)
     try:
         conflicts = publish.render_pass(ctx, con, None, check_only=True)["conflicts"]
