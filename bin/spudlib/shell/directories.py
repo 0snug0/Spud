@@ -102,10 +102,12 @@ def strip_wrapper(words):
             continue
         break
     if name == "env":
-        while rest and syntax.ASSIGNMENT_RE.match(rest[0]):
-            am = syntax.ASSIGNMENT_WORD_RE.match(rest[0])
-            if am and not am.group(2):
-                assignments.append((am.group(1), am.group(3)))  # env's environment reaches the command it runs (SPD-044)
+        # env puts every operand holding `=` past its first character in the environment, whatever the name (SPD-106,
+        # probed: `a b=c`, `x[1]=y`, `a%b=c` and `BASH_FUNC_foo%%=() { ...; }` each reached the program; `=x` is an
+        # error), so none of them is the command it runs
+        while rest and "=" in rest[0][1:]:
+            aname, _, avalue = rest[0].partition("=")
+            assignments.append((aname, avalue))  # env's environment reaches the command it runs (SPD-044)
             rest = rest[1:]
     elif name == "timeout" and rest and syntax.DURATION_RE.fullmatch(rest[0]):
         rest = rest[1:]

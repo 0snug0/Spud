@@ -177,16 +177,24 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                     " which the shell does not search PATH for; Spud commits, after the outcome is recorded" % (var, name, name)), analysis
         elif kind == "hashed":
             return ("Law 7: this line hashes `%s` into the shell's own command table (`hash -p <path> <name>` in bash,"
-                    " `hash <name>=<path>` in zsh), so a later bare `%s` runs that file whatever PATH holds and the program"
-                    " the hook checked is not the one that would run. Hash none of the names the hook reads (git, spud,"
-                    " python3.14, sqlite3, tee, a shell, a wrapper), or spell the program's path out; Spud commits, after"
-                    " the outcome is recorded" % (detail, detail)), analysis
+                    " `hash <name>=<path>` or an element of the `commands` parameter in zsh, whose name the hook may not"
+                    " be able to read), so a later bare `%s` runs that file whatever PATH holds and the program the hook"
+                    " checked is not the one that would run. Hash none of the names the hook reads (git, spud, python3.14,"
+                    " sqlite3, tee, a shell, a wrapper), or spell the program's path out; Spud commits, after the outcome"
+                    " is recorded" % (detail, detail)), analysis
         elif kind == "function":
-            return ("Law 7: this line defines a shell function `%s`, so a later bare `%s` runs that function and not the"
-                    " program the hook checked (a shell function shadows a command of the same name in command position)."
-                    " Define no function named for one of the names the hook reads (git, spud, python3.14, sqlite3, tee, a"
-                    " shell, a wrapper), or reach the program past the function (`command %s`, an absolute path); Spud"
-                    " commits, after the outcome is recorded" % (detail, detail, detail)), analysis
+            return ("Law 7: this line defines a shell function `%s` (a definition, or an element of zsh's `functions`"
+                    " parameter, whose name the hook may not be able to read), so a later bare `%s` runs that function and"
+                    " not the program the hook checked (a shell function shadows a command of the same name in command"
+                    " position). Define no function named for one of the names the hook reads (git, spud, python3.14,"
+                    " sqlite3, tee, a shell, a wrapper), or reach the program past the function (`command %s`, an absolute"
+                    " path); Spud commits, after the outcome is recorded" % (detail, detail, detail)), analysis
+        elif kind == "env-function":
+            return ("Law 7: this line puts `%s` in a program's environment (env, sudo, export, a prefix assignment, or"
+                    " bash's `export -f`), and every bash or sh started under it, however far down, imports a shell"
+                    " function from a BASH_FUNC_<name>%%%% variable that runs in place of the program the hook checked --"
+                    " a child the hook never sees. A member has no reason to hand a program a function: set no BASH_FUNC_*"
+                    " variable and export no function; Spud commits, after the outcome is recorded" % detail), analysis
         elif kind == "var":
             return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
         elif kind == "var-word":
@@ -199,8 +207,9 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                     " a command's prefix, or a builtin that assigns it), so the hook cannot resolve the words it becomes; spell them out"
                     % detail), analysis
         elif kind == "alias":
-            return ("`eval` runs the command word %s, which this line defines as an alias the hook cannot resolve: its body holds"
-                    " an expansion or a substitution, or the definition or an `unalias` may not have run (a branch, a subshell, a"
+            return ("`eval` runs the command word %s, which this line defines as an alias the hook cannot resolve (an `alias`"
+                    " line, or an element of zsh's `aliases` parameter): its name or its body holds an expansion or a"
+                    " substitution, or the definition or an `unalias` may not have run (a branch, a subshell, a"
                     " pipeline, a background list, a loop or function body, a reading only one shell makes). A shell expands an"
                     " alias when it parses the text, so the command that runs is not the one written; spell the command out, or"
                     " define no alias on the line" % detail), analysis

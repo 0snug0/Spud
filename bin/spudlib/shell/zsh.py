@@ -3,14 +3,13 @@
 import bisect
 import re
 
-from . import syntax
+from . import assignment_words, syntax
 
 
 # Reserved words after which zsh is still in command position, so `(` opens a subshell (zsh's lexer: a word turns command
 # position off, these and an assignment keep it; probed with `time (cd x)`, `! (cd x)`, `if (cd x)`, `{ (cd x) }`).
 ZSH_COMMAND_POSITION_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "done", "{", "}", "!", "time", "coproc", "nocorrect"}
 _PLAIN_RUN_RE = re.compile(r"[^\s;&|<>()'\"\\$]+")  # characters a word copies as they are
-_ARRAY_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")  # `name=` or `name+=` before an array's parenthesis
 # SPD-088: how the text of an arithmetic command `(( ... ))` and of an arithmetic expansion `$(( ... ))` is marked.  Both
 # shells evaluate it as arithmetic and run no command in it, so every character shlex, separate_redirects or ShellWalk would
 # otherwise read as an operator is replaced with an arithmetic sentinel (syntax._ARITH_SENTINELS), every glob metacharacter
@@ -270,7 +269,8 @@ def mark_zsh_patterns(text):
                     break
                 else:
                     reserved = command and 0 < j - start <= 9 and text[start:j] in ZSH_COMMAND_POSITION_WORDS  # `{(`, `else(`: a subshell
-                    array = target is None and j > start and text[j - 1] == "=" and _ARRAY_NAME_RE.fullmatch(text, start, j)
+                    # `name=(`, `name+=(` and, since SPD-085, `name[1,0]=(`: an array assignment's parenthesis, never a group
+                    array = target is None and j > start and text[j - 1] == "=" and assignment_words.array_head(text[start:j])
                     group = None
                     if not (cond or heredoc or reserved or array or text.startswith("()", j)):
                         group = _zsh_group(text, j, scan)
@@ -327,7 +327,7 @@ def mark_zsh_patterns(text):
             elif w in ("for", "select", "foreach", "function", "repeat"):
                 command, arith_next = False, w in ("for", "select")
                 for_list, repeat_count = 1 if w in ("for", "select") else 0, w == "repeat"
-            elif w in ZSH_COMMAND_POSITION_WORDS or syntax.ASSIGNMENT_WORD_RE.match(w):
+            elif w in ZSH_COMMAND_POSITION_WORDS or assignment_words.assignment_word(w):
                 pass
             else:
                 command = False

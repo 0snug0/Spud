@@ -2,7 +2,7 @@
 
 import os
 
-from . import directories, expansions, git_programs, git_verbs, globbing, prepare, spud_calls, syntax, walk, zsh
+from . import assignment_words, directories, expansions, git_programs, git_verbs, globbing, prepare, spud_calls, syntax, walk, zsh
 from ..hooks import hookio
 
 
@@ -129,7 +129,8 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
     coproc, command_position = False, True
     while words:
         w = words[0]
-        m = None if fresh else syntax.ASSIGNMENT_WORD_RE.match(w)
+        # SPD-085: `name[subscript]=value` too, read before any glob reading of its brackets
+        m = None if fresh else assignment_words.assignment_word(w)
         reserved = not fresh and w in syntax.RESERVED_WORDS
         if not (m or reserved):
             a.doubt.update(prefix_names)  # a prefix assignment is the command's environment; the shell's variable keeps its value (SPD-043)
@@ -158,9 +159,8 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
             # group's opener as the reserved word it is before it expanded anything (`N=NAME; coproc $N { git push; }`)
             words, coproc, fresh = words[1:], False, 0
         elif m:
-            name, append, value = m.groups()
-            expansions.assign_variable(a, name, value, bool(append))
-            prefix_names.append(name)
+            record_assignment(a, m)
+            prefix_names.append(m[0])
             words = words[1:]
         elif w == "-":
             effect = max(effect, "either", key=directories.EFFECT_ORDER.get)  # zsh's `-` precommand modifier; bash finds no `-`
@@ -179,9 +179,11 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 continue
             wrapper_from = 1
             for aname, avalue in env_assignments:
+                if aname.startswith(assignment_words.ENV_FUNCTION_PREFIX):
+                    a.findings.append(("env-function", prepare.deglob(aname)))  # SPD-106: a function bash and sh import
                 # `env GIT_CONFIG_*/HOME/GIT_PAGER/GIT_SSH_COMMAND/GIT_DIR/PATH/GIT_TRACE=... git ...` (SPD-044, SPD-046,
                 # SPD-047, SPD-062, SPD-049)
-                if (git_programs.is_git_config_var(aname) or git_programs.is_git_program_var(aname)
+                if syntax.IDENTIFIER_RE.match(aname) and (git_programs.is_git_config_var(aname) or git_programs.is_git_program_var(aname)
                         or git_programs.is_git_repo_var(aname) or git_programs.is_path_var(aname)
                         or git_programs.is_git_write_var(aname)):
                     a.vars[aname] = avalue
@@ -206,6 +208,10 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
     if not words:
         return
     cmd = words[0]
+    if cmd.startswith(assignment_words.ENV_FUNCTION_PREFIX) and "=" in cmd:
+        # SPD-106: `BASH_FUNC_<name>%%=...` is no assignment to a shell, but sudo reads it as one, and env reads it so
+        # wherever strip_wrapper did not: refused as the environment it spells, whatever takes it
+        a.findings.append(("env-function", prepare.deglob(cmd.partition("=")[0])))
     if a.alias_scope and command_position:
         # SPD-059: inside `eval`, a command word the line aliased runs the alias's body, not a command of its own.  The body
         # is read as the shell text it is, with its own quotes and the words after it, as eval's rejoined words are.
@@ -345,15 +351,57 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
     elif cmd in syntax.SHELL_DECLARATIONS:
         a.kinds.append("other")
         for w in words[1:]:
-            m = syntax.ASSIGNMENT_WORD_RE.match(w)
+            m = assignment_words.declaration_word(w)
             if m:
-                expansions.assign_variable(a, m.group(1), m.group(3), bool(m.group(2)))
+                record_assignment(a, m)
+            elif w.startswith(assignment_words.ENV_FUNCTION_PREFIX):  # `export 'BASH_FUNC_git%%=...'`, `export BASH_FUNC_x` (SPD-106)
+                a.findings.append(("env-function", prepare.deglob(w.partition("=")[0])))
+        a.findings.extend(("env-function", name) for name in exported_function_names(words))
         if any(w.startswith(("-", "+")) for w in words[1:]):
             for w in words[1:]:  # an attribute (`declare -n X=Y`, `typeset -i`, `local -a`) changes what the name reads (SPD-043)
                 a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(w)))
     else:
         a.kinds.append("other")  # CD, /usr/bin/cd, env cd: /usr/bin/cd in its own process, and the shell stays
     shadowed_name(a, cmd, path_names)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason
+
+
+def record_assignment(a, found):
+    """Record a word the shell reads as an assignment, found = (name, subscript or None, whether it appends, value) from
+    assignment_words.  The variable is assigned where the shell runs it (SPD-043); a subscripted one changes part of its
+    value, which the hook does not compute, so its value is unknown as an appended one's is, and it counts for every rule
+    that reads the variable as a plain assignment does -- PATH and zsh's `path` for shadowed_name, CDPATH, GIT_* (SPD-085).
+    An element of zsh's `functions`, `commands` or `aliases` binds the name it keys as a definition, a `hash` or an `alias`
+    line would (SPD-105), a name the hook cannot read standing for all of them; and a BASH_FUNC_ variable is refused
+    outright (SPD-106)."""
+    name, subscript, append, value = found
+    if name.startswith(assignment_words.ENV_FUNCTION_PREFIX):
+        a.findings.append(("env-function", name))
+    special = assignment_words.special_bindings(name, subscript, append, value)
+    if special is not None:
+        table, pairs = special
+        if table == "alias":
+            if pairs is None:
+                a.alias_unknown = True
+            for key, body in pairs or ():
+                expansions.record_alias_definition(a, key, body)
+        else:
+            names = a.functions if table == "function" else a.hashed
+            names.update([syntax.UNKNOWN_NAME] if pairs is None else [prepare.deglob(key) for key, _ in pairs])
+    expansions.assign_variable(a, name, value, append or subscript is not None)
+
+
+def exported_function_names(words):
+    """The variables `export -f <name>` and `declare -fx <name>` (typeset, local) put in the environment of every program
+    bash starts later, BASH_FUNC_<name>%%, for a name the hook reads (SPD-106): a bash or sh started under any of them
+    imports the function, which shadows the name there (probed: `bash -c 'foo() { echo SH; }; export -f foo; sh -c foo'`
+    ran it).  zsh's `export -f` lists functions and exports nothing (probed), so on the Bash tool's own line this is a
+    refusal on doubt, the line being read for every shell.  A name the hook grants nothing for is left alone: its body is
+    on the line and was read."""
+    options = "".join(w[1:] for w in words[1:] if w.startswith("-") and w != "--")
+    if "f" not in options or (words[0] != "export" and "x" not in options):
+        return []
+    return [assignment_words.ENV_FUNCTION_PREFIX + prepare.deglob(w) + "%%" for w in words[1:]
+            if not w.startswith("-") and git_programs.path_dispatched(w)]
 
 
 def hashed_names(words):
@@ -391,14 +439,14 @@ def shadowed_name(a, cmd, path_names):
     decides the lookup of every one of these names, so both are read for the command word and the wrappers alike."""
     bypass = [w for w in path_names if os.path.basename(w).casefold() not in syntax.FUNCTION_KEEP_WRAPPERS]
     for word in bypass[:1] if bypass else [cmd]:
-        if git_programs.path_dispatched(word) and prepare.deglob(word) in a.functions:
+        if git_programs.path_dispatched(word) and (prepare.deglob(word) in a.functions or syntax.UNKNOWN_NAME in a.functions):
             a.findings.append(("function", prepare.deglob(word)))
             return
     for word in [cmd] + path_names:
         if not git_programs.path_dispatched(word):
             continue
         name = prepare.deglob(word)
-        if name in a.hashed:
+        if name in a.hashed or syntax.UNKNOWN_NAME in a.hashed:
             a.findings.append(("hashed", name))
             return
         var = git_programs.path_in_force(a.vars)

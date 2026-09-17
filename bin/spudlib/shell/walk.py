@@ -1,6 +1,6 @@
 """shell/walk: ShellFrame and ShellWalk: one pass over a line's tokens.  Moved from bin/spud_ledger.py (SPD-065)."""
 
-from . import analyse, directories, globbing, prepare, syntax
+from . import analyse, assignment_words, directories, globbing, prepare, syntax
 from ..hooks import hookio
 
 
@@ -317,11 +317,12 @@ class ShellWalk:
                 self.branch()
             elif t == "(" and case and case.pattern:
                 pass  # a pattern's optional opening parenthesis
-            elif t == "(" and self.words and syntax.ARRAY_ASSIGNMENT_RE.match(self.words[-1]) and not self.skip:
+            elif t == "(" and self.words and assignment_words.array_head(self.words[-1]) and not self.skip:
                 j = i + 1
                 while j < len(toks) and toks[j] != ")":
                     j += 1
-                self.words[-1] += syntax._ARRAY_VALUE + " ".join(toks[i + 1 : j])  # name=(a b), name=(): one assignment word, marked an array
+                # name=(a b), name=(), name[1,0]=(a) (SPD-085): one assignment word, marked an array
+                self.words[-1] += assignment_words.array_value(toks[i + 1 : j])
                 i = j
             elif t == "(" and i + 1 < len(toks) and toks[i + 1] == ")" and not self.skip:
                 self.a.functions.update(_function_names(self.words))  # SPD-084: name (), name() and zsh's `a b () ...`

@@ -120,7 +120,6 @@ GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}|[" + ZSH_OPEN + ZSH_RANGE
 ZSH_RANGE_RE = re.compile(r"<(\d*)-(\d*)>")  # zsh's numeric glob, read as one wherever it stands unquoted (probed)
 GLOB_MATCH_CAP = 500   # the most files a redirection glob is expanded to before the hook refuses a member (SPD-034)
 GLOB_SCAN_CAP = 5000   # the most directory entries scanned expanding one glob, so `**` never walks a large tree unbounded
-ARRAY_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=$")
 # SPD-059: an `alias` definition word, `name=body`, as it reaches the analysis with its quotes taken (`alias gp='git push'`
 # is one word, `gp=git push`).  The shells take almost any name, so the name is everything before the first `=`; a bare word
 # is a query, which defines nothing.
@@ -128,6 +127,10 @@ ALIAS_WORD_RE = re.compile(r"^([^=\s]+)=(.*)\Z", re.S)
 # The key an alias's name is recorded under in `assigned` and `doubt`, so every rule that doubts a variable the line assigned
 # doubts the alias too.  No variable name can hold it.
 ALIAS_KEY = "\x00alias\x00"
+# SPD-105: the entry ShellAnalysis.functions and .hashed hold when the line set an element of zsh's `functions` or
+# `commands` parameter whose name the hook cannot read (`functions[$k]=`, `functions+=($pairs)`), so every name the hook
+# reads may now be one.  No command name can hold it.
+UNKNOWN_NAME = "\x00unknown\x00"
 ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)\Z", re.S)
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"}
 PYTHON_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?$")
@@ -359,13 +362,16 @@ class ShellAnalysis:
         self.aliases, self.alias_scope, self.alias_unknown = {}, 0, False
         # SPD-062: the command names a `hash` line put in the shell's own command table, so a later bare call of one of them
         # runs the file the line chose whatever PATH holds.  Never cleared: a `hash` in a branch, a subshell or a loop body
-        # still leaves the hook unable to say which program a name finds, and the refusal is the safe answer.
+        # still leaves the hook unable to say which program a name finds, and the refusal is the safe answer.  zsh's
+        # `commands[name]=<path>` fills the same table (SPD-105), and UNKNOWN_NAME stands for a name it cannot read.
         self.hashed = set()
         # SPD-084: the names a `name () { ... }`/`function name` definition earlier on the line bound to a shell function, so
         # a later bare call of one of them (in command position) runs that function, not the program the hook read.  Kept as a
         # set like `hashed`, but scoped: a definition in a branch, a loop or another function's body may exist at the call, so
         # it is kept (refuse on doubt); one in a `( ... )` subshell does not reach a call after it, so ShellWalk restores this
-        # set when the subshell frame closes (probed: `(git(){ :; }); git status` ran the real git).
+        # set when the subshell frame closes (probed: `(git(){ :; }); git status` ran the real git).  zsh's `functions`
+        # parameter binds the same names (SPD-105: `functions[git]=body`, `functions+=(git body)`), and UNKNOWN_NAME stands
+        # for one whose name the hook cannot read.
         self.functions = set()
 
     @property

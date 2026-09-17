@@ -4357,7 +4357,14 @@ class AliasEvalTest(BashHookCase):
     name the hook cannot read each refuse a member where eval dispatches the name; Spud is refused by none of those, and
     keeps his own checks inside the body (Law 1, Law 5's `--as`, the database).  The body runs in the line's own shell, so a
     cd there moves the line, exactly as eval's own words do (probed: `alias cdd='cd /tmp'; eval cdd; pwd` printed /tmp, and
-    `echo x > note.txt` after it wrote /tmp/note.txt).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+    `echo x > note.txt` after it wrote /tmp/note.txt).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **.
+
+    SPD-105: zsh's special `aliases` association defines an alias too, and the hook read it as nothing.  Probed in zsh 5.9 -f
+    and -o nobareglobqual: `aliases[gp]='echo SH'; eval gp`, `aliases=(gp 'echo SH'); eval gp` and `typeset
+    'aliases[gp]=echo SH'; eval gp` ran it, `galiases[GP]=` and `saliases[txt]=` define what `alias -g` and `alias -s` do,
+    `dis_aliases[gp]=` a disabled alias that ran nothing, and `aliases[gp]=...; gp` ran nothing, as `alias` does.
+    `aliases+=(gp 'echo SH'); eval gp` defined nothing in 5.9; it is recorded all the same, refusing on doubt.  Each
+    element is now recorded as an `alias` line's `name=body` is, and a key the hook cannot read leaves every name in doubt."""
 
     def setUp(self):
         super().setUp()
@@ -4503,6 +4510,28 @@ class AliasEvalTest(BashHookCase):
         self.assertSilent("alias gp='git push'; %s --as %s member log hi" % (self.spud_cli, AGENT_A))
         self.assertAllowed("%s --as %s member log hi" % (self.spud_cli, AGENT_A))
 
+    def test_the_zsh_aliases_parameter_defines_an_alias(self):
+        for cmd in ("aliases[gp]='git push'; eval gp", "aliases=(gp 'git push'); eval gp", "aliases+=(gp 'git push'); eval gp",
+                    "typeset 'aliases[gp]=git push'; eval gp", "galiases[GP]='git push'; eval GP",
+                    "aliases[gp]='git push' true; eval gp", "aliases=(e 'echo hi' gp 'git push'); eval gp"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.assertEqual(self.analysis("aliases[gp]='git push'").aliases, {"gp": "git push"})
+        self.assertEqual(self.analysis("aliases=(e 'echo hi' gp 'git push')").aliases, {"e": "echo hi", "gp": "git push"})
+        self.assertEqual(self.analysis("aliases[gp]='git status'; eval gp").findings, [("git", ("status", None))])
+        self.silent_for_everyone("aliases[e]='echo hi'; eval e")
+        # a key or a body the hook cannot read, or a definition that may not have run
+        for cmd in ("aliases[$k]='git status'; eval gp", "aliases+=($pairs); eval gp", "aliases[g.p]='git status'; eval gp",
+                    "aliases[gp]+=' status'; eval gp", "aliases[gp]=\"$X\"; eval gp", "(aliases[gp]='git status'); eval gp",
+                    "if true; then aliases[gp]='git status'; fi; eval gp"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "cannot resolve")
+        # nothing but eval parses the name again, and a disabled alias defines nothing
+        for ok in ("aliases[gp]='git push'; gp", "dis_aliases[gp]='git push'; eval gp", "echo $aliases[gp]"):
+            with self.subTest(ok):
+                self.assertNotEqual(self.bash(ok).decision, "deny", ok)
+                self.assertNotEqual(self.bash(ok, agent_id=None).decision, "deny", ok)
+
     def test_spud_keeps_his_own_checks_inside_the_body(self):
         spud = self.spud_cli
         self.assertRefused("alias l='%s --as %s member log hi'; eval l" % (spud, AGENT_A), "Law 5", agent_id=None)
@@ -4630,10 +4659,13 @@ class PathInForceTest(BashHookCase):
     assignment, a plain assignment, `export`, `typeset -x`, `declare -x`, `local -x` inside a function and
     `env PATH=... cmd` each ran the scratch copy in all four shells, `readonly PATH=...` in bash and sh (zsh refuses to
     write a read-only PATH), and zsh's `path=(<dir> $path)` and `path+=(<dir>)`, the array PATH is tied to.  The
-    subscripted forms zsh also takes (`path[1]=<dir>`, `path[1,0]=(<dir>)`) ran it too, but they reach the analysis as a
-    command word rather than an assignment and are left to a proposal, not closed here.  bash's `hash -p <path> <name>`
-    and zsh's `hash <name>=<path>` put a file of the line's choosing in the shell's command table for the same effect,
-    and both ran it.
+    subscripted forms zsh also takes (`path[1]=<dir>`, `path[1,0]=(<dir>)`) ran it too; they reached the analysis as a
+    command word rather than an assignment until SPD-085, and SubscriptAssignmentTest covers them.  bash's `hash -p
+    <path> <name>` and zsh's `hash <name>=<path>` put a file of the line's choosing in the shell's command table for the
+    same effect, and both ran it; so does an element of zsh's `commands` parameter (SPD-105, probed in zsh 5.9 -f and -o
+    nobareglobqual: `commands[foo]=<path>; foo`, `commands+=(foo <path>)`, `commands=(foo <path>)` and `typeset
+    'commands[foo]=<path>'` each ran the file, `command foo` too, while `env foo` and `/usr/bin/env foo` ran the real one;
+    bash and sh have no such parameter).
 
     A command run by a path (`/usr/bin/git status`, `./git`) is not looked for on PATH, so a PATH in force does not refuse
     it, and a name the hook grants nothing for (`ls`) stays silent as before; GIT_EXEC_PATH keeps SPD-046's own reason.
@@ -4768,12 +4800,194 @@ class PathInForceTest(BashHookCase):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
 
+    def test_the_zsh_commands_parameter_hashes_a_name(self):
+        # SPD-105: an element of zsh's `commands` fills the table `hash` does, by every spelling zsh takes
+        for cmd in ("commands[git]=/tmp/x/git; git status", "commands+=(git /tmp/x/git); git status",
+                    "commands=(git /tmp/x/git); git status", "typeset 'commands[git]=/tmp/x/git'; git status",
+                    "commands[git]=/tmp/x/git git status", "commands[tee]=/tmp/x/tee; tee /tmp/out",
+                    "commands[git]=/tmp/x/git; command git status", "commands[git]=/tmp/x/git; nice git status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("command table", r.reason)
+        self.assertEqual(self.finding("commands[git]=/tmp/x/git; git status"),
+                         [("git", ("status", None)), ("hashed", "git")])
+        # a key the hook cannot read may be any name it reads
+        for cmd in ("commands[$k]=/tmp/x/git; git status", "commands+=($pairs); git status",
+                    "commands[(e)git]=/tmp/x/git; git status", "commands=(git); git status"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        m = load_spud_module()
+        self.assertEqual(m.analyse_command("commands[$k]=/tmp/x/git").hashed, {m.UNKNOWN_NAME})
+        # a key the hook reads and grants nothing for, or a call it resolves past the table, stays silent
+        for ok in ("commands[ls]=/tmp/x/ls; git status", "commands[git]=/tmp/x/git; /usr/bin/git status",
+                   "commands[deploy]=/tmp/x/d; deploy", "dis_commands[git]=/tmp/x/git; git status", "echo $commands[git]"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
     def test_path_inside_shell_strings_eval_and_subshells(self):
         for cmd in ("sh -c 'PATH=/tmp/x:$PATH git status'", "eval 'PATH=/tmp/x git status'",
                     "(PATH=/tmp/x:$PATH git status)", "true && PATH=/tmp/x:$PATH git status",
                     "echo $(PATH=/tmp/x git status)"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd)
+
+
+class SubscriptAssignmentTest(BashHookCase):
+    """SPD-085 (Kennebec's SPD-062 proposal): a subscripted assignment, `name[subscript]=value`, reached the analysis as a
+    command word.  `path[1]=/tmp/x; git status` gave kinds other and git and no PATH finding; `x[1]=y git push` gave none
+    at all, the push behind the word never read; `path[1,0]=(/tmp/x); git status` was refused only by accident, a glob
+    reading of its brackets ending in `sqlite`.  Probed in zsh 5.9 -f, zsh -f -o nobareglobqual (this Mac's Bash tool),
+    bash 3.2 and sh, with `foo` first on a scratch PATH (REAL) and a scratch copy of it in another directory (FAKE):
+
+    - zsh ran FAKE for `path[1]=<dir>; foo`, `path[1,0]=(<dir>); foo`, `path[1]=(<dir>)`, `path[1]+=/../fakebin` and
+      `PATH[1]=<dir>:/` and `PATH[1,0]=<dir>:` (a character slice of the scalar), each as a prefix too
+      (`path[1]=<dir> foo`, also before `command -v` and `exec`), and for `typeset`, `declare`, `local` (at top level),
+      `typeset -g` and `export 'path[1]=<dir>'`, the unquoted `typeset path[1]=<dir>` and `typeset path[1]=(<dir>)`,
+      `export`/`typeset -x 'PATH[1]=<dir>:/'`, `path["1"]=`, `path[$((1))]=`, `i=1; path[$i]=` and `path[(r)*real*]=`.
+      `PATH[0]=` is "assignment to invalid subscript range" and aborts the line; `typeset`, `local` or `readonly` of an
+      element inside a function is "can't create local array elements";
+    - bash and sh have no `path` array (REAL), and turn PATH into an array for `PATH[0]=<dir>`, `PATH[1]=<dir>:/`,
+      `declare 'PATH[0]=<dir>'` and a function's `local 'PATH[1]=...'`: `$PATH` then reads the element and the lookup
+      finds nothing ("foo: No such file or directory") -- a PATH change all the same.  `PATH[0]+=x` appended to the scalar
+      (bash reads a scalar's [0] as the scalar itself, confirmed).  A subscripted prefix is no assignment to bash, which ran
+      REAL and handed the literal `PATH[0]=<dir>` to the program's environment; `export`/`readonly 'PATH[0]=...'` is "not a
+      valid identifier"; `path[1,0]=(...)` as a statement is "cannot assign list to array member";
+    - none of these is an assignment anywhere: `'path[1]'=x` (a command of that name), `path[ 1 ]=x` ("bad pattern" in
+      zsh), `path[1]x=y` and `path[1][1]=x` ("no matches found"); `a[b[1]]=x` is one subscript in both shells, and
+      `echo path[1]` an argument ("no matches found" in zsh).
+
+    shell/assignment_words now reads the word as the assignment it is before any glob reading of its brackets -- the
+    subscript runs to the `]` that balances its `[`, and `=` or `+=` follows at once -- as the prefix loop, a declaration's
+    operand (whose quoted subscript the builtin parses) and walk.py's `name[subscript]=( ... )` join all do.  The variable
+    is assigned with a value the hook does not compute, as an append's, so every rule that reads it counts it as a plain
+    assignment would: PATH and `path` for shadowed_name, CDPATH, GIT_*; a subscript the hook cannot evaluate changes nothing
+    about that, and an element of a variable the hook tracks nowhere changes nothing at all.  Law 7 does not bind Spud.
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def test_the_tickets_evidence_commands(self):
+        for cmd in ("path[1]=/tmp/x; git status", "path[1,0]=(/tmp/x); git status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("path", r.reason)
+                self.assertIn("PATH as the session has it", r.reason)
+                self.assertEqual(self.analysis(cmd).findings, [("git", ("status", None)), ("path", ("path", "git"))])
+                self.assertEqual(self.analysis(cmd).kinds, ["git"])  # no command word, and no glob reading of the brackets
+        # the word is an assignment, so the push behind it is read (it was not: no finding at all)
+        self.assertEqual(self.analysis("x[1]=y git push").findings, [("git", ("push", "push"))])
+        self.assertIn("git push", self.refused_for_members("x[1]=y git push").reason)
+
+    def test_every_spelling_before_a_bare_name(self):
+        for cmd in ("path[1]=/tmp/x; git status", "path[1,0]=(/tmp/x); git status", "path[1]=(/tmp/x); git status",
+                    "path[1]+=/../x; git status", "path[-1,-1]=(/tmp/x /bin); git log", "PATH[1]=/tmp/x:/; git status",
+                    "PATH[1,0]=/tmp/x:; git status", "PATH[0]=/tmp/x; git status", "PATH[0]+=:/tmp/x; git status",
+                    "path[1]=/tmp/x\ngit status", "path[1]=/tmp/x; tee /tmp/out", "path[1]=/tmp/x; sh -c 'echo hi'",
+                    "path[1]=/tmp/x; python3.14 x.py", "path[1]=/tmp/x; env ls", "path[1]=/tmp/x; %s board" % self.spud_cli):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_every_spelling_as_a_prefix(self):
+        for cmd in ("path[1]=/tmp/x git status", "path[1,0]=(/tmp/x) git status", "path[1]=(/tmp/x) git status",
+                    "PATH[1]=/tmp/x:/ git status", "PATH[0]=/tmp/x git status", "path[1]=/tmp/x nice git status",
+                    "X=1 path[1]=/tmp/x git status", "path[1]=/tmp/x exec git status", "path[1]=/tmp/x command git status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("PATH", r.reason)
+
+    def test_the_declaration_forms(self):
+        for cmd in ("typeset 'path[1]=/tmp/x'; git status", "typeset path[1]=/tmp/x; git status",
+                    "typeset path[1]=(/tmp/x); git status", "typeset -g 'path[1]=/tmp/x'; git status",
+                    "declare 'path[1]=/tmp/x'; git status", "declare 'PATH[0]=/tmp/x'; git status",
+                    "declare PATH[0]=/tmp/x; git status", "local 'path[1]=/tmp/x'; git status",
+                    "export 'path[1]=/tmp/x'; git status", "export 'PATH[1]=/tmp/x:/'; git status",
+                    "export PATH[1]=/tmp/x:/; git status", "typeset -x 'PATH[1]=/tmp/x:/'; git status",
+                    "readonly 'PATH[0]=/tmp/x'; git status", "f() { local 'PATH[1]=/tmp/x:/'; git status; }; f",
+                    "builtin typeset 'path[1]=/tmp/x'; git status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("PATH", r.reason)
+
+    def test_a_subscript_the_hook_cannot_evaluate_still_counts(self):
+        for cmd in ("path[$i]=/tmp/x; git status", "i=1; path[$i]=/tmp/x; git status", "path[$(echo 1)]=/tmp/x; git status",
+                    "path[$((1))]=/tmp/x; git status", "path[(r)*real*]=/tmp/x; git status", "path[(i)x]=/tmp/x git status",
+                    'path["1"]=/tmp/x; git status', "path[b[1]]=/tmp/x; git status", "path[${#path}]+=x; git status"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_every_tracked_variable_counts_as_a_plain_assignment_would(self):
+        cases = (("GIT_DIR[1]=/tmp/x git status", "GIT_DIR+=/tmp/x git status", "cannot resolve"),
+                 ("GIT_CONFIG_GLOBAL[1]=/tmp/x git status", "GIT_CONFIG_GLOBAL+=/tmp/x git status", "config"),
+                 ("HOME[1]=/tmp/x git status", "HOME+=/tmp/x git status", "config"),
+                 ("GIT_PAGER[1]=less git log", "GIT_PAGER+=less git log", "program"),
+                 ("GIT_TRACE[1]=/tmp/t git status", "GIT_TRACE+=/tmp/t git status", "holds a variable"))
+        for subscripted, appended, needle in cases:
+            with self.subTest(subscripted):
+                r = self.refused_for_members(subscripted, needle)
+                self.assertEqual(r.reason, self.bash(appended).reason)
+        # CDPATH: the hook cannot read it, so a relative target after the cd cannot be placed -- for everyone, as an append
+        for agent_id in (AGENT_A, None):
+            r = self.assertRefused("CDPATH[1]=/tmp; cd ledger; echo x > note.txt", "cannot follow", agent_id)
+            self.assertEqual(r.reason, self.bash("CDPATH+=/tmp; cd ledger; echo x > note.txt", agent_id).reason)
+        self.assertEqual(self.analysis("cdpath[1]=/tmp").vars, {"cdpath": "$"})
+
+    def test_a_name_run_by_path_or_granted_nothing_stays_silent(self):
+        for ok in ("path[1]=/tmp/x; /usr/bin/git status", "PATH[1]=/tmp/x ./git status", "path[1]=/tmp/x ls",
+                   "PATH[0]=/tmp/x; ls -la", "path[1]=/tmp/x", "path[1,0]=(/tmp/x)", "typeset 'path[1]=/tmp/x'"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_an_element_of_an_untracked_variable_changes_nothing(self):
+        for ok in ("x[1]=y; git status", "arr[2]=v git status", "x[1]=y", "mine[k]=(a b); git log", "x[1]+=y git diff",
+                   "declare 'x[0]=y'; git status", "a[b[1]]=x; git status"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+        self.assertEqual([f for f in self.analysis("x[1]=y; arr[2]=(a b); git status").findings if f[0] != "git"], [])
+
+    def test_words_that_are_no_assignment_stay_as_they_were(self):
+        # a quoted bracket, a blank in the subscript, and text after the subscript are no assignment in any shell
+        for ok in ("echo path[1]", "echo path[1]=/tmp/x", "'path[1]'=/tmp/x; git status", "grep -n 'path[1]=' README",
+                   "echo 'PATH[0]=/tmp/x'", "path[1]x=/tmp/x", "printf '%s\\n' path[1]=x"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+        self.assertEqual(self.analysis("'path[1]'=/tmp/x; git status").vars, {})
+        self.assertEqual(self.analysis("path[1][1]=/tmp/x").vars, {})
+
+    def test_the_plain_array_forms_read_as_before(self):
+        m = load_spud_module()
+        self.assertEqual(self.analysis("path=(/tmp/x $path); git status").findings,
+                         [("git", ("status", None)), ("path", ("path", "git"))])
+        self.assertEqual(self.analysis("path+=(/tmp/x); git status").findings,
+                         [("git", ("status", None)), ("path", ("path", "git"))])
+        self.assertEqual(self.analysis("x=(a b)").vars, {"x": m._ARRAY_VALUE + "a b"})
+        self.assertEqual(self.analysis("x=()").vars, {"x": m._ARRAY_VALUE})
+        # a quoted blank inside one element stays inside it, and the readings of `$x` are what they were
+        a = self.analysis("x=('a b' c)")
+        self.assertEqual(m.deglob(a.vars["x"]), "a b c")
+        self.assertEqual(m.variable_readings(a, "x"), ([["a", "b", "c"], ["a"]], True))
+        self.assertEqual(self.analysis("x=('a b' c); $x").findings, [("var-doubt", "$x")])
+        self.silent_for_everyone("path=(/tmp/x $path)")
 
 
 class FunctionShadowTest(BashHookCase):
@@ -4804,7 +5018,23 @@ class FunctionShadowTest(BashHookCase):
     is dropped when it closes (ShellWalk restores the set); one in a branch, a loop, a function body, a background list, a
     pipeline or a command substitution is kept (refuse on doubt, never allow on doubt), as is one an `unset -f` or
     `unfunction` may have removed (the hook keeps refusing rather than allow on doubt).  Law 7 does not bind Spud.  AGENT_A
-    plans tests/** and bin/spud; AGENT_C plans **."""
+    plans tests/** and bin/spud; AGENT_C plans **.
+
+    SPD-105 (Atlantic's SPD-084 proposal): zsh also binds a function through its special `functions` association, which the
+    hook read as a command word or an unrelated variable.  Probed in zsh 5.9 -f and -o nobareglobqual (bash and sh have no
+    such parameter and ran the real lookup every time): `functions[foo]='echo SH'; foo`, `functions+=(foo 'echo SH'); foo`,
+    `functions=(foo 'echo SH'); foo` (a whole assignment adds its pairs: a function defined before it still ran),
+    `typeset`, `declare` and `export 'functions[foo]=echo SH'`, a prefix (`functions[foo]='echo SH' true; foo`),
+    `functions[foo]+=' x'`, a function body's `functions[foo]=` once called, `k=foo; functions[$k]=`,
+    `functions[(e)foo]=` (a subscript flag), `x='echo SH'; functions+=(foo $x)` and `a=(foo 'echo SH'); functions+=($a)`
+    each ran the function, and `functions[foo]=...; (foo)` did too.  `(functions[foo]=...); foo` ran the real lookup (the
+    subshell's), as did `functions[f?o]=` (the key is `f?o`, a subscript is not globbed), `functions["foo"]=` (the quotes
+    are part of the key), `functions+=(foo 'echo SH' bar)` ("bad set of key/value pairs"), `unset 'functions[foo]'` and
+    `dis_functions[foo]=` (a disabled function).  The name each spelling keys is now recorded in the same set a definition
+    fills, with its subshell scope; a key the hook cannot read (an expansion, a subscript flag, an element that may become
+    several words, pairs odd in number, a scalar) records UNKNOWN_NAME, which refuses a member's later call of every name
+    the hook reads.  `functions["git"]=` is refused though zsh keys it `"git"`: the hook reads the word with its quotes
+    taken, and refuses on that doubt."""
 
     def setUp(self):
         super().setUp()
@@ -4972,6 +5202,60 @@ class FunctionShadowTest(BashHookCase):
         self.assertNotIn("hash", r.reason)  # its own reason, not SPD-062's
         self.assertNotIn("PATH", r.reason)
 
+    def test_the_zsh_functions_parameter_binds_a_function(self):
+        # SPD-105's evidence command, then every spelling zsh takes
+        self.assertEqual(self.finding("functions[git]='true'; git status"),
+                         [("git", ("status", None)), ("function", "git")])
+        for cmd in ("functions[git]='true'; git status", "functions+=(git 'true'); git status",
+                    "functions=(git 'echo SH'); git status", "functions+=(deploy 'a b' git 'c d'); git status",
+                    "typeset 'functions[git]=true'; git status", "declare 'functions[git]=true'; git status",
+                    "export 'functions[git]=true'; git status", "functions[git]=true true; git status",
+                    "functions[git]+=' x'; git status", "functions[git]=true; (git status)",
+                    "f() { functions[git]=true; }; f; git status", 'functions["git"]=true; git status',
+                    "functions[tee]=true; tee /tmp/out", "functions[env]=true; env git status",
+                    "functions[git]=true; time git status", "functions[git]=true; noglob git status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("shell function", r.reason)
+        self.assertEqual(self.finding("functions+=(git 'a b' tee 'c'); tee /tmp/out"), [("function", "tee")])
+        # a write verb still answers with its own reason
+        self.assertIn("git push", self.refused_for_members("functions[git]=true; git push").reason)
+
+    def test_a_functions_key_the_hook_cannot_read_refuses_every_name(self):
+        me = load_spud_module()
+        for cmd in ("functions[$k]=true; git status", "k=git; functions[$k]=true; git status",
+                    "functions[(e)git]=true; git status", "functions[$(echo git)]=true; git status",
+                    "functions+=($pairs); git status", "x=true; functions+=(git $x); git status",
+                    "functions+=(g* true); git status", "functions+=(git true tee); git status",
+                    "functions=x; git status", "functions[$k]=true; tee /tmp/out", "functions[$k]=true; sh -c 'echo hi'"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.assertEqual(me.analyse_command("functions[$k]=true").functions, {me.UNKNOWN_NAME})
+        # the unread name may be the bypassing wrapper's own, which a function of that name shadows in turn
+        self.assertEqual(self.finding("functions[$k]=true; command git status")[-1], ("function", "command"))
+        # ... and a name the hook grants nothing for is still silent, as is a call by path
+        for ok in ("functions[$k]=true; ls", "functions[$k]=true; /usr/bin/git status", "functions[$k]=true; make all"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_the_functions_parameter_keeps_the_scope_and_the_names_it_does_not_bind(self):
+        # the subshell's own element does not reach a call after it; a branch's, a background list's and a substitution's may
+        for ok in ("(functions[git]=true); git status", "(functions+=(git true)); git log"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+        for cmd in ("if true; then functions[git]=true; fi; git status", "functions[git]=true & wait; git status",
+                    "x=$(functions[git]=true); git status", "true && functions[git]=true; git status"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        # a key the hook reads that names nothing it dispatches, a key zsh does not glob, and a disabled function
+        for ok in ("functions[deploy]=true; git status", "functions+=(deploy true); git status",
+                   "functions[g?t]=true; git status", "dis_functions[git]=true; git status", "functions=(); git status",
+                   "echo $functions[git]", "functions[deploy]=true; deploy", "unset 'functions[deploy]'; git status"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+        me = load_spud_module()
+        self.assertEqual(me.analyse_command("functions+=(deploy 'a b' git 'c d')").functions, {"deploy", "git"})
+
     def test_reading_a_function_name_without_defining_it_stays_silent(self):
         # naming a function in a string is not defining one; a lone definition with no later call refuses nothing new
         for ok in ("echo 'git() { true; }'", "echo git is a function", "git status",
@@ -4979,6 +5263,139 @@ class FunctionShadowTest(BashHookCase):
             with self.subTest(ok):
                 self.assertNotEqual(self.bash(ok).decision, "deny", ok)
                 self.assertNotEqual(self.bash(ok, agent_id=None).decision, "deny", ok)
+
+
+class EnvironmentFunctionTest(BashHookCase):
+    """SPD-106 (Atlantic's SPD-084 proposal): bash and sh import a shell function from their environment, so a member can
+    hand a child a function without defining it on the line, past SPD-084.  `env 'BASH_FUNC_git%%=() { true; }' bash -c
+    'git status'` gave no finding at all: strip_wrapper took env's operands by ASSIGNMENT_RE, stopped at the `%%` word and
+    dispatched on it, so the `-c` string was never read.  Probed on this Mac in zsh 5.9 -f, zsh -f -o nobareglobqual, bash
+    3.2 and sh (every outer shell alike; SH means the function ran):
+
+    - `/usr/bin/env 'BASH_FUNC_foo%%=() { echo SH; }' /bin/bash -c foo` -> SH, and to /bin/sh -> SH; to /bin/zsh, /bin/ksh
+      and /bin/dash -> the real foo (none of them imports).  SH through `env`, `ENV`, `env -i`, `env -`, `env --`, `env -u
+      HOME`, `env X=1 <function> Y=2` and `env -S "'BASH_FUNC_foo%%=...' /bin/bash -c foo"`.  The `BASH_FUNC_foo()=`,
+      `BASH_FUNC_foo=` and `foo=() {` spellings imported nothing: macOS's bash 3.2 reads `%%` alone;
+    - an imported function goes on down: `env <function> /bin/sh -c '/bin/sh -c foo'` and `... /bin/sh -c 'exec
+      /usr/bin/env /bin/bash -c foo'` -> SH, so a program the hook cannot follow (`env <function> python3.14 x.py`, whose
+      x.py runs sh) hands it on too;
+    - env puts every operand holding `=` past its first character in the environment (`a b=c`, `x[1]=y` and `a%b=c` each
+      reached /usr/bin/env's own listing; `=x` is "setenv =x: Invalid argument"), so none of them is its command;
+    - no shell takes `BASH_FUNC_foo%%=...` as an assignment: as a word before a command it is a command not found, and
+      `export 'BASH_FUNC_foo%%=...'` is "not valid in this context" (zsh) or "not a valid identifier" (bash, sh), while
+      `BASH_FUNC_foo=1 /usr/bin/env` exported the valid spelling;
+    - `export -f`: on a zsh line `foo() { echo SH; }; export -f foo; /bin/bash -c foo` printed the function and ran the real
+      foo (zsh's `export -f` lists functions), in bash and sh it ran SH, and `typeset -fx` alike; inside `bash -c '...'`,
+      `export -f foo` or `declare -fx foo` then a child bash or sh ran SH, a child zsh the real foo.
+
+    A member has no reason to put a function in a program's environment, and the hook cannot follow what the program starts,
+    so any env operand, prefix, declaration operand or sudo operand naming a BASH_FUNC_ variable refuses a member outright,
+    whatever program follows, with its own reason (FINDING_LAST beside `function`); so does `export -f` or `declare -fx` of
+    a name the hook reads, which writes exactly that variable in bash.  `git() { :; }; export -f git; bash -c 'git status'`
+    was already refused through SPD-084's set reaching the inner shell, and still is.  Law 7 does not bind Spud.  AGENT_A
+    plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def finding(self, command):
+        me = load_spud_module()
+        return me.analyse_command(command, me.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_the_tickets_evidence_command(self):
+        cmd = "env 'BASH_FUNC_git%%=() { true; }' bash -c 'git status'"
+        r = self.refused_for_members(cmd)
+        self.assertIn("BASH_FUNC_git%%", r.reason)
+        self.assertIn("environment", r.reason)
+        self.assertNotIn("shell function `git`", r.reason)  # its own reason, not SPD-084's
+        # the -c string is read now: env's operand is no longer taken for its command
+        self.assertEqual(self.finding(cmd), [("env-function", "BASH_FUNC_git%%"), ("git", ("status", None))])
+
+    def test_every_env_spelling_whatever_program_follows(self):
+        for cmd in ("env 'BASH_FUNC_git%%=() { true; }' bash -c 'git status'",
+                    "/usr/bin/env 'BASH_FUNC_git%%=() { true; }' /bin/sh -c 'git status'",
+                    "ENV 'BASH_FUNC_git%%=() { true; }' bash -c 'git status'",
+                    "env -i 'BASH_FUNC_git%%=() { true; }' bash -c 'git status'",
+                    "env - 'BASH_FUNC_git%%=() { true; }' bash -c 'git status'",
+                    "env -- 'BASH_FUNC_git%%=() { true; }' bash -c 'git status'",
+                    "env -u HOME 'BASH_FUNC_git%%=() { true; }' bash -c 'git status'",
+                    "env X=1 'BASH_FUNC_git%%=() { true; }' Y=2 bash -c 'git status'",
+                    "env -S \"'BASH_FUNC_git%%=() { true; }' bash -c 'git status'\"",
+                    "env 'BASH_FUNC_foo%%=() { git push; }' python3.14 x.py",
+                    "env 'BASH_FUNC_git%%=() { true; }' ls", "env 'BASH_FUNC_x%%=() { true; }'",
+                    "nice env 'BASH_FUNC_git%%=() { true; }' sh -c 'git status'",
+                    "env BASH_FUNC_git=1 bash -c 'git status'",
+                    "sudo 'BASH_FUNC_git%%=() { true; }' bash -c 'git status'",
+                    "echo hi; env 'BASH_FUNC_sh%%=() { true; }' make"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("BASH_FUNC_", r.reason)
+
+    def test_a_prefix_a_declaration_or_a_bare_word_naming_it(self):
+        for cmd in ("export 'BASH_FUNC_git%%=() { true; }'; bash -c 'git status'", "export BASH_FUNC_git=1",
+                    "export BASH_FUNC_git", "typeset -x 'BASH_FUNC_git%%=() { true; }'", "BASH_FUNC_git=1 bash -c ls",
+                    "BASH_FUNC_git=1; export BASH_FUNC_git", "'BASH_FUNC_git%%=() { true; }' bash -c 'git status'",
+                    "declare -x BASH_FUNC_git=1 && sh -c ls"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "BASH_FUNC_")
+
+    def test_export_f_of_a_name_the_hook_reads(self):
+        # SPD-084's set reaching the inner shell already refused these, and still does (pinned by its own finding)
+        for cmd in ("git() { :; }; export -f git; bash -c 'git status'",
+                    "bash -c 'git() { :; }; export -f git; bash -c \"git status\"'",
+                    "bash -c 'git() { :; }; export -f git; sh -c \"git status\"'"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+                self.assertIn(("function", "git"), self.finding(cmd))
+        # ... and the export itself now refuses, whatever the child it reaches (a program the hook cannot follow)
+        for cmd in ("git() { :; }; export -f git; python3.14 x.py", "bash -c 'git() { :; }; export -f git; make'",
+                    "git() { :; }; declare -fx git", "git() { :; }; typeset -f -x git", "export -f sh",
+                    "bash -c 'tee() { :; }; declare -f -x tee; ./run'"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd, "BASH_FUNC_")
+                self.assertIn("export", r.reason)
+        self.assertIn(("env-function", "BASH_FUNC_git%%"), self.finding("git() { :; }; export -f git; python3.14 x.py"))
+
+    def test_nothing_that_puts_no_function_in_an_environment(self):
+        for ok in ("echo 'BASH_FUNC_x'", "echo BASH_FUNC_git%%=x", "grep -rn BASH_FUNC_ tests/keep.py",
+                   "env FOO=1 git status", "env GIT_OPTIONAL_LOCKS=0 git status", "env -u BASH_FUNC_git%% git status",
+                   "export -f deploy", "deploy() { :; }; export -f deploy; bash -c deploy", "declare -f git",
+                   "typeset -f", "export -p", "readonly -f git", "printenv BASH_FUNC_git%%"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+                self.assertNotEqual(self.bash(ok, agent_id=None).decision, "deny", ok)
+
+    def test_env_takes_every_operand_holding_an_equals_sign(self):
+        # an env operand no shell would take for an assignment hid the command after it; it is env's, and the command is read
+        for cmd, needle in (("env 'a b=c' git push", "git push"), ("env x[1]=y git commit -m x", "git commit"),
+                            ("env a%b=c git reset --hard", "git reset")):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn(needle, r.reason)
+        self.assertEqual(self.finding("env 'a b=c' git status"), [("git", ("status", None))])
+        self.silent_for_everyone("env 'a b=c' git status")
+
+    def test_a_refusal_the_words_as_spelled_earn_answers_first(self):
+        r = self.refused_for_members("env 'BASH_FUNC_x%%=() { true; }' git push")
+        self.assertIn("git push", r.reason)
+        r = self.assertRefused("env 'BASH_FUNC_x%%=() { true; }' %s --as spud board" % self.spud_cli, "Law 6")
+        self.assertIn("--as spud", r.reason)
 
 
 class WrapperCommandWordTest(BashHookCase):

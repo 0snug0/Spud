@@ -95,14 +95,18 @@ def record_alias_line(words, a):
     every name of the line's in doubt, since the hook cannot tell which one this defines."""
     for w in alias_arguments(words):
         m = syntax.ALIAS_WORD_RE.match(w)
-        if m is None:
-            continue
-        name, value = m.group(1), m.group(2)
-        if expansion_word(name) or not syntax.IDENTIFIER_RE.match(prepare.deglob(name)):
-            a.alias_unknown = True
-            continue
-        readable = not expansion_word(value)
-        record_alias(a, prepare.deglob(name), prepare.deglob(value) if readable else None, doubtful=not readable)
+        if m is not None:
+            record_alias_definition(a, m.group(1), m.group(2))
+
+
+def record_alias_definition(a, name, value):
+    """One definition as the line spells it, `name` and `value` masked words: an `alias` line's `name=body`, or an element
+    of zsh's `aliases` parameter (SPD-105), whose value is None where the hook cannot know it (`aliases[gp]+=...`)."""
+    if expansion_word(name) or not syntax.IDENTIFIER_RE.match(prepare.deglob(name)):
+        a.alias_unknown = True
+        return
+    readable = value is not None and not expansion_word(value)
+    record_alias(a, prepare.deglob(name), prepare.deglob(value) if readable else None, doubtful=not readable)
 
 
 def clear_alias_line(words, a):
