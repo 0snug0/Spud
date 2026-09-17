@@ -1,21 +1,20 @@
-"""Every SessionStart context fits the harness's inline limit, and says when the render watcher is down (SPD-048).
+"""Every SessionStart context fits the harness's inline limit, and says when the vault is not to be trusted (SPD-048).
 
 The harness keeps a hook's additionalContext inline up to 10,000 UTF-16 code units; past that the model gets a preview of
 about 2 KB and a file path, with no sign of what was left out (code.claude.com/docs/en/hooks, measured on Claude Code
 2.1.274 with tests/probes/context_limit.py).  Before SPD-048 the home's context had no cap at all.  Now every SessionStart
 context, the home's, outside's and a claimed project's, is cut on whole lines from the top to 8,000 bytes of UTF-8 with a
-note that counts the lines it cut, and the render watcher's line, which `spud board --brief` has carried since SPD-097, sits
-in the head above the board, where no cut reaches it.  The unit tests load the program; the rest run the hook as its
-installed line does.
+note that counts the lines it cut, and the render watcher's lines, which `spud board --brief` has carried since SPD-097,
+sit in the head above the board, where no cut reaches them.  Since SPD-117 there are two: the watcher down, and the vault
+behind the ledger, which is the one a session cannot otherwise detect.  The unit tests load the program; the rest run the
+hook as its installed line does.
 """
 
-import fcntl
 import os
 import re
 import unittest
-from pathlib import Path
 
-from helpers import load_spud_module
+from helpers import aged_event, hold_watch_lock, install_watcher_plist, load_spud_module
 from test_hooks import HookCase
 from test_hooks_projects import KEY, ProjectHookCase
 
@@ -24,6 +23,7 @@ spud = load_spud_module()
 CAP = 8000
 LIMIT_UTF16_UNITS = 10000  # measured on SPD-048: 10,000 inline, 10,001 persisted
 WATCHER_DOWN = "render watcher: installed but not running; the vault is stale (spud --as spud schedule install reloads it)"
+WATCHER_BEHIND = "render watcher: %s unrendered, the oldest %s; the vault is stale (spud render brings it up to date)"
 NOTE = re.compile(r"\((\d+) more lines? cut to fit; run `spud board --brief` for the rest\)")
 HEADER = re.compile(r"Ledger board \(`spud board --brief` at [^,]+, source startup\):")
 FILLER = "and so on " * 25  # a board line of about 300 bytes: 27 of them pass the cap
@@ -102,21 +102,17 @@ class FitBytesTest(unittest.TestCase):
 
 class ContextCase(HookCase):
     def board_lines(self, *extra):
-        """`spud board --brief` as the CLI prints it, one entry per line, without the watcher's line."""
+        """`spud board --brief` as the CLI prints it, one entry per line, without the render watcher's own lines."""
         lines = self.home.run("board", "--brief", *extra).stdout.rstrip("\n").split("\n")
-        return [line for line in lines if line != WATCHER_DOWN]
+        return [line for line in lines if not line.startswith("render watcher: ")]
 
     def install_watcher_plist(self):
         """The watcher's plist where this home's SPUD_LAUNCH_AGENTS_DIR looks: installed, and no watcher holds the lock."""
-        agents = Path(self.home.env["SPUD_LAUNCH_AGENTS_DIR"])
-        agents.mkdir(parents=True, exist_ok=True)
-        (agents / "local.spud.render.plist").write_text("<plist/>\n", encoding="utf-8")
+        install_watcher_plist(self.home)
 
     def hold_watch_lock(self):
-        """What a live watcher does: hold <home>/.spud/watch.lock for as long as the test runs."""
-        fd = os.open(str(self.home.path / ".spud" / "watch.lock"), os.O_RDWR | os.O_CREAT, 0o644)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        self.addCleanup(os.close, fd)
+        """What a live watcher does: hold the home's watch lock for as long as the test runs."""
+        self.addCleanup(os.close, hold_watch_lock(self.home))
 
     def assertCut(self, context, head_lines, board):
         """context is head_lines, then the board from the top on whole lines, then a note counting exactly the lines left out,
@@ -183,6 +179,44 @@ class HomeSessionStartTest(ContextCase):
         r = self.home.hook("SessionStart", self.session_start())
         self.assertNotIn("render watcher", r.context)
 
+    def test_a_vault_behind_the_ledger_puts_its_own_line_above_the_board(self):
+        """SPD-117: the state a session cannot otherwise detect.  A watcher holds its lock and renders nothing, so nothing
+        about it is down; the line says how far behind the vault is and the one command that brings it up to date."""
+        self.install_watcher_plist()
+        self.hold_watch_lock()
+        self.new_ticket("Queued")
+        self.home.run("render")  # the vault has caught up, and then one event goes unrendered for 25 minutes
+        aged_event(self.home, 25 * 60)
+        r = self.home.hook("SessionStart", self.session_start())
+        shown = r.context.split("\n")
+        self.assertEqual(shown[0], WATCHER_BEHIND % ("1 event", "25m ago"))
+        self.assertTrue(HEADER.fullmatch(shown[1]), shown[1])
+        self.assertEqual(shown[2:], self.board_lines())
+        self.assertEqual(self.home.run("board", "--brief").stdout.rstrip("\n").split("\n")[-1], WATCHER_BEHIND % ("1 event", "25m ago"))
+        for n in range(30):  # and a cut never reaches it: it is in the head
+            self.new_ticket("Queued %02d %s" % (n, FILLER))
+        r = self.home.hook("SessionStart", self.session_start())
+        self.assertTrue(r.context.split("\n")[0].endswith("(spud render brings it up to date)"), r.context[:200])
+        self.assertCut(r.context, r.context.split("\n")[:2], self.board_lines())
+
+    def test_a_watcher_down_and_a_vault_behind_are_two_lines_in_the_head(self):
+        self.install_watcher_plist()
+        self.new_ticket("Queued")
+        self.home.run("render")
+        aged_event(self.home, 3 * 3600)
+        r = self.home.hook("SessionStart", self.session_start())
+        shown = r.context.split("\n")
+        self.assertEqual(shown[:2], [WATCHER_DOWN, WATCHER_BEHIND % ("1 event", "3h ago")])
+        self.assertTrue(HEADER.fullmatch(shown[2]), shown[2])
+        self.assertEqual(shown[3:], self.board_lines())
+        for n in range(30):
+            self.new_ticket("Queued %02d %s" % (n, FILLER))
+        r = self.home.hook("SessionStart", self.session_start())
+        shown = r.context.split("\n")
+        self.assertEqual(shown[0], WATCHER_DOWN)
+        self.assertTrue(shown[1].startswith("render watcher: "), shown[1])
+        self.assertCut(r.context, shown[:3], self.board_lines())
+
 
 class ProjectSessionStartTest(ContextCase, ProjectHookCase):
     def test_a_claimed_sessions_context_carries_the_watcher_line_under_its_header_and_counts_its_cut(self):
@@ -199,6 +233,18 @@ class ProjectSessionStartTest(ContextCase, ProjectHookCase):
         shown = r.context.split("\n")
         self.assertEqual(shown[1], WATCHER_DOWN)
         self.assertCut(r.context, shown[:2], [shown[2]] + self.board_lines())  # the board's header is the body's first line
+
+    def test_a_claimed_sessions_context_carries_the_behind_line_under_its_header(self):
+        self.install_watcher_plist()
+        self.hold_watch_lock()  # a watcher alive and rendering nothing: the project's session hears about the vault, not the process
+        aged_event(self.home, 45 * 60)
+        r = self.hook_in(self.CLAIMED, "SessionStart", self.session_start_p(self.CLAIMED, "resume"))
+        shown = r.context.split("\n")
+        self.assertTrue(shown[0].startswith("Ledger: this session is Spud in project `%s`" % KEY), shown[0])
+        self.assertTrue(shown[1].startswith("render watcher: ") and shown[1].endswith("(spud render brings it up to date)"), shown[1])
+        self.assertIn("the oldest 45m ago", shown[1])
+        self.assertRegex(shown[2], r"\ALedger board \(`spud board --brief` at [^,]+, source resume\):\Z")
+        self.assertEqual(shown[3:], self.board_lines())
 
     def test_a_plain_session_gets_its_notice_and_no_watcher_line(self):
         self.install_watcher_plist()

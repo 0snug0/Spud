@@ -13,6 +13,15 @@ from ..state import backup, ledgerdb, lookup, schema
 
 WATCHER_DOWN = ("the render watcher %s is installed but not running: the vault is stale until `spud --as spud schedule install` reloads it"
                 % launchagents.RENDER_LABEL)
+# SPD-117: the vault behind the ledger by more than a render takes, which a watcher running and stuck leaves behind exactly
+# as a watcher that is down does.  The state of the vault, not of a process, so it is a problem either way.
+VAULT_BEHIND = "the vault is behind the ledger"
+RENDER_BEHIND = VAULT_BEHIND + " by %s, the oldest %s (a render lands within seconds of an event): `spud render` brings it up to date"
+# A watcher holding its lock and rendering nothing is stale for the same reason a down one is, and reloads the same way;
+# one command settles the vault now, the other the watcher that should have settled it.
+RENDER_BEHIND_STUCK = RENDER_BEHIND + ", and `spud --as spud schedule install` reloads the watcher that is running and not rendering"
+# doctor's render line for each of the four states core/launchagents reports; the lag phrase follows it.
+WATCHER_TEXT = {"absent": "not installed", "down": "installed, not running", "current": "running", "behind": "running"}
 
 
 def cmd_doctor(ctx, args):
@@ -121,7 +130,8 @@ def doctor_report(ctx):
         lines.append("project     %s at %s: %s" % (p["key"], p["root"], ", ".join(p["checks"]) or "no check passed"))
     if report["render"] is not None:
         r = report["render"]
-        lines.append("render      watcher %s%s" % (r["watcher"], ("; %d hand-edited file(s)" % len(r["conflicts"])) if r["conflicts"] else ""))
+        lines.append("render      watcher %s; %s%s" % (r["watcher"], launchagents.lag_text(r["lag"]),
+                                                       ("; %d hand-edited file(s)" % len(r["conflicts"])) if r["conflicts"] else ""))
     if report["pull_requests"] is not None:
         p = report["pull_requests"]
         lines.append("pull reqs   %d recorded, %d open, %d settled; reader %s" % (p["recorded"], p["open"], p["settled"], p["reader"]))
@@ -214,20 +224,25 @@ def doctor_projects(ctx, problems, notes):
 
 
 def doctor_render(ctx, problems, notes):
-    """doctor's render section (SPD-097): whether the watcher is alive (a problem when its plist is installed and it is not,
-    a note when it was never installed), and every rendered file whose on-disk text is neither the last render's nor the
-    current one, each with the two commands that settle it."""
-    installed = launchagents.watcher_installed()
-    alive = launchagents.watcher_alive(ctx)
-    if installed and not alive:
-        problems.append(WATCHER_DOWN)
-    elif not installed:
-        notes.append("no render watcher installed (%s): `spud --as spud schedule install`" % launchagents.RENDER_LABEL)
+    """doctor's render section (SPD-097, SPD-117): which of core/launchagents' four states the render watcher is in and how
+    far behind the ledger the vault is, then every rendered file whose on-disk text is neither the last render's nor the
+    current one, each with the two commands that settle it.  A watcher installed and not running is a problem and one never
+    installed is a note, as before; a vault behind past launchagents.RENDER_LAG_SECONDS is a problem of its own, raised
+    whether or not a watcher holds the lock, because what is stale then is the vault and one `spud render` settles it."""
     con = ledgerdb.connect(ctx)
     try:
+        watcher = launchagents.watcher_report(ctx, con)
         conflicts = publish.render_pass(ctx, con, None, check_only=True)["conflicts"]
     finally:
         con.close()
+    lag = watcher["lag"]
+    if watcher["state"] == "down":
+        problems.append(WATCHER_DOWN)
+    elif not watcher["installed"]:
+        notes.append("no render watcher installed (%s): `spud --as spud schedule install`" % launchagents.RENDER_LABEL)
+    if lag["behind"]:
+        shape = RENDER_BEHIND_STUCK if watcher["state"] == "behind" else RENDER_BEHIND  # `behind` is the alive-and-stuck one
+        problems.append(shape % (launchagents.behind_text(lag), kernel.ago_text(lag["seconds"])))
     for rel in conflicts:
         problems.append("hand-edited %s: accept it with `spud --as spud import --file %s`, or overwrite it with `spud --as spud render --discard %s`" % (rel, rel, rel))
-    return {"watcher": "running" if alive else ("installed, not running" if installed else "not installed"), "conflicts": conflicts}
+    return {"watcher": WATCHER_TEXT[watcher["state"]], "state": watcher["state"], "lag": lag, "conflicts": conflicts}

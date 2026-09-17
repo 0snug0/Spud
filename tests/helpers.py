@@ -7,6 +7,7 @@ keeps no home config since SPD-097). Nothing here writes into the repository.
 """
 
 import atexit
+import fcntl
 import importlib.machinery
 import importlib.util
 import json
@@ -19,6 +20,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 # The suite must leave no bytecode in the repo: bin/spud_ledger.py is loaded as a
@@ -260,6 +262,39 @@ class Home:
     @property
     def spool(self):
         return self.path / ".spud" / "hook-errors.jsonl"
+
+
+# SPD-097, SPD-117: the render watcher's three ingredients, each faked so no test needs a watcher process.  A plist where
+# this home's SPUD_LAUNCH_AGENTS_DIR looks is `installed`; the watch lock held is `running`; and an event log aged in the
+# database is a vault a watcher stopped rendering, without a test waiting two minutes for one.
+
+
+def install_watcher_plist(home):
+    """The render watcher's LaunchAgent installed for this home, with nothing running: what `down` looks like."""
+    agents = Path(home.env["SPUD_LAUNCH_AGENTS_DIR"])
+    agents.mkdir(parents=True, exist_ok=True)
+    (agents / "local.spud.render.plist").write_text("<plist/>\n", encoding="utf-8")
+
+
+def hold_watch_lock(home):
+    """What a live watcher does: hold the home's watch lock.  Returns the fd, which the caller closes (addCleanup)."""
+    fd = os.open(str(home.path / ".spud" / "watch.lock"), os.O_RDWR | os.O_CREAT, 0o644)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    return fd
+
+
+def aged_event(home, seconds, kind="hook.denied", body="refused a command"):
+    """One event written `seconds` ago and never rendered: what a watcher that stopped rendering leaves behind, without a
+    test waiting for it.  Events are append-only -- their own trigger refuses an UPDATE -- so a test ages the log by adding
+    to it.  The default kind is one no note shows, the case the renders table alone cannot report."""
+    at = (datetime.now().astimezone() - timedelta(seconds=seconds)).isoformat(timespec="seconds")
+    con = home.connect()
+    try:
+        con.execute("INSERT INTO events (at, actor, kind, body) VALUES (?, 'hook:PreToolUse', ?, ?)", (at, kind, body))
+        con.commit()
+    finally:
+        con.close()
+    return at
 
 
 GIT_IDENTITY = {"GIT_AUTHOR_NAME": "Spud", "GIT_AUTHOR_EMAIL": "spud@example.invalid", "GIT_COMMITTER_NAME": "Spud", "GIT_COMMITTER_EMAIL": "spud@example.invalid"}

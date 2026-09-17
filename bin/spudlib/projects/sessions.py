@@ -185,9 +185,9 @@ def fit_bytes(head, body, cap):
 
 
 def home_session_context(con, payload, alerts=()):
-    """The SessionStart context of a session in the home, or outside every project: `alerts` (the render watcher's line when
-    it is down), the board's header, and the board, cut to SESSION_CONTEXT_CAP (SPD-048).  With no alert and a board that
-    fits, the text is what the hook injected before SPD-048, byte for byte."""
+    """The SessionStart context of a session in the home, or outside every project: `alerts` (the render watcher's lines,
+    when it is down or the vault is behind the ledger), the board's header, and the board, cut to SESSION_CONTEXT_CAP (SPD-048).
+    With no alert and a board that fits, the text is what the hook injected before SPD-048, byte for byte."""
     head = "\n".join(list(alerts) + ["Ledger board (`spud board --brief` at %s, source %s):" % (kernel.now(), payload.get("source"))])
     return fit_bytes(head, board_brief_text(con), SESSION_CONTEXT_CAP)
 
@@ -204,8 +204,8 @@ def plain_session_notice(ctx, project):
 
 def project_session_context(ctx, con, project, claim, payload, alerts=()):
     """A Spud session's SessionStart context in a project: the header naming the project, `alerts` under it (the render
-    watcher's line when it is down), then the board, cut to SESSION_CONTEXT_CAP.  The alerts are in the head, which a cut
-    never reaches."""
+    watcher's lines, when it is down or the vault is behind the ledger), then the board, cut to SESSION_CONTEXT_CAP.  The alerts are
+    in the head, which a cut never reaches."""
     root = worktrees.project_root(ctx, project)
     if claim is not None:
         head = ("Ledger: this session is Spud in project `%s` (%s), claimed %s; root %s; tickets %s-nnn, teams %s-nnn; landing %s."

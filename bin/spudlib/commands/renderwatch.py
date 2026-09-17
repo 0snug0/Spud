@@ -1,5 +1,6 @@
-"""commands/renderwatch: render --watch, the loop LaunchAgent local.spud.render runs (SPD-097).  Whether a watcher is alive is
-core/launchagents' since SPD-048."""
+"""commands/renderwatch: render --watch, the loop LaunchAgent local.spud.render runs (SPD-097).  Whether a watcher is alive
+is core/launchagents' since SPD-048, and since SPD-117 so is the comparison this loop makes: the same watermark and the same
+highest non-render event id answer doctor, the board and the SessionStart context."""
 
 import contextlib
 import fcntl
@@ -22,12 +23,6 @@ def render_entry(ctx, args):
     return cmd_render_watch(ctx, args) if args.watch else publish.cmd_render(ctx, args)
 
 
-def latest_event_id(con):
-    """The highest event id whose kind is not `render`: what the vault must have caught up with.  A render event never
-    triggers a pass, so the watcher does not chase its own writes."""
-    return con.execute("SELECT COALESCE(MAX(id), 0) FROM events WHERE kind != 'render'").fetchone()[0]
-
-
 def log_line(text):
     """One timestamped line on stdout, flushed: launchd redirects it into <home>/.spud/logs/render.log."""
     sys.stdout.write("%s %s\n" % (kernel.now(), text))
@@ -46,9 +41,9 @@ def truncate_log():
 
 def cmd_render_watch(ctx, args):
     """render --watch: every `interval` seconds compare the highest non-render event id with the id the last pass rendered
-    through; when the database is ahead, run one pass under the render lock.  The watermark lives in this process (the
-    renders table's through_event_id at start, then the id read before each pass), so a pass that changes nothing writes
-    nothing.  Runs until SIGTERM or SIGINT, or `ticks` reads (tests).  Refused while another watcher holds the lock."""
+    through; when the database is ahead, run one pass under the render lock.  The watermark lives in this process (the last
+    pass's mark at start, then the id read before each pass), so a pass that changes nothing writes no row.  Runs until
+    SIGTERM or SIGINT, or `ticks` reads (tests).  Refused while another watcher holds the lock."""
     if args.out or args.discard:
         raise kernel.SpudError(kernel.EXIT_USAGE, "--watch renders into the home on its own: no --out, no --discard")
     if not ctx.db_path.is_file():
@@ -71,8 +66,8 @@ def cmd_render_watch(ctx, args):
                 con = ledgerdb.connect(ctx)
                 try:
                     if seen is None:
-                        seen = con.execute("SELECT COALESCE(MAX(through_event_id), 0) FROM renders").fetchone()[0]
-                    latest = latest_event_id(con)
+                        seen = launchagents.rendered_through(ctx, con)
+                    latest = launchagents.latest_event_id(con)
                     if latest > seen:
                         with publish.render_lock(ctx):
                             result = publish.render_pass(ctx, con, None)
