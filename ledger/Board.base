@@ -47,7 +47,6 @@ views:
       - proposed_by
       - origin
       - created
-      - formula.Untitled
       - tags
     sort:
       - property: status
