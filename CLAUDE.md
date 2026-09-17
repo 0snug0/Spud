@@ -23,10 +23,20 @@ Read `.claude/skills/spudlib-modules/SKILL.md` first: the import rule (a module 
 The full suite, from the checkout or a worktree root:
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests   # about eleven minutes, leaves no bytecode
+python3.14 -I -S tests/suite.py   # 986 tests on 18 workers, about 80 seconds; the last line names the tree it ran
 ```
 
-It runs entirely against scratch homes built from `tests/fixtures/spud.config.json`; `tests/helpers.py` points `SPUD_HOME` at a home that cannot exist before each test sets its own, so a run can never open the real ledger. `tests/probes/` covers what the suite doesn't — read a probe's own docstring for its exact arguments before running it:
+`tests/suite.py` (SPD-102) reads every file `git ls-files -c -o --exclude-standard` lists (tracked, or untracked and not ignored) into a scratch copy, runs the suite there in one worker interpreter per core, and removes the copy; it writes nothing into the checkout, bytecode included. A file edited during a run reaches no worker, so a run tests exactly the tree it started from, and two runs in one checkout share no file, only the cores (SPD-083). Failures print as unittest prints them, and the run ends with one line on stdout, for example `OK: 986 tests in 79.8 s on 18 workers; tree 7ac5aaaa712f01ed`: the result and the digest of the tree it covered. `python3.14 -I -S tests/suite.py --digest` prints the checkout's digest now, running nothing. It changes when any listed file's content, mode or presence changes, and never for bytecode, scratch files or anything else git ignores. A member records its green run's final line in its `member result`.
+
+While iterating, run only the modules, classes or tests you touched, `python3.14 -I -S tests/suite.py test_members test_hooks.StopTest` (seconds; about a minute for all of `test_hooks`), and run the whole suite once at the end. A named run's final line says `partial`, and it proves nothing at landing. `-j N` overrides the worker count; `--cold` gives every scratch home an empty bytecode cache, as before SPD-102. Two rules keep the parallel run honest: a test that asserts an upper bound on wall time carries `helpers.wall_clock` and runs after every other test is done, and a `SpudTestCase` that asserts what the launcher caches or what `init` or a backup leaves in `.spud/` sets `warm_cache = False`.
+
+The serial command is the fallback: the same tests, one at a time, in the checkout itself, about eleven minutes. It reads the live files, removes at exit the bytecode its first two modules wrote, and prints no digest, so run it only while nothing else writes to or runs in that checkout, and never as a landing's evidence:
+
+```bash
+python3.14 -I -S -m unittest discover -s tests -t tests   # the serial fallback, about eleven minutes, leaves no bytecode
+```
+
+Either way the suite runs entirely against scratch homes built from `tests/fixtures/spud.config.json`; `tests/helpers.py` points `SPUD_HOME` at a home that cannot exist before each test sets its own, so a run can never open the real ledger. `tests/probes/` covers what the suite doesn't — read a probe's own docstring for its exact arguments before running it:
 
 - `hook_timing.py [ROUNDS] LAUNCHER [LAUNCHER ...]` — hook-run medians, interleaved across launchers; run it against main's launcher after any change to the hook path, and pass only when every hook case's median lands within 1 ms of main's in the same run.
 - `module_sizes.py [PATH ...]` — application-code line counts and each file's largest definition, banded at 250 and 1000 lines; advisory, always exits 0.
@@ -36,7 +46,7 @@ It runs entirely against scratch homes built from `tests/fixtures/spud.config.js
 
 ## Landing
 
-The full suite green on the branch; `git merge-tree --write-tree main <branch>` as a dry run; merge `main` into the branch and rerun the suite if `main` moved since the branch was cut; `ExitWorktree` (`keep`); `git merge --no-ff <branch>` at the main checkout and push. Then the sync the change needs: `spud --as spud settings sync` refreshes the home's own `.claude/settings.json` after a change to what the hooks or allow rules generate; `spud --as spud project sync spud` (or `--all`) refreshes this and every other project's installed `.claude/settings.local.json`, `~/.claude/agents/spudagent.md` and the `/spud` skill after a change to `spudagent.md`, the skill text, or the installed hook wiring. Finally `git worktree remove .claude/worktrees/<name>` and `git branch -d <branch>` — never `--force`. Every commit names its ticket.
+The full suite green on the branch, once per tree: a member's recorded green run counts, and it is rerun only when `python3.14 -I -S tests/suite.py --digest` in the worktree now prints a different digest from the one on that run's final line (a fix after the run, `main` merged in). Committing the tree on the branch does not change its digest. `git merge-tree --write-tree main <branch>` as a dry run; merge `main` into the branch and rerun the suite if `main` moved since the branch was cut; `ExitWorktree` (`keep`); `git merge --no-ff <branch>` at the main checkout and push. Then the sync the change needs: `spud --as spud settings sync` refreshes the home's own `.claude/settings.json` after a change to what the hooks or allow rules generate; `spud --as spud project sync spud` (or `--all`) refreshes this and every other project's installed `.claude/settings.local.json`, `~/.claude/agents/spudagent.md` and the `/spud` skill after a change to `spudagent.md`, the skill text, or the installed hook wiring. Finally `git worktree remove .claude/worktrees/<name>` and `git branch -d <branch>` — never `--force`. Every commit names its ticket.
 
 ## Interpreter
 
@@ -45,11 +55,19 @@ Always `python3.14 -I -S`: isolated, no `site`, nothing on `sys.path` but the in
 ## Commands
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests   # the full suite, about eleven minutes
+python3.14 -I -S tests/suite.py   # the full suite on every core, about 80 seconds; ends with the result and the tree's digest
 ```
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests -p test_package.py   # the package-shape guard alone, seconds
+python3.14 -I -S tests/suite.py --digest   # the digest of the checkout's tree now; runs nothing
+```
+
+```bash
+python3.14 -I -S tests/suite.py test_package test_hooks.StopTest   # named modules, classes or tests only, while iterating
+```
+
+```bash
+python3.14 -I -S -m unittest discover -s tests -t tests   # the serial fallback, about eleven minutes; one run at a time per checkout
 ```
 
 ```bash
