@@ -179,11 +179,12 @@ QUIET_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
 # The order bash_reason reads a line's findings in: a refusal the words as spelled already earn first, then the ones that are
 # the hook's last resort -- a verb it cannot place among git's own commands and a repository it cannot read (SPD-047), a
 # program name the shell would not find where the hook looked (SPD-062: a PATH the line assigns, a hashed name; SPD-084: a
-# name the line bound to a shell function; SPD-049 gave them their entry, which wave 2 could not) -- then a word it cannot
+# name the line bound to a shell function; SPD-106: a function the line hands a program's environment; SPD-049 gave them
+# their entry, which wave 2 could not) -- then a word it cannot
 # resolve at all (SPD-043).  So `touch push; git p?sh` still names `git push`, `git -C /tmp commit` the verb, and
 # `PATH=<dir> git status; git push` the push.  All of them refuse; the entry decides only which reason a line of several
 # commands answers with.
-FINDING_LAST = {"git-verb": 1, "git-repo": 1, "path": 1, "hashed": 1, "function": 1, "var-word": 2, "var-doubt": 2}
+FINDING_LAST = {"git-verb": 1, "git-repo": 1, "path": 1, "hashed": 1, "function": 1, "env-function": 1, "var-word": 2, "var-doubt": 2}
 
 
 def actor_is_self(con, actor, caller_member, caller_agent_id):
