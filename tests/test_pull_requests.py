@@ -1,0 +1,486 @@
+"""Landing pull requests (SPD-077): `pr record`, `pr reconcile`, and what board, card and doctor say.
+
+BAD-058 showed as `active` for 44 minutes after its work had landed: its session opened the pull request, recorded the
+outcome and stopped, the pull request squash-merged later, and no session was left to move the ticket, write the Outcome
+or delete the worktree and its branch.  Nothing in the ledger knew a pull request existed.  So Spud records the one a
+ticket lands through, the reconciler reads each recorded, still-open one with a single `gh pr view` off every hook path,
+and the board -- the full one and the `--brief` line SessionStart injects -- says what a merge leaves owed.
+
+Every `gh` call here goes to tests/helpers.py's stand-in (GhMixin), and a Home that does not set one up has SPUD_GH=off
+and reads nothing: no test in this suite can reach the network.
+"""
+
+import json
+import unittest
+
+from helpers import EXIT_ERROR, EXIT_OWNERSHIP, EXIT_TRANSITION, EXIT_USAGE, GhMixin, SpudTestCase
+from test_hooks import HookCase
+
+URL = "https://github.com/0snug0/BadTakes/pull/361"
+URL2 = "https://github.com/0snug0/BadTakes/pull/362"
+BRANCH = "feat/bad-058-landing"
+MERGED_AT = "2026-09-16T17:12:34Z"
+
+
+class PullRequestCase(SpudTestCase):
+    """An active ticket and a helper that records a pull request against it."""
+
+    def setUp(self):
+        super().setUp()
+        self.t = self.new_ticket("A ticket that lands by pull request", status="active")
+
+    def record(self, url=URL, ticket=None, branch=BRANCH, worktree="/tmp/wt-bad-058", check=True, actor="spud", **extra):
+        args = ["pr", "record", "--ticket", ticket or self.t["key"], "--url", url, "--branch", branch]
+        if worktree is not None:
+            args += ["--worktree", worktree]
+        for k, v in extra.items():
+            args += ["--" + k.replace("_", "-"), v]
+        return self.home.json(*args, actor=actor, check=check)
+
+    def bind_worktree(self, path):
+        """Stand in for SPD-098's binding, which test_ticket_worktree covers: the path `pr record` defaults to."""
+        con = self.home.connect()
+        try:
+            with con:
+                con.execute("UPDATE tickets SET worktree = ? WHERE key = ?", (path, self.t["key"]))
+        finally:
+            con.close()
+
+    def prs(self):
+        return self.home.rows("SELECT * FROM pull_requests ORDER BY id")
+
+
+# =============================================================================
+# pr record
+# =============================================================================
+
+
+class RecordTest(PullRequestCase):
+    """One writing command records the pull request a ticket lands through, with the branch and the worktree whose
+    cleanup the landing will owe.  It is Spud's: opening a pull request is part of landing (Law 10), and a member
+    neither commits nor pushes (Law 7), so a member never has one to record."""
+
+    def test_recording_writes_the_row_and_the_event(self):
+        out = self.record()
+        d = out["pull_request"]
+        self.assertEqual((d["ticket"], d["url"], d["number"], d["branch"], d["worktree"]), (self.t["key"], URL, 361, BRANCH, "/tmp/wt-bad-058"))
+        self.assertEqual((d["state"], d["settled_at"], d["checked_at"], d["check_error"], d["merged_at"]), ("open", None, None, None, None))
+        self.assertEqual(d["recorded_by"], "spud")
+        self.assertFalse(out["again"])
+        events = self.home.json("events", "--kind", "pr.recorded")["events"]
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["actor"], "spud")
+        self.assertEqual(events[0]["ticket"], self.t["key"])
+        self.assertEqual(events[0]["data"], {"url": URL, "number": 361, "branch": BRANCH, "worktree": "/tmp/wt-bad-058", "again": False})
+        self.assertIn("#361", self.home.run("pr", "record", "--ticket", self.t["key"], "--url", URL, "--branch", BRANCH, actor="spud").stdout)
+
+    def test_the_worktree_defaults_to_the_one_the_ticket_is_bound_to(self):
+        self.bind_worktree("/tmp/worktrees/bad-058")
+        self.assertEqual(self.record(worktree=None)["pull_request"]["worktree"], "/tmp/worktrees/bad-058")
+        self.assertEqual(self.record(url=URL2, worktree="/tmp/elsewhere")["pull_request"]["worktree"], "/tmp/elsewhere")
+
+    def test_a_ticket_with_no_worktree_records_none(self):
+        self.assertIsNone(self.record(worktree=None)["pull_request"]["worktree"])
+
+    def test_only_spud_records_one(self):
+        m = self.new_member(self.t["key"])
+        proc = self.home.run("pr", "record", "--ticket", self.t["key"], "--url", URL, "--branch", BRANCH,
+                             actor="%s/%s" % (self.t["team_key"], m["name"]), check=False)
+        self.assertEqual(proc.returncode, EXIT_OWNERSHIP, proc)
+        self.assertIn("recording a landing pull request is Spud's", proc.stderr)
+        self.assertEqual(self.prs(), [])
+
+    def test_the_url_must_be_an_absolute_http_url(self):
+        for bad in ("361", "github.com/o/r/pull/1", "/pull/1", "ssh://git@github.com/o/r", ""):
+            with self.subTest(bad):
+                proc = self.home.run("pr", "record", "--ticket", self.t["key"], "--url", bad, "--branch", BRANCH, actor="spud", check=False)
+                self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+                self.assertIn("absolute http(s) URL", proc.stderr)
+        self.assertEqual(self.prs(), [])
+
+    def test_a_url_without_a_number_is_recorded_whole(self):
+        d = self.record(url="https://example.invalid/o/r/changes/9")["pull_request"]
+        self.assertIsNone(d["number"])
+        self.assertIn("https://example.invalid/o/r/changes/9", self.home.run("pr", "list").stdout)
+
+    def test_the_branch_is_required_and_not_blank(self):
+        proc = self.home.run("pr", "record", "--ticket", self.t["key"], "--url", URL, "--branch", "  ", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_USAGE, proc)
+        self.assertIn("head branch", proc.stderr)
+        proc = self.home.run("pr", "record", "--ticket", self.t["key"], "--url", URL, actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_USAGE, proc)
+
+    def test_a_closed_ticket_records_none(self):
+        self.home.json("ticket", "move", self.t["key"], "--status", "done", actor="spud")
+        proc = self.home.run("pr", "record", "--ticket", self.t["key"], "--url", URL, "--branch", BRANCH, actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_TRANSITION, proc)
+        self.assertIn("still open", proc.stderr)
+        self.assertEqual(self.prs(), [])
+
+    def test_recording_the_same_url_again_refreshes_the_branch_and_the_worktree(self):
+        self.record()
+        out = self.record(branch="fix/renamed", worktree="/tmp/moved")
+        self.assertTrue(out["again"])
+        self.assertEqual([(p["branch"], p["worktree"]) for p in self.prs()], [("fix/renamed", "/tmp/moved")])
+        self.assertIn("again", self.home.run("pr", "record", "--ticket", self.t["key"], "--url", URL, "--branch", "fix/renamed", actor="spud").stdout)
+
+    def test_one_pull_request_lands_one_ticket(self):
+        self.record()
+        other = self.new_ticket("Another", status="active")
+        proc = self.home.run("pr", "record", "--ticket", other["key"], "--url", URL, "--branch", BRANCH, actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+        self.assertIn("already recorded against %s" % self.t["key"], proc.stderr)
+
+    def test_no_such_ticket(self):
+        proc = self.home.run("pr", "record", "--ticket", "SPD-999", "--url", URL, "--branch", BRANCH, actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+        self.assertIn("no ticket SPD-999", proc.stderr)
+
+
+# =============================================================================
+# pr reconcile
+# =============================================================================
+
+
+class ReconcileTest(GhMixin, PullRequestCase):
+    """One `gh pr view` per recorded, still-open pull request, run in its ticket's project checkout, with the answer and
+    the time it was read stored.  A read that fails is a stored failed check and never stops the run; a settled pull
+    request is never read again; and nothing here merges anything, runs git or moves a ticket."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_gh()
+        self.record()
+
+    def test_a_merge_reaches_the_ledger_with_no_session_and_no_move(self):
+        self.answer_pr(URL, state="MERGED", merged_at=MERGED_AT, number=361)
+        out = self.home.json("pr", "reconcile")
+        self.assertEqual(out["reconcile"]["settled"], [URL])
+        p = self.prs()[0]
+        self.assertEqual((p["state"], p["merged_at"]), ("merged", MERGED_AT))
+        self.assertTrue(p["settled_at"] and p["checked_at"])
+        self.assertIsNone(p["check_error"])
+        # the one read, in the ticket's project checkout, of the recorded URL and nothing else
+        self.assertEqual([c["args"] for c in self.gh_calls()], [["pr", "view", URL, "--json", "state,mergedAt,url,number"]])
+        self.assertEqual(self.gh_calls()[0]["cwd"], self.home.scalar("SELECT root_path FROM projects WHERE id = 1"))
+        # the state change is the reconciler's, under no person's name, and the ticket has not moved
+        events = self.home.json("events", "--kind", "pr.state")["events"]
+        self.assertEqual([(e["actor"], e["ticket"], e["data"]["to"]) for e in events], [("reconcile", self.t["key"], "merged")])
+        self.assertEqual(self.home.json("ticket", "show", self.t["key"])["ticket"]["status"], "active")
+
+    def test_a_closed_unmerged_pull_request_is_recorded_and_nothing_is_moved(self):
+        self.answer_pr(URL, state="CLOSED", number=361)
+        self.home.json("pr", "reconcile")
+        p = self.prs()[0]
+        self.assertEqual((p["state"], p["merged_at"]), ("closed", None))
+        self.assertTrue(p["settled_at"])
+        self.assertEqual(self.home.json("ticket", "show", self.t["key"])["ticket"]["status"], "active")
+        self.assertEqual([e["data"]["to"] for e in self.home.json("events", "--kind", "pr.state")["events"]], ["closed"])
+
+    def test_an_open_pull_request_stays_open_and_writes_no_event(self):
+        self.answer_pr(URL, state="OPEN", number=361)
+        self.home.json("pr", "reconcile")
+        p = self.prs()[0]
+        self.assertEqual((p["state"], p["settled_at"]), ("open", None))
+        self.assertTrue(p["checked_at"])
+        self.assertEqual(self.home.json("events", "--kind", "pr.state")["events"], [])
+
+    def test_a_settled_pull_request_is_never_read_again(self):
+        self.answer_pr(URL, state="MERGED", merged_at=MERGED_AT, number=361)
+        self.home.json("pr", "reconcile")
+        self.home.json("pr", "reconcile")
+        self.assertEqual(len(self.gh_calls()), 1)
+
+    def test_a_failed_read_is_stored_and_does_not_stop_the_run(self):
+        self.record(url=URL2, branch="feat/second")
+        self.answer_pr(URL, error="gh: HTTP 403: API rate limit exceeded")
+        self.answer_pr(URL2, state="MERGED", merged_at=MERGED_AT, number=362)
+        out = self.home.json("pr", "reconcile")
+        self.assertEqual((out["reconcile"]["failed"], out["reconcile"]["settled"]), (1, [URL2]))
+        first, second = self.prs()
+        self.assertEqual((first["state"], first["check_error"]), ("open", "gh: HTTP 403: API rate limit exceeded"))
+        self.assertTrue(first["checked_at"])
+        self.assertEqual(second["state"], "merged")
+
+    def test_every_way_a_read_can_fail_is_a_stored_failed_check(self):
+        cases = {"a url github does not know": (dict(), "could not resolve"),
+                 "output that is not json": (dict(unparseable=True), "printed no JSON"),
+                 "a state nobody knows": (dict(state="DRAFT"), "not OPEN, MERGED or CLOSED")}
+        for label, (answer, expected) in cases.items():
+            with self.subTest(label):
+                if answer:
+                    self.answer_pr(URL, **answer)
+                else:
+                    self.forget_pr(URL)
+                self.home.json("pr", "reconcile")
+                p = self.prs()[0]
+                self.assertEqual(p["state"], "open")
+                self.assertIn(expected, p["check_error"])
+
+    def test_a_missing_gh_is_a_stored_failed_check_not_a_crash(self):
+        self.home.env["SPUD_GH"] = str(self.home.path / "no-such-gh")
+        out = self.home.json("pr", "reconcile")
+        self.assertEqual(out["reconcile"]["failed"], 1)
+        self.assertIn("cannot run", self.prs()[0]["check_error"])
+
+    def test_a_successful_read_clears_an_earlier_failure(self):
+        self.answer_pr(URL, error="gh: could not connect")
+        self.home.json("pr", "reconcile")
+        self.assertTrue(self.prs()[0]["check_error"])
+        self.answer_pr(URL, state="OPEN", number=361)
+        self.home.json("pr", "reconcile")
+        self.assertIsNone(self.prs()[0]["check_error"])
+
+    def test_the_reader_turned_off_reads_nothing_and_says_so(self):
+        self.home.env["SPUD_GH"] = "off"
+        proc = self.home.run("pr", "reconcile")
+        self.assertIn("SPUD_GH=off", proc.stdout)
+        self.assertEqual(self.gh_calls(), [])
+        self.assertTrue(self.home.json("pr", "reconcile")["reconcile"]["off"])
+        self.assertIsNone(self.prs()[0]["checked_at"])
+
+    def test_stale_skips_a_pull_request_read_recently(self):
+        self.answer_pr(URL, state="OPEN", number=361)
+        self.home.json("pr", "reconcile")
+        out = self.home.json("pr", "reconcile", "--stale", "600")
+        self.assertEqual((out["reconcile"]["skipped"], len(self.gh_calls())), (1, 1))
+        out = self.home.json("pr", "reconcile")  # --stale defaults to 0: read it now
+        self.assertEqual((out["reconcile"]["skipped"], len(self.gh_calls())), (0, 2))
+
+    def test_one_ticket_at_a_time(self):
+        other = self.new_ticket("Another", status="active")
+        self.home.json("pr", "record", "--ticket", other["key"], "--url", URL2, "--branch", "feat/other", actor="spud")
+        self.answer_pr(URL, state="OPEN", number=361)
+        self.answer_pr(URL2, state="OPEN", number=362)
+        self.home.json("pr", "reconcile", "--ticket", other["key"])
+        self.assertEqual([c["args"][2] for c in self.gh_calls()], [URL2])
+        proc = self.home.run("pr", "reconcile", "--ticket", "SPD-999", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+
+    def test_a_spent_budget_stops_the_run_and_says_so(self):
+        self.record(url=URL2, branch="feat/second")
+        self.answer_pr(URL, state="OPEN", number=361)
+        self.answer_pr(URL2, state="OPEN", number=362)
+        out = self.home.json("pr", "reconcile", "--budget", "0")
+        self.assertTrue(out["reconcile"]["out_of_budget"])
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_reconcile_needs_no_actor_and_ignores_one(self):
+        self.answer_pr(URL, state="MERGED", merged_at=MERGED_AT, number=361)
+        self.home.json("pr", "reconcile", actor="spud")
+        self.assertEqual([e["actor"] for e in self.home.json("events", "--kind", "pr.state")["events"]], ["reconcile"])
+
+
+# =============================================================================
+# the board, the brief board and the card
+# =============================================================================
+
+
+class BoardTest(GhMixin, PullRequestCase):
+    """The full board reconciles and surfaces; `board --brief`, which SessionStart injects, reads stored state alone."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_gh()
+        self.record()
+
+    def merge(self):
+        self.answer_pr(URL, state="MERGED", merged_at=MERGED_AT, number=361)
+        self.home.json("pr", "reconcile")
+
+    def test_the_board_reconciles_and_shows_a_merge_with_what_it_owes(self):
+        self.answer_pr(URL, state="MERGED", merged_at=MERGED_AT, number=361)
+        text = self.home.run("board").stdout
+        self.assertEqual(len(self.gh_calls()), 1)
+        self.assertIn("pull requests:", text)
+        self.assertIn("#361 merged 2026-09-16T17:12", text)
+        self.assertIn(URL, text)
+        self.assertIn("owed: the done move, with the pull request URL in %s's Outcome" % self.t["key"], text)
+        self.assertIn("`git worktree remove /tmp/wt-bad-058`", text)
+        self.assertIn("`git branch -D %s`" % BRANCH, text)
+        d = self.home.json("board")["pull_requests"][0]
+        self.assertEqual((d["state"], d["branch"], d["worktree"]), ("merged", BRANCH, "/tmp/wt-bad-058"))
+
+    def test_a_closed_unmerged_pull_request_is_surfaced_and_owes_nothing(self):
+        self.answer_pr(URL, state="CLOSED", number=361)
+        text = self.home.run("board").stdout
+        self.assertIn("#361 closed unmerged", text)
+        self.assertNotIn("owed:", text)
+
+    def test_an_open_pull_request_shows_when_it_was_read(self):
+        self.answer_pr(URL, state="OPEN", number=361)
+        self.assertRegex(self.home.run("board").stdout, r"#361 open, read (just now|\d+s ago)")
+        self.assertNotIn("owed:", self.home.run("board", "--no-reconcile").stdout)
+
+    def test_a_failed_read_is_named_on_the_board(self):
+        self.answer_pr(URL, error="gh: HTTP 403: API rate limit exceeded")
+        self.assertIn("open, last read failed", self.home.run("board").stdout)
+        self.assertIn("API rate limit exceeded", self.home.run("board", "--no-reconcile").stdout)
+
+    def test_no_reconcile_and_the_reader_off_read_nothing(self):
+        self.answer_pr(URL, state="MERGED", merged_at=MERGED_AT, number=361)
+        self.assertIn("#361 open, never read", self.home.run("board", "--no-reconcile").stdout)
+        self.home.env["SPUD_GH"] = "off"
+        self.assertIn("#361 open, never read", self.home.run("board").stdout)
+        self.assertEqual(self.gh_calls(), [])
+
+    def test_the_board_leaves_a_fresh_check_alone(self):
+        self.answer_pr(URL, state="OPEN", number=361)
+        self.home.run("board")
+        self.home.run("board")
+        self.assertEqual(len(self.gh_calls()), 1)
+
+    def test_a_ticket_moved_to_done_owes_nothing_and_leaves_the_block(self):
+        self.merge()
+        self.assertIn("owed:", self.home.run("board").stdout)
+        self.home.json("ticket", "move", self.t["key"], "--status", "done", actor="spud")
+        text = self.home.run("board").stdout
+        self.assertNotIn("pull requests:", text)
+        self.assertNotIn("owed:", text)
+        self.assertEqual(self.home.json("pr", "list")["pull_requests"][0]["state"], "merged")  # kept as history
+
+    def test_the_brief_board_nags_without_reading_anything(self):
+        self.merge()
+        calls = len(self.gh_calls())
+        text = self.home.run("board", "--brief").stdout
+        self.assertEqual(len(self.gh_calls()), calls)
+        self.assertIn("  pull request #361 merged 2026-09-16T17:12; owed: the done move", text)
+        self.assertNotIn("pull_requests", json.dumps(self.home.json("board", "--brief")))
+
+    def test_the_brief_board_says_nothing_about_an_open_pull_request(self):
+        self.answer_pr(URL, state="OPEN", number=361)
+        self.home.json("pr", "reconcile")
+        self.assertNotIn("  pull request", self.home.run("board", "--brief").stdout)
+
+    def test_a_queued_ticket_nags_too(self):
+        other = self.new_ticket("Queued with a merge")
+        self.home.json("pr", "record", "--ticket", other["key"], "--url", URL2, "--branch", "feat/other", actor="spud")
+        self.answer_pr(URL2, state="MERGED", merged_at=MERGED_AT, number=362)
+        self.home.json("pr", "reconcile")
+        self.assertIn("  pull request #362 merged", self.home.run("board", "--brief").stdout)
+
+    def test_the_card_shows_the_pull_request_and_what_it_owes(self):
+        self.merge()
+        text = self.home.run("card", self.t["key"]).stdout
+        self.assertIn("pull request #361 merged 2026-09-16T17:12  %s" % URL, text)
+        self.assertIn("owed: the done move", text)
+        self.assertEqual(self.home.json("card", self.t["key"])["pull_requests"][0]["url"], URL)
+
+    def test_pr_list_shows_everything_recorded(self):
+        self.merge()
+        self.home.json("pr", "record", "--ticket", self.t["key"], "--url", URL2, "--branch", "feat/second", actor="spud")
+        self.assertEqual(len(self.home.json("pr", "list")["pull_requests"]), 2)
+        self.assertEqual([d["url"] for d in self.home.json("pr", "list", "--open")["pull_requests"]], [URL2])
+        self.assertEqual(len(self.home.json("pr", "list", "--ticket", self.t["key"])["pull_requests"]), 2)
+        self.assertEqual(len(self.home.json("pr", "list", "--project", "spud")["pull_requests"]), 2)
+        bare = self.new_ticket("Bare")
+        self.assertIn("(no pull request recorded)", self.home.run("pr", "list", "--ticket", bare["key"]).stdout)
+
+
+class SessionStartTest(GhMixin, HookCase):
+    """The nag reaches the model: SessionStart injects `board --brief`, so a merge is in front of the next session that
+    starts anywhere, which is exactly what BAD-058 lacked."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_gh()
+        self.home.json("pr", "record", "--ticket", self.t["key"], "--url", URL, "--branch", BRANCH, "--worktree", "/tmp/wt", actor="spud")
+        self.answer_pr(URL, state="MERGED", merged_at=MERGED_AT, number=361)
+        self.home.json("pr", "reconcile")
+
+    def test_the_injection_carries_the_merged_pull_request(self):
+        calls = len(self.gh_calls())
+        r = self.home.hook("SessionStart", self.session_start())
+        self.assertEqual(r.code, 0, r)
+        self.assertIn("pull request #361 merged", r.context)
+        self.assertIn("owed: the done move", r.context)
+        self.assertEqual(len(self.gh_calls()), calls)  # no hook ever reads the network
+
+
+# =============================================================================
+# doctor
+# =============================================================================
+
+
+class DoctorTest(GhMixin, PullRequestCase):
+    """doctor reports the recorded pull requests and every failed read, the way it reports a down render watcher: nothing
+    in the ledger is broken, but until the read succeeds a merge that already happened stays invisible."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_gh()
+
+    def test_a_clean_home_reports_none_and_stays_green(self):
+        proc = self.home.run("doctor")
+        self.assertIn("pull reqs   0 recorded, 0 open, 0 settled", proc.stdout)
+        self.assertEqual(self.home.json("doctor")["pull_requests"]["failed_checks"], [])
+
+    def test_a_failed_read_is_a_problem_naming_the_retry(self):
+        self.record()
+        self.answer_pr(URL, error="gh: HTTP 403: API rate limit exceeded")
+        self.home.json("pr", "reconcile")
+        proc = self.home.run("doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+        self.assertIn("the last read of #361 (%s) failed" % self.t["key"], proc.stderr)
+        self.assertIn("spud pr reconcile --ticket %s" % self.t["key"], proc.stderr)
+        report = self.home.json("doctor", check=False)
+        self.assertEqual([d["url"] for d in report["pull_requests"]["failed_checks"]], [URL])
+        self.assertEqual((report["pull_requests"]["recorded"], report["pull_requests"]["open"]), (1, 1))
+
+    def test_a_failed_read_on_a_closed_ticket_is_no_problem(self):
+        self.record()
+        self.answer_pr(URL, error="gh: could not connect")
+        self.home.json("pr", "reconcile")
+        self.home.json("ticket", "move", self.t["key"], "--status", "done", actor="spud")
+        self.assertEqual(self.home.run("doctor").returncode, 0)
+
+    def test_a_settled_pull_request_is_counted_and_the_reader_named(self):
+        self.record()
+        self.answer_pr(URL, state="MERGED", merged_at=MERGED_AT, number=361)
+        self.home.json("pr", "reconcile")
+        report = self.home.json("doctor")
+        self.assertEqual((report["pull_requests"]["recorded"], report["pull_requests"]["settled"]), (1, 1))
+        self.assertEqual(report["pull_requests"]["reader"], str(self.gh))
+
+    def test_the_reader_off_with_rows_recorded_is_a_note(self):
+        self.record()
+        self.home.env["SPUD_GH"] = "off"
+        report = self.home.json("doctor")
+        self.assertEqual(report["pull_requests"]["reader"], "off")
+        self.assertTrue(any("SPUD_GH=off" in n for n in report["notes"]))
+
+
+# =============================================================================
+# the surface every command promises
+# =============================================================================
+
+
+class HelpTest(PullRequestCase):
+    def test_help_answers_for_the_family_and_each_subcommand(self):
+        top = self.home.run("--help").stdout
+        self.assertIn("pr ", top)
+        self.assertIn("landing pull requests", top)
+        family = self.home.run("pr", "--help").stdout
+        for word in ("record", "reconcile", "list", "never merges a pull request", "SPUD_GH"):
+            self.assertIn(word, family)
+        for sub in ("record", "reconcile", "list"):
+            with self.subTest(sub):
+                self.assertIn("usage: spud pr " + sub, self.home.run("pr", sub, "--help").stdout)
+        self.assertIn("--no-reconcile", self.home.run("board", "--help").stdout)
+
+    def test_json_answers_on_each_of_them(self):
+        self.assertIn("pull_requests", self.home.json("pr", "list"))
+        self.assertIn("pull_request", self.record())
+        self.assertIn("reconcile", self.home.json("pr", "reconcile"))
+        self.assertIn("pull_requests", self.home.json("board"))
+        self.assertIn("pull_requests", self.home.json("card", self.t["key"]))
+        self.assertIn("pull_requests", self.home.json("doctor"))
+
+    def test_the_events_command_knows_the_two_new_kinds(self):
+        self.record()
+        self.assertEqual(len(self.home.json("events", "--kind", "pr.recorded")["events"]), 1)
+        self.assertEqual(self.home.json("events", "--kind", "pr.state")["events"], [])
+
+
+if __name__ == "__main__":
+    unittest.main()

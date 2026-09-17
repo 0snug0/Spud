@@ -28,9 +28,20 @@ def board_line(r, day):
     return "%s %s %s %s%s" % (r["key"], r["status"], r["priority"], r["title"], (" (%s)" % "; ".join(inside)) if inside else "")
 
 
+def settled_pr_lines(con, key):
+    """The lines a ticket's merged or closed-unmerged pull requests put on the brief board (SPD-077).  Stored state only:
+    no `gh` and no git here, because this text is injected at every session start -- which is the point, since the session
+    that opened the pull request is long gone by the time it merges (BAD-058).  An open one says nothing: the full board
+    reads it and shows it there."""
+    rows = con.execute("SELECT p.* FROM pull_requests p JOIN tickets t ON t.id = p.ticket_id WHERE t.key = ? AND p.state <> 'open'"
+                       " ORDER BY p.id", (key,)).fetchall()
+    return ["  " + lookup.pr_nag_line(lookup.pr_dict(con, p)) for p in rows]
+
+
 def board_brief_text(con, rows=None, parked=False):
     """Open tickets and their live members, one line each (also the SessionStart context): active tickets with their live
-    members, then the parked tickets whose date has arrived, then queued, then one count line for the parked (SPD-096).
+    members and any settled landing pull request (SPD-077), then the parked tickets whose date has arrived, then queued,
+    then one count line for the parked (SPD-096).
     A due-back line sits above the queue and the count line last because every SessionStart context keeps whole lines
     from the top (fit_bytes): the line meant to nag must survive the cut, and the count may be cut.  With no parked ticket the
     text is what it was before SPD-096, byte for byte.  `parked`: every parked ticket instead, due or not."""
@@ -49,7 +60,7 @@ def board_brief_text(con, rows=None, parked=False):
             continue
         line = board_line(r, day)
         if r["status"] != "active":
-            queued.append(line)
+            queued += [line] + settled_pr_lines(con, r["key"])
             continue
         active.append(line)
         for m in con.execute(
@@ -57,8 +68,9 @@ def board_brief_text(con, rows=None, parked=False):
             (r["key"],),
         ).fetchall():
             active.append("  %s (%s, %s, %s) %s" % (m["name"], m["lineage"], lookup.persona_label(m), m["model"], brief_state(m, now)))
+        active.extend(settled_pr_lines(con, r["key"]))
     due = [r for r in shelved if r["parked_until"] and r["parked_until"] <= day]
-    lines = active + [board_line(r, day) for r in due] + queued
+    lines = active + [line for r in due for line in [board_line(r, day)] + settled_pr_lines(con, r["key"])] + queued
     if shelved:
         lines.append("%d parked%s (spud board --parked)" % (len(shelved), (", %d due back" % len(due)) if due else ""))
     return "\n".join(lines) or "(no open tickets)"

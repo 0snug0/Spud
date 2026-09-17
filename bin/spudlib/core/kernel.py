@@ -65,7 +65,13 @@ EVENT_KINDS = (
     "session.claimed", "session.released",
     # ticket-bound worktrees (SPD-098, migration 0004_ticket_worktree)
     "ticket.worktree",
+    # landing pull requests (SPD-077, migration 0005_pull_requests): recorded by Spud, settled by the reconciler
+    "pr.recorded", "pr.state",
 )
+
+# The actor a reconciled pull-request state is written under (SPD-077).  A `gh pr view` read is nobody's judgment, so it
+# names no person: `spud pr reconcile` takes no --as, which is what lets `spud board` run it.
+RECONCILE_ACTOR = "reconcile"
 
 # The markdown-v0 templates (ledger/_templates/) as the renderer's default layout.  `project` since SPD-014: every
 # note names its project, the home's included, so the Obsidian views group and filter without an empty bucket.

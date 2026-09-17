@@ -178,6 +178,10 @@ class Home:
         # ~/Library/LaunchAgents must not decide a test: every home looks in a directory of its own, which nothing
         # creates unless the test installs an agent.  LaunchdMixin points it at its own scratch and its fake launchctl.
         self.env["SPUD_LAUNCH_AGENTS_DIR"] = str(self.path / "LaunchAgents")
+        # SPD-077: the suite never touches the network.  `off` is the one value that stops every `gh pr view` the
+        # reconciler would make, `spud board`'s own run included, so no test can reach GitHub by forgetting something; a
+        # test that wants a read points this at a fake gh of its own (GhMixin below).
+        self.env["SPUD_GH"] = "off"
         # SPD-097: the tool, the checkout whose bin/spud the hook lines, allow rules, LaunchAgents and the /spud skill name
         # and where the spudagent source is read, is this scratch home unless a test names another.  So the assertions the
         # suite made before the split keep their `<home>/bin/spud` shape; a test of the split builds a separate tool with
@@ -536,6 +540,74 @@ if verb == "print":
 sys.stderr.write("fake launchctl: unexpected arguments %r\n" % (args,))
 sys.exit(64)
 '''
+
+
+# A stand-in for gh (SPD-077): answers `gh pr view <url> --json <fields>` from a JSON file the test writes and records
+# every call with the directory it ran in, so a test can assert both what was asked and where.  Nothing reaches the network.
+FAKE_GH = r'''"""A stand-in for gh: answers `pr view <url> --json <fields>` from a JSON file and records every call."""
+import json
+import os
+import sys
+
+state = os.environ["FAKE_GH_STATE"]
+args = sys.argv[1:]
+with open(os.path.join(state, "calls.jsonl"), "a", encoding="utf-8") as f:
+    f.write(json.dumps({"args": args, "cwd": os.getcwd()}) + "\n")
+with open(os.path.join(state, "answers.json"), encoding="utf-8") as f:
+    answers = json.load(f)
+url = args[2] if len(args) > 2 else ""
+answer = answers.get(url)
+if answer is None:
+    sys.stderr.write("could not resolve to a PullRequest with the URL %s\n" % url)
+    sys.exit(1)
+if isinstance(answer, str):  # a failure the test asked for: gh's own complaint on stderr and a non-zero exit
+    sys.stderr.write(answer + "\n")
+    sys.exit(1)
+if answer == {}:  # output the reader cannot parse
+    sys.stdout.write("not json at all")
+    sys.exit(0)
+sys.stdout.write(json.dumps(answer))
+sys.exit(0)
+'''
+
+
+class GhMixin:
+    """The stand-in for gh wired into self.home.env (SPD-077): `answer_pr` says what one URL answers, `gh_calls` reads what
+    the CLI asked for and where.  Without this a Home has SPUD_GH=off and reads nothing."""
+
+    def setup_gh(self):
+        scratch = tempfile.TemporaryDirectory(prefix="spud-gh-")
+        self.addCleanup(scratch.cleanup)
+        self.gh_state = Path(scratch.name).resolve()
+        (self.gh_state / "answers.json").write_text("{}", encoding="utf-8")
+        fake = self.gh_state / "fake_gh.py"
+        fake.write_text(FAKE_GH, encoding="utf-8")
+        self.gh = self.gh_state / "gh"
+        self.gh.write_text("#!/bin/sh\nexec %s -I -S %s \"$@\"\n" % (shlex.quote(sys.executable), shlex.quote(str(fake))), encoding="utf-8")
+        self.gh.chmod(0o755)
+        self.home.env.update({"SPUD_GH": str(self.gh), "FAKE_GH_STATE": str(self.gh_state)})
+
+    def answer_pr(self, url, state=None, merged_at=None, number=None, error=None, unparseable=False):
+        path = self.gh_state / "answers.json"
+        answers = json.loads(path.read_text(encoding="utf-8"))
+        if error is not None:
+            answers[url] = error
+        elif unparseable:
+            answers[url] = {}
+        else:
+            answers[url] = {"state": state, "mergedAt": merged_at, "url": url, "number": number}
+        path.write_text(json.dumps(answers), encoding="utf-8")
+
+    def forget_pr(self, url):
+        """Make the fake gh answer as it does for a URL GitHub does not know."""
+        path = self.gh_state / "answers.json"
+        answers = json.loads(path.read_text(encoding="utf-8"))
+        answers.pop(url, None)
+        path.write_text(json.dumps(answers), encoding="utf-8")
+
+    def gh_calls(self):
+        path = self.gh_state / "calls.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.is_file() else []
 
 
 class LaunchdMixin:

@@ -4,7 +4,7 @@ import os
 import sqlite3
 import sys
 
-from . import publish, settings_sync
+from . import ghread, prcmds, publish, settings_sync
 from ..core import homeconf, kernel, launchagents
 from ..hooks import hookio, worktrees
 from ..projects import install
@@ -91,6 +91,7 @@ def doctor_report(ctx):
         notes.append("the running bin/spud is in a linked worktree: hook lines written from here name it")
     report["projects"] = doctor_projects(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else []
     report["render"] = doctor_render(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION and config is not None else None
+    report["pull_requests"] = doctor_pull_requests(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["notes"] = notes
     report["problems"] = problems
     lines = [
@@ -121,9 +122,38 @@ def doctor_report(ctx):
     if report["render"] is not None:
         r = report["render"]
         lines.append("render      watcher %s%s" % (r["watcher"], ("; %d hand-edited file(s)" % len(r["conflicts"])) if r["conflicts"] else ""))
+    if report["pull_requests"] is not None:
+        p = report["pull_requests"]
+        lines.append("pull reqs   %d recorded, %d open, %d settled; reader %s" % (p["recorded"], p["open"], p["settled"], p["reader"]))
+        lines.extend("            last read failed: %s %s: %s" % (x["ticket"], x["url"], x["check_error"]) for x in p["failed_checks"])
     lines.extend("note        %s" % n for n in notes)
     lines.append("problems    %s" % (("\n            ".join(problems)) if problems else "none"))
     return report, problems, lines
+
+
+PR_CHECK_FAILED = ("the last read of %s (%s) failed: %s; until it succeeds the ledger cannot see whether that landing happened"
+                   " -- retry it with `spud pr reconcile --ticket %s`")
+
+
+def doctor_pull_requests(ctx, problems, notes):
+    """doctor's pull-request section (SPD-077): how many landing pull requests are recorded, open and settled, which
+    program answers for GitHub, and every still-open one of an open ticket whose last read failed.  A failed read is a
+    problem the way a down render watcher is: nothing is broken in the ledger, but until it succeeds a merge that has
+    already happened stays invisible.  A reader turned off is a note, the way a watcher never installed is."""
+    con = ledgerdb.connect(ctx)
+    try:
+        rows = [lookup.pr_dict(con, p) for p in lookup.pull_requests(con)]
+        failed = prcmds.failed_checks(con)
+    finally:
+        con.close()
+    reader = ghread.gh_program()
+    if rows and not ghread.enabled():
+        notes.append("the gh reader is off (SPUD_GH=off): no recorded pull request is read, and a merge stays invisible")
+    for d in failed:
+        problems.append(PR_CHECK_FAILED % (lookup.pr_name(d), d["ticket"], d["check_error"], d["ticket"]))
+    return {"recorded": len(rows), "open": sum(1 for d in rows if d["state"] == "open"),
+            "settled": sum(1 for d in rows if d["state"] != "open"),
+            "reader": reader if ghread.enabled() else "off", "failed_checks": failed}
 
 
 def doctor_projects(ctx, problems, notes):
