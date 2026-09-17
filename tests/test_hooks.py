@@ -7533,11 +7533,11 @@ class SqlTest(SpudTestCase):
         self.assertEqual(out["rows"], [])
 
     def test_writes_are_impossible(self):
-        for stmt in ("INSERT INTO name_pool (name) VALUES ('X')", "UPDATE tickets SET title = 'x'", "DELETE FROM events", "PRAGMA user_version = 5", "CREATE TABLE x (a)", "DROP TABLE renders", "PRAGMA query_only = OFF; INSERT INTO name_pool (name) VALUES ('X')", "ATTACH '/tmp/x.db' AS x"):
+        for stmt in ("INSERT INTO name_pool (name) VALUES ('X')", "UPDATE tickets SET title = 'x'", "DELETE FROM events", "PRAGMA user_version = 77", "CREATE TABLE x (a)", "DROP TABLE renders", "PRAGMA query_only = OFF; INSERT INTO name_pool (name) VALUES ('X')", "ATTACH '/tmp/x.db' AS x"):
             proc = self.home.run("sql", "--readonly", stmt, check=False)
             self.assertEqual(proc.returncode, EXIT_ERROR, stmt)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM name_pool WHERE name = 'X'"), 0)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 4)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), 5)
 
     def test_one_statement_no_flag_no_actor_needed(self):
         proc = self.home.run("sql", "SELECT 1", check=False)

@@ -28,8 +28,9 @@ TABLES = {
     "renders",
     "imported_sections",
     "sessions",  # SPD-014, migration 0002_projects
+    "pull_requests",  # SPD-077, migration 0005_pull_requests
 }
-SCHEMA = 4  # user_version since SPD-098
+SCHEMA = 5  # user_version since SPD-077
 
 
 class InitTest(SpudTestCase):

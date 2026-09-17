@@ -1,6 +1,6 @@
 """commands/views: events, board, fleet, card, member list.  Moved from bin/spud_ledger.py (SPD-065)."""
 
-from . import worktreebind
+from . import prcmds, worktreebind
 from ..core import kernel, launchagents
 from ..projects import sessions
 from ..render import prices, teamcard
@@ -45,6 +45,15 @@ def cmd_board(ctx, args):
             rows = [r for r in rows if r["project"] == args.project]
         if args.parked:  # SPD-096: the bucket on its own, with the two columns the default table does not carry
             rows = [r for r in rows if r["status"] == "parked"]
+        # SPD-077: the full board is where the one `gh pr view` per unsettled pull request happens -- never in `--brief`,
+        # which SessionStart injects, and never on any hook path.  A stored check younger than STALE is left alone, the
+        # whole run is capped, `--no-reconcile` skips it, and SPUD_GH=off turns it off (the suite's default).
+        prs, pr_block = [], []
+        if not args.brief:
+            open_ids = prcmds.open_ticket_ids(con, rows)
+            if args.reconcile:
+                prcmds.reconcile(ctx, con, open_ids, stale=prcmds.STALE)
+            prs, pr_block = prcmds.board_block(con, open_ids)
         for r in rows:  # SPD-098: the bound worktree and its branch, read from git now, never stored
             r["worktree"] = worktreebind.worktree_state(r["worktree"])
         if args.brief:
@@ -65,9 +74,14 @@ def cmd_board(ctx, args):
             bound = [r for r in rows if r["worktree"] is not None and r["status"] not in ("done", "declined")]
             if bound:  # an open ticket's worktree, in the board's order; a closed one keeps its path as history only
                 text += "\n\nworktrees:\n" + "\n".join("  %s  %s" % (r["key"], worktreebind.worktree_line(r["worktree"])) for r in bound)
+            if pr_block:  # SPD-077: an open ticket's recorded pull requests, merged ones with what the landing still owes
+                text += "\n" + "\n".join(pr_block)
     finally:
         con.close()
-    return kernel.Result({"tickets": rows}, text)
+    data = {"tickets": rows}
+    if not args.brief:
+        data["pull_requests"] = prs
+    return kernel.Result(data, text)
 
 
 def cmd_fleet(ctx, args):
@@ -150,6 +164,7 @@ def cmd_card(ctx, args):
         tree = team_tree(con, t, pricing)
         totals = teamcard.team_totals(con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (t["id"],)).fetchall(), pricing)
         not_priced = [{"ref": lookup.member_ref(con, m["id"]), "reasons": reasons} for m, reasons in totals["not_priced"]]
+        prs = [lookup.pr_dict(con, p) for p in lookup.pull_requests(con, [t["id"]])]  # SPD-077: stored state; `card` reads no gh
     finally:
         con.close()
     total = {"tokens": totals["tokens"], "cost_usd": prices.usd_text(totals["cost"]) if totals["cost"] is not None else None,
@@ -159,10 +174,15 @@ def cmd_card(ctx, args):
     lines = ["%s — %s  [%s, %s]  lead: %s" % (d["key"], d["title"], d["status"], d["priority"], d["lead"] or "-")]
     if worktree is not None:
         lines.append("worktree: " + worktreebind.worktree_line(worktree))
+    for p in prs:  # SPD-077: every recorded pull request, and what a merge nobody has acted on still owes
+        lines.append("pull request %s %s  %s" % (lookup.pr_name(p), prcmds.pr_read_text(p), p["url"]))
+        owed = lookup.pr_owed(p)
+        if owed:
+            lines.append("  owed: " + "; ".join(owed))
     lines.extend(format_tree(tree) or ["(no team yet)"])
     if tree:
         lines.append(card_total_line(totals, not_priced, pricing))
-    return kernel.Result({"ticket": d, "worktree": worktree, "team": tree, "total": total}, "\n".join(lines))
+    return kernel.Result({"ticket": d, "worktree": worktree, "pull_requests": prs, "team": tree, "total": total}, "\n".join(lines))
 
 
 def cmd_member_list(ctx, args):

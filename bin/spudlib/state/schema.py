@@ -352,5 +352,69 @@ CREATE INDEX events_agent  ON events(agent_id, id);
 CREATE INDEX events_kind   ON events(kind, id);
 """
 
-MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003), ("0004_ticket_worktree", DDL_0004)]
+# Landing pull requests (SPD-077): the row a `pr record` writes and the reconciler updates, so a pull request that merges
+# after its session stopped still reaches the ledger.  One row per recorded pull request, because a ticket carries several
+# over its life (one closed unmerged, a second opened).  `state` is what the last successful `gh pr view` said, `settled_at`
+# when it first said anything but open, `checked_at` and `check_error` the last read whether it worked or not; a settled row
+# is never read again.  `branch` is the head branch, which is also the local branch the landing owes a delete, and
+# `worktree` the linked worktree it owes a remove -- both recorded when the pull request is, since the session that knows
+# them is the one that opened it.  Nothing here ever merges a pull request or moves a ticket.
+# events is rebuilt for the two kinds its CHECK must now accept, as 0002_projects and 0004_ticket_worktree rebuilt it;
+# the views are dropped first, since the rename re-parses every one of them, and VIEWS_AND_TRIGGERS re-creates them and
+# the append-only triggers after.
+DDL_0005 = """
+DROP VIEW IF EXISTS v_board;
+DROP VIEW IF EXISTS v_fleet;
+CREATE TABLE pull_requests (
+  id           INTEGER PRIMARY KEY,
+  ticket_id    INTEGER NOT NULL REFERENCES tickets(id),
+  url          TEXT    NOT NULL UNIQUE,          -- the pull request's URL, as `gh pr create` printed it
+  number       INTEGER,                          -- the number in that URL, for the short form on the board
+  branch       TEXT    NOT NULL DEFAULT '',      -- the head branch: also the local branch the cleanup owes
+  worktree     TEXT,                             -- the linked worktree the cleanup owes; NULL when there is none
+  state        TEXT    NOT NULL DEFAULT 'open' CHECK (state IN ('open','merged','closed')),
+  merged_at    TEXT,                             -- mergedAt from gh, as GitHub spells it; NULL unless merged
+  recorded_at  TEXT    NOT NULL,
+  recorded_by  TEXT    NOT NULL,                 -- the actor label of the `pr record` that wrote it
+  checked_at   TEXT,                             -- when the reconciler last read it, successfully or not
+  check_error  TEXT,                             -- why the last read failed; NULL when it worked
+  settled_at   TEXT,                             -- when a read first said merged or closed
+  CHECK ((settled_at IS NULL) = (state = 'open'))
+) STRICT;
+CREATE INDEX pull_requests_ticket ON pull_requests(ticket_id, id);
+CREATE INDEX pull_requests_open ON pull_requests(state) WHERE state = 'open';
+
+DROP TRIGGER IF EXISTS events_no_update;
+DROP TRIGGER IF EXISTS events_no_delete;
+CREATE TABLE events_new (
+  id        INTEGER PRIMARY KEY,
+  at        TEXT    NOT NULL,
+  actor     TEXT    NOT NULL,
+  ticket_id INTEGER REFERENCES tickets(id),
+  member_id INTEGER REFERENCES members(id),
+  agent_id  TEXT,
+  kind      TEXT    NOT NULL CHECK (kind IN (
+              'ticket.created','ticket.status','ticket.priority','ticket.edited','ticket.worktree',
+              'member.planned','member.spawn_denied','member.spawned','member.started','member.stopped',
+              'member.log','member.result','member.blocked','member.outcome','member.status','member.edited',
+              'handoff','proposal.filed','proposal.decided','hook.denied','hook.error','render',
+              'report.entry','commit','import','config.synced',
+              'project.added','project.edited','project.installed','project.uninstalled','project.removed',
+              'session.claimed','session.released',
+              'pr.recorded','pr.state')),
+  body      TEXT    NOT NULL DEFAULT '',
+  data      TEXT    CHECK (data IS NULL OR json_valid(data))
+) STRICT;
+INSERT INTO events_new (id, at, actor, ticket_id, member_id, agent_id, kind, body, data)
+  SELECT id, at, actor, ticket_id, member_id, agent_id, kind, body, data FROM events;
+DROP TABLE events;
+ALTER TABLE events_new RENAME TO events;
+CREATE INDEX events_ticket ON events(ticket_id, id);
+CREATE INDEX events_member ON events(member_id, id);
+CREATE INDEX events_agent  ON events(agent_id, id);
+CREATE INDEX events_kind   ON events(kind, id);
+"""
+
+MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003), ("0004_ticket_worktree", DDL_0004),
+              ("0005_pull_requests", DDL_0005)]
 SCHEMA_VERSION = len(MIGRATIONS)

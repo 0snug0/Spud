@@ -8,8 +8,10 @@ from . import helptexts
 from ..commands import (
     admincmds,
     doctor,
+    ghread,
     homemove,
     membercmds,
+    prcmds,
     proposalcmds,
     publish,
     renderwatch,
@@ -324,12 +326,48 @@ def build_parser():
     q.add_argument("--next", required=True, type=text_arg, help="Spud's Next line")
     q.set_defaults(func=proposalcmds.cmd_report_add)
 
+    pr_help = ("landing pull requests: the one a ticket lands through, read back with `gh pr view` and surfaced on the board, so a"
+               " merge reaches the ledger without the session that opened it (SPD-077)")
+    p = sub.add_parser("pr", help=pr_help, description=helptexts.PR_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
+    ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
+    ps.required = True
+    pr_record = ("record the pull request a ticket lands through, right after `gh pr create` (Spud's): its URL, its head branch"
+                 " -- also the local branch the cleanup will owe -- and the worktree the cleanup will owe, which defaults to the"
+                 " one the ticket is bound to. Recording the same URL on the same ticket again refreshes the branch and the"
+                 " worktree; on another ticket it is refused")
+    q = ps.add_parser("record", help=pr_record, description=pr_record)
+    q.add_argument("--ticket", required=True, help="the ticket this pull request lands; it must still be open")
+    q.add_argument("--url", required=True, help="the pull request's absolute http(s) URL, as `gh pr create` printed it")
+    q.add_argument("--branch", required=True, help="the head branch, which is also the local branch the landing owes a `git branch -D`")
+    q.add_argument("--worktree", help="the linked worktree the landing owes a `git worktree remove` (default: the one the ticket is bound to)")
+    q.set_defaults(func=prcmds.cmd_pr_record)
+    pr_reconcile = ("read each recorded, still-open pull request once with `gh pr view` and store what it said (any actor, or none:"
+                    " a pull request's state is nobody's judgment, so the writes name the actor `%s` and `spud board` runs this"
+                    " itself). A read that fails is stored as a failed check and never stops the run; `spud doctor` lists them."
+                    " This never merges anything, never runs git, and never moves a ticket" % kernel.RECONCILE_ACTOR)
+    q = ps.add_parser("reconcile", help=pr_reconcile, description=pr_reconcile)
+    q.add_argument("--ticket", help="only this ticket's pull requests")
+    q.add_argument("--stale", type=float, default=0.0, metavar="SECONDS",
+                   help="skip a pull request read more recently than this (default 0: read every open one now; `spud board` uses %d)" % prcmds.STALE)
+    q.add_argument("--budget", type=float, default=None, metavar="SECONDS", help="stop once the run has spent this long (default: no cap)")
+    q.add_argument("--timeout", type=float, default=ghread.CALL_TIMEOUT, metavar="SECONDS", help="seconds for one `gh pr view` (default %d)" % ghread.CALL_TIMEOUT)
+    q.set_defaults(func=prcmds.cmd_pr_reconcile)
+    q = ps.add_parser("list", help="every recorded pull request with its state, the read behind it and what a merge still owes (read-only)")
+    q.add_argument("--ticket", help="only this ticket's")
+    q.add_argument("--project", help="only this project's tickets'")
+    q.add_argument("--open", action="store_true", help="only the ones still open")
+    q.set_defaults(func=prcmds.cmd_pr_list)
+
     board_help = ("the board (v_board): every ticket, active first, then queued, parked, done and declined, by priority inside each;"
-                  " then each open ticket's bound worktree and its branch, read from git")
+                  " then each open ticket's bound worktree and its branch, read from git, and its recorded landing pull requests,"
+                  " reconciled with one `gh pr view` each when their stored check has gone stale")
     p = sub.add_parser("board", help=board_help, description=board_help)
     p.add_argument("--brief", action="store_true",
                    help="open tickets and live members, one line each, as SessionStart injects it: active tickets with their live"
-                        " members, then parked tickets that are due back, then queued, then one count line for the parked")
+                        " members and any merged or closed pull request, then parked tickets that are due back, then queued, then"
+                        " one count line for the parked; reads stored state only and never runs gh")
+    p.add_argument("--no-reconcile", dest="reconcile", action="store_false",
+                   help="do not read any pull request: show the stored state as it is (SPUD_GH=off does the same everywhere)")
     p.add_argument("--parked", action="store_true",
                    help="parked tickets only, with why and until (with --brief, one line each); without it the board sorts them"
                         " after queued and --brief counts them on its last line")

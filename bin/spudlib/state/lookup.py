@@ -157,6 +157,81 @@ def proposal_dict(con, p):
     }
 
 
+def pull_requests(con, ticket_ids=None, settled_only=False):
+    """The recorded landing pull requests (SPD-077), in ticket then record order: of these ticket ids, or every one when
+    None; `settled_only` keeps the merged and closed ones, which are the rows that nag."""
+    if ticket_ids is not None and not ticket_ids:
+        return []  # an empty id list matches nothing, and `IN ()` is a syntax error
+    clauses, params = [], []
+    if ticket_ids is not None:
+        clauses.append("ticket_id IN (%s)" % ",".join("?" * len(ticket_ids)))
+        params += list(ticket_ids)
+    if settled_only:
+        clauses.append("state <> 'open'")
+    sql = "SELECT * FROM pull_requests" + ((" WHERE " + " AND ".join(clauses)) if clauses else "") + " ORDER BY ticket_id, id"
+    return con.execute(sql, params).fetchall()
+
+
+def pr_dict(con, p):
+    ticket = get_ticket_by_id(con, p["ticket_id"])
+    return {
+        "id": p["id"],
+        "ticket": ticket["key"],
+        "ticket_status": ticket["status"],
+        "project": project_key_of(con, ticket),
+        "url": p["url"],
+        "number": p["number"],
+        "branch": p["branch"],
+        "worktree": p["worktree"],
+        "state": p["state"],
+        "merged_at": p["merged_at"],
+        "recorded_at": p["recorded_at"],
+        "recorded_by": p["recorded_by"],
+        "checked_at": p["checked_at"],
+        "check_error": p["check_error"],
+        "settled_at": p["settled_at"],
+    }
+
+
+def pr_name(d):
+    """`#361` when the URL gave a number, else the URL itself."""
+    return ("#%d" % d["number"]) if d["number"] else d["url"]
+
+
+def pr_state_text(d):
+    """A recorded pull request's state in words: `open`, `merged <minute>`, `closed unmerged <minute>`.  A merge time is
+    GitHub's `mergedAt` as GitHub spells it (UTC), so it never reads as the ledger's local clock."""
+    stamp = d["merged_at"] or d["settled_at"] if d["state"] == "merged" else d["settled_at"]
+    tail = (" " + kernel.fm_minute(stamp)) if stamp else ""
+    if d["state"] == "merged":
+        return "merged" + tail
+    if d["state"] == "closed":
+        return "closed unmerged" + tail
+    return "open"
+
+
+def pr_owed(d):
+    """What a merged pull request leaves owed while its ticket is still open (SPD-077): the done move with the URL in the
+    Outcome, and the cleanup of the worktree and the local branch the record named.  [] for anything else -- a closed
+    unmerged pull request is surfaced and owes nothing, and a ticket already done or declined was settled by hand.  The
+    ledger never does any of this itself: the move is a judgment and the cleanup is git's."""
+    if d["state"] != "merged" or d["ticket_status"] in ("done", "declined"):
+        return []
+    owed = ["the done move, with the pull request URL in %s's Outcome" % d["ticket"]]
+    if d["worktree"]:
+        owed.append("`git worktree remove %s`" % d["worktree"])
+    if d["branch"]:
+        owed.append("`git branch -D %s`" % d["branch"])
+    return owed
+
+
+def pr_nag_line(d):
+    """The line a merged or closed pull request puts on the brief board and in every SessionStart context, built from
+    stored state alone: no gh call and no git, because that text is injected at every session start (SPD-077)."""
+    owed = pr_owed(d)
+    return "pull request %s %s%s" % (pr_name(d), pr_state_text(d), ("; owed: " + "; ".join(owed)) if owed else "")
+
+
 def event_dict(con, e):
     ticket = get_ticket_by_id(con, e["ticket_id"]) if e["ticket_id"] else None
     return {

@@ -35,9 +35,43 @@ ticket worktrees (SPD-098): a bare glob, or one naming the ticket's own project,
        another project, whose work is a ticket there.  A binding whose worktree is gone
        is rebound by Spud's next plan from a worktree; a member never rebinds.
 
+landing pull requests (SPD-077): under a project whose landing is `pr`, Spud records
+       the pull request with `spud --as spud pr record` right after `gh pr create`.
+       `spud pr reconcile`, which the full board runs itself, reads each recorded,
+       still-open one once with `gh pr view` and stores what it said; `spud board` and
+       every `board --brief` then show a merged one with the done move, the Outcome and
+       the worktree and local-branch cleanup it owes, and a closed-unmerged one plainly.
+       Nothing here merges a pull request, runs git or moves a ticket, and no hook and
+       no `--brief` ever reads the network.  SPUD_GH names the program (default `gh`);
+       SPUD_GH=off turns every read off.
+
 text values: an option value of @path reads the file, @- reads stdin.
 exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,
             5 transition refused, 6 render conflict (hand-edited file).
+"""
+
+PR_DESCRIPTION = """\
+Landing pull requests (SPD-077).  Under `landing: pr` a ticket's done move used to depend on the session that
+opened the pull request still being alive when it merged: BAD-058 showed as `active` for 44 minutes after its
+work had landed, because its session had stopped and nothing in the ledger knew a pull request existed.
+
+  record     Spud's, right after `gh pr create`: the URL, the head branch (also the local branch the cleanup
+             will owe) and the worktree the cleanup will owe.  Opening a pull request is part of landing, and a
+             member neither commits nor pushes, so a member never has one to record.
+  reconcile  one `gh pr view` per recorded, still-open pull request, in its ticket's project checkout, storing
+             the state and the time it was read.  Any actor, or none: the writes name the actor `reconcile`,
+             because a pull request's state is nobody's judgment, and that is what lets `spud board` run it.
+             A read that fails -- no gh, no auth, no network, a rate limit -- is stored as a failed check, does
+             not stop the run, and is listed by `spud doctor`.  A settled pull request is never read again.
+  list       what is recorded, read-only.
+
+Four things none of this does: it never merges a pull request; it never acts on one the ledger did not record;
+it runs no git, so the worktree and local-branch cleanup is named as owed and performed by Spud; and it never
+moves a ticket to done, because that is a judgment -- the job here is to make sure the judgment gets asked for.
+
+No hook and no `spud board --brief` ever reads the network: both read stored state alone, and the full board is
+the only command that reconciles on its own, skipping a check younger than its staleness window and capping the
+whole run.  SPUD_GH names the program (default `gh`), and the literal SPUD_GH=off turns every read off.
 """
 
 RESUM_DESCRIPTION = """\
