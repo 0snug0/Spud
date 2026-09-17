@@ -86,3 +86,17 @@ The plists are $SPUD_LAUNCH_AGENTS_DIR/<label>.plist (default ~/Library/LaunchAg
 (default /bin/launchctl), and the backup's output goes to ~/Library/Logs/spud-backup.log.  Every verb is Spud's
 (--as spud) and handles both agents.
 """
+
+HOME_MOVE_DESCRIPTION = """\
+Move Spud's home to a plain directory (SPD-097, design section 5).  Refused while any member is planned or active, when
+--to exists and is not empty, lies inside a git work tree or inside the current home, when a rendered file is hand-edited
+(spud doctor lists them with the commands that settle each), when an earlier move left .spud-moved behind, and when the
+running bin/spud sits in a linked worktree.  Then, each step reported: a checked backup; the database copied with
+SQLite's online backup, integrity-checked and compared row by row; ledger/, reports/, docs/, .obsidian/, the config,
+CLAUDE.md, the two .claude settings files and the backups copied, and the copied vault checked against the copied
+database (zero files to render); ~/.config/spud/home re-pointed; project spud set to sessions claim, the new home's
+.claude/settings.json synced, the ledger's entries stripped from the tool's tracked .claude/settings.json (left
+uncommitted for the removal commit), project spud installed and every installed project re-synced; both LaunchAgents
+reinstalled; a render and spud doctor in the new home; the old .spud renamed .spud-moved.  Ends by printing what is
+left by hand and how to roll back until the removal commit.  --dry-run checks the preconditions and prints the steps.
+"""

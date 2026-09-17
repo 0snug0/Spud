@@ -8,6 +8,7 @@ from . import helptexts
 from ..commands import (
     admincmds,
     doctor,
+    homemove,
     membercmds,
     proposalcmds,
     publish,
@@ -155,6 +156,16 @@ def build_parser():
     q.set_defaults(func=sessions.cmd_session_release)
     q = ps.add_parser("show", help="the home, the working directory's project and checkout, the session and its mode (any actor)")
     q.set_defaults(func=sessions.cmd_session_show)
+
+    p = sub.add_parser("home", help="Spud's home: the directory holding the database, the config and the vault (SPD-097)")
+    ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
+    ps.required = True
+    q = ps.add_parser("move", help="move the home to an empty directory outside every git work tree: backup, copy, re-point, re-sync hooks and agents, verify (Spud's)",
+                      description=helptexts.HOME_MOVE_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
+    q.add_argument("--to", required=True, help="the new home: a directory that does not exist or is empty, not inside a git work tree")
+    q.add_argument("--dry-run", action="store_true", help="check the preconditions and print the steps; move nothing")
+    q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry the move writes")
+    q.set_defaults(func=homemove.cmd_home_move)
 
     p = sub.add_parser("sql", help="run one read-only statement against the database (any actor; the inspection path)")
     p.add_argument("statement", help="SELECT, WITH, VALUES, EXPLAIN or a read-only PRAGMA")
