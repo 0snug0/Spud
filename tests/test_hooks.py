@@ -1621,10 +1621,11 @@ class SpudAllowIdentityTest(BashHookCase):
                 self.assertSilent(spelled.format(tail="--as spud board"), None)
         # an alias reaches no command word outside `eval` (SPD-059), so it withholds the vouch and nothing more
         self.assertSilentForBoth("alias python3.14=%s/python3.14; python3.14 -I -S %s {tail}" % (other, launcher))
-        # SPD-043: the function body runs the other interpreter with "$@" as its options and script, words python reads by name,
-        # so the lead is refused outright; Spud's call stays silent.  Neither is allowed.
+        # SPD-084: the line defines a function python3.14, so the later call runs the function, not the interpreter the hook
+        # read; the function shadow refuses the lead outright (its body's "$@", words python reads by name, would too --
+        # SPD-043).  Spud's call stays silent.  Neither is allowed.
         spelled = "python3.14() {{ %s/python3.14 \"$@\"; }}; python3.14 -I -S %s {tail}" % (other, launcher)
-        self.assertRefused(spelled.format(tail=self.log), "cannot resolve", AGENT_A)
+        self.assertRefused(spelled.format(tail=self.log), "shell function", AGENT_A)
         self.assertSilent(spelled.format(tail="--as spud board"), None)
         path = self.home.env["PATH"]
         try:
@@ -4483,6 +4484,10 @@ class AliasEvalTest(BashHookCase):
         for ok in ("alias gp='git push'; gp", "alias g=git; g push", "alias gp='git push'; echo gp",
                    "alias gp='git push'; sh -c 'eval gp'", "alias gp='git push'; zsh -c 'eval gp'",
                    "alias gp='git push'; eval 'command gp'", "alias gp='git push'; eval 'env gp'",
+                   # SPD-084 confirmed the alias command-position gate is right where a function's is not: zsh keeps a
+                   # function lookup after noglob/-/exec but does not expand an alias there (each ran nothing, probed)
+                   "alias gp='git push'; eval 'noglob gp'", "alias gp='git push'; eval '- gp'",
+                   "alias gp='git push'; eval 'exec gp'",
                    "alias gp='git push'; sh -c gp", "alias gp='git push'; sh <<'EOF'\neval gp\nEOF",
                    "eval gp", "alias", "alias -p", "alias gp", "unalias gp", "echo alias gp='git push'",
                    "grep -n \"alias gp\" tests/keep.py", "env alias gp='git push'; eval gp"):
@@ -4769,6 +4774,211 @@ class PathInForceTest(BashHookCase):
                     "echo $(PATH=/tmp/x git status)"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd)
+
+
+class FunctionShadowTest(BashHookCase):
+    """SPD-084: the hook reads a line's command words by name -- git, spud, python3.14, sqlite3, tee, a shell, a wrapper --
+    and a shell function of that name defined earlier on the line runs in its place, so `git() { git push; }; git status`
+    reached the hook as an ordinary `git status` with no finding (Law 7).  SPD-062 closed a PATH the line assigns and a
+    `hash`; SPD-059 closed an alias run through eval; this closes the function.  Probed in zsh 5.9 -f, zsh -f -o
+    nobareglobqual (this Mac's Bash tool), bash 3.2 and sh, with `foo` a name no command has (SH means the function ran):
+
+    - `foo() { echo SH; }; foo`, `foo () { echo SH; }`, `function foo { echo SH; }` and `function foo () { echo SH; }` each
+      ran the function in all four; zsh also takes the body-without-braces short forms `foo () echo SH` and `foo() echo SH`
+      (bash and sh: a syntax error), and its several-names form `foo bar () { echo SH; }` defined both foo and bar;
+    - a call before the definition ran the real lookup (`foo; foo() {...}` -> not found), and so did a call after a
+      definition in a `( ... )` subshell (`(foo() {...}); foo` -> not found): the subshell's function does not reach it.  A
+      call inside the subshell (`(foo() {...}; foo)`), and one after a definition in a branch (`if`, `&&`, a case arm), a
+      loop body, another function's body, a background list, a pipeline or a command substitution, ran the function;
+    - a function is looked up in command position only: `command foo`, `builtin foo`, `nice foo` and `env foo` each ran the
+      real lookup (the function bypassed), while `time foo`, `! foo` and zsh's `nocorrect foo`, `noglob foo`, `- foo` and
+      `exec foo` kept it -- `exec foo` ran the function in zsh (`SH`, no line after: exec then exits) but skipped it in bash
+      and sh, so the hook refuses it, the Bash tool being zsh.  A function named for a wrapper shadows the wrapper itself
+      (`env() { echo SH; }; env true` -> SH), but a wrapper the first one runs does not (`env() {...}; nice env true` -> not
+      SH); a call by a path (`/usr/bin/foo`) is not looked up.  zsh applies a function lookup after noglob/-/exec where it
+      does not expand an alias (SPD-059, probed: `eval 'noglob gp'`, `eval '- gp'`, `eval 'exec gp'` all ran nothing), so
+      the function gate is its own (syntax.FUNCTION_KEEP_WRAPPERS), not the alias command-position gate.
+
+    The finding is appended after its own command's and carries an entry in FINDING_LAST beside `path` and `hashed`, so on a
+    line of several commands a refusal the words as spelled already earn answers first.  A definition in a `( ... )` subshell
+    is dropped when it closes (ShellWalk restores the set); one in a branch, a loop, a function body, a background list, a
+    pipeline or a command substitution is kept (refuse on doubt, never allow on doubt), as is one an `unset -f` or
+    `unfunction` may have removed (the hook keeps refusing rather than allow on doubt).  Law 7 does not bind Spud.  AGENT_A
+    plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def finding(self, command):
+        me = load_spud_module()
+        return me.analyse_command(command, me.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_the_tickets_evidence_command(self):
+        # a function whose body is harmless still shadows the git the hook read: the reason is the function, not the body
+        r = self.refused_for_members("git() { echo pushed; }; git status")
+        self.assertIn("shell function", r.reason)
+        self.assertIn("git", r.reason)
+        self.assertEqual(self.finding("git() { echo pushed; }; git status"),
+                         [("git", ("status", None)), ("function", "git")])
+
+    def test_every_spelling_of_the_definition(self):
+        for cmd in ("git() { true; }; git status", "git () { true; }; git status",
+                    "function git { true; }; git status", "function git () { true; }; git status",
+                    "function git() { true; }; git status", "git () true; git status",
+                    "git() true; git status", "git() { true; }\ngit status",
+                    "builtin git() { true; }; git status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("shell function", r.reason)
+                self.assertEqual(self.finding(cmd)[-1], ("function", "git"))
+
+    def test_the_several_names_zsh_form_binds_them_all(self):
+        # zsh's `a b () { ... }` defines every name; a later call of any of them is shadowed (probed both ran the function)
+        self.assertEqual(self.finding("git tee () { true; }; git status"),
+                         [("git", ("status", None)), ("function", "git")])
+        self.assertEqual(self.finding("git tee () { true; }; tee /tmp/out"), [("function", "tee")])
+        self.refused_for_members("git tee () { true; }; git status")
+        self.refused_for_members("git tee () { true; }; tee /tmp/out")
+
+    def test_every_dispatched_name(self):
+        self.refused_for_members("git() { true; }; git status")
+        self.refused_for_members("git() { true; }; git push")
+        self.refused_for_members("spud() { true; }; spud board")
+        self.refused_for_members("python3.14() { true; }; python3.14 x.py")
+        self.refused_for_members("tee() { true; }; tee /tmp/out")
+        self.refused_for_members("sh() { true; }; sh -c 'echo hi'")
+        self.refused_for_members("bash() { true; }; bash -c 'echo hi'")
+        self.refused_for_members("node() { true; }; node x.js")
+        # a wrapper name is itself a function in command position: env runs the function, not /usr/bin/env
+        r = self.refused_for_members("env() { true; }; env git status")
+        self.assertIn("env", r.reason)
+        self.assertEqual(self.finding("env() { true; }; env git status")[-1], ("function", "env"))
+        # sqlite3 is refused for everyone by the database rule (read before the findings); the function finding is there
+        self.assertIn(("function", "sqlite3"), self.finding("sqlite3() { true; }; sqlite3 x.db"))
+
+    def test_a_name_the_hook_does_not_dispatch_on_changes_nothing(self):
+        for ok in ("ls() { true; }; ls", "make() { true; }; make all", "cat() { true; }; cat f",
+                   "grep() { true; }; grep x f"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_a_call_before_the_definition_is_not_shadowed(self):
+        for ok in ("git status; git() { true; }", "git log; function git { true; }"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_a_call_by_path_or_a_bypassing_prefix_stays_silent(self):
+        # the function is looked up in command position; a path is not, and command/builtin/env/nice resolve their own word
+        for ok in ("git() { true; }; /usr/bin/git status", "git() { true; }; ./git status",
+                   "git() { true; }; command git status", "git() { true; }; builtin git status",
+                   "git() { true; }; nice git status", "git() { true; }; env git status",
+                   "git() { true; }; nice env git status", "git() { true; }; sudo git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_a_bypassing_prefix_keeps_the_words_own_refusal(self):
+        # command/nice bypass the function, but a write verb behind them still earns Law 7 -- its own reason, not the function's
+        for cmd in ("git() { true; }; command git push", "git() { true; }; nice git commit -m x"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertNotIn("shell function", r.reason)
+
+    def test_modifiers_that_keep_the_function_are_refused(self):
+        # keywords (time, !) run the following function in all four shells; zsh keeps the lookup after noglob, - and exec
+        # too (probed: exec ran the function in zsh, skipped it in bash/sh; the hook refuses for the shell the tool runs)
+        for cmd in ("git() { true; }; time git status", "git() { true; }; ! git status",
+                    "git() { true; }; noglob git status", "git() { true; }; - git status",
+                    "git() { true; }; nocorrect git status", "git() { true; }; exec git status",
+                    "git() { true; }; noglob exec git status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("shell function", r.reason)
+        # a write verb still answers first, whichever modifier keeps the function
+        r = self.refused_for_members("git() { true; }; exec git push")
+        self.assertIn("git push", r.reason)
+        self.assertNotIn("shell function", r.reason)
+
+    def test_the_subshell_scope(self):
+        # a definition in a ( ... ) subshell does not reach a call after it (probed: `(git(){ :; }); git status` ran real git)
+        for ok in ("(git() { true; }); git status", "(function git { true; }); git status",
+                   "(git() { true; }) ; git log", "( ( git() { true; } ) ); git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        self.assertEqual(self.finding("(git() { true; }); git status"), [("git", ("status", None))])
+        # a call inside the subshell is shadowed
+        for cmd in ("(git() { true; }; git status)", "(git() { true; }; git push)"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_the_doubt_cases_are_refused(self):
+        # a definition that may or may not have run, or that runs in a forked list, is kept: refuse on doubt (never allow)
+        for cmd in ("if true; then git() { true; }; fi; git status",
+                    "true && git() { true; }; git status",
+                    "false || git() { true; }; git status",
+                    "case x in x) git() { true; };; esac; git status",
+                    "for f in a; do git() { true; }; done; git status",
+                    "while false; do git() { true; }; done; git status",
+                    "f() { git() { true; }; }; f; git status",
+                    "git() { true; } & wait; git status",
+                    "git() { true; } | cat; git status",
+                    "X=$(git() { true; }; echo d); git status",
+                    "git() { true; }; unset -f git; git status",
+                    "git() { true; }; unfunction git; git status"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("shell function", r.reason)
+
+    def test_a_later_command_that_earns_its_own_refusal_answers_first(self):
+        # FINDING_LAST orders the function reason after a refusal the words as spelled already earn (like path and hashed)
+        for command in ("git() { true; }; git status; git push",
+                        "git() { true; }; git log && git commit -m x"):
+            with self.subTest(command):
+                r = self.refused_for_members(command)
+                self.assertNotIn("shell function", r.reason)
+        r = self.refused_for_members("git() { true; }; git status; git push")
+        self.assertIn("git push", r.reason)
+
+    def test_a_function_body_is_still_analysed_as_today(self):
+        # no regression: a body's own commands are read exactly as before (the function name is f, not git)
+        self.assertEqual(self.finding("f() { git push; }"), [("git", ("push", "push"))])
+        self.refused_for_members("f() { git push; }")
+        self.assertEqual(self.finding("deploy() { git status; }; deploy"), [("git", ("status", None))])
+        self.silent_for_everyone("deploy() { git status; }; deploy")
+
+    def test_the_finding_names_the_command(self):
+        self.assertEqual(self.finding("git() { true; }; git status"),
+                         [("git", ("status", None)), ("function", "git")])
+        self.assertEqual(self.finding("tee() { true; }; tee /tmp/out"), [("function", "tee")])
+        r = self.refused_for_members("git() { true; }; git status")
+        self.assertIn("git", r.reason)
+        self.assertNotIn("hash", r.reason)  # its own reason, not SPD-062's
+        self.assertNotIn("PATH", r.reason)
+
+    def test_reading_a_function_name_without_defining_it_stays_silent(self):
+        # naming a function in a string is not defining one; a lone definition with no later call refuses nothing new
+        for ok in ("echo 'git() { true; }'", "echo git is a function", "git status",
+                   "git() { echo hi; }", "git log; deploy() { echo hi; }"):
+            with self.subTest(ok):
+                self.assertNotEqual(self.bash(ok).decision, "deny", ok)
+                self.assertNotEqual(self.bash(ok, agent_id=None).decision, "deny", ok)
 
 
 class WrapperCommandWordTest(BashHookCase):

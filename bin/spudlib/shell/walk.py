@@ -4,16 +4,31 @@ from . import analyse, directories, globbing, prepare, syntax
 from ..hooks import hookio
 
 
+def _function_names(words):
+    """The names a function definition binds, deglobbed (SPD-084): the name words that reached a `name ()` or
+    `function name {` header -- `name`, both of zsh's several names in `a b () { ... }`, `function name` and the
+    `name` of `function name () { ... }` (its `()` is dropped).  Deglobbed as hashed_names is, so `g?t` counts for git."""
+    names = []
+    for w in words:
+        name = prepare.deglob(w)
+        if name.strip("() "):  # not the header's parentheses
+            names.append(name)
+    return names
+
+
 class ShellFrame:
     """An open compound command: its kind, the word that closes it, the directories it started in, the directories any of
     its branches ended in so far, and the enclosing list's state to restore."""
 
-    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body")
+    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs")
 
-    def __init__(self, kind, closer, saved, outer, mark=0):
+    def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
         self.pattern = kind == "case"  # a case command reads a pattern first, and again after each ;;
         self.mark = mark  # how many assignments the line had made when it opened (SPD-043)
+        # SPD-084: the functions defined before a `( ... )` subshell opened, restored when it closes; None for every other
+        # frame kind, whose function definitions reach a call after it and are kept.
+        self.funcs = funcs
         # SPD-042, SPD-061: a loop's or a conditional's body form.  None for anything but a for, select or repeat (which starts
         # at "header") and an if, while or until (which starts at "cond", its condition list); then "pending" or "cond-pending"
         # once that is complete, until the body's first word, and then "long" (`do ... done`, `then ... fi`), "compound" (a
@@ -72,7 +87,8 @@ class ShellWalk:
     def push(self, kind, closer):
         outer = (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words,
                  self.skip, self.header, self.expect_body)
-        self.stack.append(ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned)))
+        funcs = set(self.a.functions) if kind == "sub" else None  # SPD-084: a subshell's own function definitions do not escape
+        self.stack.append(ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned), funcs))
         if kind in ("loop", "func"):
             self.a.loop_depth += 1
         self.words, self.skip, self.header, self.expect_body = [], False, None, False
@@ -82,6 +98,8 @@ class ShellWalk:
         self.finish()
         self.end_list()
         frame = self.stack.pop()
+        if frame.kind == "sub":
+            self.a.functions = frame.funcs  # SPD-084: a function defined in a subshell does not reach a call after it
         if frame.kind in ("loop", "func"):
             self.a.loop_depth -= 1
         assigned = self.a.assigned[frame.mark :]
@@ -256,6 +274,7 @@ class ShellWalk:
                 self.header = "func"
                 return
         if self.skip and self.function_next and t == "{":  # function name {
+            self.a.functions.update(_function_names(self.words))  # SPD-084
             self.discard()
             self.skip, self.header = False, None
             self.push("func", "}")
@@ -305,6 +324,7 @@ class ShellWalk:
                 self.words[-1] += syntax._ARRAY_VALUE + " ".join(toks[i + 1 : j])  # name=(a b), name=(): one assignment word, marked an array
                 i = j
             elif t == "(" and i + 1 < len(toks) and toks[i + 1] == ")" and not self.skip:
+                self.a.functions.update(_function_names(self.words))  # SPD-084: name (), name() and zsh's `a b () ...`
                 self.discard()  # name (): a function definition's header
                 self.function_next = True
                 i += 1
