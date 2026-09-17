@@ -46,7 +46,7 @@ def watcher_alive(ctx):
 
 def watcher_installed():
     """Whether the render watcher's LaunchAgent plist is installed: `down` means installed and not alive."""
-    return schedule.schedule_plist_path().with_name("local.spud.render.plist").is_file()
+    return schedule.agent_plist_path("render").is_file()
 
 
 def latest_event_id(con):

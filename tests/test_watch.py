@@ -121,5 +121,38 @@ class ConflictOnceTest(WatchCase):
         self.assertEqual(out.count("conflicts 1"), 2)
 
 
+class DoctorAndBoardTest(LaunchdMixin, WatchCase):
+    def setUp(self):
+        super().setUp()
+        self.setup_launchd()
+
+    def test_doctor_and_board_say_when_the_watcher_is_down(self):
+        self.new_ticket("Board")
+        self.assertNotIn("render watcher", self.home.run("board", "--brief").stdout)
+        report = self.home.json("doctor")
+        self.assertEqual(report["render"], {"watcher": "not installed", "conflicts": []})
+        self.assertTrue(any("no render watcher installed" in n for n in report["notes"]), report["notes"])
+        self.home.json("schedule", "install", actor="spud")  # the fake launchctl loads nothing
+        self.assertIn("render watcher: installed but not running", self.home.run("board", "--brief").stdout)
+        proc = self.home.run("doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("installed but not running", proc.stderr)
+        self.watcher()
+        self.assertTrue(self.wait_for(lambda: spud.watcher_alive(self.ctx())))
+        self.assertNotIn("render watcher", self.home.run("board", "--brief").stdout)
+        self.assertEqual(self.home.json("doctor")["render"]["watcher"], "running")
+
+    def test_doctor_lists_a_hand_edited_file_with_its_two_commands(self):
+        self.new_ticket("Edited", brief="Original brief.")
+        self.home.json("render")
+        path = self.home.path / "ledger" / "tickets" / "SPD-001.md"
+        path.write_text(path.read_text(encoding="utf-8").replace("Original brief.", "By hand."), encoding="utf-8")
+        proc = self.home.run("--json", "doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("import --file ledger/tickets/SPD-001.md", proc.stderr)
+        self.assertIn("render --discard ledger/tickets/SPD-001.md", proc.stderr)
+        self.assertIn("ledger/tickets/SPD-001.md", proc.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -98,6 +98,10 @@ class Home:
         self.env.pop("CLAUDE_PROJECT_DIR", None)
         self.env["SPUD_USER_CLAUDE_DIR"] = str(self.path / ".user-claude")
         self.env["SPUD_CONFIG_DIR"] = str(self.path / ".user-config")
+        # SPD-097: doctor and `board --brief` ask whether the render watcher's LaunchAgent is installed, so this Mac's
+        # ~/Library/LaunchAgents must not decide a test: every home looks in a directory of its own, which nothing
+        # creates unless the test installs an agent.  LaunchdMixin points it at its own scratch and its fake launchctl.
+        self.env["SPUD_LAUNCH_AGENTS_DIR"] = str(self.path / "LaunchAgents")
         # SPD-097: the tool, the checkout whose bin/spud the hook lines, allow rules, LaunchAgents and the /spud skill name
         # and where the spudagent source is read, is this scratch home unless a test names another.  So the assertions the
         # suite made before the split keep their `<home>/bin/spud` shape; a test of the split builds a separate tool with

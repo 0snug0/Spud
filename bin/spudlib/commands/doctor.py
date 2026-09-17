@@ -4,15 +4,26 @@ import os
 import sqlite3
 import sys
 
-from . import settings_sync
+from . import publish, renderwatch, schedule, settings_sync
 from ..core import homeconf, kernel
 from ..hooks import hookio, worktrees
 from ..projects import install
 from ..render import prices
 from ..state import backup, ledgerdb, lookup, schema
 
+WATCHER_DOWN = ("the render watcher %s is installed but not running: the vault is stale until `spud --as spud schedule install` reloads it"
+                % schedule.RENDER_LABEL)
+
 
 def cmd_doctor(ctx, args):
+    report, problems, lines = doctor_report(ctx)
+    if problems:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "doctor found %d problem(s): %s" % (len(problems), "; ".join(problems)), data=report)
+    return kernel.Result(report, "\n".join(lines))
+
+
+def doctor_report(ctx):
+    """(report, problems, lines): what cmd_doctor prints and raises on; home move reads it too (SPD-097)."""
     problems = []
     report = {
         "interpreter": {"path": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3], "flags": {"isolated": bool(sys.flags.isolated), "no_site": bool(sys.flags.no_site)}},
@@ -79,6 +90,7 @@ def cmd_doctor(ctx, args):
     if report["tool"]["checkout"] == "worktree":
         notes.append("the running bin/spud is in a linked worktree: hook lines written from here name it")
     report["projects"] = doctor_projects(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else []
+    report["render"] = doctor_render(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION and config is not None else None
     report["notes"] = notes
     report["problems"] = problems
     lines = [
@@ -106,12 +118,12 @@ def cmd_doctor(ctx, args):
         lines.append("pricing     %s" % ("%s: every cost shows —" % prices.NO_TABLE if not prices.price_table(config)[1] else "no usable price table: see problems"))
     for p in report["projects"]:
         lines.append("project     %s at %s: %s" % (p["key"], p["root"], ", ".join(p["checks"]) or "no check passed"))
+    if report["render"] is not None:
+        r = report["render"]
+        lines.append("render      watcher %s%s" % (r["watcher"], ("; %d hand-edited file(s)" % len(r["conflicts"])) if r["conflicts"] else ""))
     lines.extend("note        %s" % n for n in notes)
     lines.append("problems    %s" % (("\n            ".join(problems)) if problems else "none"))
-    result = kernel.Result(report, "\n".join(lines))
-    if problems:
-        raise kernel.SpudError(kernel.EXIT_ERROR, "doctor found %d problem(s): %s" % (len(problems), "; ".join(problems)), data=report)
-    return result
+    return report, problems, lines
 
 
 def doctor_projects(ctx, problems, notes):
@@ -169,3 +181,23 @@ def doctor_projects(ctx, problems, notes):
     if (ctx.home / hookio.STATE_DIR / "worktrees.json").exists():
         notes.append(".spud/worktrees.json is superseded by .spud/worktrees/<key>.json and ignored")
     return out
+
+
+def doctor_render(ctx, problems, notes):
+    """doctor's render section (SPD-097): whether the watcher is alive (a problem when its plist is installed and it is not,
+    a note when it was never installed), and every rendered file whose on-disk text is neither the last render's nor the
+    current one, each with the two commands that settle it."""
+    installed = renderwatch.watcher_installed()
+    alive = renderwatch.watcher_alive(ctx)
+    if installed and not alive:
+        problems.append(WATCHER_DOWN)
+    elif not installed:
+        notes.append("no render watcher installed (%s): `spud --as spud schedule install`" % schedule.RENDER_LABEL)
+    con = ledgerdb.connect(ctx)
+    try:
+        conflicts = publish.render_pass(ctx, con, None, check_only=True)["conflicts"]
+    finally:
+        con.close()
+    for rel in conflicts:
+        problems.append("hand-edited %s: accept it with `spud --as spud import --file %s`, or overwrite it with `spud --as spud render --discard %s`" % (rel, rel, rel))
+    return {"watcher": "running" if alive else ("installed, not running" if installed else "not installed"), "conflicts": conflicts}

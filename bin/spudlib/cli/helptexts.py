@@ -78,9 +78,11 @@ exit codes: 0 a copy written, or today's daily copy already there; 1 the write o
 """
 
 SCHEDULE_DESCRIPTION = """\
-The macOS LaunchAgent local.spud.backup runs `spud --as spud backup --daily` at load and daily at the
---at time; launchd fires a run missed during sleep at wake, and backup --daily writes one copy a day
-however often it runs.  The plist is $SPUD_LAUNCH_AGENTS_DIR/local.spud.backup.plist (default
-~/Library/LaunchAgents), launchctl is $SPUD_LAUNCHCTL (default /bin/launchctl), and the run's output
-goes to ~/Library/Logs/spud-backup.log.  Every verb is Spud's (--as spud).
+Two macOS LaunchAgents (SPD-012, SPD-097).  local.spud.backup runs `spud --as spud backup --daily` at load and daily at
+the --at time; launchd fires a run missed during sleep at wake, and backup --daily writes one copy a day however often
+it runs.  local.spud.render runs `spud --as spud render --watch` at load and again whenever it exits (KeepAlive), so
+the vault follows the database within seconds; its log is <home>/.spud/logs/render.log, started afresh at each start.
+The plists are $SPUD_LAUNCH_AGENTS_DIR/<label>.plist (default ~/Library/LaunchAgents), launchctl is $SPUD_LAUNCHCTL
+(default /bin/launchctl), and the backup's output goes to ~/Library/Logs/spud-backup.log.  Every verb is Spud's
+(--as spud) and handles both agents.
 """

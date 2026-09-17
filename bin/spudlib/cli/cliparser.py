@@ -65,7 +65,7 @@ def build_parser():
     p.add_argument("--daily", action="store_true", help="write ledger-<stamp>-daily.db unless today's is there, quick_check it, then keep the newest --keep daily copies")
     p.add_argument("--keep", type=int, metavar="N", help="daily copies --daily keeps (default %d, at least 1)" % backup.DAILY_KEEP)
     p.set_defaults(func=schedule.cmd_backup)
-    p = sub.add_parser("schedule", help="the macOS LaunchAgent %s that runs `spud backup --daily` (Spud's)" % schedule.SCHEDULE_LABEL,
+    p = sub.add_parser("schedule", help="the macOS LaunchAgents %s (the daily backup) and %s (the render watcher) (Spud's)" % (schedule.SCHEDULE_LABEL, schedule.RENDER_LABEL),
                        description=helptexts.SCHEDULE_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
