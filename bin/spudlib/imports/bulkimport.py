@@ -154,12 +154,16 @@ def bulk_import(ctx, con, paths):
             if "Team" in sections:
                 item["derived"].update(import_team_summaries(con, item["ticket"], sections["Team"]))
         for item in imported_tickets:
-            ledgerdb.write_event(con, at, "import", "import", "imported %s" % item["rel"], ticket_id=item["ticket"]["id"],
-                        data={"source": item["rel"], "derived": item["derived"]})
+            data = {"source": item["rel"], "derived": item["derived"]}
+            if item["dropped"]:  # SPD-116: what the note said about its landing pull request and the import read past
+                data["dropped"] = item["dropped"]
+            ledgerdb.write_event(con, at, "import", "import", "imported %s" % item["rel"], ticket_id=item["ticket"]["id"], data=data)
         for item in imported_tickets:
             t = lookup.get_ticket_by_id(con, item["ticket"]["id"])
             for name, text in item["sections"]:
-                if name in kernel.TICKET_COLUMN_SECTIONS or name == "Team":  # generated from members; its suffixes gave the summaries
+                # ## Team is generated from members (its tree lines' suffixes gave the summaries above) and ## Landing
+                # from pull_requests, which no import rebuilds: neither one's prose is ever stored
+                if name in kernel.TICKET_COLUMN_SECTIONS or name in kernel.TICKET_GENERATED_SECTIONS:
                     continue
                 rendered = sectiontext.ticket_section_text(con, t, name)
                 if noteimport.store_prose_if_needed(con, "ticket", t["id"], name, text, rendered):

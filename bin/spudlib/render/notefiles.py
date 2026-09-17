@@ -8,19 +8,31 @@ from ..core import kernel, markdown
 from ..state import ledgerdb, lookup
 
 
+def place_names(names, group, after, present):
+    """`group`'s names in order, each kept where the note already has it and otherwise inserted right after the first
+    name of `after` the note carries (at the end when it carries none) -- or all of them gone when `present` is False.
+    The shape a conditional part of a ticket note has: SPD-096's parked pair of keys, and SPD-116's pull-request pair
+    and its ## Landing section, each rendered only while the ledger has something to put in it."""
+    if not present:
+        return [n for n in names if n not in group]
+    at = next((names.index(n) + 1 for n in after if n in names), len(names))
+    for name in group:
+        if name not in names:
+            names.insert(at, name)
+        at = names.index(name) + 1
+    return names
+
+
 def render_ticket(con, t, pricing=None):
     layout = json.loads(t["layout"]) if t["layout"] else {}
     keys = list(layout.get("fm_keys") or kernel.TICKET_FM_KEYS)
     if "project" not in keys:  # an imported ticket's stored order, from before SPD-014: the key goes right after origin
         keys.insert(keys.index("origin") + 1 if "origin" in keys else len(keys), "project")
-    if t["status"] == "parked":  # SPD-096: the two keys that qualify the status, right after it and only while parked
-        at = keys.index("status") + 1 if "status" in keys else len(keys)
-        for key in kernel.PARKED_FM_KEYS:
-            if key not in keys:
-                keys.insert(at, key)
-            at = keys.index(key) + 1
-    else:
-        keys = [k for k in keys if k not in kernel.PARKED_FM_KEYS]
+    # SPD-096: the two keys that qualify the status, right after it and only while parked.  SPD-116: the two that name
+    # the landing pull request, after those, and only while one is recorded.
+    landing = lookup.ticket_landing(con, t["id"])
+    keys = place_names(keys, kernel.PARKED_FM_KEYS, ("status",), t["status"] == "parked")
+    keys = place_names(keys, kernel.PR_FM_KEYS, ("parked_reason", "parked_until", "status"), landing is not None)
     d = lookup.ticket_dict(con, t)
     values = {
         "id": ("plain", t["key"]),
@@ -29,6 +41,10 @@ def render_ticket(con, t, pricing=None):
         "status": ("plain", t["status"]),
         "parked_until": ("stamp", t["parked_until"] or ""),
         "parked_reason": ("quoted", t["parked_reason"] or ""),
+        # plain when known and "" when not, as parked_until and a member's spawned are: the number is the pull request
+        # a Bases view filters and links on, and a URL that carried none leaves the key empty rather than holding a URL
+        "pr": ("stamp", (landing["number"] or "") if landing else ""),
+        "pr_state": ("plain", landing["state"] if landing else ""),
         "origin": ("plain", t["origin"]),
         "project": ("plain", d["project"]),
         "proposed_by": ("quoted", "[[%s]]" % d["proposed_by"] if d["proposed_by"] else ""),
@@ -38,7 +54,11 @@ def render_ticket(con, t, pricing=None):
     }
     pairs = [(k, values[k]) for k in keys if k in values]
     heading = "%s — %s" % (t["key"], t["heading"] or t["title"])
-    names = layout.get("sections") or kernel.TICKET_SECTIONS
+    # ## Landing goes where the template has it, after the sections that precede it there (SPD-116), so a note whose
+    # stored layout predates the section -- every imported one -- gains it in the right place the moment one is recorded
+    before = kernel.TICKET_SECTIONS[: kernel.TICKET_SECTIONS.index(kernel.LANDING_SECTION)]
+    names = place_names(list(layout.get("sections") or kernel.TICKET_SECTIONS), (kernel.LANDING_SECTION,),
+                        tuple(reversed(before)), landing is not None)
     sections = [(name, sectiontext.ticket_section_text(con, t, name, pricing)) for name in names]
     return markdown.emit_frontmatter(pairs) + sectiontext.body_with_sections(heading, sections)
 

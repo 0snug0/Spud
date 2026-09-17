@@ -75,17 +75,28 @@ RECONCILE_ACTOR = "reconcile"
 
 # The markdown-v0 templates (ledger/_templates/) as the renderer's default layout.  `project` since SPD-014: every
 # note names its project, the home's included, so the Obsidian views group and filter without an empty bucket.
-TICKET_FM_KEYS = ["id", "title", "priority", "status", "parked_until", "parked_reason", "origin", "project", "proposed_by", "lead", "created", "tags"]
+TICKET_FM_KEYS = ["id", "title", "priority", "status", "parked_until", "parked_reason", "pr", "pr_state", "origin", "project",
+                  "proposed_by", "lead", "created", "tags"]
 # The two a ticket note carries only while it is parked (SPD-096); every other note drops them.
 PARKED_FM_KEYS = ("parked_until", "parked_reason")
-TICKET_SECTIONS = ["Brief", "Size, persona and model decision", "Team", "Handoffs", "Proposals received", "Outcome"]
+# The two a ticket note carries only while a landing pull request is recorded against it (SPD-116), after the status and
+# the parked pair: the number of the row `pr record` last wrote (empty when its URL carried none) and that row's state.
+# The clickable URL is in ## Landing, never here: Ledger v1 forbids a property value shaped like `word:text`, which is
+# what Obsidian reads `https://github.com/...` as.
+PR_FM_KEYS = ("pr", "pr_state")
+LANDING_SECTION = "Landing"
+TICKET_SECTIONS = ["Brief", "Size, persona and model decision", "Team", "Handoffs", "Proposals received", LANDING_SECTION, "Outcome"]
 MEMBER_SECTIONS = ["Brief", "Log", "Sub-agents", "Ticket proposals", "Result", "Blocked", "Outcome"]
 TICKET_COLUMN_SECTIONS = {"Brief": "brief", "Size, persona and model decision": "sizing", "Outcome": "outcome"}
 MEMBER_COLUMN_SECTIONS = {"Brief": "brief", "Result": "result", "Blocked": "blocked", "Outcome": "outcome"}
+# The ticket sections generated from a table alone, whose prose is never stored and which a hand edit cannot change:
+# ## Team from members (SPD-010) and ## Landing from pull_requests (SPD-116).
+TICKET_GENERATED_SECTIONS = ("Team", LANDING_SECTION)
 # Derived sections render from rows; imported prose (when the rows cannot regenerate
 # it) renders first, followed by the rows added after the prose was stored.  The
-# watermark is the id in the section's backing table.  A ticket's ## Team is not one of
-# them: it is generated from members alone and its prose is never stored (SPD-010).
+# watermark is the id in the section's backing table.  A ticket's ## Team and its
+# ## Landing are not among them: each is generated from its table alone and its prose
+# is never stored (TICKET_GENERATED_SECTIONS).
 SECTION_TABLES = {
     "Handoffs": "handoffs",
     "Proposals received": "proposal_decisions",

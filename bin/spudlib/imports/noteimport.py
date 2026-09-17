@@ -38,15 +38,26 @@ def store_prose_if_needed(con, entity, entity_id, section, text, rendered_from_r
     return True
 
 
+# The one table a note cannot rebuild: pull_requests (SPD-116).  A rendered ticket carries its landing pull request's
+# number, its state and its URL, but not the head branch, the worktree, who recorded it or when it was last read -- and
+# a merged row whose ticket is already done renders no owed line at all, so the columns that make a row actionable are
+# exactly the ones the note drops.  A rebuilt row would claim a `pr record` and a `gh pr view` that never happened, and
+# would put a URL read out of a file in front of the reconciler.  So the import reads past the two keys and the
+# ## Landing section: neither is part of the note's layout, the import event names what it dropped, and Spud re-records
+# the pull request with one `spud pr record` -- its URL is in the note he is looking at.
+
+
 def ticket_layout(fm_keys, section_names, parked=False):
     """The file's own key and section order, stored only where it differs from the template's.  The two parked
     properties are in the template's order only while the ticket is parked (SPD-096), as `## Blocked` is on a member
-    note: a note that is not parked has neither, and still needs no layout of its own."""
-    default = list(kernel.TICKET_FM_KEYS) if parked else [k for k in kernel.TICKET_FM_KEYS if k not in kernel.PARKED_FM_KEYS]
+    note: a note that is not parked has neither, and still needs no layout of its own.  The two pull-request keys and
+    ## Landing are never in either order, whatever the file had (the comment above); the caller drops them."""
+    default = [k for k in kernel.TICKET_FM_KEYS
+               if k not in kernel.PR_FM_KEYS and (parked or k not in kernel.PARKED_FM_KEYS)]
     layout = {}
     if fm_keys != default:
         layout["fm_keys"] = fm_keys
-    if section_names != kernel.TICKET_SECTIONS:
+    if section_names != [n for n in kernel.TICKET_SECTIONS if n != kernel.LANDING_SECTION]:
         layout["sections"] = section_names
     return layout or None
 
@@ -91,18 +102,24 @@ def import_ticket_file(ctx, con, at, path, rel):
     if len(set(names)) != len(names):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s: a section repeats" % rel)
     sections = dict(doc["sections"])
+    # the landing pull request is read past, not rebuilt (the comment above ticket_layout); the event names what it had
+    dropped = [k for k in kernel.PR_FM_KEYS if k in fm]
+    if kernel.LANDING_SECTION in names:
+        dropped.append(kernel.LANDING_SECTION)
+    fm_keys = [k for k in fm if k not in kernel.PR_FM_KEYS]
+    names = [n for n in names if n != kernel.LANDING_SECTION]
     tags = fm["tags"] if isinstance(fm["tags"], list) else [fm["tags"]]
     t = ops.insert_ticket(
         con, at, "import", project, fm["title"], fm["priority"], fm["status"], origin=fm["origin"],
         brief=sections.get("Brief", ""), sizing=sections.get("Size, persona and model decision", ""),
         outcome=sections.get("Outcome", ""), tags=tags, heading=heading, created_at=fm["created"],
-        number=int(m.group(2)), layout=ticket_layout(list(fm.keys()), names, fm["status"] == "parked"),
+        number=int(m.group(2)), layout=ticket_layout(fm_keys, names, fm["status"] == "parked"),
         # SPD-096: an export from before the parked status has neither key, so require_keys does not grow; the CHECKs
         # of migration 0003_parked refuse one that says parked with no reason, which is the right refusal
         parked_until=fm.get("parked_until") or None, parked_reason=fm.get("parked_reason") or None,
     )
     # the file carries one date: updated_at takes it (closed_at stays NULL; the file has no close time)
-    return {"ticket": t, "fm": fm, "sections": doc["sections"], "rel": rel, "derived": {"updated_at": "created"}}
+    return {"ticket": t, "fm": fm, "sections": doc["sections"], "rel": rel, "derived": {"updated_at": "created"}, "dropped": dropped}
 
 
 MEMBER_USAGE_KEYS = ("duration_ms", "tool_uses", "tokens_out", "tokens_in", "tokens_cached")
