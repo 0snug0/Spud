@@ -19,7 +19,7 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-CONFIG = os.path.join(ROOT, "spud.config.json")
+CONFIG = os.path.join(ROOT, "tests", "fixtures", "spud.config.json")  # the suite's fixture: the tool keeps no home config
 PY = sys.executable
 
 

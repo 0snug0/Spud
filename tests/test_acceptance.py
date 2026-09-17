@@ -15,11 +15,12 @@ Two corpora, two purposes:
   was written, and pins exactly which sections the rows cannot regenerate (the
   31 pairs below).  A regression that pushes more of the ledger into verbatim
   prose, or parses less of it into rows, fails here on purpose.
-* CutoverReadinessTest archives live HEAD: the ledger as it stands now, which
-  grows with every commit on main.  It asserts the round trip file by file and
-  that every prose section is of a known kind, with no fixed count, so it keeps
-  passing as the ledger grows and tells Spud before cutover that the importer
-  copes with the ledger as it then stands.
+* CutoverReadinessTest archives CUTOVER_REF, the ledger as it stood when it
+  left the tool repository (SPD-097).  It asserts the round trip file by file
+  and that every prose section is of a known kind, with no fixed count.  Until
+  SPD-097 it read live HEAD, which grew with every commit on main; since the
+  home moved out HEAD carries no ledger, so the last commit whose tree holds
+  one is pinned instead.
 """
 
 import difflib
@@ -40,6 +41,11 @@ spud = load_spud_module()
 # worktrees section landed in it).  It is on main, in every worktree and on origin,
 # so the pinned corpus is the same everywhere the suite runs.
 PINNED_REF = "2f11506"
+
+# The last commit on main whose tree holds ledger/ and reports/: Spud's home, and
+# with it the ledger, left the tool repository after it (SPD-097).  It is on
+# main, in every worktree and on origin, like PINNED_REF.
+CUTOVER_REF = "c2c5549"
 
 # The sections the importer keeps as verbatim prose when the rows cannot
 # regenerate them, at PINNED_REF.  Exact, on purpose: a change here is a change
@@ -444,10 +450,11 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
 
 
 class CutoverReadinessTest(RoundTripMixin, unittest.TestCase):
-    """The ledger as it stands at HEAD: the round trip holds file by file and every
-    prose section is of a known kind, whatever the count."""
+    """The ledger as it stood when it left the tool (SPD-097), at CUTOVER_REF: the
+    round trip holds file by file and every prose section is of a known kind,
+    whatever the count."""
 
-    REF = "HEAD"
+    REF = CUTOVER_REF
 
     def test_prose_sections_are_of_known_kinds(self):
         unknown = [

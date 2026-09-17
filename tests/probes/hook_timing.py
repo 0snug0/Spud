@@ -2,8 +2,8 @@
 
   python3.14 -I -S tests/probes/hook_timing.py [ROUNDS] LAUNCHER [LAUNCHER ...]
 
-Each launcher gets its own scratch SPUD_HOME (a copy of spud.config.json and `spud init`), so nothing is written into
-any ledger.  Three warm-up rounds fill each home's bytecode and git-command caches; then every round runs every case
+Each launcher gets its own scratch SPUD_HOME (a copy of the suite's tests/fixtures/spud.config.json and `spud init`), so
+nothing is written into any ledger.  Three warm-up rounds fill each home's bytecode and git-command caches; then every round runs every case
 once per launcher, in turn, so a machine slowing down slows every launcher alike.  Prints, per case, each launcher's
 median, min and max in ms, and the difference of each median from the first launcher's.  The pass for a change to the
 hook path: every hook case within 1 ms of main's median in the same run.
@@ -19,7 +19,7 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.join(os.path.dirname(os.path.dirname(HERE)), "spud.config.json")
+CONFIG = os.path.join(os.path.dirname(HERE), "fixtures", "spud.config.json")  # the suite's fixture: the tool keeps no home config (SPD-097)
 PY = sys.executable
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
 

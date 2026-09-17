@@ -2,8 +2,8 @@
 
   python3.14 -I -S tests/probes/session_diff.py LAUNCHER_A LAUNCHER_B
 
-Each launcher gets its own scratch SPUD_HOME (a copy of spud.config.json), so nothing is written into any ledger.  The
-same 44 steps run against each: commands from init to member finish, every hook event with a real payload, and two
+Each launcher gets its own scratch SPUD_HOME (a copy of the suite's tests/fixtures/spud.config.json), so nothing is
+written into any ledger.  The same 44 steps run against each: commands from init to member finish, every hook event with a real payload, and two
 malformed payloads.  Each step's exit code, stdout and stderr are compared after masking the scratch home, the
 launcher's checkout, timestamps, dates, clock times and durations.  Prints how many steps are identical and a diff of
 each that is not, and exits 1 when any differs.  A change meant to leave behaviour alone, such as a refactor of the
@@ -20,7 +20,7 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.join(os.path.dirname(os.path.dirname(HERE)), "spud.config.json")
+CONFIG = os.path.join(os.path.dirname(HERE), "fixtures", "spud.config.json")  # the suite's fixture: the tool keeps no home config (SPD-097)
 PY = sys.executable
 AGENT = "a0123456789abcdef"
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
