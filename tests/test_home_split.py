@@ -40,7 +40,8 @@ class HomeRowTest(SplitCase):
 
     def test_the_path_rule_for_spud_and_for_a_member(self):
         t = self.new_ticket("Split", status="active")
-        m = self.new_member(t["key"], name="Russet", deliverable=["bin/**", "home:docs/x.md"])
+        wt = self.add_worktree(self.tool, "spd-001-split", inside=True)
+        m = self.new_member(t["key"], name="Russet", deliverable=["bin/**", "home:docs/x.md"], cwd=wt)  # SPD-098: binds wt
         ctx = self.ctx()
         con = spud.connect(ctx)
         try:
@@ -56,18 +57,20 @@ class HomeRowTest(SplitCase):
             self.assertIn("Law 1", reason(home / "docs" / "x.md"))
             self.assertIn("Law 5", reason(home / "ledger" / "tickets" / "SPD-001.md"))
             self.assertIn("project spud, where every path is a deliverable", reason(tool / "CLAUDE.md"))
-            # the member: bare globs in the tool, home: globs in the home, generated roots nowhere
-            self.assertIsNone(reason(tool / "bin" / "x.py", AGENT, row))
+            # the member: bare globs in the tool's worktree its ticket is bound to (SPD-098), home: globs in the home,
+            # generated roots nowhere
+            self.assertIsNone(reason(wt / "bin" / "x.py", AGENT, row))
+            self.assertIn("bound to %s" % wt, reason(tool / "bin" / "x.py", AGENT, row))
             self.assertIsNone(reason(home / "docs" / "x.md", AGENT, row))
             self.assertIn("Law 5", reason(home / "bin" / "x.py", AGENT, row))
-            self.assertIn("Law 5", reason(tool / "docs" / "x.md", AGENT, row))
+            self.assertIn("Law 5", reason(wt / "docs" / "x.md", AGENT, row))
             self.assertIn("Law 5", reason(home / "ledger" / "teams" / "SPUD-001" / "Russet.md", AGENT, row))
         finally:
             con.close()
 
     def test_a_deliverable_may_name_the_home_and_must_name_an_active_project_otherwise(self):
         t = self.new_ticket("Globs")
-        m = self.new_member(t["key"], deliverable=["home:docs/", "spud:bin/x.py", "tests/**"])
+        m = self.new_member(t["key"], deliverable=["home:docs/", "spud:bin/x.py", "tests/**"], cwd=self.add_worktree(self.tool, "spd-001-globs"))
         self.assertEqual(m["deliverables"], ["home:docs/**", "spud:bin/x.py", "tests/**"])
         proc = self.home.run("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--brief", "x", "--deliverable", "nope:x", actor="spud", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
@@ -109,7 +112,7 @@ class SessionInTheHomeTest(SplitCase):
     def test_the_subagent_start_context_names_the_tool_and_the_home_for_a_spud_ticket(self):
         self.home.env["CLAUDE_CODE_SESSION_ID"] = SESSION  # the row records the session that plans it, and the spawn is checked against it
         t = self.new_ticket("Context", status="active")
-        m = self.new_member(t["key"], name="Russet", deliverable=["bin/**", "home:docs/x.md"])
+        m = self.new_member(t["key"], name="Russet", deliverable=["home:docs/x.md"])  # an unbound ticket; the bound one is test_ticket_worktree's
         common = {"session_id": SESSION, "transcript_path": "/tmp/x.jsonl", "cwd": str(self.home.path), "permission_mode": "default"}
         allow = self.home.hook("PreToolUse", dict(common, hook_event_name="PreToolUse", tool_name="Agent", tool_use_id="toolu_01",
                                                  tool_input={"description": "SPUD-001/Russet (01, scout)", "subagent_type": "spudagent", "model": "haiku", "prompt": "Do the thing."}))
@@ -180,10 +183,10 @@ class WorktreeRootsTest(SplitCase):
     still one directory.  The deliverable globs never follow the generated roots: a worktree of the tool is project
     spud's checkout in both, so a bare glob binds in it and a `home:` glob does not."""
 
-    def reasons(self, tool, deliverable):
-        """edit_reason for a member of a ticket in project spud, as a function of the path it writes."""
+    def reasons(self, tool, deliverable, cwd=None):
+        """edit_reason for a member of a ticket in project spud, planned from `cwd`, as a function of the path it writes."""
         t = self.new_ticket("Worktrees", status="active")
-        m = self.new_member(t["key"], name="Russet", deliverable=deliverable)
+        m = self.new_member(t["key"], name="Russet", deliverable=deliverable, cwd=cwd)
         ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=tool)
         con = spud.connect(ctx)
         self.addCleanup(con.close)
@@ -192,7 +195,7 @@ class WorktreeRootsTest(SplitCase):
 
     def test_a_worktree_of_the_tool_holds_no_generated_roots_when_the_home_is_elsewhere(self):
         wt = self.add_worktree(self.tool, "spd-097")
-        reason = self.reasons(self.tool, ["**", "home:docs/**"])
+        reason = self.reasons(self.tool, ["**", "home:docs/**"], cwd=wt)
         self.assertIsNone(reason(wt / "ledger" / "tickets" / "SPD-001.md"))  # ordinary code in project spud's checkout
         self.assertIsNone(reason(wt / "reports" / "2026-09-16.md"))
         self.assertIsNone(reason(wt / "bin" / "x.py"))

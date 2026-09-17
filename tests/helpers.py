@@ -116,12 +116,14 @@ class Home:
     def cleanup(self):
         self._tmp.cleanup()
 
-    def run(self, *args, check=True, actor=None, stdin=None):
+    def run(self, *args, check=True, actor=None, stdin=None, cwd=None):
+        """The CLI with this home's env; `cwd` is the directory it runs in (SPD-098: `member new` binds a code ticket to the
+        linked worktree it runs in), else the test process's own."""
         cmd = [sys.executable, "-I", "-S", str(SPUD)]
         if actor is not None:
             cmd += ["--as", actor]
         cmd += [str(a) for a in args]
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=self.env, input=stdin)
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=self.env, input=stdin, cwd=None if cwd is None else str(cwd))
         if check and proc.returncode != 0:
             raise AssertionError(
                 "spud %s exited %d\nstdout: %s\nstderr: %s"
@@ -129,8 +131,8 @@ class Home:
             )
         return proc
 
-    def json(self, *args, actor=None, check=True, stdin=None):
-        proc = self.run("--json", *args, actor=actor, check=check, stdin=stdin)
+    def json(self, *args, actor=None, check=True, stdin=None, cwd=None):
+        proc = self.run("--json", *args, actor=actor, check=check, stdin=stdin, cwd=cwd)
         try:
             return json.loads(proc.stdout)
         except json.JSONDecodeError as e:
@@ -328,7 +330,9 @@ class SpudTestCase(unittest.TestCase):
                 args += ["--" + k.replace("_", "-"), v]
         return self.home.json(*args, actor="spud")["ticket"]
 
-    def new_member(self, ticket, actor="spud", persona="scout", model="haiku", **kw):
+    def new_member(self, ticket, actor="spud", persona="scout", model="haiku", cwd=None, **kw):
+        """`member new`, run from `cwd` when given: a code member of a project whose root is a git checkout is planned from a
+        linked worktree of it (SPD-098)."""
         kw.setdefault("brief", "Do the thing.")
         args = ["member", "new", "--ticket", ticket, "--persona", persona, "--model", model]
         for k, v in kw.items():
@@ -337,7 +341,7 @@ class SpudTestCase(unittest.TestCase):
                     args += ["--" + k.replace("_", "-"), item]
             else:
                 args += ["--" + k.replace("_", "-"), v]
-        return self.home.json(*args, actor=actor)["member"]
+        return self.home.json(*args, actor=actor, cwd=cwd)["member"]
 
 
 def normalize_markdown(text):

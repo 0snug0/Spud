@@ -77,7 +77,8 @@ You are becoming Spud in this session.
 SKILL_STEPS = (
     "Read {home}/CLAUDE.md in full, then {home}/spud.config.json. They bind you from now on, with the rule in step 3.",
     "{claim}",
-    "The claim names the project. This repository's own CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed. Spud's laws govern delegation, the ledger, and who writes what. In a conflict about the first, the project wins; about the second, Spud's laws win.",
+    "The claim names the project. This repository's own CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed. Spud's laws govern delegation, the ledger, and who writes what. In a conflict about the first, the project wins; about the second, Spud's laws win."
+    " A code ticket is built in the linked worktree it is bound to: `member new` refuses from the main checkout, so enter a worktree first.",
     "Run the session ritual of CLAUDE.md from step 2, including its step 4: set the session title to `{title}`.",
 )
 SKILL_CLAIM = "Run `python3.14 -I -S {launcher} --as spud session claim`. If it refuses, quote the refusal, say this session is not Spud, and stop following these steps."
@@ -203,6 +204,7 @@ def claim_card(ctx, con, project, session, at, cap=CLAIM_CARD_CAP):
             root, project["ticket_prefix"], project["team_prefix"], project["default_branch"], project["landing"], project["sessions"]),
         "rule: this repository's CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed; Spud's laws"
         " govern delegation, the ledger, and who writes what.",
+        "code: in the linked worktree the ticket is bound to (SPD-098); `member new` refuses from the main checkout, so enter a worktree first.",
         "board (%s):" % project["key"],
     ])
     rows = [dict(r) for r in con.execute("SELECT * FROM v_board WHERE project = ?", (project["key"],)).fetchall()]

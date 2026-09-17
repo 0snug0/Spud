@@ -21,10 +21,19 @@ hooks: `spud hook <event>` is the harness's entry point (payload on stdin, answe
 
 deliverable globs (--deliverable): repository-relative, no leading slash and no `..`;
        `*` and `?` match inside one path segment, `**` crosses segments, a trailing `/`
-       means everything under that directory, `<key>:` in front names another
-       project's checkout and `home:` Spud's home (SPD-097).  Every other character is
+       means everything under that directory, `<key>:` in front names a project's
+       checkout by its key and `home:` Spud's home (SPD-097).  Every other character is
        literal, brackets included: write a Next.js segment plainly,
        admin/src/app/accounts/[email]/** (SPD-086).
+
+ticket worktrees (SPD-098): a bare glob, or one naming the ticket's own project, binds
+       the ticket to the linked worktree of that project `member new` runs in, and the
+       edit and Bash hooks then hold its members to that worktree.  `member new` and
+       `member edit --deliverable` refuse (exit 5) from the main checkout (enter a
+       worktree first: EnterWorktree name: <ticket key>-<slug>), from outside the
+       project, from another worktree while the bound one exists, and for a glob naming
+       another project, whose work is a ticket there.  A binding whose worktree is gone
+       is rebound by Spud's next plan from a worktree; a member never rebinds.
 
 text values: an option value of @path reads the file, @- reads stdin.
 exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,

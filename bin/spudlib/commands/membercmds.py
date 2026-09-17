@@ -1,9 +1,10 @@
 """commands/membercmds: member new, start, finish, edit, log, result, block, show.  Moved from bin/spud_ledger.py (SPD-065)."""
 
+import contextlib
 import json
 import os
 
-from . import reportentry
+from . import reportentry, worktreebind
 from ..core import kernel, markdown
 from ..state import actors, ledgerdb, lookup, ops
 
@@ -13,9 +14,11 @@ def cmd_member_new(ctx, args):
     try:
         actor = actors.resolve_actor(con, args.actor)
         ops.check_prose_headings(args.brief, markdown.IMPORT_MEMBER_SECTIONS, "--brief")
+        binder = worktreebind.Binder(ctx, worktreebind.working_directory())  # SPD-098: a code ticket binds a worktree
+        binder.prepare(con, actor, worktreebind.planned_ticket(con, actor, args.ticket), args.deliverable)
         m = ops.plan_member(ctx, con, actor, args.ticket, args.persona, args.model, name=args.name, tier_reason=args.tier_reason,
                         agent_type=args.agent_type, brief=args.brief or "", deliverables=args.deliverable,
-                        session_id=actors.planning_session(os.environ))
+                        session_id=actors.planning_session(os.environ), binder=binder)
         d = lookup.member_dict(con, m)
     finally:
         con.close()
@@ -71,6 +74,10 @@ def cmd_member_edit(ctx, args):
     con = ledgerdb.connect(ctx)
     try:
         actor = actors.resolve_actor(con, args.actor)
+        binder = worktreebind.Binder(ctx, worktreebind.working_directory())  # SPD-098: new deliverables bind as member new's do
+        if args.deliverable is not None:
+            with contextlib.suppress(kernel.SpudError):  # the transaction reports a member it cannot read
+                binder.prepare(con, actor, lookup.get_ticket_by_id(con, lookup.get_member(con, args.ref)["ticket_id"]), args.deliverable)
         at = kernel.now()
         with ledgerdb.write_txn(con):
             m = lookup.get_member(con, args.ref)
@@ -81,6 +88,7 @@ def cmd_member_edit(ctx, args):
                 updates["brief"] = args.brief
             if args.deliverable is not None and json.dumps(ops.normalize_deliverables(args.deliverable)) != m["deliverables"]:
                 ops.check_deliverable_projects(con, ops.normalize_deliverables(args.deliverable))
+                binder.decide(con, at, actor, lookup.get_ticket_by_id(con, m["ticket_id"]), ops.normalize_deliverables(args.deliverable))
                 updates["deliverables"] = json.dumps(ops.normalize_deliverables(args.deliverable))
             if args.summary is not None and args.summary != m["summary"]:
                 updates["summary"] = args.summary

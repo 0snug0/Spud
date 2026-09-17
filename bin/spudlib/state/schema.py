@@ -184,7 +184,7 @@ DROP TRIGGER IF EXISTS events_no_delete;
 
 CREATE VIEW v_board AS                            -- what Board.base shows, for the CLI and for rendering
 SELECT t.key, (SELECT pr.key FROM projects pr WHERE pr.id = t.project_id) AS project,
-       t.status, t.parked_until, t.parked_reason, t.priority, t.title, l.name AS lead, t.origin,
+       t.status, t.parked_until, t.parked_reason, t.priority, t.title, l.name AS lead, t.origin, t.worktree,
        (SELECT t2.team_key || '/' || m.name
           FROM proposals p JOIN members m ON m.id = p.origin_member_id JOIN tickets t2 ON t2.id = m.ticket_id
          WHERE p.id = t.proposal_id) AS proposed_by,
@@ -312,5 +312,45 @@ ALTER TABLE tickets_new RENAME TO tickets;
 CREATE INDEX tickets_board ON tickets(status, priority);
 """
 
-MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003)]
+# Ticket-bound worktrees (SPD-098, the home and tool split design's section 6): the one column, the absolute path of the
+# linked worktree a code ticket is built in, NULL while unbound (every ticket planned before this migration, which keeps
+# the path rule it had), and the event kind that records a binding.  SQLite cannot alter a CHECK, so events is rebuilt
+# as 0002_projects rebuilt it; the views are dropped first, since the rename re-parses every view and v_board names the
+# column this migration adds, and VIEWS_AND_TRIGGERS re-creates them and the append-only triggers after.
+DDL_0004 = """
+DROP VIEW IF EXISTS v_board;
+DROP VIEW IF EXISTS v_fleet;
+ALTER TABLE tickets ADD COLUMN worktree TEXT;     -- the bound linked worktree's real path; NULL while unbound
+
+DROP TRIGGER IF EXISTS events_no_update;
+DROP TRIGGER IF EXISTS events_no_delete;
+CREATE TABLE events_new (
+  id        INTEGER PRIMARY KEY,
+  at        TEXT    NOT NULL,
+  actor     TEXT    NOT NULL,
+  ticket_id INTEGER REFERENCES tickets(id),
+  member_id INTEGER REFERENCES members(id),
+  agent_id  TEXT,
+  kind      TEXT    NOT NULL CHECK (kind IN (
+              'ticket.created','ticket.status','ticket.priority','ticket.edited','ticket.worktree',
+              'member.planned','member.spawn_denied','member.spawned','member.started','member.stopped',
+              'member.log','member.result','member.blocked','member.outcome','member.status','member.edited',
+              'handoff','proposal.filed','proposal.decided','hook.denied','hook.error','render',
+              'report.entry','commit','import','config.synced',
+              'project.added','project.edited','project.installed','project.uninstalled','project.removed',
+              'session.claimed','session.released')),
+  body      TEXT    NOT NULL DEFAULT '',
+  data      TEXT    CHECK (data IS NULL OR json_valid(data))
+) STRICT;
+INSERT INTO events_new (id, at, actor, ticket_id, member_id, agent_id, kind, body, data)
+  SELECT id, at, actor, ticket_id, member_id, agent_id, kind, body, data FROM events;
+DROP TABLE events;
+ALTER TABLE events_new RENAME TO events;
+CREATE INDEX events_ticket ON events(ticket_id, id);
+CREATE INDEX events_member ON events(member_id, id);
+CREATE INDEX events_agent  ON events(agent_id, id);
+CREATE INDEX events_kind   ON events(kind, id);
+"""
+
+MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003), ("0004_ticket_worktree", DDL_0004)]
 SCHEMA_VERSION = len(MIGRATIONS)

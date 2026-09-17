@@ -172,9 +172,15 @@ def hook_subagent_start(ctx, payload):
                 context += " You are %s/%s (%s, %s) on %s; your deliverables: %s." % (
                     ticket["team_key"], member["name"], member["lineage"], member["persona"], ticket["key"], ", ".join(json.loads(member["deliverables"])) or "none")
                 project = con.execute("SELECT * FROM projects WHERE id = ?", (ticket["project_id"],)).fetchone()
-                context += (" Your ticket's project is `%s`; bare deliverables are relative to `%s` or a worktree of it, `<key>:<glob>` names"
-                            " another project's checkout and `home:<glob>` Spud's home (%s); that repository's CLAUDE.md and skills govern how"
-                            " you build and verify." % (project["key"], worktrees.project_root(ctx, project), ctx.home))
+                if ticket["worktree"]:  # SPD-098: a bound ticket's paths are its worktree's alone
+                    context += (" Your ticket's project is `%s`, and your ticket is bound to its worktree `%s`: bare deliverables are relative"
+                                " to that worktree alone, the same paths in the main checkout `%s` or in any other worktree are refused, and"
+                                " `home:<glob>` names Spud's home (%s); that repository's CLAUDE.md and skills govern how you build and verify."
+                                % (project["key"], ticket["worktree"], worktrees.project_root(ctx, project), ctx.home))
+                else:
+                    context += (" Your ticket's project is `%s`; bare deliverables are relative to `%s` or a worktree of it, `<key>:<glob>` names"
+                                " another project's checkout and `home:<glob>` Spud's home (%s); that repository's CLAUDE.md and skills govern how"
+                                " you build and verify." % (project["key"], worktrees.project_root(ctx, project), ctx.home))
     finally:
         con.close()
     return hookio.HookOutput({"hookSpecificOutput": {"hookEventName": "SubagentStart", "additionalContext": context}})

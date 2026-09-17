@@ -5934,7 +5934,7 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
         self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated", agent_id=AGENT_B)
         self.assertSilent(self.home.path / "tests" / "x.py", agent_id=AGENT_B)
         self.assertRefused(self.home.path / "ledger" / "x.md", "generated", agent_id=AGENT_B)
-        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"]), AGENT_C)
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"], cwd=self.elsewhere), AGENT_C)  # SPD-098: binds SPD-001 there
         self.assertSilent(self.elsewhere / "tests" / "x.py", agent_id=AGENT_C)
         self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated", agent_id=AGENT_C)
         self.assertRefused(self.home.path / "tests" / "x.py", "deliverables", agent_id=AGENT_C)
@@ -5943,7 +5943,7 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
         """SPD-031: the worktree cache this class exercises, which the hook itself writes, and a worktree elsewhere's own state
         directory, refused to a member whose glob is ** and to Spud.  Both scopes since SPD-097, so the globs really do reach
         every path the state directory is refused at: `home:**` at the home, the bare `**` in project spud's worktree."""
-        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**", "**"]), AGENT_B)
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**", "**"], cwd=self.elsewhere), AGENT_B)  # SPD-098: binds SPD-001 there
         self.assertSilent(self.elsewhere / "tests" / "x.py", agent_id=AGENT_B)  # lists the worktrees, writing the cache
         cache = self.home.path / STATE / "worktrees" / "spud.json"  # one cache per project since SPD-014
         self.assertTrue(cache.is_file())
@@ -6906,7 +6906,7 @@ class SqlTest(SpudTestCase):
             proc = self.home.run("sql", "--readonly", stmt, check=False)
             self.assertEqual(proc.returncode, EXIT_ERROR, stmt)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM name_pool WHERE name = 'X'"), 0)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 3)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), 4)
 
     def test_one_statement_no_flag_no_actor_needed(self):
         proc = self.home.run("sql", "SELECT 1", check=False)

@@ -1,6 +1,6 @@
 """commands/views: events, board, fleet, card, member list.  Moved from bin/spud_ledger.py (SPD-065)."""
 
-from . import renderwatch
+from . import renderwatch, worktreebind
 from ..core import kernel
 from ..projects import sessions
 from ..render import prices, teamcard
@@ -45,6 +45,8 @@ def cmd_board(ctx, args):
             rows = [r for r in rows if r["project"] == args.project]
         if args.parked:  # SPD-096: the bucket on its own, with the two columns the default table does not carry
             rows = [r for r in rows if r["status"] == "parked"]
+        for r in rows:  # SPD-098: the bound worktree and its branch, read from git now, never stored
+            r["worktree"] = worktreebind.worktree_state(r["worktree"])
         if args.brief:
             text = sessions.board_brief_text(con, rows, parked=args.parked)
             if renderwatch.watcher_installed() and not renderwatch.watcher_alive(ctx):  # SPD-097: the vault is stale
@@ -59,6 +61,9 @@ def cmd_board(ctx, args):
             if con.execute("SELECT count(*) FROM projects").fetchone()[0] > 1:  # SPD-014: the project column once there is more than one
                 columns.insert(1, ("project", "project"))
             text = kernel.table(rows, columns)
+            bound = [r for r in rows if r["worktree"] is not None and r["status"] not in ("done", "declined")]
+            if bound:  # an open ticket's worktree, in the board's order; a closed one keeps its path as history only
+                text += "\n\nworktrees:\n" + "\n".join("  %s  %s" % (r["key"], worktreebind.worktree_line(r["worktree"])) for r in bound)
     finally:
         con.close()
     return kernel.Result({"tickets": rows}, text)
@@ -149,11 +154,14 @@ def cmd_card(ctx, args):
     total = {"tokens": totals["tokens"], "cost_usd": prices.usd_text(totals["cost"]) if totals["cost"] is not None else None,
              "partial": totals["cost"] is not None and bool(not_priced), "not_priced": not_priced, "tool_uses": totals["tools"],
              "pricing": {k: pricing[k] for k in ("as_of", "source", "currency")} if pricing else None}
+    worktree = worktreebind.worktree_state(d["worktree"])  # SPD-098: read from git now, never stored
     lines = ["%s — %s  [%s, %s]  lead: %s" % (d["key"], d["title"], d["status"], d["priority"], d["lead"] or "-")]
+    if worktree is not None:
+        lines.append("worktree: " + worktreebind.worktree_line(worktree))
     lines.extend(format_tree(tree) or ["(no team yet)"])
     if tree:
         lines.append(card_total_line(totals, not_priced, pricing))
-    return kernel.Result({"ticket": d, "team": tree, "total": total}, "\n".join(lines))
+    return kernel.Result({"ticket": d, "worktree": worktree, "team": tree, "total": total}, "\n".join(lines))
 
 
 def cmd_member_list(ctx, args):
