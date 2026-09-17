@@ -11,6 +11,7 @@ from ..commands import (
     membercmds,
     proposalcmds,
     publish,
+    renderwatch,
     resumcmd,
     schedule,
     settings_sync,
@@ -165,10 +166,13 @@ def build_parser():
     p.add_argument("--file", help="accept a hand edit of this rendered file: title, priority, tags, status through the state machine, Brief/Size/Outcome; a member's Brief, Outcome and status; an appended report entry")
     p.set_defaults(func=admincmds.cmd_import)
 
-    p = sub.add_parser("render", help="regenerate ledger/ and reports/ from the database; a hand-edited file is left alone (exit 6), a note whose frontmatter only changed YAML style (Obsidian's rewrite) is rendered over and kept in the event")
+    p = sub.add_parser("render", help="regenerate ledger/ and reports/ from the database; a hand-edited file is left alone (exit 6), a note whose frontmatter only changed YAML style (Obsidian's rewrite) is rendered over and kept in the event; --watch keeps doing it (Spud's)")
     p.add_argument("--out", help="render into this directory instead of SPUD_HOME (no hash checks)")
     p.add_argument("--discard", metavar="PATH", help="overwrite this hand-edited file with the current render, keeping the discarded text in the event (Spud only)")
-    p.set_defaults(func=publish.cmd_render)
+    p.add_argument("--watch", action="store_true", help="run until SIGTERM, rendering whenever the event log moves: the LaunchAgent local.spud.render's run (SPD-097)")
+    p.add_argument("--interval", type=float, default=renderwatch.WATCH_INTERVAL, metavar="SECONDS", help="with --watch: seconds between reads of the event log (default %.0f)" % renderwatch.WATCH_INTERVAL)
+    p.add_argument("--ticks", type=int, metavar="N", help="with --watch: stop after N reads (tests)")
+    p.set_defaults(func=renderwatch.render_entry)
 
     p = sub.add_parser("ticket", help="tickets (Spud's)")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")

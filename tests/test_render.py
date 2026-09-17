@@ -219,7 +219,32 @@ class RenderConflictTest(SpudTestCase):
         again = self.home.json("render")
         self.assertEqual(again["written"], [])
         self.assertEqual(sorted(again["unchanged"]), sorted(out["written"]))
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'render'"), 2)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'render'"), 1)  # SPD-097: the second pass changed nothing and wrote nothing
+
+    def test_a_no_change_render_writes_nothing(self):
+        self.new_ticket("Quiet")
+        self.home.json("render")
+        snapshot = lambda: (self.home.scalar("SELECT max(id) FROM events"), self.home.rows("SELECT path, sha256, rendered_at, through_event_id FROM renders ORDER BY path"))
+        before = snapshot()
+        again = self.home.json("render")
+        self.assertEqual((again["written"], again["conflicts"], again["restyled"]), ([], [], []))
+        self.assertEqual(snapshot(), before)
+
+    def test_a_conflict_is_logged_once_per_path_and_on_disk_hash(self):
+        t = self.new_ticket("Edited", brief="Original brief.")
+        self.home.json("render")
+        path = self.home.path / "ledger" / "tickets" / "SPD-001.md"
+        path.write_text(path.read_text(encoding="utf-8").replace("Original brief.", "Edited once."), encoding="utf-8")
+        self.home.json("ticket", "edit", t["key"], "--title", "Renamed", actor="spud")
+        for _ in range(3):
+            self.assertEqual(self.home.run("render", check=False).returncode, EXIT_CONFLICT)
+        conflicts = lambda: [json.loads(r["data"]) for r in self.home.rows("SELECT data FROM events WHERE kind = 'render' AND json_extract(data, '$.conflict') = 1 ORDER BY id")]
+        self.assertEqual([c["path"] for c in conflicts()], ["ledger/tickets/SPD-001.md"])
+        self.assertEqual(conflicts()[0]["sha256"], hashlib.sha256(path.read_bytes()).hexdigest())
+        path.write_text(path.read_text(encoding="utf-8").replace("Edited once.", "Edited twice."), encoding="utf-8")
+        self.assertEqual(self.home.run("render", check=False).returncode, EXIT_CONFLICT)
+        self.assertEqual([c["sha256"] for c in conflicts()][1], hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertEqual(len(conflicts()), 2)
 
     def test_hand_edit_is_refused_until_import_file_accepts_it(self):
         t = self.new_ticket("Edited", brief="Original brief.")
@@ -372,7 +397,8 @@ class StyleOnlyRewriteTest(SpudTestCase):
                 self.assertEqual(self.ticket_path.read_text(encoding="utf-8"), edited)
                 self.assertEqual(
                     self.render_events("conflict")[-1],
-                    {"conflict": True, "path": self.TICKET, "body": "refused to overwrite hand-edited %s" % self.TICKET},
+                    {"conflict": True, "path": self.TICKET, "sha256": hashlib.sha256(edited.encode("utf-8")).hexdigest(),  # SPD-097: the hash it refused
+                     "body": "refused to overwrite hand-edited %s" % self.TICKET},
                 )
                 self.home.json("render", "--discard", self.ticket_path, actor="spud")
         self.assertEqual(self.render_events("style_only"), [])
@@ -468,7 +494,8 @@ class StyleOnlyRewriteTest(SpudTestCase):
         proc = self.home.run("render", check=False)
         self.assertEqual(proc.returncode, EXIT_CONFLICT)
         self.assertEqual((self.home.path / day).read_text(encoding="utf-8"), edited)
-        self.assertEqual(self.render_events("conflict"), [{"conflict": True, "path": day, "body": "refused to overwrite hand-edited %s" % day}])
+        self.assertEqual(self.render_events("conflict"), [{"conflict": True, "path": day, "sha256": hashlib.sha256(edited.encode("utf-8")).hexdigest(),
+                                                           "body": "refused to overwrite hand-edited %s" % day}])
 
 
 class HandEditAllowlistTest(SpudTestCase):
