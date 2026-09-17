@@ -46,29 +46,6 @@ def parse_pr_url(url):
     return text, int(m.group(1)) if m else None
 
 
-def seconds_since(stamp, now=None):
-    """Seconds between an ISO stamp the ledger wrote and now; None when the stamp cannot be read or compared."""
-    try:
-        return ((datetime.now().astimezone() if now is None else now) - datetime.fromisoformat(stamp)).total_seconds()
-    except (TypeError, ValueError):
-        return None
-
-
-def ago_text(seconds):
-    """`40s ago`, `4m ago`, `3h ago`, `2d ago`, for how long ago a check was made."""
-    if seconds is None:
-        return "at a time that cannot be read"
-    if seconds < 1:
-        return "just now"
-    if seconds < 90:
-        return "%ds ago" % int(seconds)
-    if seconds < 5400:
-        return "%dm ago" % round(seconds / 60)
-    if seconds < 172800:
-        return "%dh ago" % round(seconds / 3600)
-    return "%dd ago" % round(seconds / 86400)
-
-
 # ----------------------------------------------------------------------------
 # pr record (Spud's)
 # ----------------------------------------------------------------------------
@@ -149,7 +126,7 @@ def reconcile(ctx, con, ticket_ids=None, stale=0, budget=BUDGET, timeout=ghread.
     for p in lookup.pull_requests(con, ticket_ids):
         if p["state"] != "open":
             continue
-        age = seconds_since(p["checked_at"], started) if p["checked_at"] else None
+        age = kernel.seconds_since(p["checked_at"], started) if p["checked_at"] else None
         if age is not None and age < stale:  # a stamp that cannot be read counts as no check, and is read again
             out["skipped"] += 1
             continue
@@ -212,10 +189,10 @@ def pr_read_text(d, now=None):
     if d["state"] != "open":
         return lookup.pr_state_text(d)
     if d["check_error"]:
-        return "open, last read failed %s: %s" % (ago_text(seconds_since(d["checked_at"], now)), d["check_error"])
+        return "open, last read failed %s: %s" % (kernel.ago_text(kernel.seconds_since(d["checked_at"], now)), d["check_error"])
     if not d["checked_at"]:
         return "open, never read"
-    return "open, read %s" % ago_text(seconds_since(d["checked_at"], now))
+    return "open, read %s" % kernel.ago_text(kernel.seconds_since(d["checked_at"], now))
 
 
 def pr_lines(rows, now=None):

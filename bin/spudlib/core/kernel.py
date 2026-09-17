@@ -123,6 +123,31 @@ def fm_minute(stamp):
     return "" if not stamp else stamp[:16]
 
 
+def seconds_since(stamp, now=None):
+    """Seconds between an ISO stamp the ledger wrote and now; None when the stamp cannot be read or compared.  Moved down
+    from commands/prcmds on SPD-117: a pull request's last read and the vault's lag ask the same question, and the lag is
+    asked on the hook path, which no command module may serve."""
+    try:
+        return ((datetime.now().astimezone() if now is None else now) - datetime.fromisoformat(stamp)).total_seconds()
+    except (TypeError, ValueError):
+        return None
+
+
+def ago_text(seconds):
+    """`40s ago`, `4m ago`, `3h ago`, `2d ago`, for how long ago a check was made or an event went unrendered."""
+    if seconds is None:
+        return "at a time that cannot be read"
+    if seconds < 1:
+        return "just now"
+    if seconds < 90:
+        return "%ds ago" % int(seconds)
+    if seconds < 5400:
+        return "%dm ago" % round(seconds / 60)
+    if seconds < 172800:
+        return "%dh ago" % round(seconds / 3600)
+    return "%dd ago" % round(seconds / 86400)
+
+
 def sha256_bytes(data):
     return lazy.hashlib.sha256(data).hexdigest()
 

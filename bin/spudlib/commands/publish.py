@@ -6,7 +6,7 @@ import fcntl
 import os
 from pathlib import Path
 
-from ..core import kernel, markdown
+from ..core import kernel, launchagents, markdown
 from ..imports import accept
 from ..render import notefiles
 from ..state import actors, ledgerdb
@@ -114,6 +114,11 @@ def render_pass(ctx, con, out_root=None, check_only=False):
                 ledgerdb.write_event(con, at, "spud", "render", "rendered %d files, %d unchanged, %d conflicts" % (len(written), len(unchanged), len(conflicts)),
                                      data={"written": written, "unchanged": len(unchanged), "conflicts": conflicts,
                                            "restyled": [rel for rel, _ in restyled], "through_event_id": through})
+    if into_home and not check_only:
+        # SPD-117: every pass leaves its watermark, the pass that wrote nothing included, so doctor, the board and the
+        # SessionStart context can tell a vault that has caught up from one a stuck watcher left behind.  Not a row: this
+        # is the one record a no-op pass makes, and SPD-097's rule is that such a pass writes nothing to the database.
+        launchagents.record_render(ctx, through, kernel.now())
     return {"out": str(root), "written": written, "unchanged": unchanged, "conflicts": conflicts, "restyled": [rel for rel, _ in restyled],
             "new_conflicts": [rel for rel, _ in new_conflicts], "through": through}
 

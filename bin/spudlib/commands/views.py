@@ -58,9 +58,10 @@ def cmd_board(ctx, args):
             r["worktree"] = worktreebind.worktree_state(r["worktree"])
         if args.brief:
             text = sessions.board_brief_text(con, rows, parked=args.parked)
-            down = launchagents.watcher_down_line(ctx)  # SPD-097: the vault is stale; the SessionStart context carries the same line (SPD-048)
-            if down:
-                text += "\n" + down
+            # SPD-097, SPD-117: the render watcher's lines -- down, the vault behind, or both.  The SessionStart context
+            # carries the same ones (SPD-048), so a session reads the state of the vault it is about to trust.
+            for line in launchagents.watcher_lines(ctx, con):
+                text += "\n" + line
         else:
             for r in rows:
                 r["created"] = kernel.fm_date(r["created_at"])

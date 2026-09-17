@@ -1,12 +1,22 @@
 """SPD-097: the vault follows the database.  The render lock, the watcher (`render --watch`), a conflict logged once, and
-what doctor and board say about a watcher that is down."""
+what doctor and board say about a watcher that is down.
 
+SPD-117 adds the state liveness could not see: a watcher running and stuck, which reported `watcher running` and no problem
+while every note went stale.  The report compares the vault with the ledger instead -- the events since the last pass and
+how old the oldest of them is -- so doctor, `spud board --brief` and the SessionStart context tell four states apart: no
+watcher installed, one installed and not running, one running with the vault caught up, and one running with the vault
+behind.  VaultLagTest needs no watcher process for any of them.
+"""
+
+import json
+import os
 import subprocess
 import sys
 import time
 import unittest
 
-from helpers import EXIT_ERROR, EXIT_OK, SPUD, LaunchdMixin, SpudTestCase, load_spud_module
+from helpers import (EXIT_ERROR, EXIT_OK, SPUD, LaunchdMixin, SpudTestCase, aged_event, hold_watch_lock,
+                     install_watcher_plist, load_spud_module)
 
 spud = load_spud_module()
 
@@ -130,7 +140,7 @@ class DoctorAndBoardTest(LaunchdMixin, WatchCase):
         self.new_ticket("Board")
         self.assertNotIn("render watcher", self.home.run("board", "--brief").stdout)
         report = self.home.json("doctor")
-        self.assertEqual(report["render"], {"watcher": "not installed", "conflicts": []})
+        self.assertEqual((report["render"]["watcher"], report["render"]["state"], report["render"]["conflicts"]), ("not installed", "absent", []))
         self.assertTrue(any("no render watcher installed" in n for n in report["notes"]), report["notes"])
         self.home.json("schedule", "install", actor="spud")  # the fake launchctl loads nothing
         self.assertIn("render watcher: installed but not running", self.home.run("board", "--brief").stdout)
@@ -152,6 +162,124 @@ class DoctorAndBoardTest(LaunchdMixin, WatchCase):
         self.assertIn("import --file ledger/tickets/SPD-001.md", proc.stderr)
         self.assertIn("render --discard ledger/tickets/SPD-001.md", proc.stderr)
         self.assertIn("ledger/tickets/SPD-001.md", proc.stdout)
+
+
+BEHIND_LINE = "render watcher: %s unrendered, the oldest %s; the vault is stale (spud render brings it up to date)"
+DOWN_LINE = "render watcher: installed but not running; the vault is stale (spud --as spud schedule install reloads it)"
+
+
+class VaultLagTest(WatchCase):
+    """SPD-117: the four states doctor and `spud board --brief` report, with no watcher process in any of them.  The plist
+    is a file, the lock is one this test holds, and how far behind the vault is comes from the event log's own stamps."""
+
+    def report(self):
+        """doctor's JSON report, whatever doctor exits: a problem is the point of half of these states."""
+        return json.loads(self.home.run("--json", "doctor", check=False).stdout)
+
+    def render_line(self):
+        """doctor's render line.  doctor prints its lines only when it found nothing wrong; a problem goes to stderr."""
+        return next((line for line in self.home.run("doctor", check=False).stdout.split("\n") if line.startswith("render ")), "")
+
+    def brief(self):
+        return self.home.run("board", "--brief").stdout.rstrip("\n").split("\n")
+
+    def run_watcher_in_place(self):
+        """Installed and holding the lock: a watcher that answers every liveness question and renders nothing."""
+        install_watcher_plist(self.home)
+        self.addCleanup(os.close, hold_watch_lock(self.home))
+
+    def test_a_vault_that_has_caught_up_says_so_whether_or_not_a_watcher_is_there(self):
+        self.new_ticket("Vault")
+        self.home.json("render")
+        r = self.report()["render"]
+        self.assertEqual((r["state"], r["watcher"], r["lag"]["events"], r["lag"]["behind"]), ("absent", "not installed", 0, False))
+        self.assertEqual(self.render_line(), "render      watcher not installed; vault current")
+        self.assertNotIn("render watcher", "\n".join(self.brief()))
+        self.run_watcher_in_place()
+        r = self.report()["render"]
+        self.assertEqual((r["state"], r["watcher"], r["lag"]["events"]), ("current", "running", 0))
+        self.assertEqual(self.render_line(), "render      watcher running; vault current")
+        self.assertNotIn("render watcher", "\n".join(self.brief()))  # a quiet board means the vault on disk is the ledger
+
+    def test_a_watcher_running_and_behind_is_a_problem_that_names_spud_render(self):
+        self.new_ticket("Rendered")
+        self.home.json("render")
+        self.run_watcher_in_place()
+        fresh = self.new_ticket("Unrendered")  # seconds old: reported, and not yet a problem
+        r = self.report()["render"]
+        events = self.home.scalar("SELECT count(*) FROM events WHERE ticket_id = (SELECT id FROM tickets WHERE key = ?)", fresh["key"])
+        self.assertEqual((r["state"], r["lag"]["events"], r["lag"]["behind"]), ("current", events, False))
+        self.assertTrue(self.render_line().startswith("render      watcher running; vault behind by %d events, the oldest " % events), self.render_line())
+        self.assertNotIn("render watcher", "\n".join(self.brief()))
+        self.home.json("render")  # caught up again, and then the same watcher stops rendering for ten minutes
+        aged_event(self.home, 10 * 60)
+        proc = self.home.run("--json", "doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        r = json.loads(proc.stdout)["render"]
+        self.assertEqual((r["state"], r["watcher"], r["lag"]["events"], r["lag"]["behind"], r["lag"]["seconds"] // 60), ("behind", "running", 1, True, 10))
+        self.assertIn("the vault is behind the ledger by 1 event, the oldest 10m ago", proc.stderr)
+        self.assertIn("`spud render` brings it up to date", proc.stderr)
+        self.assertIn("reloads the watcher that is running and not rendering", proc.stderr)  # the other half of the recovery
+        self.assertNotIn("installed but not running", proc.stderr)  # alive, and stale: the state liveness cannot see
+        self.assertEqual(self.brief()[-1], BEHIND_LINE % ("1 event", "10m ago"))
+
+    def test_a_watcher_down_and_a_vault_behind_are_two_problems_and_two_lines(self):
+        self.new_ticket("Rendered")
+        self.home.json("render")
+        install_watcher_plist(self.home)  # installed, nothing holding the lock
+        aged_event(self.home, 3 * 3600)
+        aged_event(self.home, 3600)
+        proc = self.home.run("--json", "doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        r = json.loads(proc.stdout)
+        self.assertEqual((r["render"]["state"], r["render"]["watcher"]), ("down", "installed, not running"))
+        self.assertEqual((r["render"]["lag"]["events"], r["render"]["lag"]["behind"]), (2, True))
+        self.assertEqual(len([p for p in r["problems"] if "watcher" in p or "vault is behind" in p]), 2)
+        self.assertNotIn("running and not rendering", " ".join(r["problems"]))  # nothing is running: the down problem says so
+        self.assertEqual(self.brief()[-2:], [DOWN_LINE, BEHIND_LINE % ("2 events", "3h ago")])
+
+    def test_no_watcher_installed_and_a_vault_behind_still_names_the_command(self):
+        self.new_ticket("Rendered")
+        self.home.json("render")
+        aged_event(self.home, 2 * 86400)
+        r = self.report()["render"]
+        self.assertEqual((r["state"], r["watcher"], r["lag"]["behind"]), ("absent", "not installed", True))
+        self.assertEqual(self.brief()[-1], BEHIND_LINE % ("1 event", "2d ago"))
+        self.assertTrue(any("no render watcher installed" in n for n in self.report()["notes"]))
+
+    def test_one_render_clears_a_lag_no_note_shows(self):
+        """The renders table records only the files a pass wrote (SPD-097), so an event no note shows -- a hook denial --
+        leaves its through_event_id where it was, however often the vault is rendered.  Every pass writes its own mark
+        instead, so the one command the report names does clear the report."""
+        self.new_ticket("Vault")
+        self.home.json("render")
+        recorded = self.home.scalar("SELECT MAX(through_event_id) FROM renders")
+        aged_event(self.home, 30 * 60, kind="hook.denied")
+        r = self.report()["render"]
+        self.assertEqual((r["lag"]["events"], r["lag"]["behind"]), (1, True))
+        result = self.home.json("render")
+        self.assertEqual(result["written"], [])  # the event changed no note, so the table's watermark stands still
+        self.assertEqual(self.home.scalar("SELECT MAX(through_event_id) FROM renders"), recorded)
+        r = self.report()["render"]
+        self.assertEqual((r["state"], r["lag"]["events"], r["lag"]["behind"]), ("absent", 0, False))
+        self.assertNotIn("render watcher", self.home.run("board", "--brief").stdout)
+
+    def test_every_pass_marks_what_it_rendered_and_the_table_answers_without_a_mark(self):
+        self.new_ticket("Vault")
+        self.home.json("render")
+        mark = self.home.path / ".spud" / "rendered.json"
+        marked = json.loads(mark.read_text(encoding="utf-8"))
+        self.assertEqual(marked["through_event_id"], self.home.scalar("SELECT MAX(id) FROM events WHERE kind != 'render'"))
+        recorded = self.home.scalar("SELECT MAX(through_event_id) FROM renders")
+        con = self.home.connect()
+        try:
+            self.assertEqual(spud.rendered_through(self.ctx(), con), marked["through_event_id"])
+            mark.unlink()  # a home last rendered before SPD-117: the renders table still answers
+            self.assertEqual(spud.rendered_through(self.ctx(), con), recorded)
+            mark.write_text("not json at all\n", encoding="utf-8")  # and a mark that cannot be read never answers instead
+            self.assertEqual(spud.rendered_through(self.ctx(), con), recorded)
+        finally:
+            con.close()
 
 
 if __name__ == "__main__":
