@@ -18,7 +18,11 @@ def _function_names(words):
 
 class ShellFrame:
     """An open compound command: its kind, the word that closes it, the directories it started in, the directories any of
-    its branches ended in so far, and the enclosing list's state to restore."""
+    its branches ended in so far, and the enclosing list's state to restore.
+
+    The kinds: "group" a `{ list }`, "sub" one that runs in its own process (a `( list )` subshell, and a coproc's
+    `{ list }` group, whose fork the `coproc` before it makes -- SPD-081), "loop" a for, select, repeat, while or until,
+    "cond" an if, "case" a case, "func" a function body."""
 
     __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs")
 
@@ -279,6 +283,18 @@ class ShellWalk:
             self.skip, self.header = False, None
             self.push("func", "}")
             self.function_next = False
+            return
+        if t == "{" and not self.skip and not self.function_next and self.words and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words):
+            # zsh runs a `{ list }` after `coproc`, `time` and `!` as well (SPD-081, probed: `coproc { repeat 1 vcs push }`,
+            # `time { repeat 1 vcs push; }`, `! { repeat 1 vcs push; }`, `time ! { ... }`, `! time { ... }`,
+            # `time coproc { ... }`, `coproc time { ... }` and `time { { ... } }` each ran the body), so the group is read as
+            # a group and a short loop or short conditional inside it is checked.  With `coproc` among the prefix words the
+            # group is a forked shell's, as `coproc ( ... )` already was: its directory and its assignments never reach the
+            # line (probed: `coproc { x=1; cd /tmp; }` left the line where it was with x unset, while `time { x=1; cd /tmp; }`
+            # and `! { x=1; cd /tmp; }` left it in /tmp with x=1), and a trap set there still fires (SPD-054).
+            forked = "coproc" in self.words  # read before discard takes the prefix words away
+            self.discard()
+            self.push("sub" if forked else "group", "}")
             return
         if not self.skip and self.words and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words) and t in ("for", "select", "repeat", "if", "while", "until"):
             # zsh runs a compound command after `coproc`, `time` and `!` (probed: `coproc repeat 1 git push`, `coproc if
