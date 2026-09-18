@@ -2745,7 +2745,9 @@ class GlobCommandWordTest(BashHookCase):
                     "true && /usr/bin/g[a-z]t add .", "X=g?t; $X push", "timeout 5 g?t push", "- g?t push", "f() { g?t push; }; f"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd, "Law 7")
-                self.assertSilent(cmd, agent_id=None)
+                # SPD-121: `touch git` is itself a write by argument, and a file named git in the home is a deliverable, so
+                # Spud earns Law 1 for it there; his reading of the glob is unchanged, which the same line outside shows.
+                self.assertSilent(cmd, agent_id=None, cwd=str(self.out) if cmd.startswith("touch ") else None)
         self.assertSilent("X=g?t; echo $X")  # an assignment's value is not expanded, and the variable is only echoed
 
     def test_a_verb_glob_matching_a_file_the_line_creates(self):
@@ -2765,7 +2767,8 @@ class GlobCommandWordTest(BashHookCase):
             with self.subTest(cmd):
                 r = self.refused_for_members(cmd, "Law 7")
                 self.assertIn("not one of git's own commands", r.reason)
-                self.assertSilent(cmd, agent_id=None)
+                # SPD-121: `touch status` writes a file in the home, which is Law 1 for Spud; outside every project it is his
+                self.assertSilent(cmd, agent_id=None, cwd=str(self.out) if cmd.startswith("touch ") else None)
 
     def test_brace_lists_in_the_command_word_and_the_verb(self):
         for cmd in ("{git,push}", "{/usr/bin/git,push}", "git {push,status}", "command {git,push}", "{env,git} push", "git {-C,.} push",
@@ -2824,9 +2827,13 @@ class GlobCommandWordTest(BashHookCase):
         self.assertRefused("printf x | t?e ledger/tickets/SPD-001.md", "generated", AGENT_C)
         self.assertRefused("printf x | t?e ledger/tickets/SPD-001.md", "Law 1", agent_id=None)
         self.assertRefused("printf x | /usr/bin/t(e|x)e docs/x.md", "deliverables", AGENT_A)
-        cmd = "c? %s/ledger && echo x > tickets/SPD-001.md" % home
+        # `c[d]` matches cd alone; since SPD-121 cp is a checked name too, so `c?` can become two at once and a member is
+        # refused for the glob itself, while Spud's reading of the cd is unchanged.
+        cmd = "c[d] %s/ledger && echo x > tickets/SPD-001.md" % home
         self.assertRefused(cmd, "generated", AGENT_C, cwd=str(out))
         self.assertRefused(cmd, "Law 1", agent_id=None, cwd=str(out))
+        self.assertRefused("c? %s/ledger && echo x > tickets/SPD-001.md" % home, "glob", AGENT_C, cwd=str(out))
+        self.assertRefused("c? %s/ledger && echo x > tickets/SPD-001.md" % home, "Law 1", agent_id=None, cwd=str(out))
         self.assertSilent("cd %s && echo x > tickets/SPD-001.md" % out, AGENT_C, cwd=str(out))
 
     def test_shell_strings_read_their_own_globs(self):
@@ -5010,6 +5017,269 @@ class NamedCoprocTest(BashHookCase):
                 self.assertSilent(ok)
 
 
+# zsh's prefixed groups (SPD-081): a `{ list }` whose `{` follows only `coproc`, `time` and `!`.  Each fills its `%s` with
+# the body the group runs, and PREFIXED_GROUP_EVIDENCE is Spud's probe, line for line.
+PREFIXED_GROUP_EVIDENCE = ("coproc { repeat 1 %s }", "coproc { repeat 1 %s; }", "coproc { if [[ -n x ]] %s }",
+                           "coproc { for f (a) %s }", "time { repeat 1 %s; }", "! { repeat 1 %s; }",
+                           "time { for f (a) %s }", "! { while [[ -n x ]] %s }", "time ! { repeat 1 %s }",
+                           "! time { repeat 1 %s }", "time coproc { repeat 1 %s; }", "coproc time { repeat 1 %s; }",
+                           "time { { repeat 1 %s } }")
+# The forms a shell parses but does not run: read all the same, which costs a line no shell accepts.
+PREFIXED_GROUP_PARSE_ERRORS = ("! coproc { repeat 1 %s }", "! ! { repeat 1 %s }")
+# The prefixes whose group runs in a forked shell of its own, and those whose group runs in the shell that reads the line.
+FORKED_GROUPS = ("coproc { %s }", "coproc { %s; }", "time coproc { %s; }", "coproc time { %s; }")
+CURRENT_SHELL_GROUPS = ("time { %s; }", "! { %s; }", "time ! { %s; }", "! time { %s; }", "time { { %s; } }")
+
+
+class PrefixedGroupTest(BashHookCase):
+    """SPD-081 (from proposal 85): zsh runs a `{ list }` after `coproc`, `time` and `!`, and ShellWalk opened a group only
+    where no word stood before the `{`; after one of those words the brace was appended as an ordinary word, analyse_words
+    stripped it as the reserved word it is, and the rest of the line was read as one simple command.  A zsh short loop or
+    short conditional inside such a group was flattened into that command's words and never checked, so `coproc { repeat 1
+    git push }`, `time { repeat 1 git push; }` and `! { repeat 1 git push; }` were each kind other with no finding, while
+    `{ repeat 1 git push }` found the push (Laws 1, 5, 6 and 7).  SPD-042 and SPD-061 had already opened a frame for `for`,
+    `select`, `repeat`, `if`, `while` and `until` after those words; `{` was the one left.
+
+    No shell is probed here: this worktree session's harness refuses to run one (SPD-094).  The evidence is Spud's probe of
+    2026-09-17, recorded on the ticket -- zsh 5.9 -f and zsh -f -o nobareglobqual (this Mac's Bash tool), identical in both,
+    with a function standing in for the VCS program that appends its arguments to a log, since a coproc's stdout goes to its
+    pipe and only a file shows that the body ran:
+
+    - the body ran for every form in PREFIXED_GROUP_EVIDENCE above, `coproc { repeat 1 vcs push }` and
+      `time { { repeat 1 vcs push } }` included;
+    - `! coproc { ... }` and `! ! { ... }` are parse errors and ran nothing.  The hook reads them as groups all the same,
+      fail closed and at no real cost: the line is a shell error where it is not one of the forms that run;
+    - the line's directory and variables: `time { x=1; cd /tmp; }`, `! { x=1; cd /tmp; }`, `time ! { x=1; cd /tmp; }` and
+      `! time { x=1; cd /tmp; }` each left the line in /tmp with x=1 (the current shell), while `coproc { x=1; cd /tmp; }`,
+      `time coproc { x=1; cd /tmp; }` and `coproc time { x=1; cd /tmp; }` left the line where it was with x unset (a fork,
+      as SPD-054 has it, and as `coproc ( ... )` was already read).  In a pipeline, `time { x=1; cd /tmp; } | cat` and
+      `! { x=1; cd /tmp; } | cat` left the line where it was, as `{ cd /tmp; } | cat` does -- the reading main had wrong,
+      since it moved the line there.  (A zsh quirk the hook does not chase: `time { x=1; }` alone left x unset, while
+      `time { x=1; cd /tmp; }` set it; a variable behind `time` is read as the current shell's, which is what `time x=1`
+      already did.)
+
+    So a `{` whose preceding words are all LOOP_PREFIX_WORDS opens a group frame, and the group is read exactly as an
+    unprefixed one in the same position -- a short loop, a short conditional, a nested group, a subshell, a spud call, a
+    redirection, an eval and an `sh -c` inside it alike.  With `coproc` among those words the frame is a forked shell's:
+    its cd and its assignments never reach the line, and a trap set there still fires (SPD-054).  `echo coproc { git push; }`
+    and any `{` after an ordinary word stay arguments, SPD-060's `coproc NAME { ... }` keeps its own path, and zsh's
+    `{ ... } always { ... }` is SPD-124, not this ticket.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone", "bin"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)  # Law 7 refuses members only
+        return r
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("%s hook PreToolUse" % spud, "hook"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    # -- the hole --------------------------------------------------------------------------
+    def test_the_probes_evidence_forms_reach_the_body(self):
+        """Every form Spud's probe ran: the push inside the prefixed group is found and the member refused."""
+        for form in PREFIXED_GROUP_EVIDENCE:
+            line = form % "git push"
+            with self.subTest(line=line):
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+        self.assertEqual(self.analysis("coproc { repeat 1 git push }").findings, [("git", ("push", "push"))])
+        self.assertEqual(self.analysis("time { repeat 1 git status; }").findings, [("git", ("status", None))])
+
+    def test_the_forms_no_shell_parses_are_over_read(self):
+        """`! coproc { ... }` and `! ! { ... }` run nothing anywhere; reading them as groups refuses a line no shell accepts."""
+        for form in PREFIXED_GROUP_PARSE_ERRORS:
+            with self.subTest(form=form):
+                self.refused_for_members(form % "git push")
+
+    def test_every_body_form_inside_a_prefixed_group(self):
+        """A short loop, a short conditional, a nested group, a subshell, an eval and an `sh -c` inside the group are read
+        as they are inside an unprefixed one."""
+        for form in ("coproc { %s; }", "time { %s; }", "! { %s; }"):
+            for body in ("%s", "repeat 1 %s", "for f (a) %s", "if [[ -n x ]] %s", "{ %s }", "( %s )",
+                         "if true; then %s; fi", "eval '%s'", "sh -c '%s'", "true && %s", "%s | cat",
+                         "for f in a b; do %s; done"):
+                line = form % (body % "git push")
+                with self.subTest(line=line):
+                    self.assertRefused(line, "Law 7")
+                    self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_every_payload_in_every_prefixed_group_for_every_caller(self):
+        for form in ("coproc { %s; }", "time coproc { %s; }", "time { %s; }", "! { %s; }"):
+            for body in ("%s", "repeat 1 %s", "if [[ -n x ]] %s"):
+                for command, needle in self.member_payloads():
+                    line = form % (body % command)
+                    for agent_id in (AGENT_C, AGENT_A):
+                        with self.subTest(line=line, agent_id=agent_id):
+                            self.assertRefused(line, needle, agent_id)
+                for command, needle in self.spud_payloads():
+                    line = form % (body % command)
+                    with self.subTest(line=line, agent_id="spud"):
+                        self.assertRefused(line, needle, agent_id=None)
+
+    def test_a_target_outside_a_narrow_members_deliverables(self):
+        """AGENT_A plans tests/** and bin/spud, so note.txt at the home is refused it and allowed the ** member."""
+        for form in ("coproc { %s; }", "coproc time { %s; }", "time { %s; }", "! { %s; }"):
+            for body in ("%s", "repeat 1 %s"):
+                line = form % (body % "echo x > note.txt")
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")
+                    self.assertSilent(line, AGENT_C)
+                    self.assertSilent(form % (body % "echo x > tests/zzone/k.py"))
+
+    # -- the coproc group's fork (SPD-054) ---------------------------------------------------
+    def test_a_coproc_groups_directory_and_assignments_never_reach_the_line(self):
+        home, out = str(self.home.path), self.out
+        for form in FORKED_GROUPS:
+            for body in ("x=1; cd %s" % out, "cd %s" % out, "cd %s; git status" % out, "repeat 1 cd %s" % out):
+                line = form % body
+                with self.subTest(line=line):
+                    self.assertEqual(self.analysis(line).cwds, frozenset([home]), line)
+            # ... so what follows the group is in the line's own directory, checked there: the ledger file the same line
+            # names through the group's cd is never reached
+            self.assertSilent((form % ("cd %s" % out)) + "; echo x > tests/zzone/k.py")
+            self.assertSilent((form % ("cd %s/ledger" % home)) + "; echo x > tickets/SPD-001.md", AGENT_C)
+        # a variable the forked shell assigns does not hold after it, so a later word that reads it is doubted (SPD-043),
+        # exactly as after an unprefixed group
+        for line, plain in (("coproc { X=git; }; $X push", "{ X=git; }; $X push"),
+                            ("X=git; coproc { X=ls; }; $X push", "X=git; { X=ls; }; $X push")):
+            with self.subTest(line=line):
+                self.assertIn(("var-doubt", "$X"), self.analysis(line).findings, line)
+                self.assertEqual(self.analysis(line).findings, self.analysis(plain).findings, line)
+        self.assertRefused("coproc { X=git; }; $X push", "Law 7")
+        self.assertRefused("X=git; coproc { X=ls; }; $X push", "may not hold")
+
+    def test_a_trap_set_in_a_coproc_group_still_fires(self):
+        """SPD-054: the forked shell's exit fires an EXIT trap set there, so the action is read as it is anywhere else."""
+        for line in ("coproc { trap 'git push' EXIT; }", "coproc { repeat 1 trap 'git push' EXIT }",
+                     "time coproc { trap 'git push' EXIT; }", "coproc time { trap 'git push' EXIT; }"):
+            with self.subTest(line=line):
+                self.refused_for_members(line)
+        for agent_id in (AGENT_C, AGENT_A, None):  # a target the hook cannot place refuses Spud too (SPD-035)
+            self.assertRefused("coproc { trap 'echo x > out.txt' EXIT; }", "cannot follow", agent_id)
+        self.assertSilent("coproc { trap 'echo done' EXIT; }")
+        self.assertSilent("coproc { trap 'echo done' EXIT; }", agent_id=None)
+
+    # -- the current shell's groups -------------------------------------------------------------
+    def test_a_time_or_bang_group_is_read_as_an_unprefixed_group_in_its_place(self):
+        home, out = str(self.home.path), self.out
+        for form in CURRENT_SHELL_GROUPS:
+            for body in ("x=1; cd %s" % out, "cd %s" % out, "git status; cd %s" % out):
+                line, plain = form % body, "{ %s; }" % body
+                with self.subTest(line=line):
+                    a, b = self.analysis(line), self.analysis(plain)
+                    self.assertEqual((a.cwds, a.findings, sorted(a.doubt)), (b.cwds, b.findings, sorted(b.doubt)), line)
+                    self.assertEqual(a.cwds, frozenset([str(out)]), line)  # the cd moved the line itself
+            # ... and what follows the group is checked in the directory the group left it in, not in the line's own
+            self.assertRefused((form % ("cd %s/ledger" % home)) + "; echo x > tickets/SPD-001.md", "generated", AGENT_C)
+            self.assertSilent((form % ("cd %s" % out)) + "; echo x > note.txt")
+            self.assertRefused((form % ("cd %s" % out)) + "; echo x > %s/note.txt" % home, "deliverables")
+
+    def test_a_prefixed_group_in_a_pipeline_leaves_the_line_where_it_was(self):
+        """`time { x=1; cd /tmp; } | cat` and `! { x=1; cd /tmp; } | cat` left the line where it was, as `{ cd /tmp; } | cat`
+        does; main moved it to /tmp."""
+        home, out = str(self.home.path), self.out
+        for form in ("time { %s; } | cat", "! { %s; } | cat", "{ %s; } | cat", "time ! { %s; } | cat", "coproc { %s; } | cat"):
+            line = form % ("x=1; cd %s" % out)
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).cwds, frozenset([home]), line)
+        self.assertSilent(("time { cd %s; } | cat" % out) + "; echo x > tests/zzone/k.py")
+        self.assertRefused(("! { cd %s; } | cat" % out) + "; echo x > note.txt", "deliverables")
+        # the commands inside a piped group are still checked
+        self.assertRefused("time { git push; } | cat", "Law 7")
+        self.assertRefused("! { repeat 1 git push; } | cat", "Law 7")
+
+    def test_the_group_ends_where_its_brace_ends_it(self):
+        """What follows the group is outside it: a `}` with no terminator before it closes the group, as zsh closes one."""
+        home = str(self.home.path)
+        for form in ("time { %s }", "coproc { %s }", "! { %s }"):
+            line = form % "echo a > ledger/tickets/SPD-001.md" + "; echo b > tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertEqual(len(self.analysis(line).redirects), 2, self.analysis(line).redirects)
+                self.assertRefused(line, "generated")
+        self.assertSilent("time { echo a > tests/zzone/k.py }; echo b > tests/zzone/k.py")
+        self.assertRefused("coproc { true }; echo x > ledger/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertEqual(self.analysis("time { cd /nowhere-at-all }; git status").kinds[-1], "git")
+        self.assertEqual(self.analysis("coproc { git push }").cwds, frozenset([home]))
+
+    # -- controls ----------------------------------------------------------------------------------
+    def test_a_brace_after_an_ordinary_word_stays_an_argument(self):
+        for ok in ("echo coproc { git push; }", "echo time { git push; }", "echo x coproc { git push; }",
+                   "echo '{ git push; }'", "echo \"coproc { git push; }\"",
+                   "grep -n 'coproc { git push; }' tests/zzone/k.py",
+                   "%s --as %s member log 'coproc { repeat 1 git push }'" % (self.spud_cli, AGENT_A),
+                   "printf 'time { git push; }\\n' > tests/zzone/k.py"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+        self.assertEqual(self.analysis("echo coproc { git push; }").findings, [])
+
+    def test_the_named_form_and_the_simple_commands_are_unchanged(self):
+        for refused in ("coproc NAME { git push; }", "coproc NAME { git push }", "coproc git push", "time git push",
+                        "! git push", "coproc { git push; }", "coproc ( git push )", "{ git push; }",
+                        "coproc repeat 1 git push", "time repeat 1 git push", "! repeat 1 git push",
+                        "coproc if [[ -n x ]] git push", "time if [[ -n x ]] git push"):
+            with self.subTest(refused):
+                self.refused_for_members(refused)
+        for ok in ("coproc NAME git push", "coproc { git status; }", "time { git status; }", "! { echo hi; }",
+                   "coproc { echo hi; }", "time echo hi", "coproc 1bad { git push; }"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+        # the named form's group still runs in its own fork, and the unnamed one's cd is still not the line's
+        for cmd in ("coproc NAME { cd /tmp; }", "coproc { cd /tmp; }", "coproc cd /tmp"):
+            with self.subTest(cmd):
+                self.assertEqual(self.analysis(cmd).cwds, frozenset([str(self.home.path)]))
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        m = load_spud_module()
+        for line in ("coproc { " * 1000 + "git push" + " }" * 1000, "time { " * 1000 + "git push",
+                     "! { " * 500 + "repeat 1 git push" + " }" * 500, "coproc time ! { " * 300 + "git push",
+                     "time { " * 2000, "coproc { repeat 1 { " * 300 + "git push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
 class PathInForceTest(BashHookCase):
     """SPD-062: the hook reads a line's command words by name -- git, spud, python3.14, sqlite3, tee, a shell, a wrapper --
     and the shell then finds each of them on PATH, so a member that puts a directory of its own first runs its own program
@@ -6562,6 +6832,323 @@ class UnenterableDirTest(BashHookCase):
 
     def test_a_git_write_after_such_a_cd_is_checked_in_both_directories(self):
         self.assertRefused("cd %s; git archive -o ledger/tickets/SPD-001.md HEAD" % self.locked, "generated", AGENT_C)
+
+
+ARG_WORDING = "a write by argument"  # SPD-121: a file a command names as an operand and writes, checked as a redirection's target
+VARIABLE_WORDING = "spell the path out"  # an unresolvable target, for a redirection and a write by argument alike
+WORD_WORDING = "spell the words out"  # SPD-043's var-word: an expansion in a word the hook reads by name
+
+# SPD-121: one line per command the Bash hook reads writes by argument from, `{}` the file it writes.
+ARG_WRITERS = (
+    ("cp", "cp tests/src.txt {}"),
+    ("mv", "mv /tmp/spd-121-src {}"),  # a source every caller may remove: mv's sources are written too
+    ("ln -s", "ln -s /tmp/x {}"),
+    ("link", "link tests/src.txt {}"),
+    ("install", "install -m 644 tests/src.txt {}"),
+    ("install -d", "install -d {}"),
+    ("mkdir", "mkdir -p {}"),
+    ("touch", "touch {}"),
+    ("rm", "rm -f {}"),
+    ("unlink", "unlink {}"),
+    ("rmdir", "rmdir {}"),
+    ("truncate", "truncate -s 0 {}"),
+    ("chmod", "chmod +x {}"),
+    ("chown", "chown nobody {}"),
+    ("chgrp", "chgrp staff {}"),
+    ("chflags", "chflags nohidden {}"),
+    ("sed -i ''", "sed -i '' s/a/b/ {}"),
+    ("sed -i.bak", "sed -i.bak s/a/b/ {}"),
+    ("sed -I", "sed -I '' -e s/a/b/ {}"),
+)
+
+
+class ArgumentWriteTest(BashHookCase):
+    """SPD-121: the Bash hook held a write to the path rule only when it was a redirection, a tee operand or one of SPD-049's
+    file-writing git options, so a command that writes the files it names as operands was never read: a bound member's
+    `cp tests/src.txt tests/fake/.git/hooks/post-index-change`, `ln -s /tmp/x tests/fake/.git/hooks/x` and
+    `cp tests/src.txt /Users/nobody/.zshrc` were silent, past Law 5, SPD-064's outside allowlist and SPD-066's .git rule.
+
+    Spud's design decision: a write by argument is a write by redirection.  The files cp, mv, ln (and link), install, mkdir,
+    touch, rm (and unlink), rmdir, truncate, chmod, chown, chgrp, chflags and sed in place name as operands go through the
+    check a redirection target goes through, for every caller: a member held to its globs, the outside allowlist and the .git
+    rule; Spud held to Law 1 in a project and free in his own files and outside every project.  An operand the hook cannot
+    resolve, and a glob, are read as a redirection target is.  Each command is read on this Mac's BSD grammar, probed in a
+    scratch directory (getopt stops at the first operand, so `mkdir new -p` made ./-p; `sed -i` always takes the next word as
+    its suffix, so `sed -i -e X f` backed f up to f-e; `install -M log` wrote log), and GNU's -t/--target-directory and -T
+    are read too.  AGENT_A plans home:tests/** and home:bin/spud; AGENT_C plans home:bin/**."""
+
+    def setUp(self):
+        super().setUp()
+        self.narrow = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:bin/**"]), AGENT_C)
+        home = self.home.path
+        self.home.env["HOME"] = "/Users/nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
+        for d in ("tests/fake/.git/hooks", "tests/out", "tests/copy", "docs", "ledger/tickets", "reports", "bin"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        for f in ("tests/src.txt", "tests/b.txt", "docs/x.md", "ledger/tickets/SPD-001.md", "bin/spud"):
+            (home / f).write_text("a\n", encoding="utf-8")
+        self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+
+    def refused_targets(self):
+        """(target, the needle its refusal carries) for AGENT_A: a .git component, outside the deliverables, the home's
+        generated roots, and outside every project."""
+        return (("tests/fake/.git/hooks/post-index-change", GIT_DIR_WORDING), ("docs/x.md", "deliverables"),
+                ("ledger/tickets/SPD-001.md", "generated"), ("reports/2026-09-17.md", "generated"),
+                ("/Users/nobody/.zshrc", OUTSIDE), ("~/.zshrc", OUTSIDE))
+
+    def silent_targets(self):
+        return ("tests/out/new.txt", self.scratchpad + "/probe.txt", "/tmp/spd-121-x")
+
+    def test_the_tickets_lines_are_refused_with_the_path_in_the_reason(self):
+        for command, needle, path in (
+            ("cp tests/src.txt tests/fake/.git/hooks/post-index-change", GIT_DIR_WORDING, "tests/fake/.git/hooks/post-index-change"),
+            ("ln -s /tmp/x tests/fake/.git/hooks/x", GIT_DIR_WORDING, "tests/fake/.git/hooks/x"),
+            ("cp tests/src.txt /Users/nobody/.zshrc", OUTSIDE, "/Users/nobody/.zshrc"),
+        ):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle)
+                self.assertIn(path, r.reason)
+                self.assertIn(ARG_WORDING, r.reason)
+        # The fourth line lays out a bare repository's objects/ and refs/ with mkdir.  Both lie inside a tests/** member's
+        # globs and no .git component is spelled, so the path rule allows it; SPD-066 already refuses any git call a member
+        # points at a repository that is not a known checkout's own, which is what such a layout is for.  A member whose
+        # globs do not cover tests/b is refused it, with the path named.
+        self.assertSilent("mkdir -p tests/b/objects tests/b/refs")
+        r = self.assertRefused("mkdir -p tests/b/objects tests/b/refs", "deliverables", agent_id=AGENT_C)
+        self.assertIn("tests/b/objects", r.reason)
+
+    def test_every_command_is_held_to_the_path_rule(self):
+        for label, form in ARG_WRITERS:
+            for target, needle in self.refused_targets():
+                command = form.format(target)
+                with self.subTest(command=command):
+                    r = self.assertRefused(command, needle)
+                    self.assertIn(target if target[0] != "~" else ".zshrc", r.reason)  # the reason names the path
+
+    def test_every_command_is_silent_inside_the_deliverables_the_scratchpad_and_tmp(self):
+        for label, form in ARG_WRITERS:
+            for target in self.silent_targets():
+                command = form.format(target)
+                with self.subTest(command=command):
+                    self.assertSilent(command)
+
+    def test_a_command_that_writes_nothing_by_argument_stays_silent(self):
+        for command in ("sed -n p docs/x.md", "sed s/a/b/ docs/x.md", "sed -e s/a/b/ -e s/c/d/ docs/x.md", "sed -E 's/(a)/b/' docs/x.md",
+                        "cat docs/x.md", "ls -la docs", "grep -r x docs", "cp docs/x.md tests/out/", "ln -s docs/x.md tests/x-link",
+                        "chmod -R u+w tests/out", "sed s/a/b/ -i '' docs/x.md"):  # BSD: after the script, -i and '' are files sed reads
+            with self.subTest(command):
+                self.assertSilent(command)
+
+    def test_a_directory_destination_writes_each_source_inside_it(self):
+        refused = (
+            ("cp tests/src.txt tests/b.txt docs/", "docs/src.txt"),  # several sources: a directory
+            ("cp tests/src.txt tests/b.txt docs", "docs/src.txt"),
+            ("cp tests/src.txt docs", "docs/src.txt"),  # an existing directory, no slash
+            ("cp tests/src.txt tests/fake/.git", "tests/fake/.git/src.txt"),
+            ("cp -r tests/fake/.git tests/copy", "tests/copy/.git"),  # the source's own name, joined
+            ("cp -R tests/fake/.git tests/copy/", "tests/copy/.git"),
+            ("cp -t docs tests/src.txt", "docs/src.txt"),  # GNU's -t, in every spelling
+            ("cp -tdocs tests/src.txt", "docs/src.txt"),
+            ("cp -rt docs tests/src.txt", "docs/src.txt"),
+            ("cp --target-directory=docs tests/src.txt", "docs/src.txt"),
+            ("cp --target-directory docs tests/src.txt", "docs/src.txt"),
+            ("cp --target docs tests/src.txt", "docs/src.txt"),
+            ("cp -t tests/fake/.git/hooks tests/src.txt", "tests/fake/.git/hooks/src.txt"),
+            ("cp -T tests/src.txt tests/fake/.git", "tests/fake/.git"),  # -T: the destination itself, never inside it
+            ("cp tests/*.txt docs/", "docs/b.txt"),  # a source glob: each file it matches, in order
+            ("mv tests/src.txt docs/", "docs/src.txt"),
+            ("ln -s tests/src.txt docs/", "docs/src.txt"),
+            ("install tests/src.txt docs", "docs/src.txt"),
+        )
+        for command, path in refused:
+            with self.subTest(command):
+                r = self.assertRefused(command, GIT_DIR_WORDING if ".git" in path else "deliverables")
+                self.assertIn(path, r.reason)
+        for command in ("cp tests/src.txt tests/out/", "cp tests/src.txt tests/b.txt tests/out", "cp -r tests/fake/.git tests/newcopy",
+                        "cp -t tests/out tests/src.txt", "cp -T tests/src.txt tests/out", "cp tests/*.txt tests/out/",
+                        "cp -R tests/out tests/copy/", "cp tests/src.txt tests/newdir/", "install tests/src.txt tests/out"):
+            with self.subTest(command):
+                self.assertSilent(command)
+
+    def test_a_destination_reached_through_a_symlink_is_read_as_the_link_resolves(self):
+        home = self.home.path
+        (home / "tests" / "link").symlink_to(home / "tests" / "fake" / ".git")
+        for command in ("cp tests/src.txt tests/link", "cp tests/src.txt tests/link/hooks/x", "touch tests/link/hooks/x",
+                        "sed -i '' s/a/b/ tests/link/HEAD", "ln -s /tmp/x tests/link/hooks/x"):
+            with self.subTest(command):
+                r = self.assertRefused(command, GIT_DIR_WORDING)
+                self.assertIn(str(home / "tests" / "fake" / ".git"), r.reason)  # the reading that has the component
+
+    def test_a_case_variant_of_the_target_or_the_command_is_refused(self):
+        for command in ("cp tests/src.txt tests/fake/.GIT/hooks/x", "touch tests/fake/.Git/index", "CP tests/src.txt docs/x.md",
+                        "/bin/cp tests/src.txt docs/x.md", "/BIN/Cp tests/src.txt docs/x.md", "Rm docs/x.md", "SED -i '' s/a/b/ docs/x.md",
+                        "/usr/bin/install tests/src.txt docs/x.md", "Mkdir docs/new"):
+            with self.subTest(command):
+                self.assertRefused(command, GIT_DIR_WORDING if "git" in command.lower() else "deliverables")
+
+    def test_mv_removes_its_sources(self):
+        for command, needle, path in (("mv docs/x.md tests/out/", "deliverables", "docs/x.md"),
+                                      ("mv ledger/tickets/SPD-001.md /tmp/spd-121-x", "generated", "ledger/tickets/SPD-001.md"),
+                                      ("mv tests/fake/.git tests/g2", GIT_DIR_WORDING, "tests/fake/.git"),
+                                      ("mv -f -- docs/x.md tests/b.txt tests/out", "deliverables", "docs/x.md")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle)
+                self.assertIn(path, r.reason)
+        self.assertSilent("mv tests/src.txt tests/renamed.txt")
+        self.assertSilent("mv tests/src.txt /tmp/spd-121-x")
+
+    def test_ln_writes_its_link_name_never_its_target(self):
+        for command in ("ln -s tests/fake/.git/hooks tests/hooks-link", "ln -s docs/x.md tests/x-link", "ln -s /Users/nobody/.zshrc tests/rc",
+                        "ln tests/src.txt tests/hard", "ln -sf /tmp/x tests/out/x", "cd tests && ln -s ../docs/x.md"):
+            with self.subTest(command):
+                self.assertSilent(command)
+        for command, needle, path in (("ln -s tests/src.txt docs/link", "deliverables", "docs/link"),
+                                      ("ln -s /tmp/x", "deliverables", "x"),  # one operand: ./x, here the home's root
+                                      ("ln -s tests/fake/.git/hooks/post-index-change", "deliverables", "post-index-change"),
+                                      ("ln -s /tmp/x tests/fake/.git/hooks/pre-commit", GIT_DIR_WORDING, "pre-commit"),
+                                      ("link tests/src.txt docs/hard", "deliverables", "docs/hard")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle)
+                self.assertIn(path, r.reason)
+
+    def test_sed_in_place_and_its_backup(self):
+        for command, path in (("sed -i '' s/a/b/ docs/x.md", "docs/x.md"),
+                              ("sed -i.bak s/a/b/ docs/x.md", "docs/x.md"),
+                              ("sed -i.bak s/a/b/ bin/spud", "bin/spud.bak"),  # bin/spud is AGENT_A's, its backup is not
+                              ("sed -i -e s/a/b/ bin/spud", "bin/spud-e"),  # BSD: -i took -e as its suffix (probed)
+                              ("sed -e s/a/b/ -i '' docs/x.md", "docs/x.md"),
+                              ("sed -Ei '' s/a/b/ docs/x.md", "docs/x.md"),
+                              ("sed -n -i '' -e s/a/b/ tests/b.txt docs/x.md", "docs/x.md"),
+                              ("sed -I '' s/a/b/ tests/b.txt docs/x.md", "docs/x.md"),
+                              ("sed -f tests/s.sed -i '' docs/x.md", "docs/x.md"),
+                              ("sed -i '' -- s/a/b/ docs/x.md", "docs/x.md"),
+                              ("sed --in-place s/a/b/ docs/x.md", "docs/x.md"),  # GNU's, read too
+                              ("sed --in-place=.bak -e s/a/b/ docs/x.md", "docs/x.md"),
+                              # a `/` in the suffix BSD would append to the file name fails there (rename: Not a directory,
+                              # probed), so the word is also read as GNU reads it: the script, and the files after it
+                              ("sed -i 's/a/b/' docs/x.md", "docs/x.md")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables")
+                self.assertIn(path, r.reason)
+        for command in ("sed -i '' s/a/b/ bin/spud", "sed -i.bak s/a/b/ tests/b.txt", "sed -i '' s/a/b/ tests/b.txt",
+                        "sed -i bak s/a/b/ tests/b.txt"):
+            with self.subTest(command):
+                self.assertSilent(command)
+
+    def test_chmod_and_its_kin_skip_the_mode_or_owner_and_nothing_else(self):
+        for command in ("chmod 755 docs/x.md", "chmod -R u+x docs", "chmod -x docs/x.md", "chmod -v -w docs/x.md", "chmod u+x,g-w tests/b.txt docs/x.md",
+                        "chmod +a 'admin allow write' docs/x.md", "chmod =a# 1 'admin allow write' docs/x.md", "chmod -a# 1 docs/x.md",
+                        "chmod -N docs/x.md", "chown -R nobody:staff docs", "chown :staff docs/x.md", "chgrp -h staff docs/x.md",
+                        "chflags -R nouchg docs", "chmod --reference=tests/b.txt docs/x.md"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables")
+        for command in ("chmod 755 tests/b.txt", "chmod +a 'admin allow write' tests/b.txt", "chmod -a# 1 tests/b.txt", "chown nobody tests/b.txt"):
+            with self.subTest(command):
+                self.assertSilent(command)
+
+    def test_the_options_end_where_this_macs_getopt_ends_them(self):
+        for command, path in (("rm -- docs/x.md", "docs/x.md"), ("cp -- tests/src.txt docs/x.md", "docs/x.md"),
+                              ("mkdir -- docs/new", "docs/new"), ("touch -- -x", "-x"),  # -x at the home's root
+                              ("touch tests/b.txt -c", "-c"),  # BSD: an option after an operand is a file (probed: ./-c)
+                              ("install -d tests/out/d -m 700", "-m"),  # probed: made ./-m and ./700
+                              ("rm -f -- tests/b.txt docs/x.md", "docs/x.md")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables")
+                self.assertIn(path, r.reason)
+        for command in ("rm -rf -- tests/out", "mkdir -m 700 -p tests/out/d", "touch -r docs/x.md tests/b.txt", "touch -t 202609170000 tests/b.txt",
+                        "truncate -r docs/x.md tests/b.txt", "install -m 755 -o nobody tests/src.txt tests/out/x"):
+            with self.subTest(command):
+                self.assertSilent(command)
+
+    def test_install_writes_its_metalog_and_backup_and_install_d_every_operand(self):
+        for command, path in (("install -M docs/log tests/src.txt tests/out/x", "docs/log"),
+                              ("install -d tests/out/a docs/b", "docs/b"),
+                              ("install -b tests/src.txt bin/spud", "bin/spud.old"),
+                              ("install -b -B .orig tests/src.txt bin/spud", "bin/spud.orig")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables")
+                self.assertIn(path, r.reason)
+        self.assertSilent("install -b tests/src.txt tests/out/x")
+
+    def test_behind_every_wrapper_and_wherever_tee_is_read(self):
+        for command in ("env cp tests/src.txt docs/x.md", "command cp tests/src.txt docs/x.md", "sudo cp tests/src.txt docs/x.md",
+                        "sudo -u root rm docs/x.md", "env A=1 touch docs/x.md", "ENV touch docs/x.md", "nohup rm docs/x.md &",
+                        "time mkdir docs/new", "nice -n 5 chmod +x docs/x.md", "xargs rm docs/x.md < /dev/null", "exec touch docs/x.md",
+                        "timeout 5 sed -i '' s/a/b/ docs/x.md", "command -p mv docs/x.md tests/out/", "noglob rm docs/x.md",
+                        "echo x | sed -i '' s/a/b/ docs/x.md", "true && ln -s x docs/y", "false || touch docs/x.md",
+                        "(cd tests && cp src.txt ../docs/x.md)", "{ touch docs/x.md; }", "eval 'rm docs/x.md'", "sh -c 'mv tests/src.txt docs/'",
+                        "bash -lc 'touch docs/x.md'", "f() { touch docs/x.md; }; f", "echo $(touch docs/x.md)", "bash <<'EOF'\nrm docs/x.md\nEOF",
+                        "if true; then mkdir docs/new; fi", "while false; do rm docs/x.md; done", "cd docs && touch x.md", "cd docs; rm -rf ."):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables")
+
+    def test_a_glob_command_word_is_read_as_each_command_it_can_be(self):
+        (self.home.path / "cp").write_text("", encoding="utf-8")  # so `c?` matches a file here, as zsh would expand it
+        for command in ("c? tests/src.txt docs/x.md", "/bin/c? tests/src.txt docs/x.md", "/bin/[c]p tests/src.txt docs/x.md"):
+            with self.subTest(command):
+                r = self.bash(command)
+                self.assertEqual((r.code, r.decision), (0, "deny"), (command, r))
+
+    def test_a_target_the_hook_cannot_resolve_is_refused_for_a_member_alone(self):
+        for command in ("cp tests/src.txt $D", "rm \"$F\"", "touch $(date).log", "mkdir -p \"$D\"/x", "sed -i '' s/a/b/ $F",
+                        "for f in a b; do touch tests/$f; done", "ln -s /tmp/x `pwd`/x", "cp -t \"$D\" tests/src.txt",
+                        "cp \"$SRC\" tests/out/", "mv \"$SRC\" tests/out/"):  # the name a source takes inside a directory
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING)
+                self.assertSilent(command, agent_id=None)  # Spud: the hook cannot read it, as for a redirection
+        for command in ("cp \"$SRC\" tests/out.txt", "cp \"$D\"/src.txt tests/out/", "sed -n \"$N\"p docs/x.md", "cat \"$F\""):
+            with self.subTest(command):
+                self.assertSilent(command)
+        # The line's own assignment is resolved, as it is for every other word the hook reads by name: a member writes into
+        # its scratchpad through a variable it set on the line, and the hook reads the path it set.
+        self.assertSilent("F=tests/b.txt; rm \"$F\"")
+        self.assertSilent("S=/tmp/spd-121-x; mkdir -p $S/y && rm -rf $S")
+        r = self.assertRefused("S=docs; touch $S/x.md", "deliverables")
+        self.assertIn("docs/x.md", r.reason)
+        self.assertRefused("D=tests/fake/.git/hooks; cp tests/src.txt $D/post-index-change", GIT_DIR_WORDING)
+        # A word where this Mac's getopt still reads an option, holding an expansion, is read by name (SPD-043): for sed and
+        # install, whose options change what they write, `sed $X` may be `sed -i`.
+        self.assertRefused("X=-i; sed $X '' s/a/b/ docs/x.md", "deliverables")  # resolved, and then in place
+        for command in ("sed -$X '' s/a/b/ docs/x.md", "cp -$X tests/src.txt docs/"):
+            with self.subTest(command):
+                self.assertRefused(command, WORD_WORDING)  # a word spelled with `-` is an option the hook must read
+        # A first operand the line cannot settle is read both ways instead, and each reading's files are checked: what a
+        # `sed -n "${n},$((n+3))p" f` only prints stays silent, while the files an in-place reading would write do not.
+        for command in ("sed $(printf -- -i) '' s/a/b/ docs/x.md", "sed \"$X\" -e p tests/b.txt docs/x.md",
+                        "install $(echo -d) tests/out/a docs/b"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables")
+        for command in ("sed -n \"$N\"p docs/x.md", "sed -n \"${A},$((A+3))p\" docs/x.md", "for n in 1 2; do sed -n \"${n}p\" docs/x.md; done"):
+            with self.subTest(command):
+                self.assertSilent(command)
+
+    def test_a_glob_target_is_read_as_a_redirections(self):
+        (self.home.path / "tests" / "fake" / ".git" / "hooks" / "pre-commit").write_text("", encoding="utf-8")
+        self.assertRefused("rm tests/fake/.git/hooks/*", GIT_DIR_WORDING)
+        self.assertRefused("rm tests/fake/.gi?/hooks/pre-commit", GIT_DIR_WORDING)
+        self.assertRefused("rm docs/*.md", "deliverables")
+        self.assertRefused("rm tests/*.nomatch", "matches no file now")  # a member: what the shell would open is unknown
+        self.assertSilent("rm /tmp/spd-121-none/*.nomatch", agent_id=None)  # Spud: the literal name is checked, outside every project
+        self.assertSilent("rm tests/*.txt")
+        self.assertSilent("rm -f tests/{src,b}.txt")
+
+    def test_spuds_answers(self):
+        """Spud is held to Law 1 in a project and is free in his own files and outside every project, as for a redirection."""
+        for label, form in ARG_WRITERS:
+            with self.subTest(label):
+                r = self.assertRefused(form.format("docs/x.md"), "Law 1", agent_id=None)
+                self.assertIn(ARG_WORDING, r.reason)
+                self.assertRefused(form.format("ledger/tickets/SPD-001.md"), "generated", agent_id=None)
+                self.assertSilent(form.format("/Users/nobody/.zshrc"), agent_id=None)
+                self.assertSilent(form.format("/tmp/spd-121-x"), agent_id=None)
+                self.assertSilent(form.format(".claude/settings.json"), agent_id=None)  # his own, the backup under .claude/** too
+        r = self.assertRefused("cp tests/src.txt tests/fake/.git/hooks/post-index-change", "Law 1", agent_id=None)
+        self.assertNotIn(GIT_DIR_WORDING, r.reason)  # SPD-066's rule is a caller's with an agent_id
+
+    def test_an_unbound_agent_id_is_held_as_for_a_redirection(self):
+        self.assertRefused("cp tests/src.txt /Users/nobody/.zshrc", OUTSIDE, agent_id=AGENT_D)
+        self.assertRefused("touch tests/fake/.git/hooks/x", GIT_DIR_WORDING, agent_id=AGENT_D)
+        self.assertRefused("touch tests/x.py", "not bound", agent_id=AGENT_D)
+        self.assertSilent("touch %s/probe.txt" % self.scratchpad, agent_id=AGENT_D)
 
 
 # =============================================================================

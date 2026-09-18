@@ -2,7 +2,7 @@
 
 import os
 
-from . import assignment_words, directories, expansions, git_programs, git_verbs, globbing, prepare, spud_calls, syntax, walk, zsh
+from . import arg_writes, assignment_words, directories, expansions, git_programs, git_verbs, globbing, prepare, spud_calls, syntax, walk, zsh
 from ..hooks import hookio
 
 
@@ -330,6 +330,14 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
         for w in words[1:]:
             if not w.startswith("-"):
                 a.redirects.append((w, a.cwds))
+    elif base in syntax.ARG_WRITE_COMMANDS:
+        # SPD-121: a command that writes the files it names as operands, read where tee is, so bash_reason holds each to
+        # the path rule as it holds a redirection target.  The words this Mac's getopt reads as options are read by name
+        # first, so a glob among them is read as each option it can become (`sed -? '' s/a/b/ f` is `sed -i`).
+        if not read_points(lambda ws, start: expansions.option_point(arg_writes.option_read_index(base, ws, start, a))):
+            return
+        a.kinds.append("other")
+        arg_writes.read_writes(prepare.deglob(cmd), base, words, a)
     elif cmd in ("alias", "unalias") and directories.builtin_runs(effect):
         # SPD-059: the builtin, spelled exactly, stores text the shell runs wherever it next parses this name in command
         # position -- which on one line means `eval`.  Never a spud call, so an aliasing line is not allowed on its own.
