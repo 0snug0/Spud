@@ -57,8 +57,14 @@ def cmd_member_finish(ctx, args):
             extra = {"outcome": args.outcome}
             if args.summary is not None:
                 extra["summary"] = args.summary
+            # SPD-120: a finished member decides nothing more, so say what it was holding and who it now falls to.  This
+            # refuses nothing and moves nothing: recording a returned member's outcome is Law 9, and the climb is
+            # resolved and written at `proposal decide`, so a blocked member that is re-briefed keeps what nobody decided.
+            held = lookup.held_proposals(con, m["id"])
             ops.member_status_change(con, at, actor.label, m, args.status, extra, outcome_event=args.outcome)
             m = lookup.get_member_by_id(con, m["id"])
+            falls_to = lookup.member_ref(con, lookup.effective_holder(con, m["id"])) if held else None
+            held = [dict(h, holder=falls_to) for h in held]
             if actor.kind == "spud" and m["parent_id"] is None:  # report entries are Spud's: his own children's verdicts
                 ticket = lookup.get_ticket_by_id(con, m["ticket_id"])
                 summary = m["summary"] if m["summary"] and m["summary"].strip() else None
@@ -67,7 +73,14 @@ def cmd_member_finish(ctx, args):
         d = lookup.member_dict(con, m)
     finally:
         con.close()
-    return reportentry.with_report_entry({"member": d}, "%s is %s (finished %s)" % (d["ref"], d["status"], d["finished_at"]), entry)
+    data = {"member": d}
+    text = "%s is %s (finished %s)" % (d["ref"], d["status"], d["finished_at"])
+    if held:
+        data["held_proposals"] = held
+        text += "\n%s left %d open proposal%s for %s to decide: %s" % (
+            d["ref"], len(held), "" if len(held) == 1 else "s", lookup.holder_name(held[0]["holder"]),
+            ", ".join("%d (%s)" % (h["id"], h["title"]) for h in held))
+    return reportentry.with_report_entry(data, text, entry)
 
 
 def cmd_member_edit(ctx, args):
