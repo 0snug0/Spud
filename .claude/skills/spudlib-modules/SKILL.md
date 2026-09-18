@@ -18,7 +18,7 @@ bin/
     imports/   noteimport · bulkimport · accept
     commands/  reportentry · admincmds · doctor · schedule · settings_sync · publish · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind
     projects/  sessions · registry · install
-    hooks/     hookio · worktrees · pathrule · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
+    hooks/     hookio · worktrees · pathrule · gitrepos · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
     shell/     syntax · prepare · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · walk · analyse · redirect_globs · bash_rule
     cli/       helptexts · cliparser
 ```
@@ -61,7 +61,7 @@ Also:
 | `imports/` | markdown back into rows: the v0 tree import, and `import --file` accepting a hand edit | `core`, `render`, `state` |
 | `commands/` | one module per command family; each command is `cmd_<name>(ctx, args)` returning `kernel.Result` | `core`, `hooks`, `imports`, `projects`, `render`, `state` |
 | `projects/` | registered projects: the registry, install and uninstall, session mode and claims | `commands`, `core`, `hooks`, `state` |
-| `hooks/` | the seven hook events' handlers and their plumbing: the spool, worktrees, the path rule, dispatch | `core`, `projects`, `shell`, `state` |
+| `hooks/` | the seven hook events' handlers and their plumbing: the spool, worktrees, the path rule, the repository reading, dispatch | `core`, `projects`, `shell`, `state` |
 | `shell/` | the Bash rule's reading of a command line: tokens, zsh globs, git verbs, expansions, the walk | `core`, `hooks`, `state` |
 | `cli/` | `build_parser`, `normalize_argv`, the help texts. Nothing imports `cli` but the entry | `commands`, `core`, `hooks`, `projects`, `state` |
 

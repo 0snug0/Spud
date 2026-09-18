@@ -2,6 +2,7 @@
 
 from . import prcmds, worktreebind
 from ..core import kernel, launchagents
+from ..hooks import gitrepos
 from ..projects import sessions
 from ..render import prices, teamcard
 from ..state import ledgerdb, lookup
@@ -60,7 +61,9 @@ def cmd_board(ctx, args):
             text = sessions.board_brief_text(con, rows, parked=args.parked)
             # SPD-097, SPD-117: the render watcher's lines -- down, the vault behind, or both.  The SessionStart context
             # carries the same ones (SPD-048), so a session reads the state of the vault it is about to trust.
-            for line in launchagents.watcher_lines(ctx, con):
+            # SPD-123: and one line naming each checkout that holds what a member may have planted for git to run, which the
+            # harness's own git and Eric's terminal would run with no hook to see it.
+            for line in launchagents.watcher_lines(ctx, con) + gitrepos.planted_lines(ctx, con):
                 text += "\n" + line
         else:
             for r in rows:

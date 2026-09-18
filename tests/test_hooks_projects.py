@@ -24,9 +24,9 @@ from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from helpers import SPUD, HookResult
+from helpers import EXIT_ERROR, SPUD, HookResult
 from test_hooks import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split
-from test_hooks import GIT_DIR_WORDING, GIT_NESTED_WORDING, plant_git_dir
+from test_hooks import GIT_DIR_WORDING, GIT_HOOK_WORDING, GIT_NESTED_WORDING, GIT_SCOPE_WORDING, SPUD_PLANTED_WORDING, plant_git_dir
 
 KEY = "badtakes"
 TICKET_PREFIX = "BAD"
@@ -42,6 +42,7 @@ NOT_BOUND = "not bound"  # an unbound agent_id in a Spud session writing a proje
 STATE_WORDING = "ledger database"  # the state directory .spud/ at any project root, for everyone
 BOUND_WORKTREE = "SPD-098"  # a member of a bound ticket writing its project's path outside the worktree the ticket is bound to
 GIT_DIR = GIT_DIR_WORDING  # SPD-066: a path with a .git component, for every agent_id in a Spud session
+SPUD_PLANTED = SPUD_PLANTED_WORDING  # SPD-123: Spud's own git call reaching what a member may have planted in a known checkout
 
 # The columns of the section 3.2 table, in its order.
 SPUD_COL, PLAIN_COL, MEMBER_COL, UNBOUND_SPUD_COL, UNBOUND_PLAIN_COL = range(5)
@@ -600,7 +601,8 @@ class BashHookProjectTest(ProjectHookCase):
     def test_a_nested_repository_binds_members_and_not_erics_own_subagents(self):
         """SPD-066 (2) in another project: a repository planted below badtakes' worktree or root is no checkout's own, for a
         member of BAD-001 and an unbound agent_id of a Spud session; Eric's plain session and its subagents keep today's
-        answer, and the checkouts' own repositories stay silent for everyone."""
+        answer, and the checkouts' own repositories stay silent for everyone.  Since SPD-123 Spud is refused too: the
+        repository lies in a checkout the ledger knows, so git would run its hooks under his own call (PlantedRepositoryTest)."""
         nested = plant_git_dir(self.bad_wt / "src" / "fake" / ".git").parent
         bare = plant_git_dir(self.bad / "vendor" / "bare")
         self.spawn_in(self.CLAIMED, self.plan_bad(), AGENT_A)
@@ -614,12 +616,293 @@ class BashHookProjectTest(ProjectHookCase):
                 plain_wt = self.PLAIN._replace(cwd=self.bad_wt)
                 self.assertHookSilent(self.bash(plain_wt, command, AGENT_D), command)  # Eric's own subagent
                 self.assertHookSilent(self.bash(plain_wt, command), command)
-                self.assertHookSilent(self.bash(in_wt, command), command)  # Spud
+                r = self.assertDenied(self.bash(in_wt, command), GIT_NESTED_WORDING, command)  # Spud, since SPD-123
+                self.assertIn(SPUD_PLANTED, r.reason)
         for s, command in ((in_wt, "git status"), (in_wt, "git -C %s log" % self.bad_wt), (self.CLAIMED, "git fetch"),
                            (in_wt, "git -C %s/src status" % self.bad_wt)):
             with self.subTest(command=command, cwd=str(s.cwd)):
                 self.assertHookSilent(self.bash(s, command, AGENT_A), command)
                 self.assertHookSilent(self.bash(s, command), command)
+
+
+PLANTED_LINE = "repository check: "  # SPD-123: the one line `spud board --brief` and a Spud session's context add
+
+
+class PlantedRepositoryTest(ProjectHookCase):
+    """SPD-123: SPD-066 refuses a member every path it spells into a git directory and every repository but a known
+    checkout's own, and SPD-063 the program keys at a repository's local and worktree scopes -- all of it read from what a
+    member spells.  A member that writes through a program the hook cannot read (python -c, a script under its globs, node)
+    can still put a hook in a known checkout's common git directory, a program key in its config or in a worktree's
+    config.worktree, or a repository below the checkout, and git runs it with nothing on the line: post-index-change under
+    any `git status`, reference-transaction under `git fetch` (SPD-066's probe, git 2.54.0), and pre-commit, commit-msg,
+    post-commit, post-merge and post-checkout under Spud's own commit, merge and worktree calls, which he runs as Eric.
+
+    So one check runs before every git call that is not a plain session's, Spud's own included.  For a repository in a
+    checkout the ledger knows it refuses (a) an entry of the common directory's hooks/ that is not a *.sample file, whatever
+    its mode; (b) a program-naming key at the local or worktree scope; (c) a repository that is not the checkout's own.
+    Spud alone stays silent where the line is his own: a repository outside every known checkout (a scratch clone), and a
+    directory the hook cannot follow.  Eric's plain session and its subagents keep today's answers.  The harness and Eric's
+    terminal run git no hook sees, so doctor names every finding and `spud board --brief`, with every Spud session's
+    context, carries one line naming the checkout."""
+
+    SPUD_COMMANDS = ("git status", "git commit -m x", "git merge --no-ff b", "git fetch")
+
+    def setUp(self):
+        super().setUp()
+        self.common = self.bad / ".git"  # the common git directory of the checkout and of its worktree
+        self.wt_gitdir = Path((self.bad_wt / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
+        self.IN_WT = self.CLAIMED._replace(label="claimed, cwd in the worktree", cwd=self.bad_wt)
+        self.PLAIN_WT = self.PLAIN._replace(label="plain, cwd in the worktree", cwd=self.bad_wt)
+        self.config_text = (self.common / "config").read_text(encoding="utf-8")
+        (self.common / "hooks").mkdir(exist_ok=True)
+        (self.common / "hooks" / "pre-push.sample").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")  # git init's kind
+
+    def bash(self, s, command, agent_id=None):
+        return self.hook_in(s, "PreToolUse", self.bash_p(s, command, agent_id))
+
+    # -- what a member could plant through an interpreter ------------------------------------
+    def plant_hook(self, name="post-index-change", mode=0o755):
+        hook = self.common / "hooks" / name
+        hook.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        hook.chmod(mode)
+        return hook
+
+    def plant_local(self, text):
+        """The common config as git init left it, then `text`; plant_local("") restores it."""
+        (self.common / "config").write_text(self.config_text + text, encoding="utf-8")
+
+    def plant_worktree_key(self, local=""):
+        self.plant_local(local + "[extensions]\n\tworktreeConfig = true\n")
+        (self.wt_gitdir / "config.worktree").write_text("[core]\n\tfsmonitor = /bin/echo\n", encoding="utf-8")
+
+    # -- who calls, where ----------------------------------------------------------------------
+    def spud_in(self, s):
+        return [(s, command) for command in self.SPUD_COMMANDS]
+
+    def spud_places(self):
+        """Spud's commit, merge, status and fetch in the checkout and in its worktree, and git -C from the home's session."""
+        return (self.spud_in(self.CLAIMED) + self.spud_in(self.IN_WT)
+                + [(self.HOME, "git -C %s status" % self.bad), (self.HOME, "git -C %s fetch" % self.bad_wt)])
+
+    def assertSpudRefused(self, needles, places=None):
+        for s, command in (self.spud_places() if places is None else places):
+            with self.subTest(session=s.label, command=command):
+                r = self.assertDenied(self.bash(s, command), SPUD_PLANTED, command)
+                for needle in needles:
+                    self.assertIn(needle, r.reason, command)
+                self.assertNotIn("Law 7", r.reason)  # Law 7 is a member's; Spud's refusal is about what git would run
+
+    def assertSpudSilent(self, places=None):
+        for s, command in (self.spud_places() if places is None else places):
+            with self.subTest(session=s.label, command=command):
+                self.assertHookSilent(self.bash(s, command), command)
+
+    def assertPlainSilent(self, commands=()):
+        """Eric's own session and its own subagents: today's answers, whatever is planted."""
+        for s in (self.PLAIN, self.PLAIN_WT):
+            for command in self.SPUD_COMMANDS + tuple(commands):
+                for agent_id in (None, AGENT_D):
+                    with self.subTest(session=s.label, command=command, agent_id=agent_id):
+                        self.assertHookSilent(self.bash(s, command, agent_id), command)
+
+    def doctor(self):
+        proc = self.cli("--json", "doctor", check=False)
+        return proc, json.loads(proc.stdout)
+
+    # -- the Bash hook ----------------------------------------------------------------------------
+    def test_a_clean_checkout_is_silent_for_everyone(self):
+        """hooks/ holding only samples and a config setting no program: nothing changes for anyone."""
+        self.assertSpudSilent()
+        self.assertPlainSilent()
+        self.spawn_in(self.CLAIMED, self.plan_bad(), AGENT_A)
+        for command in ("git status", "git fetch", "git -C %s log" % self.bad):
+            self.assertHookSilent(self.bash(self.IN_WT, command, AGENT_A), command)
+
+    def test_a_planted_hook_refuses_spud_in_the_checkout_and_in_its_worktree(self):
+        for name, mode in (("post-index-change", 0o755), ("post-index-change", 0o644), ("reference-transaction", 0o755),
+                           ("pre-commit", 0o700), ("post-merge", 0o755)):
+            with self.subTest(hook=name, mode=oct(mode)):  # git runs one once it is executable, and a program can set the bit
+                hook = self.plant_hook(name, mode)
+                self.assertSpudRefused([str(hook), GIT_HOOK_WORDING, "with nothing on the line"])
+                self.assertPlainSilent()
+                hook.unlink()
+        hook = self.plant_hook()
+        for command in ("git --git-dir=%s/.git status" % self.bad, "GIT_DIR=%s/.git git fetch" % self.bad,
+                        "GIT_COMMON_DIR=%s/.git git log" % self.bad):  # the git directory taken as given, as git takes it
+            self.assertSpudRefused([str(hook)], [(self.CLAIMED, command), (self.HOME, command)])
+        hook.unlink()
+        for odd in ("pre-commit.d", "x.sample"):  # a directory named like anything, and one named like a sample: fail closed
+            with self.subTest(entry=odd):
+                (self.common / "hooks" / odd).mkdir()
+                self.assertSpudRefused([str(self.common / "hooks" / odd)], self.spud_in(self.CLAIMED))
+                (self.common / "hooks" / odd).rmdir()
+        self.assertSpudSilent()  # samples only again
+
+    def test_a_program_key_at_the_local_scope_refuses_spud(self):
+        for key, text in (("core.fsmonitor", "[core]\n\tfsmonitor = /bin/echo\n"),
+                          ("core.hookspath", "[core]\n\thooksPath = /tmp/planted-hooks\n")):
+            with self.subTest(key):
+                self.plant_local(text)
+                self.assertSpudRefused([key, "local"])
+                self.assertPlainSilent()
+        self.plant_local("")
+        self.assertSpudSilent()
+
+    def test_spuds_refusal_names_every_finding_of_the_repository(self):
+        hook = self.plant_hook()
+        self.plant_local("[core]\n\tfsmonitor = /bin/echo\n")
+        r = self.assertDenied(self.bash(self.CLAIMED, "git merge --no-ff b"), SPUD_PLANTED)
+        for needle in (str(hook), "core.fsmonitor", "local", "spud doctor", "interpreter", str(self.bad)):
+            self.assertIn(needle, r.reason)
+
+    def test_a_program_key_in_a_worktrees_config_worktree_refuses_spud_there(self):
+        self.plant_worktree_key()
+        self.assertSpudRefused(["core.fsmonitor", "worktree"], self.spud_in(self.IN_WT) + [(self.HOME, "git -C %s fetch" % self.bad_wt)])
+        self.assertSpudSilent(self.spud_in(self.CLAIMED))  # git reads a worktree's config.worktree in that worktree alone
+        self.assertPlainSilent()
+
+    def test_a_nested_bare_layout_reached_by_git_C_refuses_spud(self):
+        for root, s, plain in ((self.bad, self.CLAIMED, self.PLAIN), (self.bad_wt, self.IN_WT, self.PLAIN_WT)):
+            fake = plant_git_dir(root / "tests" / "fake")
+            with self.subTest(checkout=str(root)):
+                r = self.assertDenied(self.bash(s, "git -C tests/fake status"), GIT_NESTED_WORDING)
+                self.assertIn(SPUD_PLANTED, r.reason)
+                self.assertIn(str(fake), r.reason)
+                for agent_id in (None, AGENT_D):
+                    self.assertHookSilent(self.bash(plain, "git -C tests/fake status", agent_id))
+        self.assertSpudSilent()  # the checkouts' own repositories beside them
+
+    def test_a_worktree_whose_gitfile_or_commondir_names_another_repository_refuses_spud(self):
+        """SPD-066 read a work tree found through a listed worktree's own .git as that checkout's repository, wherever the
+        gitfile pointed; the common directory must be a registered checkout's own too."""
+        elsewhere = self.make_repo("spud-elsewhere-")
+        gitfile = self.bad_wt / ".git"
+        own = gitfile.read_text(encoding="utf-8")
+        gitfile.write_text("gitdir: %s\n" % (elsewhere / ".git"), encoding="utf-8")
+        self.assertSpudRefused([GIT_NESTED_WORDING, str(self.bad_wt)], self.spud_in(self.IN_WT))
+        gitfile.write_text(own, encoding="utf-8")
+        (self.wt_gitdir / "commondir").write_text("%s\n" % (elsewhere / ".git"), encoding="utf-8")
+        self.assertSpudRefused([GIT_NESTED_WORDING], self.spud_in(self.IN_WT))
+        (self.wt_gitdir / "commondir").write_text("../..\n", encoding="utf-8")
+        self.assertSpudSilent()
+
+    def test_spud_is_silent_outside_every_checkout_and_where_the_hook_cannot_follow(self):
+        clone = self.make_repo("spud-scratch-clone-")
+        (clone / ".git" / "hooks").mkdir(exist_ok=True)
+        (clone / ".git" / "hooks" / "post-index-change").write_text("#!/bin/sh\n", encoding="utf-8")
+        (clone / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tfsmonitor = /bin/echo\n", encoding="utf-8")
+        for s in (self.CLAIMED, self.HOME):
+            for command in ("git -C %s status" % clone, "cd %s && git fetch" % clone, "git --git-dir=%s/.git log" % clone,
+                            "cd %s && git commit -m x" % clone):
+                with self.subTest(session=s.label, command=command):
+                    self.assertHookSilent(self.bash(s, command), command)  # a scratch clone is Spud's own business
+        self.assertDenied(self.bash(self.CLAIMED, "cd %s && git status" % clone, AGENT_D), GIT_NESTED_WORDING)  # a member's is not
+        self.plant_hook()
+        for s in (self.CLAIMED, self.IN_WT):
+            for command in ("cd - && git status", "popd && git fetch", "cd ~x && git log"):
+                with self.subTest(session=s.label, command=command):
+                    self.assertHookSilent(self.bash(s, command), command)  # Spud's own spelling: the check is about files
+
+    def test_a_member_is_refused_on_a_planted_hook_and_keeps_its_older_reasons(self):
+        self.spawn_in(self.CLAIMED, self.plan_bad(), AGENT_A)
+        hook = self.plant_hook()
+        for command in ("git status", "git fetch", "git log --oneline", "git -C %s diff" % self.bad):
+            for agent_id in (AGENT_A, AGENT_D):  # a bound member, and an unbound agent_id of a Spud session
+                with self.subTest(command=command, agent_id=agent_id):
+                    r = self.assertDenied(self.bash(self.IN_WT, command, agent_id), GIT_HOOK_WORDING, command)
+                    self.assertIn("Law 7", r.reason)
+                    self.assertIn(str(hook), r.reason)
+                    self.assertIn("with nothing on the line", r.reason)
+                    self.assertIn("interpreter", r.reason)
+        # each refusal a member earned before SPD-123 keeps its own reason
+        r = self.assertDenied(self.bash(self.IN_WT, "git commit -m x", AGENT_A), "never run")
+        self.assertNotIn(GIT_HOOK_WORDING, r.reason)
+        self.plant_local("[core]\n\tfsmonitor = /bin/echo\n")
+        r = self.assertDenied(self.bash(self.IN_WT, "git status", AGENT_A), GIT_SCOPE_WORDING)
+        self.assertNotIn(GIT_HOOK_WORDING, r.reason)
+        self.plant_local("")
+        plant_git_dir(self.bad_wt / "src" / "fake")
+        r = self.assertDenied(self.bash(self.IN_WT, "git -C src/fake status", AGENT_A), GIT_NESTED_WORDING)
+        self.assertNotIn(GIT_HOOK_WORDING, r.reason)
+        r = self.assertDenied(self.bash(self.IN_WT, "git -C %s status" % self.outside, AGENT_A), "outside every checkout")
+        self.assertNotIn(GIT_HOOK_WORDING, r.reason)
+        self.assertPlainSilent()
+
+    def imports_of(self, s, event, payload):
+        """The modules a hook run imports, as the installed line runs it (hook_in's environment), from -X importtime."""
+        env = dict(self.home.env, CLAUDE_PROJECT_DIR=str(s.launch), CLAUDE_CODE_SESSION_ID=s.session)
+        cmd = [sys.executable, "-I", "-S", "-X", "importtime", str(SPUD), "hook", event] + (["--project", s.project] if s.project else [])
+        proc = subprocess.run(cmd, input=json.dumps(payload), capture_output=True, text=True, env=env, cwd=str(s.cwd))
+        self.assertEqual(proc.returncode, 0, proc)
+        return {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines() if line.startswith("import time:")}
+
+    def test_the_check_runs_no_git_once_its_caches_are_warm(self):
+        """The cost rule: the repository check adds no subprocess to a hook beyond the config scopes' own git run, which
+        happens only after a config file changes; the hooks listing is a scandir."""
+        for s, event, payload in ((self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")),
+                                  (self.CLAIMED, "PreToolUse", self.bash_p(self.CLAIMED, "git -C %s log" % self.bad_wt)),
+                                  (self.CLAIMED, "SessionStart", self.session_start_p(self.CLAIMED))):
+            with self.subTest(event=event, cwd=str(s.cwd)):
+                self.hook_in(s, event, payload)  # warms the worktree list, git's command list and the config scopes
+                self.assertNotIn("subprocess", self.imports_of(s, event, payload))
+        self.plant_local("[core]\n\tfsmonitor = /bin/echo\n")  # a config edit: the one git run, then warm again
+        self.assertIn("subprocess", self.imports_of(self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")))
+        self.assertNotIn("subprocess", self.imports_of(self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")))
+
+    # -- doctor, the board and the SessionStart context -----------------------------------------------
+    def test_doctor_names_every_finding_with_what_to_do_and_none_when_clean(self):
+        proc, report = self.doctor()
+        self.assertEqual(report["repositories"]["findings"], [], report["repositories"])
+        self.assertLessEqual({str(self.bad), str(self.bad_wt)}, set(report["repositories"]["checkouts"]), report["repositories"])
+        self.assertFalse([p for p in report["problems"] if "repository" in p], report["problems"])
+        hook = self.plant_hook()
+        self.plant_worktree_key(local="[core]\n\thooksPath = /tmp/planted-hooks\n")
+        proc, report = self.doctor()
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+        found = {(f["kind"], f["what"]) for f in report["repositories"]["findings"]}
+        self.assertLessEqual({("hook", str(hook)), ("key", "core.hookspath"), ("key", "core.fsmonitor")}, found, found)
+        for needle in (str(hook), "core.hookspath", "core.fsmonitor"):
+            with self.subTest(needle):
+                named = [p for p in report["problems"] if needle in p]
+                self.assertEqual(len(named), 1, report["problems"])  # once, though the checkout and its worktree share it
+                self.assertIn("is Eric's call", named[0])
+        self.assertIn(str(self.wt_gitdir / "config.worktree"), " ".join(report["problems"]))  # the worktree scope's file
+        text = self.cli("doctor", check=False)
+        self.assertEqual(text.returncode, EXIT_ERROR)
+        self.assertIn(str(hook), text.stderr)
+        hook.unlink()
+        self.plant_local("")
+        (self.wt_gitdir / "config.worktree").unlink()
+        gitfile = self.bad_wt / ".git"
+        own = gitfile.read_text(encoding="utf-8")
+        gitfile.write_text("gitdir: %s\n" % (self.make_repo("spud-elsewhere-") / ".git"), encoding="utf-8")
+        proc, report = self.doctor()
+        self.assertEqual([(f["kind"], f["checkout"]) for f in report["repositories"]["findings"]], [("foreign", str(self.bad_wt))])
+        self.assertIn(GIT_NESTED_WORDING, " ".join(report["problems"]))
+        gitfile.write_text(own, encoding="utf-8")
+        proc, report = self.doctor()
+        self.assertEqual(report["repositories"]["findings"], [])
+
+    def test_the_board_and_every_spud_sessions_context_carry_one_line_naming_the_checkout(self):
+        def brief():
+            return self.cli("board", "--brief").stdout.rstrip("\n").split("\n")
+
+        def contexts():
+            return {s.label: self.hook_in(s, "SessionStart", self.session_start_p(s)).context for s in (self.HOME, self.CLAIMED, self.PLAIN)}
+
+        self.assertFalse([line for line in brief() if line.startswith(PLANTED_LINE)])
+        self.assertFalse([label for label, c in contexts().items() if PLANTED_LINE in c])
+        self.plant_hook()
+        lines = [line for line in brief() if line.startswith(PLANTED_LINE)]
+        self.assertEqual(len(lines), 1, brief())
+        self.assertIn(str(self.bad), lines[0])
+        self.assertIn("spud doctor", lines[0])
+        shown = contexts()
+        for label in (self.HOME.label, self.CLAIMED.label):
+            with self.subTest(session=label):
+                head = shown[label].split("\nLedger board (", 1)[0].split("\n")
+                self.assertIn(lines[0], head)  # in the head, above the board, where no cut reaches it
+        self.assertNotIn(PLANTED_LINE, shown[self.PLAIN.label])  # Eric's own session: its one-line notice, as before
 
 
 class StopProjectTest(ProjectHookCase):

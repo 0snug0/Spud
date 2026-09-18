@@ -3,6 +3,7 @@
 import re
 
 from . import git_verbs, syntax
+from ..hooks import gitrepos
 
 
 # A git alias is a config key `alias.NAME` whose value git expands into a whole command before it dispatches, so a write can run
@@ -39,20 +40,9 @@ GIT_REPO_OPTIONS = ("--git-dir", "--work-tree")
 # and gpg.<f>.program and gpg.ssh.defaultKeyCommand, credential.helper, pager.<cmd>, log.showSignature, remote.<n>.uploadpack/
 # receivepack, uploadpack.packObjectsHook, protocol.ext, url.<b>.insteadOf, browser.<t>.cmd, instaweb.httpd, notes.rewrite.<c> ...),
 # so a denylist would miss keys git adds.  We allowlist instead: only keys proven to change git's output or behaviour without
-# naming or enabling a program pass, everything else is refused (default-deny).  Sections whose every documented key is inert:
-GIT_INERT_CONFIG_SECTIONS = {
-    "color",    # color.* -- terminal colour of output only (color.pager is a boolean, not a program)
-    "advice",   # advice.* -- booleans toggling advisory hint messages
-    "i18n",     # i18n.commitEncoding/logOutputEncoding/filesEncoding -- text encodings
-    "column",   # column.* -- multi-column output layout
-}
-# Inert keys inside sections that also hold program-naming keys (so the whole section cannot be allowed):
-GIT_INERT_CONFIG_KEYS = {
-    "core.quotepath",   # whether to quote non-ASCII bytes in printed paths (output)
-    "core.abbrev",      # length of abbreviated object names (output)
-    "log.date",         # date format git prints (output); NOT log.showSignature, which runs gpg
-    "safe.directory",   # marks a directory trusted; runs no program
-}
+# naming or enabling a program pass, everything else is refused (default-deny).  The allowlist is hooks/gitrepos'
+# GIT_INERT_CONFIG_SECTIONS and GIT_INERT_CONFIG_KEYS since SPD-123, one layer down, where the repository check that reads
+# a key in a repository's own config (SPD-063) and the SessionStart line both reach it without the shell.
 # core.pager and pager.<cmd> name the pager program; allowed only with an inert value (empty or `cat`), handled in code.
 # Environment variables in force on the line (prefix assignment, export, env -- like GIT_CONFIG_* in git_env_defines_alias) that
 # name or enable a program git runs.  GIT_PAGER/PAGER are inert with an empty or `cat` value; the rest name a program outright,
@@ -190,8 +180,7 @@ def git_config_key_allowed(flag, operand):
     key_part, sep, raw_value = operand.partition("=")
     section = key_part.split(".", 1)[0].strip().casefold()
     last = key_part.rsplit(".", 1)[-1].strip().casefold()
-    full = key_part.strip().casefold()
-    if section in GIT_INERT_CONFIG_SECTIONS or full in GIT_INERT_CONFIG_KEYS:
+    if gitrepos.git_config_key_inert(key_part):
         return True
     if section == "pager" or (section == "core" and last == "pager"):
         return flag == "-c" and git_inert_pager_value(raw_value if sep else None)

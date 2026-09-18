@@ -6,7 +6,7 @@ import sys
 
 from . import ghread, prcmds, publish, settings_sync
 from ..core import homeconf, kernel, launchagents
-from ..hooks import hookio, worktrees
+from ..hooks import gitrepos, hookio, worktrees
 from ..projects import install
 from ..render import prices
 from ..state import backup, ledgerdb, lookup, schema
@@ -99,6 +99,7 @@ def doctor_report(ctx):
     if report["tool"]["checkout"] == "worktree":
         notes.append("the running bin/spud is in a linked worktree: hook lines written from here name it")
     report["projects"] = doctor_projects(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else []
+    report["repositories"] = doctor_repositories(ctx, problems) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["render"] = doctor_render(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION and config is not None else None
     report["pull_requests"] = doctor_pull_requests(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["notes"] = notes
@@ -128,6 +129,11 @@ def doctor_report(ctx):
         lines.append("pricing     %s" % ("%s: every cost shows —" % prices.NO_TABLE if not prices.price_table(config)[1] else "no usable price table: see problems"))
     for p in report["projects"]:
         lines.append("project     %s at %s: %s" % (p["key"], p["root"], ", ".join(p["checks"]) or "no check passed"))
+    if report["repositories"] is not None:
+        r = report["repositories"]
+        lines.append("repos       %d checkout%s read: %s" % (
+            len(r["checkouts"]), "" if len(r["checkouts"]) == 1 else "s",
+            "%d finding(s), under problems" % len(r["findings"]) if r["findings"] else "nothing planted"))
     if report["render"] is not None:
         r = report["render"]
         lines.append("render      watcher %s; %s%s" % (r["watcher"], launchagents.lag_text(r["lag"]),
@@ -221,6 +227,29 @@ def doctor_projects(ctx, problems, notes):
     if (ctx.home / hookio.STATE_DIR / "worktrees.json").exists():
         notes.append(".spud/worktrees.json is superseded by .spud/worktrees/<key>.json and ignored")
     return out
+
+
+def doctor_repositories(ctx, problems):
+    """doctor's repositories section (SPD-123): every checkout the ledger knows -- the home, each active project's root and
+    its listed worktrees -- read the way the Bash hook reads the repository of a git call (hooks/gitrepos), with every
+    finding a problem: a hook that is not a sample, a program key at the local or worktree scope, a repository that is not
+    the checkout's own.  The harness and Eric's terminal run git that no hook sees, so this is where Eric learns of one.
+    A finding two checkouts share (their common directory's hooks, its config) is one problem, named at the first."""
+    con = ledgerdb.connect(ctx)
+    try:
+        read, found = gitrepos.checkout_findings(ctx, con)
+    except hookio.HookError as e:
+        problems.append("repositories: %s" % e)
+        return {"checkouts": [], "findings": [], "error": str(e)}
+    finally:
+        con.close()
+    findings, named = [], set()
+    for project, root, f in found:
+        findings.append({"project": project["key"], "checkout": root, "kind": f["kind"], "what": f["what"], "file": f["file"], "text": f["text"]})
+        if f["text"] not in named:
+            named.add(f["text"])
+            problems.append("checkout %s: %s. %s" % (root, f["text"], gitrepos.TO_DO))
+    return {"checkouts": read, "findings": findings}
 
 
 def doctor_render(ctx, problems, notes):
