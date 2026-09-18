@@ -234,11 +234,12 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                     return ("`--as %s` does not resolve to the caller's own member %s; use `--as %s`"
                             % (prepare.deglob(call["actor"]), who, caller_agent_id)), analysis
     if strict:
-        # SPD-063: the config the repository each git call reads sets for itself, which git reads with nothing on the line.
-        # After the findings, so a refusal the words as spelled already earn (a write verb, a program key, an unknown verb,
-        # a repository outside every known checkout) keeps its own reason.
+        # SPD-066 and SPD-063: the repository each git call reads must be a known checkout's own, and the config it sets for
+        # itself, which git reads with nothing on the line, is held to the program allowlist.  After the findings, so a
+        # refusal the words as spelled already earn (a write verb, a program key, an unknown verb, a repository outside
+        # every known checkout) keeps its own reason.
         for targets, target_cwds in analysis.git_calls:
-            reason = git_config.git_local_config_reason(ctx, targets, target_cwds)
+            reason = git_config.git_repository_reason(ctx, con, targets, target_cwds)
             if reason:
                 return reason, analysis
 

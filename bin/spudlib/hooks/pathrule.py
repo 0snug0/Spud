@@ -1,4 +1,4 @@
-"""hooks/pathrule: Laws 1 and 5 over a path: globs, outside roots, git config files, the state directory, edit_reason.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/pathrule: Laws 1 and 5 over a path: globs, outside roots, git config files and git directories, the state directory, edit_reason.  Moved from bin/spud_ledger.py (SPD-065)."""
 
 import json
 import os
@@ -146,6 +146,28 @@ def git_config_file(path):
     return any(len(parts) >= len(tail) and parts[-len(tail):] == list(tail) for tail in GIT_CONFIG_FILE_TAILS)
 
 
+# SPD-066: the rest of a git directory.  SPD-063 closes the config files, but git also runs a hook from <gitdir>/hooks with
+# nothing on the line and no config key naming it (probed on git 2.54.0: every `git status` runs post-index-change, every
+# `git fetch` reference-transaction), reads info/attributes, info/exclude, shallow and the index, and follows a worktree's
+# or a submodule's .git gitfile to any git directory it names.  So no caller with an agent_id writes a path with a `.git`
+# component, anywhere, its own deliverables included, the way SPD-031 refuses the state directory at any project root.
+# A .git/config keeps GIT_CONFIG_FILE_REASON, checked first: it is the more specific reason (an alias as well as a hook).
+# A component that merely begins with .git (.gitignore, .github, .gitattributes, .gitmodules) is an ordinary file of the tree.
+GIT_DIR_COMPONENT = ".git"
+GIT_DIR_PATH_REASON = (
+    "Law 7: %s is inside a git directory (a path with a .git component: anything under a .git directory, or the .git"
+    " gitfile of a worktree or submodule). git runs a hook from there with nothing on the line -- post-index-change under"
+    " `git status`, reference-transaction under `git fetch` -- and reads the attributes, the index and the gitfile with no"
+    " config key naming them, so a write there can run a program, or point git at another repository, under a verb Law 7's"
+    " table allows. No spudagent writes one, its own deliverables included; Spud commits, after the outcome is recorded")
+
+
+def git_dir_path(path):
+    """True when `path` has a component `.git`: it lies in a git directory, or is a .git gitfile.  Matched case-folded, like
+    git_config_file, so a case variant is refused on every filesystem (SPD-029's reading)."""
+    return any(p.casefold() == GIT_DIR_COMPONENT for p in path.replace("\\", "/").split("/"))
+
+
 NOT_SPUD_HOME = ("a session that is not Spud does not write in Spud's home (%s is there); type /spud to make this session Spud,"
                  " or work in a session opened in the home")
 
@@ -216,8 +238,8 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
     before the binding, Law 1 and glob checks (SPD-031).  A bound member is held to its globs in any session; a session
     that is not Spud (`mode` plain), and an unbound subagent of one, writes freely in other projects and nowhere in the home.
 
-    Since SPD-064 a caller with an agent_id in a Spud session is held outside the projects too: a git configuration file is
-    refused wherever it lies (SPD-063), and every reading of the target must land either in a registered project, where the
+    Since SPD-064 a caller with an agent_id in a Spud session is held outside the projects too: a git configuration file
+    (SPD-063) and any other path in a git directory (SPD-066) are refused wherever they lie, and every reading of the target must land either in a registered project, where the
     globs decide, or under an allowed outside root -- the session scratchpad and the system temp directories.  So a symlink
     that reaches out of a project, and a path in no project at all, are both refused instead of passing unchecked."""
     readings = worktrees.path_readings(path, cwd)
@@ -232,6 +254,9 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
         for candidate in readings:
             if git_config_file(candidate):
                 return GIT_CONFIG_FILE_REASON % candidate, None
+        for candidate in readings:  # SPD-066: the rest of a git directory, after the more specific config reason
+            if git_dir_path(candidate):
+                return GIT_DIR_PATH_REASON % candidate, None
     inside, outside = worktrees.path_placements(ctx, con, path, cwd)
     if held and outside:
         reason = outside_project_reason(outside)

@@ -26,6 +26,7 @@ from pathlib import Path
 
 from helpers import SPUD, HookResult
 from test_hooks import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split
+from test_hooks import GIT_DIR_WORDING, GIT_NESTED_WORDING, plant_git_dir
 
 KEY = "badtakes"
 TICKET_PREFIX = "BAD"
@@ -40,6 +41,7 @@ NOT_SPUD = "not Spud"  # a plain session, or an unbound agent_id of one, writing
 NOT_BOUND = "not bound"  # an unbound agent_id in a Spud session writing a project path
 STATE_WORDING = "ledger database"  # the state directory .spud/ at any project root, for everyone
 BOUND_WORKTREE = "SPD-098"  # a member of a bound ticket writing its project's path outside the worktree the ticket is bound to
+GIT_DIR = GIT_DIR_WORDING  # SPD-066: a path with a .git component, for every agent_id in a Spud session
 
 # The columns of the section 3.2 table, in its order.
 SPUD_COL, PLAIN_COL, MEMBER_COL, UNBOUND_SPUD_COL, UNBOUND_PLAIN_COL = range(5)
@@ -275,6 +277,10 @@ class PathTableTest(ProjectHookCase):
             ("home: reports/2026-09-14.md",                       home / "reports" / "2026-09-14.md",   LAW_5,   LAW_5,    LAW_5,  LAW_5,         LAW_5),
             ("badtakes root: .spud/ledger.db",                    bad / ".spud" / "ledger.db") + state,
             ("badtakes worktree: .spud/worktrees.json",           wt / ".spud" / "worktrees.json") + state,
+            # SPD-066: a path with a .git component is no agent_id's in a Spud session; Spud and a plain session keep their answers
+            ("badtakes root: .git/hooks/pre-auto-gc",             bad / ".git" / "hooks" / "pre-auto-gc", LAW_1, None,     GIT_DIR, GIT_DIR,      None),
+            ("badtakes worktree: .git (its gitfile)",             wt / ".git",                          LAW_1,   None,     GIT_DIR, GIT_DIR,      None),
+            ("badtakes worktree: src/.git/index (under the glob)", wt / "src" / ".git" / "index",       LAW_1,   None,     GIT_DIR, GIT_DIR,      None),
             ("outside every project",                             out / "x.txt",                        None,    None,     None,   None,          None),
         )
 
@@ -590,6 +596,30 @@ class BashHookProjectTest(ProjectHookCase):
         self.spawn_in(self.CLAIMED, self.plan_bad(), AGENT_A)
         self.assertDenied(self.bash(self.CLAIMED, "git commit -m x", AGENT_A), "Law 7")
         self.assertDenied(self.bash(self.CLAIMED._replace(cwd=self.bad_wt), "git commit -m x", AGENT_A), "Law 7")
+
+    def test_a_nested_repository_binds_members_and_not_erics_own_subagents(self):
+        """SPD-066 (2) in another project: a repository planted below badtakes' worktree or root is no checkout's own, for a
+        member of BAD-001 and an unbound agent_id of a Spud session; Eric's plain session and its subagents keep today's
+        answer, and the checkouts' own repositories stay silent for everyone."""
+        nested = plant_git_dir(self.bad_wt / "src" / "fake" / ".git").parent
+        bare = plant_git_dir(self.bad / "vendor" / "bare")
+        self.spawn_in(self.CLAIMED, self.plan_bad(), AGENT_A)
+        in_wt = self.CLAIMED._replace(cwd=self.bad_wt)
+        for command, repository in (("git -C %s status" % nested, nested), ("cd src/fake && git fetch", nested),
+                                    ("GIT_DIR=%s git log" % bare, bare), ("git -C %s log" % bare, bare)):
+            with self.subTest(command=command):
+                r = self.assertDenied(self.bash(in_wt, command, AGENT_A), GIT_NESTED_WORDING, command)
+                self.assertIn(str(repository), r.reason)
+                self.assertDenied(self.bash(in_wt, command, AGENT_D), GIT_NESTED_WORDING, command)  # unbound, Spud session
+                plain_wt = self.PLAIN._replace(cwd=self.bad_wt)
+                self.assertHookSilent(self.bash(plain_wt, command, AGENT_D), command)  # Eric's own subagent
+                self.assertHookSilent(self.bash(plain_wt, command), command)
+                self.assertHookSilent(self.bash(in_wt, command), command)  # Spud
+        for s, command in ((in_wt, "git status"), (in_wt, "git -C %s log" % self.bad_wt), (self.CLAIMED, "git fetch"),
+                           (in_wt, "git -C %s/src status" % self.bad_wt)):
+            with self.subTest(command=command, cwd=str(s.cwd)):
+                self.assertHookSilent(self.bash(s, command, AGENT_A), command)
+                self.assertHookSilent(self.bash(s, command), command)
 
 
 class StopProjectTest(ProjectHookCase):
