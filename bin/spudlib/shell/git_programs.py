@@ -26,6 +26,9 @@ GIT_CONFIG_HOME_VARS = ("HOME", "XDG_CONFIG_HOME")
 # git rejects an attached `-C<dir>`/`-C=<dir>` and every abbreviation of these global options (`--git-di=`, `--gitdir=`:
 # "unknown option", probed), so only these spellings parse; `-C` is repeatable and relative to the previous one, and it moves
 # what a relative --git-dir or --work-tree means whichever order they appear in (git(1) documents the equivalence).
+# SPD-066's probe (2.54.0) narrows that for the work tree: --work-tree and GIT_WORK_TREE never choose the repository, git reads
+# the one it discovers in the directory it runs in (from a directory in no repository `git --work-tree=<repo>` fails), which is
+# why git_config reads that directory too.  They stay here, refused outside every checkout, which costs a member nothing.
 GIT_REPO_ENV_VARS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
 GIT_REPO_OPTIONS = ("--git-dir", "--work-tree")
 # SPD-046: git config and environment can name a program git runs (a pager, editor, ssh/proxy command, diff or merge driver,

@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import EXIT_ERROR, EXIT_USAGE, PROGRAM, SPUD, SpudTestCase, load_spud_module, real_config, wall_clock
+from helpers import git as scratch_git
 
 
 def case_insensitive_fs(path):
@@ -3487,6 +3488,19 @@ class GitAliasFileTest(BashHookCase):
 # target repository's local or worktree scope.
 GIT_FILE_WORDING = "git reads with nothing on the line"
 GIT_SCOPE_WORDING = "scope (the repository in"
+# SPD-066: (1) a path with a .git component; (2) a repository that is not the own repository of a checkout the ledger knows.
+GIT_DIR_WORDING = "is inside a git directory"
+GIT_NESTED_WORDING = "not the own repository of a checkout the ledger knows"
+
+
+def plant_git_dir(path, config="[core]\n\trepositoryformatversion = 0\n"):
+    """A git directory built by hand, as a member could build one without git init (a write verb): HEAD, objects/, refs/
+    and a config.  Put at <dir>/.git it makes <dir> a work tree; anywhere else it is a bare layout git discovers."""
+    (path / "objects").mkdir(parents=True)
+    (path / "refs" / "heads").mkdir(parents=True)
+    (path / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (path / "config").write_text(config, encoding="utf-8")
+    return path
 
 
 class GitConfigFileTest(BashHookCase):
@@ -3540,9 +3554,9 @@ class GitConfigFileTest(BashHookCase):
                 self.assertRefused("echo x > %s" % p, GIT_FILE_WORDING)
 
     def test_similar_names_stay_under_the_globs(self):
+        # .git/hooks/x stood here until SPD-066, which refuses every path with a .git component (GitDirectoryPathTest)
         for p in (self.tests / "config", self.tests / "gitconfig", self.tests / "x.gitconfig", self.tests / ".gitconfig.bak",
-                  self.tests / ".github" / "config", self.tests / ".git" / "hooks" / "x", self.tests / "git" / "config.json",
-                  self.tests / "notgit" / "config"):
+                  self.tests / ".github" / "config", self.tests / "git" / "config.json", self.tests / "notgit" / "config"):
             with self.subTest(str(p)):
                 self.assertSilent("echo x > %s" % p)
                 r = self.home.hook("PreToolUse", self.pre_edit(p, agent_id=AGENT_A))
@@ -3581,6 +3595,170 @@ class GitConfigFileTest(BashHookCase):
                 self.assertSilent(cmd, agent_id=None)
 
 
+class GitDirectoryPathTest(BashHookCase):
+    """SPD-066 (1): SPD-063 closed the config files git reads by itself, and the rest of a git directory stayed a member's to
+    write under its globs: .git/hooks/* (git runs a hook with nothing on the line and no config key naming it -- probed on
+    git 2.54.0, every `git status` runs post-index-change and every `git fetch` runs reference-transaction),
+    .git/info/attributes and info/exclude, .git/shallow, the index, and a worktree's .git gitfile, which points git at any
+    git directory.  So the path rule refuses a caller with an agent_id any path with a `.git` component, by any reading of
+    it, anywhere, its own deliverables included, matched case-folded like git_config_file; a .git/config keeps SPD-063's
+    more specific reason.  The Edit tools and every Bash write target that goes through edit_reason (a redirection, tee,
+    SPD-049's file-writing git options) refuse it alike.  .gitignore, .github/, .gitattributes and the other names that
+    merely begin with .git stay under the globs, and Spud's answers do not change.  AGENT_A plans home:tests/** and
+    home:bin/spud; AGENT_C plans home:**."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.tests = self.home.path / "tests"
+        self.fake = self.tests / "fake"
+        (self.fake / ".git" / "hooks").mkdir(parents=True)
+        (self.fake / ".git" / "info").mkdir()
+
+    def git_dir_paths(self):
+        g = self.fake / ".git"
+        return [g / "hooks" / "pre-auto-gc", g / "hooks" / "post-index-change", g / "hooks" / "reference-transaction",
+                g / "info" / "attributes", g / "info" / "exclude", g / "index", g / "shallow", g / "HEAD",
+                g / "objects" / "17" / "0123abcd", g / "refs" / "heads" / "main", g / "modules" / "m" / "hooks" / "pre-auto-gc",
+                g, self.tests / "sub" / ".git", self.tests / ".git"]
+
+    def assertEditRefused(self, path, needle, agent_id=AGENT_A, tool="Write"):
+        r = self.home.hook("PreToolUse", self.pre_edit(path, agent_id=agent_id, tool=tool))
+        self.assertEqual((r.code, r.decision), (0, "deny"), (str(path), agent_id, tool, r))
+        self.assertIn(needle, r.reason, (str(path), agent_id, tool))
+        return r
+
+    def assertEditSilent(self, path, agent_id=AGENT_A):
+        r = self.home.hook("PreToolUse", self.pre_edit(path, agent_id=agent_id))
+        self.assertEqual((r.code, r.stdout), (0, ""), (str(path), agent_id, r))
+
+    def test_a_member_may_not_write_under_a_git_directory_even_inside_its_globs(self):
+        for p in self.git_dir_paths():
+            with self.subTest(str(p)):
+                for agent_id in (AGENT_A, AGENT_C):
+                    r = self.assertEditRefused(p, GIT_DIR_WORDING, agent_id)
+                    self.assertIn("Law 7", r.reason)
+                    self.assertIn(str(p), r.reason)  # the reason names the path
+                    r = self.assertRefused("echo x > %s" % p, GIT_DIR_WORDING, agent_id=agent_id)
+                    self.assertIn(str(p), r.reason)
+        self.assertEqual(self.wide["deliverables"], ["home:**"])  # not even a ** member
+
+    def test_the_reason_says_why(self):
+        r = self.assertEditRefused(self.fake / ".git" / "hooks" / "pre-auto-gc", GIT_DIR_WORDING)
+        for word in ("hook", "attributes", "index", "gitfile", "nothing on the line", "Spud commits"):
+            self.assertIn(word, r.reason)
+
+    def test_every_edit_tool_and_every_bash_write_target(self):
+        p = self.fake / ".git" / "hooks" / "pre-auto-gc"
+        for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+            with self.subTest(tool):
+                self.assertEditRefused(p, GIT_DIR_WORDING, tool=tool)
+        commands = [form % p for form in ("echo x > %s", "echo x >> %s", "printf x | tee %s", "printf x | tee -a %s",
+                                          "printf x | tee /dev/null %s", "echo x 2> %s", "cat > %s <<< x")]
+        commands += ["cd %s && echo x > .git/hooks/pre-auto-gc" % self.fake, "cd %s/.git && echo x > index" % self.fake,
+                     "cd %s && printf x | tee .git/info/attributes" % self.fake,
+                     "sh -c 'echo x > %s'" % p,
+                     "git diff --output=%s" % p]  # SPD-049: a file a git option writes goes through the same rule
+        for command in commands:
+            with self.subTest(command):
+                self.assertRefused(command, GIT_DIR_WORDING)
+                self.assertRefused(command, GIT_DIR_WORDING, agent_id=AGENT_C)
+
+    def test_case_variants_are_refused_too(self):
+        for p in (self.fake / ".GIT" / "hooks" / "pre-auto-gc", self.fake / ".Git" / "index", self.tests / ".gIt",
+                  self.tests / "sub" / ".GIT" / "info" / "attributes"):
+            with self.subTest(str(p)):
+                self.assertRefused("echo x > %s" % p, GIT_DIR_WORDING)
+                self.assertEditRefused(p, GIT_DIR_WORDING)
+
+    def test_a_symlink_reading_is_refused(self):
+        """By any reading of the target: a link whose own path has no .git component but whose real path does."""
+        (self.tests / "link").symlink_to(self.fake / ".git")
+        (self.tests / "hooklink").symlink_to(self.fake / ".git" / "hooks" / "post-index-change")  # need not exist
+        real = self.fake / ".git"
+        for p, resolved in ((self.tests / "link" / "hooks" / "pre-auto-gc", real / "hooks" / "pre-auto-gc"),
+                            (self.tests / "hooklink", real / "hooks" / "post-index-change")):
+            with self.subTest(str(p)):
+                r = self.assertEditRefused(p, GIT_DIR_WORDING)
+                self.assertIn(str(resolved), r.reason)  # the reading that has the component
+                r = self.assertRefused("echo x > %s" % p, GIT_DIR_WORDING)
+                self.assertIn(str(resolved), r.reason)
+        (self.tests / "plain").mkdir()
+        (self.tests / "plainlink").symlink_to(self.tests / "plain")  # the control: a link to a directory of the tree
+        self.assertEditSilent(self.tests / "plainlink" / "x.py")
+
+    def test_similar_names_stay_under_the_globs(self):
+        t = self.tests
+        similar = [t / ".gitignore", t / ".github" / "workflows" / "ci.yml", t / ".gitattributes", t / ".gitmodules",
+                   t / ".gitkeep", t / "x.git" / "hooks" / "pre-auto-gc", t / ".git.bak" / "hooks" / "pre-auto-gc",
+                   t / "git" / "hooks" / "pre-auto-gc", t / "dotgit" / "index", t / "hooks" / "pre-auto-gc", t / ".gitx" / "HEAD"]
+        for p in similar:
+            with self.subTest(str(p)):
+                for agent_id in (AGENT_A, AGENT_C):
+                    self.assertEditSilent(p, agent_id)
+                    self.assertSilent("echo x > %s" % p, agent_id=agent_id)
+        # at the home's root they are outside AGENT_A's globs: its answer is the globs', never this rule's
+        for p in (self.home.path / ".gitignore", self.home.path / ".github" / "x.yml", self.home.path / ".gitattributes"):
+            with self.subTest(str(p)):
+                r = self.assertEditRefused(p, "deliverables")
+                self.assertNotIn(GIT_DIR_WORDING, r.reason)
+                self.assertEditSilent(p, AGENT_C)
+
+    def test_a_git_config_file_keeps_its_own_reason(self):
+        """SPD-063's tails stay the more specific reason: a .git/config can also define an alias."""
+        for p in (self.fake / ".git" / "config", self.fake / ".git" / "config.worktree", self.fake / ".GIT" / "Config"):
+            with self.subTest(str(p)):
+                r = self.assertEditRefused(p, GIT_FILE_WORDING)
+                self.assertNotIn(GIT_DIR_WORDING, r.reason)
+                r = self.assertRefused("echo x > %s" % p, GIT_FILE_WORDING)
+                self.assertNotIn(GIT_DIR_WORDING, r.reason)
+
+    def test_the_scratchpad_is_no_exception(self):
+        scratch = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        for p in (scratch + "/repo/.git/hooks/pre-auto-gc", scratch + "/repo/.git", "/tmp/x/.git/index"):
+            with self.subTest(p):
+                r = self.assertEditRefused(p, GIT_DIR_WORDING)
+                self.assertIn(p, r.reason)
+                self.assertRefused("echo x > %s" % p, GIT_DIR_WORDING)
+                self.assertSilent("echo x > %s" % p, agent_id=None)  # Spud writes there freely, as before
+        self.assertEditSilent(scratch + "/repo/notes.md")  # the control
+
+    def test_spud_is_not_bound_by_it(self):
+        for p in self.git_dir_paths():
+            with self.subTest(str(p)):
+                r = self.home.hook("PreToolUse", self.pre_edit(p, agent_id=None))
+                self.assertNotIn(GIT_DIR_WORDING, r.reason)  # Law 1 may refuse it in the home; never this reason
+                self.assertNotIn(GIT_DIR_WORDING, self.bash("echo x > %s" % p, agent_id=None).reason)
+
+    def test_an_unbound_agent_id_in_a_spud_session_is_held_too(self):
+        """The rule binds where SPD-063's does: any agent_id in a Spud session, before its binding too."""
+        r = self.assertEditRefused(self.fake / ".git" / "hooks" / "pre-auto-gc", GIT_DIR_WORDING, agent_id=AGENT_D)
+        self.assertNotIn("not bound", r.reason)
+
+    def test_a_worktrees_own_gitfile_is_refused(self):
+        """The .git of a linked worktree is a gitfile, `gitdir: <path>`, and git follows it to whatever git directory it
+        names; a member bound to that very worktree, whose glob is **, is refused it and keeps the rest of the tree."""
+        scratch_git(self.home.path, "init", "-q", "-b", "main")
+        scratch_git(self.home.path, "commit", "-q", "--allow-empty", "-m", "root")
+        wt = self.home.path.parent / ("%s-gitfile" % self.home.path.name)
+        self.addCleanup(shutil.rmtree, wt, True)
+        scratch_git(self.home.path, "worktree", "add", "-q", "-b", "gitfile", wt)
+        self.assertTrue((wt / ".git").is_file(), "a linked worktree's .git is a gitfile")
+        self.home.json("member", "finish", self.other["ref"], "--status", "done", "--outcome", "x", actor="spud")  # a slot for D
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"], cwd=wt), AGENT_D)  # SPD-098: binds SPD-001 to wt
+        r = self.assertEditRefused(wt / ".git", GIT_DIR_WORDING, agent_id=AGENT_D)
+        self.assertIn(str(wt / ".git"), r.reason)
+        for command in ("echo gitdir: /tmp/x > %s" % (wt / ".git"), "cd %s && printf x | tee .git" % wt):
+            with self.subTest(command):
+                self.assertRefused(command, GIT_DIR_WORDING, agent_id=AGENT_D)
+        self.assertEditSilent(wt / "tests" / "x.py", agent_id=AGENT_D)  # the control: the rest of its tree
+        self.assertEditSilent(wt / ".gitignore", agent_id=AGENT_D)
+        self.assertEditRefused(self.home.path / ".git" / "hooks" / "pre-auto-gc", GIT_DIR_WORDING, agent_id=AGENT_C)
+        r = self.home.hook("PreToolUse", self.pre_edit(wt / ".git", agent_id=None))
+        self.assertIn("Law 1", r.reason)  # Spud's answer in a project checkout, as before
+        self.assertNotIn(GIT_DIR_WORDING, r.reason)
+
+
 class GitLocalConfigTest(BashHookCase):
     """SPD-063 (b): git reads the target repository's own config with nothing on the line, and a member can craft one under
     its deliverable globs inside a checkout the ledger knows (`git -C tests/fake status` resolves inside the home, so
@@ -3592,16 +3770,19 @@ class GitLocalConfigTest(BashHookCase):
     core.filemode, extensions.worktreeconfig, remote.origin.url and branch.main.vscode-merge-base, so a check that refused
     every key outside SPD-046's inert allowlist would refuse every member git call in Spud's own repository.  The answer is
     kept in the home's state directory under the stat fingerprint of the config files git reads there, so only the first
-    hook after one of them changes runs git (the hook path never imports subprocess otherwise, SPD-016)."""
+    hook after one of them changes runs git (the hook path never imports subprocess otherwise, SPD-016).
+
+    Since SPD-066 a repository nested in a checkout -- the tests/fake this class planted until then -- is refused before its
+    keys are read (NestedRepositoryTest), so the repository here is the checkout's own: the home, which is project spud's
+    root in the suite, made a repository by hand.  Its config is still a file no member may write (GitConfigFileTest); the
+    check stands for a key Eric or a tool set there."""
 
     def setUp(self):
         super().setUp()
         self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
-        self.repo = self.home.path / "tests" / "fake"  # a repository inside the home: git reads it, the ledger knows it
-        (self.repo / ".git" / "objects").mkdir(parents=True)
-        (self.repo / ".git" / "refs" / "heads").mkdir(parents=True)
-        (self.repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
-        self.plant("[core]\n\trepositoryformatversion = 0\n")
+        self.repo = self.home.path  # the checkout's own repository: git reads it, the ledger knows it
+        plant_git_dir(self.repo / ".git")
+        (self.repo / "tests").mkdir()
 
     def plant(self, text, name="config"):
         (self.repo / ".git" / name).write_text(text, encoding="utf-8")
@@ -3673,7 +3854,8 @@ class GitLocalConfigTest(BashHookCase):
 
     def test_a_directory_in_no_repository_at_all_needs_no_git_run(self):
         cache = self.home.path / STATE / "git-config-scopes.json"
-        self.assertSilent("git status")  # the scratch home is not a repository: no local scope, nothing to read
+        shutil.rmtree(self.repo / ".git")
+        self.assertSilent("git status")  # the scratch home is not a repository now: no local scope, nothing to read
         self.assertFalse(cache.exists(), "a directory in no repository costs no git run and no cache entry")
 
     def test_the_answer_is_cached_and_a_config_edit_invalidates_it(self):
@@ -3713,6 +3895,168 @@ class GitLocalConfigTest(BashHookCase):
         self.plant("[core]\n\trepositoryformatversion = 0\n\tpager = /bin/echo\n")
         self.assertNotIn(GIT_SCOPE_WORDING, self.assertRefused("git -C %s commit -m x" % self.repo, "never run").reason)
         self.assertNotIn(GIT_SCOPE_WORDING, self.assertRefused("git -C %s -c core.editor=vi log" % self.repo, "program git never checks").reason)
+
+
+class NestedRepositoryTest(BashHookCase):
+    """SPD-066 (2): a git directory need not be called .git, and the path rule cannot see every route to one.  A bare layout
+    (HEAD, objects/, refs/, hooks/) written under a member's globs is a repository git discovers from inside it, a .git
+    built by an interpreter, cp or mkdir is one too, and `git -C tests/fake <read verb>` resolves inside a known checkout,
+    so SPD-047's refusal of a repository outside every known checkout never fires.  git runs such a repository's hooks with
+    nothing on the line (probed on 2.54.0: `git status` runs post-index-change, `git fetch` reference-transaction) and reads
+    its config, attributes and index.  So at each member git call the repository git would read must be a known checkout's
+    own: discovered from the directory (-C, or the shell's), its work tree is the root of the registered project checkout or
+    listed worktree, reached through that root's own .git; named by --git-dir, GIT_DIR or GIT_COMMON_DIR, it is that
+    checkout's git or common directory.  --work-tree and GIT_WORK_TREE never choose the repository (probed: git still
+    discovers from the directory it runs in), so with only those on the line the shell's directory is read too.  The home
+    is a real repository here, project spud's root in the suite; AGENT_A plans home:tests/** and home:bin/spud, AGENT_C
+    home:**."""
+
+    VERBS = ("status", "log --oneline", "fetch")
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        scratch_git(home, "init", "-q", "-b", "main")
+        scratch_git(home, "commit", "-q", "--allow-empty", "-m", "root")
+        self.nested = home / "tests" / "fake"  # a .git planted below the checkout's root
+        plant_git_dir(self.nested / ".git")
+        (self.nested / "sub").mkdir()
+        self.bare = home / "tests" / "bare"  # a bare layout, no .git anywhere: git discovers it from inside
+        plant_git_dir(self.bare)
+        (self.bare / "hooks").mkdir()
+
+    def refused_for_members(self, command, repository):
+        for agent_id in (AGENT_A, AGENT_C):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, GIT_NESTED_WORDING, agent_id=agent_id)
+                self.assertIn("Law 7", r.reason)
+                self.assertIn(str(repository), r.reason)  # the reason names the repository
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)  # Law 7 does not bind Spud
+
+    def silent_for_all(self, command):
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id=agent_id)
+
+    def test_a_nested_git_directory_is_refused(self):
+        n, home = self.nested, self.home.path
+        for verb in self.VERBS:
+            for cmd in ("git -C %s %s" % (n, verb), "git -C tests/fake %s" % verb, "cd %s && git %s" % (n, verb),
+                        "cd tests/fake/sub && git %s" % verb, "git -C %s/sub %s" % (n, verb),
+                        "git --git-dir=%s/.git %s" % (n, verb), "git --git-dir %s/.git %s" % (n, verb),
+                        "GIT_DIR=%s/.git git %s" % (n, verb), "env GIT_DIR=%s/.git git %s" % (n, verb),
+                        "export GIT_DIR=%s/.git; git %s" % (n, verb), "git -C tests/fake --git-dir=.git %s" % verb,
+                        "sh -c 'cd %s && git %s'" % (n, verb), "(cd tests/fake && git %s)" % verb,
+                        # the work tree never chooses the repository: git still reads the one it discovers where it runs
+                        "cd %s && git --work-tree=%s %s" % (n, home, verb), "cd %s && GIT_WORK_TREE=%s git %s" % (n, home, verb)):
+                self.refused_for_members(cmd, n)
+
+    def test_a_bare_layout_is_refused(self):
+        b = self.bare
+        for verb in self.VERBS:
+            for cmd in ("git -C %s %s" % (b, verb), "git -C tests/bare %s" % verb, "cd %s && git %s" % (b, verb),
+                        "cd tests/bare/refs/heads && git %s" % verb, "git --git-dir=%s %s" % (b, verb),
+                        "git --git-dir %s %s" % (b, verb), "GIT_DIR=%s git %s" % (b, verb),
+                        "GIT_DIR=tests/bare git %s" % verb, "GIT_COMMON_DIR=%s git %s" % (b, verb)):
+                self.refused_for_members(cmd, b)
+
+    def test_a_gitfile_below_the_root_is_a_nested_repository_too(self):
+        """A submodule's shape: a .git file naming a git directory elsewhere.  Here it names the checkout's own, so the git
+        directory is known, but the work tree git would read with it is not the checkout's."""
+        linked = self.home.path / "tests" / "linked"
+        linked.mkdir()
+        (linked / ".git").write_text("gitdir: %s\n" % (self.home.path / ".git"), encoding="utf-8")
+        self.refused_for_members("git -C %s status" % linked, linked)
+        self.refused_for_members("cd %s && git status" % linked, linked)
+
+    def test_the_checkouts_own_repository_stays_silent(self):
+        home = self.home.path
+        for verb in self.VERBS:
+            for cmd in ("git %s" % verb, "git -C %s %s" % (home, verb), "cd %s/tests && git %s" % (home, verb),
+                        "git -C tests %s" % verb, "git -C bin %s" % verb, "git --git-dir=%s/.git %s" % (home, verb),
+                        "GIT_DIR=%s/.git git %s" % (home, verb), "git -C %s --git-dir=.git %s" % (home, verb),
+                        "git --work-tree=%s %s" % (home, verb), "GIT_WORK_TREE=%s git %s" % (home, verb),
+                        "GIT_COMMON_DIR=%s/.git git %s" % (home, verb), "sh -c 'cd %s && git %s'" % (home, verb)):
+                self.silent_for_all(cmd)
+
+    def test_a_listed_worktree_is_a_checkouts_own_repository(self):
+        home = self.home.path
+        wt = home.parent / ("%s-nested" % home.name)
+        self.addCleanup(shutil.rmtree, wt, True)
+        scratch_git(home, "worktree", "add", "-q", "-b", "nested", wt)
+        inside = home / ".claude" / "worktrees" / "spd-066-x"
+        scratch_git(home, "worktree", "add", "-q", "-b", "worktree-spd-066-x", inside)
+        for verb in self.VERBS:
+            for cmd in ("git -C %s %s" % (wt, verb), "cd %s && git %s" % (inside, verb), "git -C %s/.claude %s" % (home, verb),
+                        "GIT_DIR=%s/.git/worktrees/nested git %s" % (home, verb)):
+                self.silent_for_all(cmd)
+        # a directory that looks like a worktree of the home but that git does not list is no checkout of it, though the path
+        # rule maps a .claude/worktrees/<name>/ of a root as one
+        planted = home / ".claude" / "worktrees" / "planted"
+        plant_git_dir(planted / ".git")
+        self.refused_for_members("git -C %s status" % planted, planted)
+        self.refused_for_members("cd %s && git fetch" % planted, planted)
+
+    def test_a_bare_layout_at_a_checkout_root_is_no_repository_of_it(self):
+        """The root that has no .git of its own (the home, in the real ledger) made a bare repository by writing HEAD,
+        objects/ and refs/ at it, and a root with a .git named as the git directory itself (--git-dir=<root>)."""
+        shutil.rmtree(self.home.path / ".git")
+        plant_git_dir(self.home.path / "planted-root")  # built beside, then its parts moved to the root
+        for part in ("objects", "refs", "HEAD", "config"):
+            os.rename(self.home.path / "planted-root" / part, self.home.path / part)
+        self.refused_for_members("git status", self.home.path)
+        self.refused_for_members("git -C tests log", self.home.path)
+        self.refused_for_members("git --git-dir=%s fetch" % self.home.path, self.home.path)
+
+    def test_a_repository_outside_every_checkout_reached_by_cd_is_refused(self):
+        """SPD-047 refuses one a line names; the directory the shell is in reaches one too."""
+        outside = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, outside, True)
+        plant_git_dir(outside / ".git")
+        self.refused_for_members("cd %s && git status" % outside, outside)
+        r = self.assertRefused("git -C %s status" % outside, "outside every checkout")  # SPD-047's own reason, first
+        self.assertNotIn(GIT_NESTED_WORDING, r.reason)
+        nowhere = Path(tempfile.mkdtemp(prefix="spud-no-repository-")).resolve()
+        self.addCleanup(shutil.rmtree, nowhere, True)
+        self.silent_for_all("cd %s && git status" % nowhere)  # no repository where it runs: git reads none, nothing to check
+
+    def test_a_directory_the_hook_cannot_follow_with_only_a_work_tree_is_refused(self):
+        """With only --work-tree or GIT_WORK_TREE on the line git discovers the repository where the shell is, which the
+        hook cannot know after `cd -`: it fails closed, as SPD-063 does for a bare `git status` there."""
+        for cmd in ("cd - && git --work-tree=%s status" % self.home.path, "popd && GIT_WORK_TREE=%s git log" % self.home.path):
+            with self.subTest(cmd):
+                r = self.assertRefused(cmd, "cannot")
+                self.assertIn("Law 7", r.reason)
+                self.assertSilent(cmd, agent_id=None)
+
+    def test_a_refusal_reads_no_config_and_runs_no_git(self):
+        """The nested repository is refused from what SPD-063 already computes (the one walk up to it): no git run, no cache
+        entry for it, no subprocess import once the checkout's own caches are warm."""
+        self.plant_program_key(self.nested / ".git" / "config")
+        self.assertSilent("git status")  # warms the worktree list, git's command list and the checkout's config scopes
+        r = self.assertRefused("git -C %s status" % self.nested, GIT_NESTED_WORDING)
+        self.assertNotIn(GIT_SCOPE_WORDING, r.reason)  # the repository is refused before its keys are read
+        cache = json.loads((self.home.path / STATE / "git-config-scopes.json").read_text(encoding="utf-8"))
+        self.assertNotIn(str(self.nested / ".git"), cache)
+        payload = self.pre_bash("git -C %s status" % self.nested, agent_id=AGENT_A)
+        proc = subprocess.run([sys.executable, "-I", "-S", "-X", "importtime", str(SPUD), "hook", "PreToolUse"],
+                              input=json.dumps(payload), capture_output=True, text=True, env=self.home.env)
+        self.assertIn('"deny"', proc.stdout)
+        imported = {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines() if line.startswith("import time:")}
+        self.assertNotIn("subprocess", imported)
+
+    @staticmethod
+    def plant_program_key(config):
+        config.write_text("[core]\n\trepositoryformatversion = 0\n\tpager = /bin/echo\n", encoding="utf-8")
+
+    def test_write_verbs_and_spd_047_keep_their_own_reasons(self):
+        for cmd, needle in (("git -C %s commit -m x" % self.nested, "never run"), ("git -C %s push" % self.bare, "never run"),
+                            ("git -C %s -c core.editor=vi log" % self.nested, "program git never checks")):
+            with self.subTest(cmd):
+                r = self.assertRefused(cmd, needle)
+                self.assertNotIn(GIT_NESTED_WORDING, r.reason)
 
 
 class ParameterExpansionCommandWordTest(BashHookCase):

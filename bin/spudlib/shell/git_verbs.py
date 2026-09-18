@@ -137,6 +137,21 @@ def git_repo_targets(words, variables):
     return targets
 
 
+# SPD-066: what a git_repo_targets entry names, read back from the spelling that function gives it (`-C <dir>`, `<option>=<v>`
+# or `<option> <v>`, `<VAR>=<v>`).  The -C chain is where git discovers the repository from; --git-dir and GIT_DIR name the
+# git directory itself and GIT_COMMON_DIR the common one, whose config and hooks git reads, each taken as given with no
+# discovery; --work-tree and GIT_WORK_TREE name only the work tree: git still discovers the repository from the directory
+# it runs in (probed on 2.54.0: from a directory in no repository `git --work-tree=<repo> rev-parse --git-dir` fails, and
+# from another repository it reads that one's config).
+GIT_TARGET_KINDS = {"-C": "chdir", "--git-dir": "gitdir", "GIT_DIR": "gitdir", "GIT_COMMON_DIR": "common",
+                    "--work-tree": "worktree", "GIT_WORK_TREE": "worktree"}
+
+
+def git_target_kind(spelled):
+    """"chdir", "gitdir", "common" or "worktree" for one (spelling, path) git_repo_targets returned."""
+    return GIT_TARGET_KINDS.get(spelled.split("=", 1)[0].split(" ", 1)[0], "worktree")
+
+
 def git_write_option_targets(words):
     """Every file or directory a git call's own options name for git to write (SPD-049), as (the spelling a reason names
     it by, the path word as the line spells it): the diff option syntax.GIT_FILE_OPTIONS on any verb, this verb's entry
