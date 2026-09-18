@@ -248,11 +248,19 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                             % (prepare.deglob(call["actor"]), who, caller_agent_id)), analysis
     if strict:
         # SPD-066 and SPD-063: the repository each git call reads must be a known checkout's own, and the config it sets for
-        # itself, which git reads with nothing on the line, is held to the program allowlist.  After the findings, so a
-        # refusal the words as spelled already earn (a write verb, a program key, an unknown verb, a repository outside
-        # every known checkout) keeps its own reason.
+        # itself, which git reads with nothing on the line, is held to the program allowlist; SPD-123: and it holds no hook
+        # a member planted.  After the findings, so a refusal the words as spelled already earn (a write verb, a program
+        # key, an unknown verb, a repository outside every known checkout) keeps its own reason.
         for targets, target_cwds in analysis.git_calls:
             reason = git_config.git_repository_reason(ctx, con, targets, target_cwds)
+            if reason:
+                return reason, analysis
+    elif not caller_agent_id and not plain:
+        # SPD-123: Spud's own git call, which runs as Eric's, reads the same repository for what a member could have
+        # planted there through a program the hook cannot read.  A plain session's calls and its own subagents never reach
+        # this: they keep the answers they had.
+        for targets, target_cwds in analysis.git_calls:
+            reason = git_config.git_spud_repository_reason(ctx, con, targets, target_cwds)
             if reason:
                 return reason, analysis
 

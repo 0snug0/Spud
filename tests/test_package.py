@@ -23,12 +23,13 @@ DISPATCH = "hooks.dispatch"
 # tests/probes/hook_timing.py against main: the commands, render and import, the parser, project install, schedule and
 # doctor stay off this list (Eric, SPD-065).  core.launchagents joined for SessionStart's render watcher line (SPD-048),
 # shell.assignment_words for the Bash rule's reading of a subscripted assignment (SPD-085), shell.arg_writes for the files a
-# command names as operands and writes (SPD-121).
+# command names as operands and writes (SPD-121), hooks.gitrepos for the repository check the Bash rule and SessionStart's
+# line share (SPD-123).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
     "render.prices", "projects.sessions",
-    "hooks.dispatch", "hooks.hookio", "hooks.pathrule", "hooks.pretool", "hooks.recording", "hooks.sessionhooks",
+    "hooks.dispatch", "hooks.gitrepos", "hooks.hookio", "hooks.pathrule", "hooks.pretool", "hooks.recording", "hooks.sessionhooks",
     "hooks.stophook", "hooks.subagent_stop", "hooks.worktrees",
     "shell.analyse", "shell.arg_writes", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.expansions", "shell.git_config", "shell.git_programs",
     "shell.git_verbs", "shell.globbing", "shell.prepare", "shell.redirect_globs", "shell.spud_calls", "shell.syntax",

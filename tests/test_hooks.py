@@ -3498,6 +3498,10 @@ GIT_SCOPE_WORDING = "scope (the repository in"
 # SPD-066: (1) a path with a .git component; (2) a repository that is not the own repository of a checkout the ledger knows.
 GIT_DIR_WORDING = "is inside a git directory"
 GIT_NESTED_WORDING = "not the own repository of a checkout the ledger knows"
+# SPD-123: an entry of a repository's hooks directory that is not a *.sample file, for every caller the check runs for; and
+# Spud's own refusal, which names what it found and leaves inspecting and removing it to Eric.
+GIT_HOOK_WORDING = "not a *.sample file"
+SPUD_PLANTED_WORDING = "is Eric's call"
 
 
 def plant_git_dir(path, config="[core]\n\trepositoryformatversion = 0\n"):
@@ -3782,7 +3786,8 @@ class GitLocalConfigTest(BashHookCase):
     Since SPD-066 a repository nested in a checkout -- the tests/fake this class planted until then -- is refused before its
     keys are read (NestedRepositoryTest), so the repository here is the checkout's own: the home, which is project spud's
     root in the suite, made a repository by hand.  Its config is still a file no member may write (GitConfigFileTest); the
-    check stands for a key Eric or a tool set there."""
+    check stands for a key Eric or a tool set there, or a member wrote through an interpreter.  Since SPD-123 it binds
+    Spud's own git call too (assertRepoRefused's Spud line flipped from silent): the home is a checkout the ledger knows."""
 
     def setUp(self):
         super().setUp()
@@ -3804,7 +3809,11 @@ class GitLocalConfigTest(BashHookCase):
                 for agent_id in (AGENT_A, AGENT_C):
                     r = self.assertRefused(cmd, "Law 7", agent_id=agent_id)
                     self.assertIn(needle, r.reason)
-                self.assertSilent(cmd, agent_id=None)  # Law 7 does not bind Spud
+                # SPD-123: Law 7 does not bind Spud, but the home is a checkout the ledger knows, and git would run the
+                # program the key names under his own call with nothing on the line
+                r = self.assertRefused(cmd, SPUD_PLANTED_WORDING, agent_id=None)
+                self.assertIn(needle, r.reason)
+                self.assertNotIn("Law 7", r.reason)
 
     def assertRepoSilent(self):
         for cmd in self.calls():
@@ -3916,7 +3925,8 @@ class NestedRepositoryTest(BashHookCase):
     checkout's git or common directory.  --work-tree and GIT_WORK_TREE never choose the repository (probed: git still
     discovers from the directory it runs in), so with only those on the line the shell's directory is read too.  The home
     is a real repository here, project spud's root in the suite; AGENT_A plans home:tests/** and home:bin/spud, AGENT_C
-    home:**."""
+    home:**.  Since SPD-123 Spud is refused a repository nested in a known checkout too (refused_for_members' Spud line
+    flipped from silent); one outside every known checkout stays his own business."""
 
     VERBS = ("status", "log --oneline", "fetch")
 
@@ -3933,14 +3943,19 @@ class NestedRepositoryTest(BashHookCase):
         plant_git_dir(self.bare)
         (self.bare / "hooks").mkdir()
 
-    def refused_for_members(self, command, repository):
+    def refused_for_members(self, command, repository, spud=True):
         for agent_id in (AGENT_A, AGENT_C):
             with self.subTest(command=command, agent_id=agent_id):
                 r = self.assertRefused(command, GIT_NESTED_WORDING, agent_id=agent_id)
                 self.assertIn("Law 7", r.reason)
                 self.assertIn(str(repository), r.reason)  # the reason names the repository
         with self.subTest(command=command, agent_id="spud"):
-            self.assertSilent(command, agent_id=None)  # Law 7 does not bind Spud
+            if spud:  # SPD-123: it lies in a checkout the ledger knows, so git would run its hooks under Spud's own call
+                r = self.assertRefused(command, GIT_NESTED_WORDING, agent_id=None)
+                self.assertIn(SPUD_PLANTED_WORDING, r.reason)
+                self.assertIn(str(repository), r.reason)
+            else:  # Law 7 does not bind Spud, and a repository outside every known checkout is his own business
+                self.assertSilent(command, agent_id=None)
 
     def silent_for_all(self, command):
         for agent_id in (AGENT_A, AGENT_C, None):
@@ -4022,7 +4037,7 @@ class NestedRepositoryTest(BashHookCase):
         outside = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
         self.addCleanup(shutil.rmtree, outside, True)
         plant_git_dir(outside / ".git")
-        self.refused_for_members("cd %s && git status" % outside, outside)
+        self.refused_for_members("cd %s && git status" % outside, outside, spud=False)
         r = self.assertRefused("git -C %s status" % outside, "outside every checkout")  # SPD-047's own reason, first
         self.assertNotIn(GIT_NESTED_WORDING, r.reason)
         nowhere = Path(tempfile.mkdtemp(prefix="spud-no-repository-")).resolve()
