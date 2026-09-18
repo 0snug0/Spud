@@ -12,7 +12,8 @@ from ..hooks import hookio
 # command word dispatches on, and every option, verb and argument the dispatch compares a later word with.
 GLOB_COMMAND_SAMPLES = frozenset(syntax.WRAPPERS | syntax.SHELLS | syntax.DIRECTORY_COMMANDS | syntax.SHELL_DECLARATIONS | syntax.JS_RUNTIMES
                                  | {"git", "spud", "eval", "source", ".", "trap", "sqlite3", "sqlite", "tee", "python", "python3", "python3.14",
-                                    "hash"})  # `hash` shadows a name the hook reads (SPD-062)
+                                    "hash"}  # `hash` shadows a name the hook reads (SPD-062)
+                                 | set(syntax.ARG_WRITE_COMMANDS))  # SPD-121: `/bin/c? a b` runs cp
 GLOB_SAMPLES = frozenset(
     GLOB_COMMAND_SAMPLES | syntax.GIT_WRITE_VERBS | syntax.GIT_GLOBAL_VALUE_FLAGS | syntax.BRANCH_READ_FLAGS | syntax.BRANCH_READ_VALUE_FLAGS | syntax.TAG_READ_FLAGS
     # CONFIG_READ_SUBCOMMANDS are left out: a glob read as `get` or `list` refuses nothing, so sampling them would only
@@ -27,7 +28,8 @@ GLOB_SAMPLES = frozenset(
     | {o for longs, _ in syntax.GIT_VERB_PROGRAM_OPTIONS.values() for o in longs}
     | {"-" + c for _, shorts in syntax.GIT_VERB_PROGRAM_OPTIONS.values() for c in shorts}
     | {"-c", "-lc", "-ic", "-m", "-", "-X", "-W", "-Q", "-I", "-S", "--as", "--as=spud", "--json", "--help", "-h", "--version"}
-    | set(hookio.SPUD_COMMANDS) | {w for pair in hookio.SPUD_ONLY_SUBCOMMANDS + hookio.MEMBER_OWN_COMMANDS for w in pair})
+    | set(hookio.SPUD_COMMANDS) | {w for pair in hookio.SPUD_ONLY_SUBCOMMANDS + hookio.MEMBER_OWN_COMMANDS for w in pair}
+    | syntax.ARG_WRITE_OPTIONS)  # SPD-121: `sed -? '' s/a/b/ f` is `sed -i` when a file named -i is there
 GLOB_OPTION = "-%"  # a glob that may start with `-` read as an option that takes no value (SPD-041)
 GLOB_WORD_LIMIT = 256  # a longer glob word, or a segment with more than two stars or four groups, is not matched (backtracking)
 GLOB_READING_BUDGET = 128  # the readings of one simple command's glob words before the hook stops reading them and refuses a member

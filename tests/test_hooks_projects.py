@@ -204,10 +204,14 @@ class ProjectHookCase(HookCase):
     def redirect(self, s, path, agent_id=None):
         return self.hook_in(s, "PreToolUse", self.bash_p(s, "echo x > %s" % path, agent_id))
 
+    def copy(self, s, path, agent_id=None):
+        """SPD-121: a write by argument, the path cp's destination, which every caller is answered for as for a redirection."""
+        return self.hook_in(s, "PreToolUse", self.bash_p(s, "cp /dev/null %s" % path, agent_id))
+
     def expect(self, s, agent_id, label, path, expected):
-        """One cell of the path table, through PreToolUse(Write) and through a Bash redirection: None is silent, a string the
-        needle a refusal carries."""
-        for tool, run in (("Write", self.write), ("Bash redirect", self.redirect)):
+        """One cell of the path table, through PreToolUse(Write), a Bash redirection and a Bash write by argument: None is
+        silent, a string the needle a refusal carries."""
+        for tool, run in (("Write", self.write), ("Bash redirect", self.redirect), ("Bash cp", self.copy)):
             with self.subTest(session=s.label, agent_id=agent_id, target=label, tool=tool):
                 r = run(s, path, agent_id)
                 if expected is None:
@@ -620,6 +624,51 @@ class BashHookProjectTest(ProjectHookCase):
             with self.subTest(command=command, cwd=str(s.cwd)):
                 self.assertHookSilent(self.bash(s, command, AGENT_A), command)
                 self.assertHookSilent(self.bash(s, command), command)
+
+
+class ArgumentWriteProjectTest(ProjectHookCase):
+    """SPD-121: a write by argument answers every caller as a redirection does (PathTableTest's `Bash cp` column), and here
+    each command's representative line is pinned for the callers that are not a member: a plain session and its own
+    subagents write freely in badtakes and nowhere in Spud's home, and Spud is held to Law 1 in a project and free outside
+    every project.  A member of BAD-001 with `src/**` is held to its globs in the worktree the ticket is bound to."""
+
+    FORMS = ("cp /dev/null {}", "mv /tmp/spd-121-src {}", "ln -s /tmp/x {}", "install /dev/null {}", "mkdir -p {}", "touch {}", "rm -f {}",
+             "rmdir {}", "truncate -s 0 {}", "chmod +x {}", "chown nobody {}", "sed -i '' s/a/b/ {}")
+
+    def run_form(self, s, form, path, agent_id=None):
+        return self.hook_in(s, "PreToolUse", self.bash_p(s, form.replace("{}", str(path)), agent_id))
+
+    def test_each_command_for_a_plain_session_spud_and_a_member(self):
+        home, wt, out = self.home.path, self.bad_wt, self.outside
+        self.spawn_in(self.CLAIMED, self.plan_bad(name="Russet"), AGENT_A)
+        cells = (
+            # session, agent_id, path, expected needle (None: silent)
+            (self.PLAIN, None, wt / "src" / "a.txt", None),
+            (self.PLAIN, None, wt / "README.md", None),
+            (self.PLAIN, None, home / "CLAUDE.md", NOT_SPUD),
+            (self.PLAIN, None, home / "ledger" / "x.md", LAW_5),
+            (self.PLAIN, None, out / "x.txt", None),
+            (self.PLAIN, AGENT_D, wt / "README.md", None),  # Eric's own subagent
+            (self.PLAIN, AGENT_D, home / "CLAUDE.md", NOT_SPUD),
+            (self.CLAIMED, None, wt / "src" / "a.txt", LAW_1),
+            (self.CLAIMED, None, home / "CLAUDE.md", None),
+            (self.CLAIMED, None, out / "x.txt", None),
+            (self.HOME, None, wt / "src" / "a.txt", LAW_1),
+            (self.HOME, None, home / "reports" / "x.md", LAW_5),
+            (self.CLAIMED, AGENT_A, wt / "src" / "a.txt", None),
+            (self.CLAIMED, AGENT_A, wt / "README.md", LAW_5),
+            (self.CLAIMED, AGENT_A, self.bad / "src" / "a.txt", BOUND_WORKTREE),
+            (self.CLAIMED, AGENT_A, wt / "src" / ".git" / "index", GIT_DIR),
+        )
+        for form in self.FORMS:
+            for s, agent_id, path, expected in cells:
+                with self.subTest(form=form, session=s.label, agent_id=agent_id, path=str(path)):
+                    r = self.run_form(s, form, path, agent_id)
+                    if expected is None:
+                        self.assertHookSilent(r)
+                    else:
+                        self.assertDenied(r, expected)
+                        self.assertIn("a write by argument", r.reason)
 
 
 class StopProjectTest(ProjectHookCase):

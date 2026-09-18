@@ -292,6 +292,40 @@ GIT_VERB_FILE_OPTIONS = {
 # `git bundle create <file> <rev-list-args>`, `git mailinfo <msg> <patch>` and `git pack-objects <base-name>` each wrote
 # what they name (probed; bundle create with `-q` and `--version=2` before the file too).
 GIT_VERB_FILE_POSITIONALS = {"bundle": ("create", 1), "mailinfo": (None, 2), "pack-objects": (None, 1)}
+# SPD-121: the commands that write the files they name as operands, which shell/arg_writes reads for bash_reason to hold
+# to the path rule as it holds a redirection target.  Per command, (its shape, the short options that take a value --
+# attached, or the next word -- and the GNU long options that take the next word unless `=` attaches it).  Read on this
+# Mac's BSD grammar (/bin/cp, /bin/mv, /bin/ln, /bin/mkdir, /bin/rm, /bin/rmdir, /bin/chmod, /usr/bin/install,
+# /usr/bin/touch, /usr/bin/truncate, /usr/sbin/chown, /usr/bin/chgrp, /usr/bin/chflags, /usr/bin/sed: their man pages,
+# and probed in a scratch directory), so where BSD and GNU disagree BSD wins: cp's -S and sed's -l are flags, install's
+# -T takes its mtree tags and -D its DESTDIR.  GNU's -t/--target-directory and -T/--no-target-directory are read too, where
+# BSD has no such option (a BSD command refuses an option it does not know and writes nothing).  `link` is ln's and
+# `unlink` rm's two-argument forms (their man pages).  Shapes: "dest" writes its last operand (or -t's directory) and, when
+# that is a directory, each source inside it; "move" also removes each source; "link" writes its link name, `./<name>` for
+# a single operand; "each" writes every operand; "mode" every operand after the mode, owner or flags; "sed" every file
+# after the script, only in place.
+ARG_WRITE_COMMANDS = {
+    "cp": ("dest", "t", ("--target-directory", "--suffix")),
+    "install": ("dest", "BDfghlMmoTt", ("--target-directory", "--suffix", "--mode", "--owner", "--group", "--strip-program")),
+    "mv": ("move", "t", ("--target-directory", "--suffix")),
+    "ln": ("link", "t", ("--target-directory", "--suffix")),
+    "link": ("link", "", ()),
+    "mkdir": ("each", "m", ("--mode",)),
+    "touch": ("each", "Adrt", ("--date", "--reference", "--time")),
+    "rm": ("each", "", ()),
+    "unlink": ("each", "", ()),
+    "rmdir": ("each", "", ()),
+    "truncate": ("each", "rs", ("--reference", "--size")),
+    "chmod": ("mode", "", ("--reference",)),
+    "chown": ("mode", "", ("--from", "--reference")),
+    "chgrp": ("mode", "", ("--from", "--reference")),
+    "chflags": ("mode", "", ()),
+    "sed": ("sed", "efiI", ("--expression", "--file", "--line-length")),
+}
+# The options of those commands that change which files they write, so a glob word the shell may expand to one of them is
+# read as it (SPD-041's GLOB_SAMPLES): the destination directory, install's -d (every operand a directory it makes) and -M
+# (its metalog), and sed's in-place forms.
+ARG_WRITE_OPTIONS = frozenset({"-t", "-T", "--target-directory", "--no-target-directory", "-d", "-M", "-i", "-I", "--in-place"})
 BRANCH_READ_FLAGS = {"-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", "--all", "--remotes", "--verbose", "--color",
                      "--no-color", "--column", "--no-column", "-i", "--ignore-case", "--no-abbrev"}
 BRANCH_READ_VALUE_FLAGS = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--abbrev"}
@@ -340,6 +374,12 @@ class ShellAnalysis:
         # a reason names it by, the target word as the line spells it, the directories the shell may be in when git
         # opens it).  Checked in bash_reason with the path rule, like a redirection target, for every caller.
         self.git_writes = []
+        # SPD-121: one entry per file a command names as an operand and writes (cp, mv, ln, install, mkdir, touch, rm,
+        # rmdir, truncate, chmod and its kin, sed in place), as shell/arg_writes reads it: (the command as spelled, the
+        # operand word, the directories the shell may be in, the source words a destination directory takes, how the
+        # word is written, a backup suffix or None).  bash_reason turns each into the files it names and holds them to the
+        # path rule like a redirection target, for every caller.
+        self.arg_writes = []
         self.vars = {}
         self.cwds = frozenset([cwd]) if cwd else None
         self.unparseable = False
