@@ -2,7 +2,7 @@
 
 import os
 
-from . import analyse, git_config, prepare, redirect_globs, spud_calls, syntax
+from . import analyse, arg_writes, git_config, prepare, redirect_globs, spud_calls, syntax
 from ..hooks import hookio, pathrule, worktrees
 from ..state import lookup
 
@@ -34,6 +34,19 @@ GIT_WRITE_MESSAGES = {
                " name the file explicitly"),
     "nomatch": ("the file this git call writes (%s) is a glob that matches no file now, so the hook cannot know what git"
                 " would open; name the file explicitly"),
+}
+# SPD-121: a file a command names as an operand and writes (cp, mv, ln, install, mkdir, touch, rm, rmdir, truncate, chmod
+# and its kin, sed in place), `%s` naming the command and the file as the line spells them.
+ARG_WRITE_MESSAGES = {
+    "into": "a write by argument (%s): %s",
+    "variable": ("a write by argument (%s) names its file through a variable or substitution the hook cannot resolve;"
+                 " spell the path out"),
+    "unfollowable": "a write by argument (%s) names a file relative to a directory the hook cannot follow (" + _UNFOLLOWABLE + "; use an absolute path",
+    "capped": ("a write by argument (%s) names a glob whose expansion reaches the hook's match budget of %d files;"
+               " name the files explicitly"),
+    "nomatch": ("a write by argument (%s) names a glob that matches no file now, so the hook cannot know what the command"
+                " would write (a matching file may appear before it runs, or the shell may pass the name literally);"
+                " name the files explicitly"),
 }
 
 
@@ -200,7 +213,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
         elif kind == "var-word":
             return ("the word %s holds a parameter expansion, arithmetic or a substitution the hook cannot resolve, where the command is"
                     " read by name (a wrapper's options, git's options, verb and the arguments it checks, a shell's or python's options and"
-                    " script, a spud call's words); spell the words out" % detail), analysis
+                    " script, a spud call's words, the options of a command that writes by argument); spell the words out" % detail), analysis
         elif kind == "var-doubt":
             return ("the variable %s may not hold the value this line assigned it (the assignment may not run or does not persist: a"
                     " condition, a compound command, a loop or function body, a pipeline, a background job, a subshell or substitution,"
@@ -244,7 +257,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                 return reason, analysis
 
     def target_reason(messages, spelled, path):
-        """edit_reason for one concrete file a redirection, a tee or a git call may open, phrased for the write."""
+        """edit_reason for one concrete file a redirection, a tee, a git call or a write by argument may open, phrased for the write."""
         reason, rel = pathrule.edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode)
         if not reason:
             return None
@@ -293,10 +306,14 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
         return None
 
     # The redirections first, so a line that already earned a redirection's reason keeps it; then the files a git call
-    # writes through its own options or the environment (SPD-049), which are held to the same rule.
+    # writes through its own options or the environment (SPD-049), and the files a command names as operands and writes
+    # (SPD-121), which are held to the same rule.
+    written, capped = arg_writes.written_paths(analysis.arg_writes)
     for entries, messages in (([(None, t, c) for t, c in analysis.redirects], REDIRECT_MESSAGES),
-                              (analysis.git_writes, GIT_WRITE_MESSAGES)):
+                              (analysis.git_writes, GIT_WRITE_MESSAGES), (written, ARG_WRITE_MESSAGES)):
         reason = targets_reason(entries, messages)
         if reason:
             return reason, analysis
+    if strict and capped:  # a source glob whose files, each written into a directory, reach the budget
+        return ARG_WRITE_MESSAGES["capped"] % (capped, syntax.GLOB_MATCH_CAP), analysis
     return None, analysis
