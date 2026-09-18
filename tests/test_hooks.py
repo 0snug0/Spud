@@ -4995,6 +4995,269 @@ class NamedCoprocTest(BashHookCase):
                 self.assertSilent(ok)
 
 
+# zsh's prefixed groups (SPD-081): a `{ list }` whose `{` follows only `coproc`, `time` and `!`.  Each fills its `%s` with
+# the body the group runs, and PREFIXED_GROUP_EVIDENCE is Spud's probe, line for line.
+PREFIXED_GROUP_EVIDENCE = ("coproc { repeat 1 %s }", "coproc { repeat 1 %s; }", "coproc { if [[ -n x ]] %s }",
+                           "coproc { for f (a) %s }", "time { repeat 1 %s; }", "! { repeat 1 %s; }",
+                           "time { for f (a) %s }", "! { while [[ -n x ]] %s }", "time ! { repeat 1 %s }",
+                           "! time { repeat 1 %s }", "time coproc { repeat 1 %s; }", "coproc time { repeat 1 %s; }",
+                           "time { { repeat 1 %s } }")
+# The forms a shell parses but does not run: read all the same, which costs a line no shell accepts.
+PREFIXED_GROUP_PARSE_ERRORS = ("! coproc { repeat 1 %s }", "! ! { repeat 1 %s }")
+# The prefixes whose group runs in a forked shell of its own, and those whose group runs in the shell that reads the line.
+FORKED_GROUPS = ("coproc { %s }", "coproc { %s; }", "time coproc { %s; }", "coproc time { %s; }")
+CURRENT_SHELL_GROUPS = ("time { %s; }", "! { %s; }", "time ! { %s; }", "! time { %s; }", "time { { %s; } }")
+
+
+class PrefixedGroupTest(BashHookCase):
+    """SPD-081 (from proposal 85): zsh runs a `{ list }` after `coproc`, `time` and `!`, and ShellWalk opened a group only
+    where no word stood before the `{`; after one of those words the brace was appended as an ordinary word, analyse_words
+    stripped it as the reserved word it is, and the rest of the line was read as one simple command.  A zsh short loop or
+    short conditional inside such a group was flattened into that command's words and never checked, so `coproc { repeat 1
+    git push }`, `time { repeat 1 git push; }` and `! { repeat 1 git push; }` were each kind other with no finding, while
+    `{ repeat 1 git push }` found the push (Laws 1, 5, 6 and 7).  SPD-042 and SPD-061 had already opened a frame for `for`,
+    `select`, `repeat`, `if`, `while` and `until` after those words; `{` was the one left.
+
+    No shell is probed here: this worktree session's harness refuses to run one (SPD-094).  The evidence is Spud's probe of
+    2026-09-17, recorded on the ticket -- zsh 5.9 -f and zsh -f -o nobareglobqual (this Mac's Bash tool), identical in both,
+    with a function standing in for the VCS program that appends its arguments to a log, since a coproc's stdout goes to its
+    pipe and only a file shows that the body ran:
+
+    - the body ran for every form in PREFIXED_GROUP_EVIDENCE above, `coproc { repeat 1 vcs push }` and
+      `time { { repeat 1 vcs push } }` included;
+    - `! coproc { ... }` and `! ! { ... }` are parse errors and ran nothing.  The hook reads them as groups all the same,
+      fail closed and at no real cost: the line is a shell error where it is not one of the forms that run;
+    - the line's directory and variables: `time { x=1; cd /tmp; }`, `! { x=1; cd /tmp; }`, `time ! { x=1; cd /tmp; }` and
+      `! time { x=1; cd /tmp; }` each left the line in /tmp with x=1 (the current shell), while `coproc { x=1; cd /tmp; }`,
+      `time coproc { x=1; cd /tmp; }` and `coproc time { x=1; cd /tmp; }` left the line where it was with x unset (a fork,
+      as SPD-054 has it, and as `coproc ( ... )` was already read).  In a pipeline, `time { x=1; cd /tmp; } | cat` and
+      `! { x=1; cd /tmp; } | cat` left the line where it was, as `{ cd /tmp; } | cat` does -- the reading main had wrong,
+      since it moved the line there.  (A zsh quirk the hook does not chase: `time { x=1; }` alone left x unset, while
+      `time { x=1; cd /tmp; }` set it; a variable behind `time` is read as the current shell's, which is what `time x=1`
+      already did.)
+
+    So a `{` whose preceding words are all LOOP_PREFIX_WORDS opens a group frame, and the group is read exactly as an
+    unprefixed one in the same position -- a short loop, a short conditional, a nested group, a subshell, a spud call, a
+    redirection, an eval and an `sh -c` inside it alike.  With `coproc` among those words the frame is a forked shell's:
+    its cd and its assignments never reach the line, and a trap set there still fires (SPD-054).  `echo coproc { git push; }`
+    and any `{` after an ordinary word stay arguments, SPD-060's `coproc NAME { ... }` keeps its own path, and zsh's
+    `{ ... } always { ... }` is SPD-124, not this ticket.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone", "bin"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)  # Law 7 refuses members only
+        return r
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("%s hook PreToolUse" % spud, "hook"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    # -- the hole --------------------------------------------------------------------------
+    def test_the_probes_evidence_forms_reach_the_body(self):
+        """Every form Spud's probe ran: the push inside the prefixed group is found and the member refused."""
+        for form in PREFIXED_GROUP_EVIDENCE:
+            line = form % "git push"
+            with self.subTest(line=line):
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+        self.assertEqual(self.analysis("coproc { repeat 1 git push }").findings, [("git", ("push", "push"))])
+        self.assertEqual(self.analysis("time { repeat 1 git status; }").findings, [("git", ("status", None))])
+
+    def test_the_forms_no_shell_parses_are_over_read(self):
+        """`! coproc { ... }` and `! ! { ... }` run nothing anywhere; reading them as groups refuses a line no shell accepts."""
+        for form in PREFIXED_GROUP_PARSE_ERRORS:
+            with self.subTest(form=form):
+                self.refused_for_members(form % "git push")
+
+    def test_every_body_form_inside_a_prefixed_group(self):
+        """A short loop, a short conditional, a nested group, a subshell, an eval and an `sh -c` inside the group are read
+        as they are inside an unprefixed one."""
+        for form in ("coproc { %s; }", "time { %s; }", "! { %s; }"):
+            for body in ("%s", "repeat 1 %s", "for f (a) %s", "if [[ -n x ]] %s", "{ %s }", "( %s )",
+                         "if true; then %s; fi", "eval '%s'", "sh -c '%s'", "true && %s", "%s | cat",
+                         "for f in a b; do %s; done"):
+                line = form % (body % "git push")
+                with self.subTest(line=line):
+                    self.assertRefused(line, "Law 7")
+                    self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_every_payload_in_every_prefixed_group_for_every_caller(self):
+        for form in ("coproc { %s; }", "time coproc { %s; }", "time { %s; }", "! { %s; }"):
+            for body in ("%s", "repeat 1 %s", "if [[ -n x ]] %s"):
+                for command, needle in self.member_payloads():
+                    line = form % (body % command)
+                    for agent_id in (AGENT_C, AGENT_A):
+                        with self.subTest(line=line, agent_id=agent_id):
+                            self.assertRefused(line, needle, agent_id)
+                for command, needle in self.spud_payloads():
+                    line = form % (body % command)
+                    with self.subTest(line=line, agent_id="spud"):
+                        self.assertRefused(line, needle, agent_id=None)
+
+    def test_a_target_outside_a_narrow_members_deliverables(self):
+        """AGENT_A plans tests/** and bin/spud, so note.txt at the home is refused it and allowed the ** member."""
+        for form in ("coproc { %s; }", "coproc time { %s; }", "time { %s; }", "! { %s; }"):
+            for body in ("%s", "repeat 1 %s"):
+                line = form % (body % "echo x > note.txt")
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")
+                    self.assertSilent(line, AGENT_C)
+                    self.assertSilent(form % (body % "echo x > tests/zzone/k.py"))
+
+    # -- the coproc group's fork (SPD-054) ---------------------------------------------------
+    def test_a_coproc_groups_directory_and_assignments_never_reach_the_line(self):
+        home, out = str(self.home.path), self.out
+        for form in FORKED_GROUPS:
+            for body in ("x=1; cd %s" % out, "cd %s" % out, "cd %s; git status" % out, "repeat 1 cd %s" % out):
+                line = form % body
+                with self.subTest(line=line):
+                    self.assertEqual(self.analysis(line).cwds, frozenset([home]), line)
+            # ... so what follows the group is in the line's own directory, checked there: the ledger file the same line
+            # names through the group's cd is never reached
+            self.assertSilent((form % ("cd %s" % out)) + "; echo x > tests/zzone/k.py")
+            self.assertSilent((form % ("cd %s/ledger" % home)) + "; echo x > tickets/SPD-001.md", AGENT_C)
+        # a variable the forked shell assigns does not hold after it, so a later word that reads it is doubted (SPD-043),
+        # exactly as after an unprefixed group
+        for line, plain in (("coproc { X=git; }; $X push", "{ X=git; }; $X push"),
+                            ("X=git; coproc { X=ls; }; $X push", "X=git; { X=ls; }; $X push")):
+            with self.subTest(line=line):
+                self.assertIn(("var-doubt", "$X"), self.analysis(line).findings, line)
+                self.assertEqual(self.analysis(line).findings, self.analysis(plain).findings, line)
+        self.assertRefused("coproc { X=git; }; $X push", "Law 7")
+        self.assertRefused("X=git; coproc { X=ls; }; $X push", "may not hold")
+
+    def test_a_trap_set_in_a_coproc_group_still_fires(self):
+        """SPD-054: the forked shell's exit fires an EXIT trap set there, so the action is read as it is anywhere else."""
+        for line in ("coproc { trap 'git push' EXIT; }", "coproc { repeat 1 trap 'git push' EXIT }",
+                     "time coproc { trap 'git push' EXIT; }", "coproc time { trap 'git push' EXIT; }"):
+            with self.subTest(line=line):
+                self.refused_for_members(line)
+        for agent_id in (AGENT_C, AGENT_A, None):  # a target the hook cannot place refuses Spud too (SPD-035)
+            self.assertRefused("coproc { trap 'echo x > out.txt' EXIT; }", "cannot follow", agent_id)
+        self.assertSilent("coproc { trap 'echo done' EXIT; }")
+        self.assertSilent("coproc { trap 'echo done' EXIT; }", agent_id=None)
+
+    # -- the current shell's groups -------------------------------------------------------------
+    def test_a_time_or_bang_group_is_read_as_an_unprefixed_group_in_its_place(self):
+        home, out = str(self.home.path), self.out
+        for form in CURRENT_SHELL_GROUPS:
+            for body in ("x=1; cd %s" % out, "cd %s" % out, "git status; cd %s" % out):
+                line, plain = form % body, "{ %s; }" % body
+                with self.subTest(line=line):
+                    a, b = self.analysis(line), self.analysis(plain)
+                    self.assertEqual((a.cwds, a.findings, sorted(a.doubt)), (b.cwds, b.findings, sorted(b.doubt)), line)
+                    self.assertEqual(a.cwds, frozenset([str(out)]), line)  # the cd moved the line itself
+            # ... and what follows the group is checked in the directory the group left it in, not in the line's own
+            self.assertRefused((form % ("cd %s/ledger" % home)) + "; echo x > tickets/SPD-001.md", "generated", AGENT_C)
+            self.assertSilent((form % ("cd %s" % out)) + "; echo x > note.txt")
+            self.assertRefused((form % ("cd %s" % out)) + "; echo x > %s/note.txt" % home, "deliverables")
+
+    def test_a_prefixed_group_in_a_pipeline_leaves_the_line_where_it_was(self):
+        """`time { x=1; cd /tmp; } | cat` and `! { x=1; cd /tmp; } | cat` left the line where it was, as `{ cd /tmp; } | cat`
+        does; main moved it to /tmp."""
+        home, out = str(self.home.path), self.out
+        for form in ("time { %s; } | cat", "! { %s; } | cat", "{ %s; } | cat", "time ! { %s; } | cat", "coproc { %s; } | cat"):
+            line = form % ("x=1; cd %s" % out)
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).cwds, frozenset([home]), line)
+        self.assertSilent(("time { cd %s; } | cat" % out) + "; echo x > tests/zzone/k.py")
+        self.assertRefused(("! { cd %s; } | cat" % out) + "; echo x > note.txt", "deliverables")
+        # the commands inside a piped group are still checked
+        self.assertRefused("time { git push; } | cat", "Law 7")
+        self.assertRefused("! { repeat 1 git push; } | cat", "Law 7")
+
+    def test_the_group_ends_where_its_brace_ends_it(self):
+        """What follows the group is outside it: a `}` with no terminator before it closes the group, as zsh closes one."""
+        home = str(self.home.path)
+        for form in ("time { %s }", "coproc { %s }", "! { %s }"):
+            line = form % "echo a > ledger/tickets/SPD-001.md" + "; echo b > tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertEqual(len(self.analysis(line).redirects), 2, self.analysis(line).redirects)
+                self.assertRefused(line, "generated")
+        self.assertSilent("time { echo a > tests/zzone/k.py }; echo b > tests/zzone/k.py")
+        self.assertRefused("coproc { true }; echo x > ledger/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertEqual(self.analysis("time { cd /nowhere-at-all }; git status").kinds[-1], "git")
+        self.assertEqual(self.analysis("coproc { git push }").cwds, frozenset([home]))
+
+    # -- controls ----------------------------------------------------------------------------------
+    def test_a_brace_after_an_ordinary_word_stays_an_argument(self):
+        for ok in ("echo coproc { git push; }", "echo time { git push; }", "echo x coproc { git push; }",
+                   "echo '{ git push; }'", "echo \"coproc { git push; }\"",
+                   "grep -n 'coproc { git push; }' tests/zzone/k.py",
+                   "%s --as %s member log 'coproc { repeat 1 git push }'" % (self.spud_cli, AGENT_A),
+                   "printf 'time { git push; }\\n' > tests/zzone/k.py"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+        self.assertEqual(self.analysis("echo coproc { git push; }").findings, [])
+
+    def test_the_named_form_and_the_simple_commands_are_unchanged(self):
+        for refused in ("coproc NAME { git push; }", "coproc NAME { git push }", "coproc git push", "time git push",
+                        "! git push", "coproc { git push; }", "coproc ( git push )", "{ git push; }",
+                        "coproc repeat 1 git push", "time repeat 1 git push", "! repeat 1 git push",
+                        "coproc if [[ -n x ]] git push", "time if [[ -n x ]] git push"):
+            with self.subTest(refused):
+                self.refused_for_members(refused)
+        for ok in ("coproc NAME git push", "coproc { git status; }", "time { git status; }", "! { echo hi; }",
+                   "coproc { echo hi; }", "time echo hi", "coproc 1bad { git push; }"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+        # the named form's group still runs in its own fork, and the unnamed one's cd is still not the line's
+        for cmd in ("coproc NAME { cd /tmp; }", "coproc { cd /tmp; }", "coproc cd /tmp"):
+            with self.subTest(cmd):
+                self.assertEqual(self.analysis(cmd).cwds, frozenset([str(self.home.path)]))
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        m = load_spud_module()
+        for line in ("coproc { " * 1000 + "git push" + " }" * 1000, "time { " * 1000 + "git push",
+                     "! { " * 500 + "repeat 1 git push" + " }" * 500, "coproc time ! { " * 300 + "git push",
+                     "time { " * 2000, "coproc { repeat 1 { " * 300 + "git push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
 class PathInForceTest(BashHookCase):
     """SPD-062: the hook reads a line's command words by name -- git, spud, python3.14, sqlite3, tee, a shell, a wrapper --
     and the shell then finds each of them on PATH, so a member that puts a directory of its own first runs its own program
