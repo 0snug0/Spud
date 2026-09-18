@@ -292,7 +292,9 @@ def build_parser():
     q.add_argument("--evidence", type=text_arg)
     q.add_argument("--priority", choices=kernel.PRIORITIES, help="suggested priority")
     q.set_defaults(func=proposalcmds.cmd_proposal_file)
-    q = ps.add_parser("decide", help="absorb | decline | escalate (the holder) or create (Spud)")
+    decide_help = ("absorb | decline | escalate (the holder) or create (Spud); a holder that has returned holds nothing, so the"
+                   " proposal falls to the nearest ancestor that can still act, and to Spud at the root")
+    q = ps.add_parser("decide", help=decide_help, description=decide_help)
     q.add_argument("id", type=int)
     q.add_argument("--decision", required=True, choices=("absorb", "decline", "escalate", "create"))
     q.add_argument("--reason", type=text_arg)

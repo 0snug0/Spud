@@ -139,14 +139,59 @@ def member_dict(con, m):
     }
 
 
+def effective_holder(con, member_id):
+    """Who must decide a proposal held by `member_id` now (SPD-120): that member while it can still act, else the nearest
+    ancestor that can, and None -- Spud -- at the root.  A member can act while its status is in kernel.ALIVE, planned or
+    active; done, failed and blocked have all returned, and a blocked one acts again only after `member start`.  The climb
+    is read where a decision is made and written there, never at `member finish`, so a blocked member that is re-briefed
+    keeps whatever nobody decided meanwhile.  A holder whose row is gone, or a parent chain that loops, falls to Spud:
+    the one thing that must never happen is a proposal nobody can decide."""
+    seen = set()
+    while member_id is not None and member_id not in seen:
+        seen.add(member_id)
+        row = get_member_by_id(con, member_id)
+        if row is None:
+            return None
+        if row["status"] in kernel.ALIVE:
+            return member_id
+        member_id = row["parent_id"]
+    return None
+
+
+def holder_name(ref):
+    """A proposal's holder in words: its member ref, or `Spud` for the NULL holder that means Spud."""
+    return ref or "Spud"
+
+
+def holder_words(recorded, effective):
+    """Who must decide a proposal now, naming the recorded holder when the climb passed it (SPD-120):
+    `Spud (was BADS-110/Garfield)`.  Both are member refs, or None for Spud."""
+    if effective == recorded:
+        return holder_name(recorded)
+    return "%s (was %s)" % (holder_name(effective), holder_name(recorded))
+
+
+def held_proposals(con, member_id):
+    """The open proposals a member must decide (SPD-120): those recorded to it, and those recorded to a member below it
+    that has returned, whose climb ends at it.  [{id, title}] in id order.  `member finish` reads it before the status
+    change and names what it found, since after the change every one of them climbs one step further; it refuses
+    nothing, because recording a returned member's outcome is Law 9 and the finish is what hands them on."""
+    rows = con.execute("SELECT id, title, holder_member_id FROM proposals WHERE status = 'open' ORDER BY id").fetchall()
+    return [{"id": r["id"], "title": r["title"]} for r in rows if effective_holder(con, r["holder_member_id"]) == member_id]
+
+
 def proposal_dict(con, p):
     ticket = get_ticket_by_id(con, p["ticket_id"])
     created = get_ticket_by_id(con, p["created_ticket_id"]) if p["created_ticket_id"] else None
+    # SPD-120: who must decide it now, which is the recorded holder unless that member has returned.  A settled proposal
+    # is nobody's to decide, so it stays its own holder rather than reading as inherited.
+    effective = effective_holder(con, p["holder_member_id"]) if p["status"] == "open" else p["holder_member_id"]
     return {
         "id": p["id"],
         "ticket": ticket["key"],
         "origin": member_ref(con, p["origin_member_id"]),
         "holder": member_ref(con, p["holder_member_id"]),
+        "effective_holder": member_ref(con, effective),
         "title": p["title"],
         "why": p["why"],
         "evidence": p["evidence"],

@@ -44,20 +44,30 @@ def cmd_proposal_decide(ctx, args):
                 raise kernel.SpudError(kernel.EXIT_ERROR, "no proposal %d" % args.id)
             if p["status"] != "open":
                 raise kernel.SpudError(kernel.EXIT_ERROR, "proposal %d is already %s" % (p["id"], p["status"]))
-            holder = p["holder_member_id"]
+            # SPD-120: a recorded holder that has returned cannot decide anything, so the proposal falls to the nearest
+            # ancestor that can and to Spud at the root.  The climb is resolved here, before the ownership check, and
+            # written below with the decision, so nothing is ever held by a member that no longer exists.
+            recorded = p["holder_member_id"]
+            holder = lookup.effective_holder(con, recorded)
+            held_by = lookup.holder_words(lookup.member_ref(con, recorded), lookup.member_ref(con, holder))
             if actor.kind == "spud":
                 if holder is not None:
-                    raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "proposal %d is held by %s, not by Spud yet" % (p["id"], lookup.member_ref(con, holder)))
+                    raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "proposal %d is held by %s, not by Spud yet" % (p["id"], held_by))
                 if args.decision == "escalate":
                     raise kernel.SpudError(kernel.EXIT_ERROR, "Spud has nobody to escalate to; create or decline")
                 if args.decision == "absorb":
                     raise kernel.SpudError(kernel.EXIT_ERROR, "Spud does not absorb work (Law 1); create a ticket or decline")
             else:
                 if holder != actor.member["id"]:
-                    raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "proposal %d is held by %s, not by %s" % (p["id"], "Spud" if holder is None else lookup.member_ref(con, holder), actor.ref(con)))
+                    raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "proposal %d is held by %s, not by %s" % (p["id"], held_by, actor.ref(con)))
                 if args.decision == "create":
                     raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "only Spud creates tickets (Law 6); escalate instead")
             updates = {}
+            climb = {}
+            if holder != recorded:  # the climb, written where it was read; escalate's own move overwrites it below
+                was = lookup.get_member_by_id(con, recorded)
+                updates["holder_member_id"] = holder
+                climb = {"inherited_from": lookup.member_ref(con, recorded), "inherited_from_status": was["status"] if was else None}
             if args.decision == "escalate":
                 updates["holder_member_id"] = actor.member["parent_id"]
             elif args.decision == "absorb":
@@ -76,7 +86,7 @@ def cmd_proposal_decide(ctx, args):
             )
             ledgerdb.write_event(con, at, actor.label, "proposal.decided", "%s: %s%s" % (args.decision, p["title"], (" (" + args.reason + ")") if args.reason else ""),
                         ticket_id=p["ticket_id"], member_id=p["origin_member_id"],
-                        data={"proposal_id": p["id"], "decision": args.decision, "created_ticket": created["key"] if created else None})
+                        data={"proposal_id": p["id"], "decision": args.decision, "created_ticket": created["key"] if created else None, **climb})
             if actor.kind == "spud":  # Spud creates or declines, and either decision is one report entry
                 proposer = lookup.member_ref(con, p["origin_member_id"])
                 if created is not None:
@@ -113,7 +123,10 @@ def cmd_proposal_list(ctx, args):
         rows = [lookup.proposal_dict(con, p) for p in con.execute(sql + " ORDER BY p.id", params).fetchall()]
     finally:
         con.close()
-    return kernel.Result({"proposals": rows}, kernel.table(rows, [("id", "id"), ("ticket", "ticket"), ("status", "status"), ("origin", "origin"), ("holder", "holder"), ("P", "suggested_priority"), ("title", "title")]))
+    # SPD-120: the holder column says who must decide it now, naming the recorded holder when the climb passed one that
+    # has returned -- `Spud (was SPUD-110/Garfield)`.  The rows keep both, so --json still reads the recorded holder.
+    shown = [dict(r, holder=lookup.holder_words(r["holder"], r["effective_holder"])) for r in rows]
+    return kernel.Result({"proposals": rows}, kernel.table(shown, [("id", "id"), ("ticket", "ticket"), ("status", "status"), ("origin", "origin"), ("holder", "holder"), ("P", "suggested_priority"), ("title", "title")]))
 
 
 def cmd_handoff_add(ctx, args):
