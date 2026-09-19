@@ -13,12 +13,16 @@ the rest of the word or the next one, so `sed -i -e X f` backed f up to f-e.  On
 differential over 3477 commands spudagents ran showed is how a member writes in its scratchpad.
 
 Each recorded write also carries SPD-129's directory kind, which the command decides and only the path rule reads: mkdir's
-operands and `install -d`'s only make a directory, rmdir's and rm's under -r, -R or -d only remove one, and a member's own
-deliverable glob covers the directory it names without matching it.  Every other write of the same path, a destination
-directory's contents and a backup included, is a file and keeps the reading a redirection target has.
+operands and `install -d`'s only make a directory, rmdir's and rm -d's only remove one, and a member's own deliverable glob
+covers the directory it names without matching it; since SPD-126 rm -r's, chmod -R's and mv's reach the whole subtree
+under a directory operand (bash_rule.path_directories).  Every other write of the same path, a destination directory's
+contents and a backup included, is a file and keeps the reading a redirection target has.
 
-A module of its own because it is one reading with its own users, the analysis and bash_reason, and its own table; a file
-the operand does not spell (xargs's input, find's `{}`, a recursive copy's contents) is not read here.
+A module of its own because it is one reading with its own users, the analysis and bash_reason, and its own table.  SPD-126
+reads here what the operands carry beyond themselves: rm -r's whole subtree ("rm-tree"), chmod -R's and mv's ("file-tree"),
+each directory a recursive copy or a move lands whole, walked for a git directory (written_paths), and an operand the line
+does not spell -- xargs's input, find's `{}` -- read as options too where getopt would read them (options_unknown).  What
+find and xargs do themselves is shell/find_xargs's, the commands that write a whole tree shell/tree_writes'.
 
 Past 250 lines (SPD-065's look-again point) it stays whole: the two halves are one grammar read twice -- the scan that says
 which words a command writes, and the paths those words name once the filesystem says whether a destination is a directory
@@ -28,7 +32,7 @@ here is long; the length is the grammar's, one short function per shape."""
 import os
 import re
 
-from . import bash_rule, expansions, globbing, prepare, redirect_globs, syntax
+from . import bash_rule, expansions, globbing, prepare, redirect_globs, syntax, tree_walk
 from ..hooks import hookio
 
 
@@ -46,6 +50,15 @@ TARGET_DIRECTORY = "--target-directory"
 # SPD-129: the options that make rm remove a directory rather than a file, on this Mac's BSD rm (-r and -R recursively,
 # -d the empty directory itself); scan reads them as it reads any cluster, so `rm -fr`, `rm -- -r` and `rm -rf` agree.
 RM_DIRECTORY_OPTIONS = ("-r", "-R", "-d")
+RM_TREE_OPTIONS = ("-r", "-R", "--recursive")  # SPD-126: the hierarchy rooted in each operand (rm(1): -r is -R)
+# SPD-126: cp's options that copy a directory and everything under it (cp(1): -R, and -a, "Same as -RpP"; GNU's -r,
+# --recursive and --archive too), and the recursive option of chmod, chown, chgrp and chflags, which change every file
+# under a directory operand rather than the directory alone.
+CP_TREE_OPTIONS = ("-R", "-r", "-a", "--recursive", "--archive")
+MODE_TREE_OPTIONS = ("-R", "--recursive")
+# SPD-126: the kind a destination entry carries when what lands there may be a whole tree: (RECURSIVE, the rsync exclude
+# patterns a walk honours or None, whether a source spelled with a trailing `/` lands as its contents).
+RECURSIVE = "recursive"
 # A `$NAME` or `${NAME}` anywhere in a word, which `resolved` puts the line's own value in place of.  A `$` the quoting marked
 # literal is followed by that marker, never by a name, so it never matches.
 _EXPANSION_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
@@ -151,20 +164,35 @@ def hidden_option(args, values, longs):
 
 
 def expansion_at_start(word):
-    """True when a word begins with an expansion the shell resolves, which alone can put a `-` at its start."""
-    return word.startswith(hookio.SUBST) or (word.startswith("$") and not word.startswith("$" + syntax._LITERAL_DOLLAR))
+    """True when a word begins with an expansion the shell resolves, which alone can put a `-` at its start; since SPD-126
+    also with an operand the line does not spell (find's `{}`, xargs's input), which may be an option too."""
+    return (word.startswith(hookio.SUBST) or (word.startswith("$") and not word.startswith("$" + syntax._LITERAL_DOLLAR))
+            or word[:1] in (syntax.FIND_PATH, syntax.INPUT_OPERAND, syntax.ANY_PATH))
 
 
 def directory_kind(base, names):
     """SPD-129: what a command does to the operands it writes, when all it does to them is make or remove a directory:
     "make" for mkdir and `install -d`, whose operands are directories they create and nothing else; "remove" for rmdir,
-    and for rm when -r, -R or -d puts a directory within its reach.  Every other command, and rm without one of those
-    options, writes a file, and the path rule reads its operand as it reads a redirection target."""
+    and for rm when -d puts a directory within its reach.  Every other command, and rm without one of those options,
+    writes a file, and the path rule reads its operand as it reads a redirection target.  SPD-126: rm under -r or -R
+    removes the whole hierarchy rooted in the operand, "rm-tree", which bash_rule reads as a whole-subtree removal ("tree")
+    unless the operand exists now as something other than a directory -- a file, or a symlink, which rm removes as itself
+    -- when it is SPD-129's "remove" as before: `rm -rf bin/sub` with `bin/*` removes bin/sub/<anything>, which `bin/*`
+    does not cover."""
     if base == "mkdir" or (base == "install" and "-d" in names):
         return "make"
+    if base == "rm" and any(n in names for n in RM_TREE_OPTIONS):
+        return "rm-tree"
     if base == "rmdir" or (base == "rm" and any(n in names for n in RM_DIRECTORY_OPTIONS)):
         return "remove"
     return None
+
+
+def options_unknown(operands):
+    """SPD-126: True when the first operand this Mac's getopt would read is an operand the line does not spell (find's `{}`,
+    xargs's input): what it holds may be options, so the command is read as if every option that widens what it writes
+    were given (rm -r, cp -R, chmod -R)."""
+    return bool(operands) and operands[0][:1] in (syntax.FIND_PATH, syntax.INPUT_OPERAND, syntax.ANY_PATH)
 
 
 def operand_writes(base, shape, args, hidden=False):
@@ -172,6 +200,8 @@ def operand_writes(base, shape, args, hidden=False):
     shape_values, longs = syntax.ARG_WRITE_COMMANDS[base][1:]
     options, operands = scan(args, shape_values, longs)
     names = {n for n, _, _ in options}
+    if options_unknown(operands):
+        names |= set(RM_TREE_OPTIONS) | set(CP_TREE_OPTIONS)
     entries, suffix = [], None
     if base == "install":
         entries += [(v, (), "path", None, None) for n, v, _ in options if n == "-M" and v]  # the metalog it writes, a file
@@ -186,22 +216,34 @@ def operand_writes(base, shape, args, hidden=False):
     target_dir = next((v for n, v, _ in reversed(options) if n in ("-t", TARGET_DIRECTORY)), None)
     # GNU's -T writes the destination itself, never into it; install's -T is BSD's mtree tags, a value
     no_target = "--no-target-directory" in names or ("-T" in names and base != "install")
+    # SPD-126: what a recursive copy or a move of a directory lands, read in written_paths: each source that is a directory
+    # now lands as a whole tree, walked for a git directory; cp copies a source spelled with a trailing `/` as its
+    # contents (cp(1)), mv renames it whole
+    recursive = None
+    if base == "cp" and any(n in names for n in CP_TREE_OPTIONS):
+        recursive = (RECURSIVE, None, True)
+    elif shape == "move":
+        recursive = (RECURSIVE, None, False)
     if target_dir is not None:
         sources = tuple(operands)
-        entries.append((target_dir, sources, "into", suffix, None))
+        entries.append((target_dir, sources, "into", suffix, recursive))
     elif operands:
         dest, sources = operands[-1], tuple(operands[:-1])
         if shape == "link" and not sources:
             entries.append((".", (dest,), "into", suffix, None))  # `ln -s TARGET`: the link ./<name of TARGET>
             sources = ()
+        elif no_target and recursive:
+            entries.append((dest, sources, "itself", suffix, recursive))  # -T: each source lands as the destination
         elif no_target:
             entries.append((dest, (), "path", suffix, None))
         else:
-            entries.append((dest, sources, "into" if len(sources) > 1 else "dest", suffix, None))  # several sources: a directory
+            entries.append((dest, sources, "into" if len(sources) > 1 else "dest", suffix, recursive))  # several sources: a directory
     else:
         sources = ()
-    if shape == "move":  # mv removes each source, which may be a directory and is read as the file it is (SPD-129)
-        entries = [(s, (), "path", None, None) for s in sources] + entries
+    if shape == "move":
+        # mv removes each source, read as the file it is (SPD-129); SPD-126: a source that is a directory now takes its
+        # whole subtree with it, "file-tree", and a file otherwise
+        entries = [(s, (), "path", None, "file-tree") for s in sources] + entries
     return entries
 
 
@@ -217,7 +259,11 @@ def mode_writes(base, args):
     elif base == "chmod" and operands and ACL_MODE_RE.match(prepare.deglob(operands[0])):
         mode = prepare.deglob(operands[0])
         skip = 1 + ("#" in mode) + (mode != "-a#")
-    return [(w, (), "path", None, None) for w in operands[skip:]]
+    # SPD-126: -R changes every file under a directory operand, "file-tree"; an operand the line does not spell where the
+    # mode stands may be -R, the mode and the files at once
+    unknown = options_unknown(operands)
+    kind = "file-tree" if unknown or any(n in names for n in MODE_TREE_OPTIONS) else None
+    return [(w, (), "path", None, kind) for w in (operands if unknown else operands[skip:])]
 
 
 def sed_writes(args, hidden=False):
@@ -268,35 +314,71 @@ def option_read_index(base, words, start, a):
 
 
 def unresolved(word):
-    return "$" in word or "`" in word or hookio.SUBST in word
+    return "$" in word or "`" in word or hookio.SUBST in word or syntax.unknown_operand(word)
 
 
-def written_paths(entries):
-    """([(named, target, cwds, directory)], capped) for bash_reason: every file the recorded writes by argument name, each
-    target a masked word checked as a redirection target is, `named` the spelling its reason gives and `directory` the
-    kind of SPD-129 the path rule reads a member's globs with; and the first source glob whose files reached the match
-    budget, or None.  Only an operand the command writes as it stands carries a kind: a backup the command leaves beside
-    it is a file, and so is every name a destination directory takes."""
-    out, capped = [], None
+def written_paths(entries, walk=False):
+    """([(named, target, cwds, directory)], capped, unwalked) for bash_reason: every file the recorded writes by argument
+    name, each target a masked word checked as a redirection target is, `named` the spelling its reason gives and
+    `directory` the kind the path rule reads a member's globs with (SPD-129, SPD-126); the first source glob whose files
+    reached the match budget, or None; and the first tree whose walk stopped short, or None.  Only an operand the command
+    writes as it stands carries a kind: a backup the command leaves beside it is a file, and so is every name a destination
+    directory takes.
+
+    SPD-126: a destination entry whose kind is RECURSIVE (cp -R, mv, rsync, ditto) lands each source that is a directory
+    now as a whole tree ("tree"), under the source's name or, for a trailing `/` where the tool copies contents, as the
+    destination itself; an operand the line does not spell lands anywhere under the destination.  `walk` (a caller the
+    path rule holds): every tree such a copy lands, and every tree find hands its command ("find-tree", "walk"), is walked
+    (tree_walk.first_git_entry), and a git directory or config file found there is a target of its own where it lands, so
+    SPD-066's rule refuses a copied `.git` as it refuses writing one."""
+    out, capped, unwalked = [], None, None
     for cmd, word, cwds, sources, how, suffix, kind in entries:
-        targets = []
-        if how == "path":
-            targets.append(word)
+        targets, trees, walks = [], [], []  # walks: (the word a tree lands at, its source directory now, rsync's excludes)
+        if how in ("path", "walk"):
+            if how == "path":
+                targets.append(word)
+            if kind == "find-tree" or how == "walk":
+                walks += [(globbing.literalize(path), path, None) for _, path in tree_walk.directory_sources(word, cwds)]
         else:
-            into, itself = destination(word, cwds, how)
+            recursive = kind if isinstance(kind, tuple) else None
+            into, itself = ([], True) if how == "itself" else destination(word, cwds, how)
             if itself:
                 targets.append(word)
             for folder in into:
+                join = "" if folder.endswith("/") else "/"
                 for source in sources:
+                    if syntax.unknown_operand(source):
+                        trees.append(folder)  # a name the line does not spell, and with -R a whole tree, lands under it
+                        continue
                     names, cap = source_names(source, cwds)
                     if cap and capped is None:
                         capped = "`%s` %s" % (cmd, prepare.deglob(source))
-                    targets += [folder + ("" if folder.endswith("/") else "/") + name for name in names]
+                    targets += [folder + join + name for name in names]
+                    for name, path in tree_walk.directory_sources(source, cwds) if recursive else ():
+                        landing = folder if recursive[2] and prepare.deglob(source).endswith("/") else folder + join + name
+                        trees.append(landing)
+                        walks.append((landing, path, recursive[1]))
+            for source in sources if itself and recursive else ():
+                if syntax.unknown_operand(source):
+                    trees.append(word)
+                for _, path in tree_walk.directory_sources(source, cwds):
+                    trees.append(word)  # the source copied or moved as the destination itself
+                    walks.append((word, path, recursive[1]))
         for target in targets:
             out.append(("`%s` %s" % (cmd, target), target, cwds, kind if how == "path" else None))
             if suffix:
                 out.append(("`%s` %s" % (cmd, target + suffix), target + suffix, cwds, None))
-    return out, capped
+        out += [("`%s` %s" % (cmd, tree), tree, cwds, "tree") for tree in dict.fromkeys(trees)]
+        for landing, path, excludes in walks if walk else ():
+            rel, short = tree_walk.first_git_entry(path, excludes)
+            if short and unwalked is None:
+                unwalked = "`%s` %s" % (cmd, path)
+            if rel is not None:  # where the git directory or config file lands, a file SPD-066's rule reads
+                found = landing + ("" if landing.endswith("/") else "/") + globbing.literalize(rel)
+                origin = os.path.join(path, rel)
+                named = "`%s` %s" % (cmd, found) if origin == found else "`%s` %s, the copy of %s" % (cmd, found, origin)
+                out.append((named, found, cwds, None))
+    return out, capped, unwalked
 
 
 def destination(word, cwds, how):

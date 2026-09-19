@@ -4,6 +4,11 @@ from . import syntax
 from ..hooks import hookio
 
 
+# What a quoted or escaped character becomes: a glob metacharacter's sentinel (SPD-034), and since SPD-126 a shell operator
+# character's, so a quoted `;` or `(` stays in its word instead of reaching the walk as the operator.
+_QUOTED_SENTINELS = dict(syntax._GLOB_SENTINELS, **syntax._PUNCT_SENTINELS)
+
+
 def strip_heredocs(command):
     """Remove here-document bodies from the command text; return (text, bodies) in order."""
     lines = command.split("\n")
@@ -131,7 +136,8 @@ def neutralize_quoted_globs(text):
     sentinel, so filename generation and brace expansion are read only from the unquoted metacharacters (SPD-034: zsh 5.9
     and bash 3.2 both expand an unquoted glob in a redirection target, and both leave a quoted one literal).  The quotes and
     backslashes are kept for shlex to strip; deglob restores the literal character.  Word boundaries are untouched, so other
-    words are read exactly as before.
+    words are read exactly as before.  SPD-126: a quoted or escaped shell operator character (`; & | < > ( )`) gets a sentinel
+    too, so `find . \\( -name a \\) -exec rm {} \\; -delete` reaches the walk as one command whose words hold them.
 
     SPD-043: beside a `$` it leaves the marks the expansion check reads once shlex has removed the quotes: _LITERAL_DOLLAR after a
     `$` that is single-quoted, escaped, or last in double quotes (no expansion in either shell), _QUOTED_DOLLAR after the `$` of
@@ -151,7 +157,7 @@ def neutralize_quoted_globs(text):
     while i < n:
         c = text[i]
         if state == "'":
-            out.append(syntax._GLOB_SENTINELS.get(c, c))
+            out.append(_QUOTED_SENTINELS.get(c, c))
             if c == "'":
                 state = None
             elif c == "$":
@@ -163,10 +169,10 @@ def neutralize_quoted_globs(text):
                 out.append(syntax._NAME_END)
             if state == '"' and nxt not in '$`"\\\n':
                 out.append(c)  # inside "" a backslash before an ordinary character stays literal
-                out.append(syntax._GLOB_SENTINELS.get(nxt, nxt))
+                out.append(_QUOTED_SENTINELS.get(nxt, nxt))
             else:
                 out.append(c)
-                out.append(syntax._GLOB_SENTINELS.get(nxt, nxt))
+                out.append(_QUOTED_SENTINELS.get(nxt, nxt))
             if nxt == "$":
                 out.append(syntax._LITERAL_DOLLAR)
             i += 2
@@ -176,7 +182,7 @@ def neutralize_quoted_globs(text):
                     out.append(syntax._LITERAL_DOLLAR)  # `"cost $"`: a dollar last in double quotes is literal
                 end_name(i + 1)
                 state = None
-            out.append(syntax._GLOB_SENTINELS.get(c, c))
+            out.append(_QUOTED_SENTINELS.get(c, c))
             i += 1
         elif c in "'\"":
             end_name(i)

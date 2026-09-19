@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, expansions, git_programs, git_verbs, globbing, prepare, spud_calls, syntax, walk, zsh
+from . import arg_writes, assignment_words, directories, expansions, find_xargs, git_programs, git_verbs, globbing, prepare, spud_calls, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -144,6 +144,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     # SPD-060: `coproc` was read; SPD-059: no word has taken the command position away yet, so an alias the line defined is
     # still expanded here (a reserved word and an assignment keep it, a wrapper other than zsh's `time` does not).
     coproc, command_position = False, True
+    input_appended = False  # SPD-126: an xargs this command runs under appends what it reads to the words (find_xargs)
     while words:
         w = words[0]
         # SPD-085: `name[subscript]=value` too, read before any glob reading of its brackets
@@ -195,6 +196,10 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 wrapper_from = k + 1 if outcome == expansions._FLAGGED else k
                 continue
             wrapper_from = 1
+            if os.path.basename(w).casefold() == "xargs":
+                # SPD-126: what xargs reads from its input stands where -J or -I puts it, or after the words it runs
+                rest, appended = find_xargs.xargs_input(words, consumed, rest)
+                input_appended = input_appended or appended
             if chdir is not None:
                 # SPD-128: everything the wrapper runs -- its words, a string it hands a shell, a nested wrapper -- starts in the
                 # directory it moved to, once its own words are read (a glob or an expansion there leaves it unknown)
@@ -230,6 +235,13 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     if not words:
         return
     cmd = words[0]
+    if syntax.unknown_operand(cmd):
+        # SPD-126: the program is what xargs reads from its input (`xargs -J % % x`), or a file find found (`-exec {}`)
+        a.kinds.append("other")
+        a.findings.append(("var", syntax.shown_operands(prepare.deglob(cmd))))
+        return
+    # SPD-126: an input xargs appends is operands the line does not spell, read where a command writes by argument
+    unspelled = [syntax.INPUT_OPERAND] * 2 if input_appended else []
     if cmd.startswith(assignment_words.ENV_FUNCTION_PREFIX) and "=" in cmd:
         # SPD-106: `BASH_FUNC_<name>%%=...` is no assignment to a shell, but sudo reads it as one, and env reads it so
         # wherever strip_wrapper did not: refused as the environment it spells, whatever takes it
@@ -362,7 +374,15 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         if not read_points(lambda ws, start: expansions.option_point(arg_writes.option_read_index(base, ws, start, a))):
             return
         a.kinds.append("other")
-        arg_writes.read_writes(prepare.deglob(cmd), base, words, a)
+        arg_writes.read_writes(prepare.deglob(cmd), base, words + unspelled, a)
+    elif base in syntax.TREE_WRITE_COMMANDS:
+        # SPD-126: a command whose files the line does not spell -- what find deletes and runs, an archive extracted, a
+        # patch applied, a download the server names, a tree synced -- read where tee is, a whole-subtree write each
+        a.kinds.append("other")
+        if base == "find":
+            find_xargs.read_find(prepare.deglob(cmd), words + unspelled, a, depth)
+        else:
+            tree_writes.read_tree_writes(prepare.deglob(cmd), base, words + unspelled, a, depth)
     elif cmd in ("alias", "unalias") and directories.builtin_runs(effect):
         # SPD-059: the builtin, spelled exactly, stores text the shell runs wherever it next parses this name in command
         # position -- which on one line means `eval`.  Never a spud call, so an aliasing line is not allowed on its own.
@@ -482,7 +502,7 @@ def member_supplied(target, supplied):
 def unresolvable_write(target):
     """True when the hook cannot tell which file this target names: it holds a variable or a substitution, the test
     bash_reason makes of a redirection target before it refuses a member for one."""
-    return "$" in target or "`" in target or hookio.SUBST in target
+    return "$" in target or "`" in target or hookio.SUBST in target or syntax.unknown_operand(target)
 
 
 def record_assignment(a, found):

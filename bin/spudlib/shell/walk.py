@@ -4,6 +4,16 @@ from . import analyse, assignment_words, directories, globbing, prepare, syntax
 from ..hooks import hookio
 
 
+def _value_may_start_with_dash(word):
+    """SPD-126: whether a masked word, as the shell expands it, may start with `-`: spelled so, an expansion or an operand
+    the line does not spell at its start, or a glob or brace list that may expand to such a word."""
+    if word.startswith("-") or word.startswith((hookio.SUBST, "`")) or word[:1] in (syntax.FIND_PATH, syntax.INPUT_OPERAND, syntax.ANY_PATH):
+        return True
+    if word.startswith("$") and not word.startswith("$" + syntax._LITERAL_DOLLAR):
+        return True
+    return globbing.active_glob_word(word) and (globbing.may_start_with_dash(word) or word.startswith("{"))
+
+
 def _function_names(words):
     """The names a function definition binds, deglobbed (SPD-084): the name words that reached a `name ()` or
     `function name {` header -- `name`, both of zsh's several names in `a b () { ... }`, `function name` and the
@@ -206,6 +216,22 @@ class ShellWalk:
         of that list may open with no `then` or `do` (SPD-061)."""
         self.push("cond" if t == "if" else "loop", "fi" if t == "if" else "done")
         self.stack[-1].body = "cond"
+
+    def loop_header_word(self, t):
+        """SPD-126: a `for` or `select` loop's variable holds whatever its list gives it, which a member writes: a doubt
+        (SPD-043), so a word it fills where a command reads options or primaries is one the member controls -- unless every
+        word of the list, as the shell expands it, starts with something other than `-` (`for d in /tmp/*/; do find "$d"
+        ...`), which ShellAnalysis.dashless_loops records until the list says otherwise."""
+        if "in" not in self.words:
+            if syntax.IDENTIFIER_RE.match(t):
+                self.a.doubt.add(t)
+            return
+        at = self.words.index("in")
+        names = [n for n in self.words[:at] if syntax.IDENTIFIER_RE.match(n)]
+        if any(_value_may_start_with_dash(w) for w in self.words[at + 1 :]):
+            self.a.dashless_loops.difference_update(names)
+        else:
+            self.a.dashless_loops.update(names)
 
     def end_header(self):
         """The loop's header, or an if/while/until condition ending in `]]`, is complete.  Its body may follow with no `do`
@@ -437,6 +463,8 @@ class ShellWalk:
             self.close_brace()
             return
         self.words.append(t)
+        if self.skip and self.header == "for":
+            self.loop_header_word(t)
         if self.skip and self.header == "repeat":  # `repeat word`: one word of header, then the body (SPD-042)
             self.end_header()
         elif t == "]]" and "[[" in self.words and not self.skip and self.stack and self.stack[-1].body == "cond":

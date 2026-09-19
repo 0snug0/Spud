@@ -4,6 +4,7 @@ import os
 import re
 import sys
 
+from . import syntax
 from ..hooks import hookio, worktrees
 from ..state import lookup
 
@@ -109,7 +110,7 @@ def python_options_vouched(options):
 
 
 def unresolvable_word(word):
-    return "$" in word or "`" in word or hookio.SUBST in word
+    return "$" in word or "`" in word or hookio.SUBST in word or syntax.unknown_operand(word)
 
 
 def interpreter_vouched(word, cwds):
