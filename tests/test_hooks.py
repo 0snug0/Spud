@@ -4905,6 +4905,368 @@ class AliasEvalTest(BashHookCase):
         self.assertRefused("alias e='echo x | tee ledger/tickets/SPD-001.md'; eval e", "Law 1", agent_id=None)
 
 
+# A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
+# files on this Mac are 4,100 lines and 124 KB; nothing here reads them, and a test never touches ~/.claude.
+SHELL_SNAPSHOT = """\
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+# Functions
+ggp () {
+\tgit push origin "${*}"
+}
+noteit () {
+\techo hi > note.txt
+}
+keepit () {
+\techo hi > tests/kept.txt
+}
+shadowed () {
+\tlocal _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+\tARGV0=ugrep "$_cc_bin" ${1+"$@"}
+}
+opendb () {
+\tsqlite3 ledger.db 'select 1'
+}
+take () {
+\tmkdir -p "$@"
+}
+# Shell Options
+setopt autocd
+setopt nohashdirs
+# Aliases
+alias -- g=git
+alias -- gp='git push'
+alias -- gpf='git push --force-with-lease --force-if-includes'
+alias -- gc='git commit --verbose'
+alias -- gcp='git cherry-pick'
+alias -- grhh='git reset --hard'
+alias -- gam='git am'
+alias -- gst='git status'
+alias -- gd='git diff'
+alias -- glog='git log --oneline --decorate --graph'
+alias -- ls='ls -G'
+alias -- ll='ls -lh'
+alias -- python=python3
+alias -- grep='grep --color=auto'
+alias -- awky='awk '\\''{print $1}'\\'' f'
+alias -- _='sudo '
+alias -- into='echo hi > note.txt'
+alias -- intok='echo hi > tests/kept.txt'
+alias -- toledger='echo hi > ledger/Home.md'
+alias -- writes='cp a.txt note.txt'
+alias -- md='mkdir -p'
+alias -- broken='git push
+# Shadow grep with the harness's own
+unalias grep 2>/dev/null || true
+function grep {
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  ARGV0=ugrep "$_cc_bin" ${1+"$@"}
+}
+"""
+
+
+class ShellSnapshotCase(BashHookCase):
+    """A scratch ~/.claude/shell-snapshots of the test's own making, under the home's SPUD_USER_CLAUDE_DIR."""
+
+    def setUp(self):
+        super().setUp()
+        self.snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        self.snapshots.mkdir(parents=True)
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", SHELL_SNAPSHOT)
+        (self.home.path / "tests").mkdir(exist_ok=True)
+
+    def write_snapshot(self, name, text, mtime=None):
+        path = self.snapshots / name
+        path.write_text(text, encoding="utf-8")
+        if mtime is not None:
+            os.utime(path, (mtime, mtime))
+        return path
+
+    def refused_for_members(self, command, needle="Law 7", cwd=None):
+        r = None
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id, cwd)
+        return r
+
+    def silent_for_everyone(self, command, cwd=None):
+        for agent_id in (AGENT_A, AGENT_B, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id, cwd)
+
+
+class ShellSnapshotTest(ShellSnapshotCase):
+    """SPD-133: Claude Code starts a shell for every Bash call and sources its snapshot of the user's interactive shell in
+    it (~/.claude/shell-snapshots/snapshot-zsh-<stamp>-<id>.sh), so a member's command word is expanded by that profile's
+    aliases and run by its functions before any program does.  The hook read the word as written, so on this Mac `gp`
+    pushed, `gc -m x` committed, `g commit -m x` committed and `ggp` pushed, each reaching the rule as an unknown command
+    with no finding at all -- a hole straight through Law 7.
+
+    Confirmed from a member's own Bash call before anything was written: `type gp` printed "gp is an alias for git push",
+    `type gc` "gc is an alias for git commit --verbose", `type ggp` "ggp is a shell function from
+    /Users/ericlugo/.claude/shell-snapshots/snapshot-zsh-1789793561771-kk8ad0.sh", and `gst --short --branch` ran git and
+    printed the worktree's status with no finding.  The six snapshots there define 497 aliases and 223 functions between
+    them; 190 aliases expand to git and 111 of those to a write verb.
+
+    The table is parsed out of the snapshots themselves, never by running a shell, and cached under the home's .spud/ by
+    each file's size and mtime.  A snapshot is read in line order, since the harness appends its own shadows after the
+    alias block -- `unalias grep`, then `function grep { ... }` -- so on this Mac grep is a function and not the alias the
+    same file defines earlier.  An alias is then expanded as zsh expands it: at command position only, textually, before
+    any rule reads the word, chaining into the next word when the body ends in a blank, and never into its own name
+    again.  A function's body is read as an `eval` string is, once per name per line.  The findings are the body's own,
+    minus the ones that say only that the hook cannot read a word of it: the harness's own grep, find, rg and pkill each
+    dispatch through `"$_cc_bin"`, and reading that as a refusal would refuse a member every grep it runs.
+
+    A member plans home:tests/** and home:bin/spud (AGENT_A and AGENT_B), and the home is the cwd."""
+
+    def test_the_tickets_evidence_commands(self):
+        for cmd, verb in (("gp", "git push"), ("gpf", "git push"), ("gc -m x", "git commit"), ("g commit -m x", "git commit"),
+                          ("gcp abc", "git cherry-pick"), ("grhh", "git reset"), ("gam x.patch", "git am"), ("ggp", "git push")):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn(verb, r.reason)
+
+    def test_the_read_verbs_stay_silent(self):
+        for cmd in ("gst", "gst --short --branch", "gd", "glog", "git status", "git log --oneline -5"):
+            self.silent_for_everyone(cmd)
+
+    def test_an_alias_that_shadows_a_program_stays_silent(self):
+        for cmd in ("ls", "ls -la", "ll", "python -c pass", "grep -rn x .", "awky", "echo hi", "cat f"):
+            self.silent_for_everyone(cmd)
+
+    def test_a_recursive_alias_terminates(self):
+        """`alias ls='ls -G'` and `ll='ls -lh'`: zsh does not expand a name again inside its own expansion."""
+        self.silent_for_everyone("ll -a")
+        self.assertEqual(self.expansion("ll -a"), [("ll", "an alias for `ls -lh`"), ("ls", "an alias for `ls -G`")])
+        self.assertEqual(self.expansion("ls"), [("ls", "an alias for `ls -G`")])
+
+    def test_a_body_ending_in_a_blank_chains_into_the_next_word(self):
+        """zsh expands the word after an alias whose body ends in a blank, which is what `_='sudo '` is for."""
+        self.refused_for_members("_ gp")
+        self.assertEqual([n for n, _ in self.expansion("_ gp")], ["_", "gp"])
+        self.silent_for_everyone("_ ls")
+        self.silent_for_everyone("sudo gp")  # a wrapper takes the command position: no chaining through it
+
+    def test_the_command_position_alone(self):
+        for cmd in ("command gp", "./gp", "echo gp", "builtin gp", "env gp", "x=gp", "git log --grep gp"):
+            self.silent_for_everyone(cmd)
+        self.assertEqual(self.expansion("command gp"), [])
+
+    def test_a_function_that_runs_a_git_write(self):
+        r = self.refused_for_members("ggp")
+        self.assertIn("git push", r.reason)
+        self.assertEqual(self.expansion("ggp"), [("ggp", "a shell function")])
+        self.refused_for_members("ggp origin main")
+
+    def test_a_function_that_dispatches_through_a_variable_stays_silent(self):
+        """The harness's own shadows for grep, find, rg and pkill run `ARGV0=ugrep "$_cc_bin" ${1+"$@"}`: a command word
+        the hook cannot resolve.  Reading that as a refusal would refuse a member every grep it runs, and the member
+        neither wrote the text nor can change the file, so the findings that say only "the hook cannot read this" are
+        dropped from a body the shell holds."""
+        self.silent_for_everyone("shadowed x")
+        self.silent_for_everyone("grep -rn x .")
+        self.assertEqual(self.expansion("grep x"), [("grep", "a shell function")])  # the function, not the alias
+
+    def test_what_the_hook_can_read_in_a_body_still_refuses(self):
+        self.refused_for_members("opendb", "ledger database")
+
+    def test_a_redirection_in_a_body_is_held_to_the_path_rule(self):
+        """A file an alias's body or a function's writes is the caller's write, read by the path rule for whoever runs the
+        line: refused where it is nobody's deliverable, refused for Spud wherever it is a member's, and allowed a member
+        inside its own."""
+        for cmd in ("into", "noteit", "writes"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "note.txt")
+                self.assertRefused(cmd, "Law 1", agent_id=None)
+        for cmd in ("intok", "keepit"):  # tests/** is what these members plan
+            with self.subTest(cmd):
+                self.assertSilent(cmd, AGENT_A)
+                self.assertSilent(cmd, AGENT_B)
+                self.assertRefused(cmd, "Law 1", agent_id=None)
+
+    def test_spud_keeps_his_own_answers(self):
+        """Law 7 does not bind Spud, so every alias and function that refuses a member here is silent for him; Law 1 and
+        the path rule still read what one of them writes, and ledger/Home.md is one of his own paths."""
+        for cmd in ("gp", "gc -m x", "ggp", "gst", "ls", "grep x", "broken", "toledger"):
+            with self.subTest(cmd):
+                self.assertSilent(cmd, agent_id=None)
+        self.refused_for_members("toledger", "ledger/Home.md")
+
+    def test_an_alias_body_the_hook_cannot_read(self):
+        r = self.refused_for_members("broken", "cannot read")
+        self.assertIn("broken", r.reason)
+        self.assertSilent("broken", agent_id=None)
+
+    def test_the_reason_names_what_the_shell_defined(self):
+        r = self.assertRefused("gc -m x", "Law 7")
+        self.assertIn("`gc` as an alias for `git commit --verbose`", r.reason)
+        self.assertIn("~/.claude/shell-snapshots/", r.reason)
+        self.assertNotIn("shell-snapshots", self.assertRefused("git commit -m x", "Law 7").reason)
+
+    def test_the_harness_shadow_shape_is_read_in_order(self):
+        """The snapshot defines `grep` as an alias and then unaliases it and defines a function of the same name; the
+        shell ends with the function, and so does the table."""
+        m = load_spud_module()
+        built = m.build_table([str(self.snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh")])
+        self.assertNotIn("grep", built.aliases)
+        self.assertIn("grep", built.functions)
+        self.assertEqual(built.aliases["gp"], "git push")
+        self.assertEqual(built.aliases["_"], "sudo ")  # the trailing blank survives
+        self.assertEqual(built.aliases["awky"], "awk '{print $1}' f")  # one level of quoting off, the awk quotes kept
+        self.assertIsNone(built.aliases["broken"])
+        self.assertIn("git push origin", built.body("ggp"))
+
+    def test_the_newest_snapshot_that_names_a_name_decides_it(self):
+        older = "alias -- gp='git status'\nalias -- only='git push'\n"
+        self.write_snapshot("snapshot-zsh-1600000000000-bbbbbb.sh", older, mtime=1600000000)
+        os.utime(self.snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh", (1700000000, 1700000000))
+        self.refused_for_members("gp")            # the newer file's `git push`
+        self.refused_for_members("only")          # named only by the older file
+        self.silent_for_everyone("gst")
+
+    def test_the_table_is_cached_under_the_state_directory_and_rebuilt_when_a_snapshot_changes(self):
+        cache = self.home.path / ".spud" / "shell-snapshot.json"
+        self.assertFalse(cache.exists())
+        self.refused_for_members("gp")
+        self.assertTrue(cache.is_file())
+        stored = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertEqual(stored["aliases"]["gp"], "git push")
+        self.assertEqual(len(stored["fingerprint"]), 1)
+        before = cache.stat().st_mtime_ns
+        self.silent_for_everyone("echo hi")  # a second run reads the cache and leaves it alone
+        self.assertEqual(cache.stat().st_mtime_ns, before)
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", "alias -- gp='git status'\n")
+        self.silent_for_everyone("gp")
+        self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))["aliases"]["gp"], "git status")
+        for garbage in ("not json", "[]", '{"fingerprint": 1}'):  # a cache it cannot use is built again, never trusted
+            with self.subTest(garbage=garbage):
+                cache.write_text(garbage, encoding="utf-8")
+                self.silent_for_everyone("gp")
+                self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))["aliases"]["gp"], "git status")
+
+    def test_an_alias_never_launders_a_target_the_member_supplied(self):
+        """An alias's expansion is its body followed by the member's OWN words, and a function's `$@` is them, so the
+        prune that keeps `grep` and `find` silent must never reach a target the member wrote.  Before this narrowing
+        `md $HOME/planted` (md='mkdir -p') recorded no write at all and was silent, while `mkdir -p $HOME/planted`
+        spelled out was refused; the same for the chaining alias and for a function that writes its `$@`."""
+        for cmd in ("md $HOME/planted", "mkdir -p $HOME/planted", "_ cp a $HOME/.gitconfig", "cp a $HOME/.gitconfig",
+                    "take $HOME/planted", "md `echo x`", "md $(echo x)"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "spell the path out")
+        # Spud keeps the answer he had: an unresolvable target refuses a member alone, behind an alias exactly as spelled out
+        for cmd in ("md $HOME/planted", "mkdir -p $HOME/planted", "take $HOME/planted"):
+            with self.subTest(cmd):
+                self.assertSilent(cmd, agent_id=None)
+
+    def test_the_narrowing_keeps_a_resolvable_write_and_the_shadowed_commands(self):
+        """What the prune is for is untouched: the `$_cc_bin` and `$data` shaped targets a body of its own writes.  A
+        target the hook can resolve was never pruned, so the path rule reads it for the caller as it always did."""
+        for cmd in ("md tests/scratch", "md tests/a/b"):
+            with self.subTest(cmd):
+                self.assertSilent(cmd, AGENT_A)
+                self.assertSilent(cmd, AGENT_B)
+                self.assertRefused(cmd, "Law 1", agent_id=None)
+        self.refused_for_members("md scratchdir", "scratchdir")  # outside every deliverable of theirs
+        for cmd in ("grep -rn x .", "find . -name x", "shadowed x", "ls", "python -c pass"):
+            self.silent_for_everyone(cmd)
+
+    def test_a_member_cannot_plant_a_snapshot(self):
+        """Reading the shell's table is only safe because a member cannot write one: an alias of its own making would make
+        a line the hook refuses silent (`alias git=echo` reaches the dispatch as `echo push`).  SPD-064 already refuses a
+        caller with an agent_id every path outside a registered project, and ~/.claude is one -- asserted here because it
+        is this reading's premise, not an accident of it.  Nothing is written: the hook is asked about the path."""
+        planted = os.path.expanduser("~/.claude/shell-snapshots/snapshot-zsh-1900000000000-planted.sh")
+        self.assertFalse(os.path.exists(planted))
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(agent_id=agent_id):
+                self.assertRefused("echo x > %s" % planted, "outside every registered project", agent_id)
+                self.assertRefused("cp %s %s" % (self.home.path / "spud.config.json", planted), "outside every registered project", agent_id)
+                r = self.home.hook("PreToolUse", self.pre_edit(planted, agent_id=agent_id))
+                self.assertEqual(r.decision, "deny", r)
+                self.assertIn("outside every registered project", r.reason)
+        self.assertFalse(os.path.exists(planted))
+
+    def test_no_snapshot_directory_keeps_the_reading_the_line_had(self):
+        shutil.rmtree(self.snapshots)
+        for cmd in ("gp", "gc -m x", "ggp", "ls", "grep x"):
+            self.silent_for_everyone(cmd)
+        self.refused_for_members("git push")  # the words as spelled are read as they always were
+        self.assertFalse((self.home.path / ".spud" / "shell-snapshot.json").exists())
+        self.assertFalse(self.home.spool.exists())  # a machine with no snapshots is no gap
+
+    def test_an_unreadable_snapshot_fails_open_and_is_spooled(self):
+        (self.snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh").chmod(0o000)
+        self.addCleanup((self.snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh").chmod, 0o644)
+        self.silent_for_everyone("gp")  # a member is never refused every command because the table is cold
+        self.refused_for_members("git " + "push")  # and the words as spelled keep every reading they had
+        gaps = self.events("hook.error")  # the spool the first run wrote is drained by the run after it
+        self.assertTrue(gaps, self.home.spool.read_text(encoding="utf-8") if self.home.spool.exists() else "no spool")
+        self.assertIn("the shell alias table is missing", gaps[-1]["body"])
+        self.assertIn("the hook cannot read this Mac's shell snapshots", self.home.run("doctor", check=False).stderr)
+
+    def test_doctor_reports_the_table(self):
+        out = self.home.json("doctor")
+        self.assertTrue(any("shell snapshot: " in n and "aliases" in n for n in out["notes"]), out["notes"])
+        self.assertTrue(any("the hook cannot read" in n for n in out["notes"]), out["notes"])
+        shutil.rmtree(self.snapshots)
+        self.assertTrue(any("no shell snapshot in" in n for n in self.home.json("doctor")["notes"]))
+
+    def expansion(self, command):
+        """[(the name, what the shell runs for it)] the analysis recorded for this line."""
+        m = load_spud_module()
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            a = m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+        return a.shell_expanded
+
+
+class RealShellSnapshotTest(BashHookCase):
+    """The same rule against this Mac's own ~/.claude/shell-snapshots, skipped where there is none: the ticket's evidence
+    was Eric's oh-my-zsh profile, and nothing here is asserted about a name that profile does not define.  Never fails the
+    suite on Eric's dotfiles -- it only checks that a name the shell really does define as a git write is refused, and
+    that the names members run all day are not."""
+
+    def setUp(self):
+        super().setUp()
+        m = load_spud_module()
+        directory = Path(os.path.expanduser("~/.claude")) / "shell-snapshots"
+        if not directory.is_dir() or not list(directory.glob("snapshot-*.sh")):
+            self.skipTest("no shell snapshot in %s" % directory)
+        self.table = m.build_table(sorted((str(p) for p in directory.glob("snapshot-*.sh")), reverse=True))
+        self.env = dict(self.home.env)
+        self.env.pop("SPUD_USER_CLAUDE_DIR")  # this run reads the real ~/.claude
+
+    def real_bash(self, command, agent_id=AGENT_A):
+        env, self.home.env = self.home.env, self.env
+        try:
+            return self.bash(command, agent_id)
+        finally:
+            self.home.env = env
+
+    def test_the_table_reads_this_macs_profile(self):
+        self.assertIsNone(self.table.gap)
+        self.assertTrue(self.table.aliases or self.table.functions)
+        for name, body in sorted(self.table.aliases.items()):
+            self.assertTrue(body is None or isinstance(body, str), name)
+
+    def test_a_git_write_this_shell_really_defines_is_refused(self):
+        found = [n for n, b in sorted(self.table.aliases.items()) if b and b.split()[:2] in (["git", "push"], ["git", "commit"])]
+        if not found:
+            self.skipTest("this profile aliases no git push or commit")
+        r = self.real_bash(found[0])
+        self.assertEqual(r.decision, "deny", (found[0], r))
+        self.assertIn("Law 7", r.reason)
+
+    def test_the_commands_members_run_all_day_stay_silent(self):
+        for cmd in ("ls", "ls -la", "grep -rn spud .", "python3 -c pass", "cat /etc/hosts", "echo hi", "git status",
+                    "find . -name x", "diff /etc/hosts /etc/hosts"):
+            with self.subTest(cmd):
+                r = self.real_bash(cmd)
+                self.assertNotEqual(r.decision, "deny", (cmd, r.reason))
+
+
 class NamedCoprocTest(BashHookCase):
     """SPD-060: bash 4 and later accept a name before a coproc's compound command, `coproc NAME compound_command`, and run
     the group in a forked shell; the hook read NAME for the command word, so `coproc NAME { git push; }` was kind other with

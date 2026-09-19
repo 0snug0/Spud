@@ -127,6 +127,18 @@ ALIAS_WORD_RE = re.compile(r"^([^=\s]+)=(.*)\Z", re.S)
 # The key an alias's name is recorded under in `assigned` and `doubt`, so every rule that doubts a variable the line assigned
 # doubts the alias too.  No variable name can hold it.
 ALIAS_KEY = "\x00alias\x00"
+# SPD-133: the findings that say only that the hook cannot read a word, dropped from text the shell itself holds -- an
+# alias's body or a function's, out of Claude Code's snapshot of the user's profile.  The member did not write that text,
+# cannot spell it differently and cannot write the file it comes from, and Claude Code's own shadows for find, grep,
+# pkill and rg each dispatch through `"$_cc_bin"`, so reading those as refusals would refuse every `grep` a member runs.
+# Everything the hook *can* read there -- a git verb, a program git runs, a database call, a spud call, a file the text
+# names and writes -- is the finding it would be on the line.
+SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias"})
+# SPD-133: a positional parameter, which is how a function receives the words the member wrote (`mkdir -p $@` in a body is
+# the member's own path).  A write target holding one is never pruned from text the shell holds, whatever else is: `$@`,
+# `$*`, `$0`..`$9` and every braced form of them (`${@}`, `${@:2}`, `${@:$#}`, `${1:-x}`, `${#@}`, `${1+"$@"}`).  `$HOME`
+# and `$_cc_bin` are not matched -- a name never starts with a digit or one of those two characters.
+POSITIONAL_RE = re.compile(r"\$(?:[0-9@*]|\{[#!]?[0-9@*][^}]*\})")
 # SPD-105: the entry ShellAnalysis.functions and .hashed hold when the line set an element of zsh's `functions` or
 # `commands` parameter whose name the hook cannot read (`functions[$k]=`, `functions+=($pairs)`), so every name the hook
 # reads may now be one.  No command name can hold it.
@@ -400,6 +412,15 @@ class ShellAnalysis:
         # under ALIAS_KEY + name, so a definition in a branch, a subshell, a pipeline or a loop body is doubted as a
         # variable's assignment there is.
         self.aliases, self.alias_scope, self.alias_unknown = {}, 0, False
+        # SPD-133: the shell the Bash tool starts sources Claude Code's snapshot of the user's interactive shell, so a
+        # command word may already be one of that profile's aliases or functions before anything on the line runs.
+        # `shell_expanded`, (the name, what the shell runs for it) per expansion on this line, in order, so a reason can
+        # say what the word it names actually was; `expanding`, the alias names whose expansion is in flight, which zsh
+        # does not expand again inside their own body (`alias ls='ls -G'` terminates); `bodies_read`, the function names
+        # whose body this line has already read, once each however often the line names them; `shell_reading`, how deep
+        # inside such text the reading is, so the outermost of them prunes once, against the member's own words.
+        self.shell_expanded, self.expanding, self.bodies_read = [], [], set()
+        self.shell_reading = 0
         # SPD-062: the command names a `hash` line put in the shell's own command table, so a later bare call of one of them
         # runs the file the line chose whatever PATH holds.  Never cleared: a `hash` in a branch, a subshell or a loop body
         # still leaves the hook unable to say which program a name finds, and the refusal is the safe answer.  zsh's

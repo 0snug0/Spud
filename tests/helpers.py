@@ -39,6 +39,10 @@ GUARD_HOME = os.path.join(tempfile.gettempdir(), "spud-test-guard-%d-does-not-ex
 os.environ["SPUD_HOME"] = GUARD_HOME
 os.environ["SPUD_CONFIG_DIR"] = os.path.join(GUARD_HOME, "config")
 os.environ["SPUD_TOOL_DIR"] = GUARD_HOME
+# SPD-133: the Bash rule reads a command word against the aliases and functions of Claude Code's shell snapshot,
+# ~/.claude/shell-snapshots/.  This Mac's snapshots must not decide a test in this process either, so the guard path
+# stands in for ~/.claude here as it does for the home; every Home sets its own SPUD_USER_CLAUDE_DIR below.
+os.environ["SPUD_USER_CLAUDE_DIR"] = os.path.join(GUARD_HOME, "user-claude")
 
 REPO = Path(__file__).resolve().parent.parent
 

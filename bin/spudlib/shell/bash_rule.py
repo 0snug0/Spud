@@ -104,6 +104,30 @@ def git_repo_outside(ctx, con, target, cwds):
 
 
 def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="spud"):
+    """(reason or None, analysis) for a Bash command line, with what the shell expanded named after it (SPD-133): the
+    refusal is the one the words the shell actually runs earn, and a member that typed `gc -m x` reads Law 7's words
+    about `git commit` beside the alias that spelled it."""
+    reason, analysis = bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode)
+    if reason and analysis is not None and analysis.shell_expanded:
+        reason += shell_expansion_note(analysis)
+    return reason, analysis
+
+
+def shell_expansion_note(analysis):
+    """What a reason adds when the shell this line runs in already defined one of its command words (SPD-133).  Claude
+    Code sources its snapshot of the user's interactive shell in the shell it starts for every Bash call, so the word the
+    member wrote is not the command that runs; the reason says which names it read and what each one is."""
+    named, seen = [], set()
+    for name, what in analysis.shell_expanded:
+        if name not in seen:
+            seen.add(name)
+            named.append("`%s` as %s" % (name, what))
+    return ("  (The shell this command runs in already defines %s, from Claude Code's snapshot of your interactive shell"
+            " in ~/.claude/shell-snapshots/, which it sources for every Bash call; the hook reads what the command word"
+            " runs, not what it spells.)" % ", ".join(named))
+
+
+def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="spud"):
     """(reason or None, analysis) for a Bash command line.  In a session that is not Spud (`mode` plain, SPD-014) a caller
     with no agent_id, or an unbound one (Eric's own subagents), keeps the database, `spud hook`, `--as spud` and member-own
     refusals and the path rule, and gets no Law 7 refusal; a bound member gets every refusal, in any session."""
@@ -226,6 +250,11 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
                     " pipeline, a background list, a loop or function body, a reading only one shell makes). A shell expands an"
                     " alias when it parses the text, so the command that runs is not the one written; spell the command out, or"
                     " define no alias on the line" % detail), analysis
+        elif kind == "shell-alias":
+            return ("the command word %s is an alias your shell already defines whose body the hook cannot read (its quoting"
+                    " does not close in Claude Code's snapshot of your interactive shell, ~/.claude/shell-snapshots/). A shell"
+                    " expands an alias when it parses the line, so the command that runs is not the one written; spell the"
+                    " command out" % detail), analysis
         elif kind == "glob":
             return ("the word %s is a glob the shell expands before it runs the command, and it can become more than one command,"
                     " option or verb the hook checks at once, or more than the hook reads; spell the words out" % detail), analysis

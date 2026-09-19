@@ -184,7 +184,8 @@ QUIET_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
 # resolve at all (SPD-043).  So `touch push; git p?sh` still names `git push`, `git -C /tmp commit` the verb, and
 # `PATH=<dir> git status; git push` the push.  All of them refuse; the entry decides only which reason a line of several
 # commands answers with.
-FINDING_LAST = {"git-verb": 1, "git-repo": 1, "path": 1, "hashed": 1, "function": 1, "env-function": 1, "var-word": 2, "var-doubt": 2}
+FINDING_LAST = {"git-verb": 1, "git-repo": 1, "path": 1, "hashed": 1, "function": 1, "env-function": 1, "var-word": 2, "var-doubt": 2,
+                "shell-alias": 2}  # SPD-133: an alias of the shell's whose body the hook cannot read, after the words as spelled
 
 
 def actor_is_self(con, actor, caller_member, caller_agent_id):

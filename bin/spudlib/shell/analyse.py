@@ -229,6 +229,9 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
             if doubtful:  # after the body, so a refusal the body itself earns keeps its own reason
                 a.findings.append(("alias", prepare.deglob(cmd)))
             return
+    if command_position and read_shell_name(words, a, depth):
+        # SPD-133: the shell this line runs in already defines the command word as an alias, whose body took the command
+        return
     if cmd in syntax.ASSIGNING_COMMANDS:
         for x in words[1:]:  # `read X`, `printf -v X`, `unset X`, `getopts o X`: X may now hold anything (SPD-043, probed)
             a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(x)))
@@ -375,6 +378,93 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
     else:
         a.kinds.append("other")  # CD, /usr/bin/cd, env cd: /usr/bin/cd in its own process, and the shell stays
     shadowed_name(a, cmd, path_names)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason
+
+
+def read_shell_name(words, a, depth):
+    """A command word the shell the Bash tool starts already defines (SPD-133), read for what it actually runs: an alias,
+    whose body and the words after it are analysed as the text the shell put there -- and True, since that text is the
+    command now -- or a function, whose body is read as an `eval` string is while the call's own words go on to be
+    dispatched for what they name.  An alias shadows a function of the same name, as the shell resolves them."""
+    cmd = prepare.deglob(words[0])
+    text, own_words, expanded, unreadable = expansions.shell_aliased(words, a)
+    a.shell_expanded.extend(expanded)
+    if unreadable is not None:  # the chain reached a body whose quoting the hook cannot take off: it runs the line, unread
+        a.kinds.append("other")
+        a.findings.append(("shell-alias", unreadable))
+        return True
+    if expanded:
+        a.expanding.extend(name for name, _ in expanded)
+        try:
+            analyse_shell_text(a, text, depth + 1, own_words)
+        finally:
+            del a.expanding[len(a.expanding) - len(expanded):]
+        return True
+    body = expansions.shell_function(cmd, a)
+    if body is not None:
+        a.shell_expanded.append((cmd, "a shell function"))
+        a.bodies_read.add(cmd)
+        # the call's own words reach the body as its positional parameters, which member_supplied reads there
+        analyse_shell_text(a, body, depth + 1, [prepare.deglob(w) for w in words[1:]], own_process=True)
+    return False
+
+
+def analyse_shell_text(a, text, depth, own_words, own_process=False):
+    """Read text the shell itself holds: an alias's body, which is the line's own text once the shell has parsed it, or a
+    function's, whose directory changes and assignments stay its own (own_process).  `own_words` are the member's own
+    words of the line that reach this text -- the words after the alias the shell expanded, or the call's arguments, which
+    a function receives as its positional parameters.
+
+    The findings are the findings the text would earn on the line, minus two kinds that would fall on a member for text it
+    did not write and cannot change: the ones that say only that the hook cannot read a word (syntax.SHELL_TEXT_TOLERATED)
+    and a write whose target the hook cannot resolve.  Claude Code shadows find, grep, rg and pkill with functions that
+    dispatch through `"$_cc_bin"` and write through `$data`-shaped names of their own; without both prunes a member would
+    be refused every `grep` it runs.
+
+    A target the member supplied is never pruned (member_supplied): an alias's expansion is its body followed by the
+    member's own words, and a function's `$@` is them, so pruning on the target's spelling alone let an alias launder
+    exactly what the unresolvable-target rule exists to refuse -- `md $HOME/planted` recorded no write while
+    `mkdir -p $HOME/planted` was refused.  A concrete file the text writes is held to the path rule for the caller, as an
+    alias's redirection is anywhere else.  Only the outermost of these readings prunes, so a nested one never drops what
+    the reading closest to the member's words keeps (SPD-133)."""
+    outermost = a.shell_reading == 0
+    marks = (len(a.findings), len(a.redirects), len(a.git_writes), len(a.arg_writes))
+    a.shell_reading += 1
+    try:
+        if own_process:
+            analyse_isolated(a, text, depth)
+        else:
+            analyse_command(text, a, depth)
+    finally:
+        a.shell_reading -= 1
+    if not outermost:
+        return
+    supplied = frozenset(own_words)
+    a.findings[marks[0]:] = [f for f in a.findings[marks[0]:] if f[0] not in syntax.SHELL_TEXT_TOLERATED]
+    a.redirects[marks[1]:] = [e for e in a.redirects[marks[1]:] if keeps_write(e[0], supplied)]
+    a.git_writes[marks[2]:] = [e for e in a.git_writes[marks[2]:] if keeps_write(e[1], supplied)]
+    a.arg_writes[marks[3]:] = [e for e in a.arg_writes[marks[3]:] if keeps_write(e[1], supplied)]
+
+
+def keeps_write(target, supplied):
+    """Whether a write this text would make is read as it stands: every target the hook can resolve, and every one the
+    member's own words supplied, whatever the hook can make of it."""
+    return not unresolvable_write(target) or member_supplied(target, supplied)
+
+
+def member_supplied(target, supplied):
+    """True when this target is one the member's own line gave the text: one of the words that followed the alias the
+    shell expanded, or a positional parameter, which is how a function receives them.  An own word that is itself
+    unresolvable is also read where it stands inside a longer target, since that is the spelling the refusal is for."""
+    spelled = prepare.deglob(target)
+    if syntax.POSITIONAL_RE.search(spelled) is not None or spelled in supplied:
+        return True
+    return any(word in spelled for word in supplied if unresolvable_write(word))
+
+
+def unresolvable_write(target):
+    """True when the hook cannot tell which file this target names: it holds a variable or a substitution, the test
+    bash_reason makes of a redirection target before it refuses a member for one."""
+    return "$" in target or "`" in target or hookio.SUBST in target
 
 
 def record_assignment(a, found):
