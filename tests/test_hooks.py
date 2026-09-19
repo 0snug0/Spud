@@ -8411,6 +8411,158 @@ class ArgumentWriteTest(BashHookCase):
         self.assertSilent("touch %s/probe.txt" % self.scratchpad, agent_id=AGENT_D)
 
 
+AGENT_E = "b1c2d3e4f5a6b7c8d"  # SPD-129: the member holding the differential's four mkdir globs
+AGENT_F = "c9d8e7f6a5b4c3d2e"  # SPD-129: the member holding dist/**, the differential's `rm -rf dist`
+
+
+class DirectoryWriteTest(BashHookCase):
+    """SPD-129: a member is refused the directory its own deliverable glob covers.
+
+    path_matches_glob reads `X/**` as `X/` plus something, so a member whose glob is `test/fixtures/movecheck/**` may write
+    every file under that directory and was refused the `mkdir -p` that makes it (Law 5).  Before SPD-121 a mkdir was
+    unread and the question never arose; now it is the natural first line of a member's work, and SPD-121's differential
+    over the 3477 commands spudagents ran holds five refusals of exactly this shape, each pinned below:
+    `mkdir -p test/fixtures/movecheck` with `test/fixtures/movecheck/**`, `mkdir -p admin/src/lib/actions`,
+    `mkdir -p test/helpers`, `mkdir -p docs/superpowers/plans` (the three with the obvious `<dir>/**`), and `rm -rf dist`
+    with `dist/**`.
+
+    Spud's decision is two readings, one per direction, and they are not symmetrical.  A write that only MAKES a directory
+    -- mkdir's operands, install -d's, and nothing else -- is inside when the path is a glob's literal directory prefix or
+    an ancestor of it, since an empty directory writes no content.  A write that REMOVES one -- rmdir's operands, and rm's
+    when -r, -R or -d is among its options -- is inside only when one glob covers the whole subtree (`D/**` or `D/`) and the
+    path is exactly D; an ancestor is never inside, so `rm -rf test` with `test/fixtures/movecheck/**` stays Law 5.  Every
+    other write of the same path -- touch, cp, mv, ln, tee, sed -i, a redirection, a Write or an Edit -- keeps today's
+    reading, and the refusals that run before the globs (a .git component, the generated roots, the state directory, the
+    outside allowlist, SPD-098's bound worktree) win as they did."""
+
+    GLOBS = ("home:test/fixtures/movecheck/**", "home:admin/src/lib/actions/**", "home:test/helpers/**",
+             "home:docs/superpowers/plans/**", "home:admin/src/*.ts")
+
+    def setUp(self):
+        super().setUp()
+        # Children of the lead: the ticket's root fan-out is spent on BashHookCase's two engineers.
+        self.dirs = self.spawn(self.plan(actor=self.lead["ref"], persona="engineer", model="opus", deliverable=list(self.GLOBS)),
+                               AGENT_E, caller=AGENT_A)
+        self.dist = self.spawn(self.plan(actor=self.lead["ref"], persona="engineer", model="opus", deliverable=["home:dist/**"]),
+                               AGENT_F, caller=AGENT_A)
+        home = self.home.path
+        for d in ("tests", "docs", "ledger/tickets", "test/fixtures/movecheck"):  # `dist` is left unmade on purpose
+            (home / d).mkdir(parents=True, exist_ok=True)
+        for f in ("docs/x.md", "ledger/tickets/SPD-001.md"):
+            (home / f).write_text("a\n", encoding="utf-8")
+
+    def edit(self, path, agent_id, tool="Write"):
+        return self.home.hook("PreToolUse", self.pre_edit(path, agent_id=agent_id, tool=tool))
+
+    # -- the differential's five lines -------------------------------------------------
+    def test_the_differentials_five_lines_are_silent_for_the_member_that_owns_them(self):
+        for command in ("mkdir -p test/fixtures/movecheck", "mkdir -p admin/src/lib/actions", "mkdir -p test/helpers",
+                        "mkdir -p docs/superpowers/plans"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_E)
+        self.assertSilent("rm -rf dist", agent_id=AGENT_F)
+
+    def test_the_same_lines_stay_refused_for_a_member_without_the_glob(self):
+        """The reading is the member's own globs, not a licence: AGENT_A holds tests/** and bin/spud."""
+        for command, path in (("mkdir -p test/fixtures/movecheck", "test/fixtures/movecheck"),
+                              ("mkdir -p admin/src/lib/actions", "admin/src/lib/actions"),
+                              ("mkdir -p test/helpers", "test/helpers"), ("mkdir -p docs/superpowers/plans", "docs/superpowers/plans"),
+                              ("rm -rf dist", "dist"), ("rmdir dist", "dist")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables")
+                self.assertIn(path, r.reason)
+
+    # -- making a directory ------------------------------------------------------------
+    def test_every_ancestor_of_a_globs_literal_prefix_may_be_made(self):
+        for command in ("mkdir -p test/fixtures/movecheck", "mkdir -p test/fixtures", "mkdir test", "mkdir -p admin/src/lib/actions",
+                        "mkdir -p admin/src/lib", "mkdir -p admin/src", "mkdir admin", "mkdir -p docs/superpowers",
+                        "install -d test/helpers", "install -d test/fixtures admin/src", "mkdir -m 700 -p test/helpers"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_E)
+        self.assertSilent("mkdir bin", agent_id=AGENT_A)  # the directory of the file glob `home:bin/spud`
+        self.assertSilent("mkdir tests", agent_id=AGENT_A)
+
+    def test_a_directory_no_glob_prefixes_is_still_refused(self):
+        for command, path in (("mkdir -p test/fixtures/other", "test/fixtures/other"), ("mkdir -p admin/src/lib/other", "admin/src/lib/other"),
+                              ("mkdir -p admin/other", "admin/other"), ("install -d docs/x", "docs/x"),
+                              ("mkdir -p test/helpers admin/other", "admin/other")):  # the first operand is the member's, the second is not
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_E)
+                self.assertIn(path, r.reason)
+        r = self.assertRefused("mkdir -p bin/other", "deliverables", agent_id=AGENT_A)  # `home:bin/spud` gives bin, and nothing under it
+        self.assertIn("bin/other", r.reason)
+
+    # -- removing a directory ----------------------------------------------------------
+    def test_a_wholly_covered_directory_may_be_removed_in_every_spelling(self):
+        for command in ("rm -rf dist", "rm -r dist", "rm -R dist/", "rm -d dist", "rmdir dist", "rm -fr -- dist",
+                        "rm -rf dist/sub", "rmdir dist/sub"):  # under it is content one glob already matched
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_F)
+
+    def test_an_ancestor_is_never_removed_and_a_partial_glob_covers_nothing(self):
+        for command, path in (("rm -rf test", "test"), ("rm -rf test/fixtures", "test/fixtures"),
+                              ("rm -rf admin/src", "admin/src"),  # admin/src/*.ts covers part of it, never the subtree
+                              ("rm -rf admin", "admin"), ("rmdir test/fixtures", "test/fixtures"),
+                              ("rm -rf docs/superpowers", "docs/superpowers")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_E)
+                self.assertIn(path, r.reason)
+        self.assertRefused("rm -rf .", "deliverables", agent_id=AGENT_F)  # the checkout's root is no glob's directory
+
+    def test_rm_without_r_R_or_d_is_a_file_and_keeps_todays_answer(self):
+        for command in ("rm dist", "rm -f dist", "rm -v dist", "unlink dist"):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_F)
+                self.assertIn("dist", r.reason)
+
+    def test_every_other_write_of_the_same_path_keeps_todays_reading(self):
+        """The same path written any other way is a file: `dist` does not exist here, so nothing but the reading decides."""
+        for command in ("touch dist", "cp docs/x.md dist", "mv dist /tmp/spd-129-x", "ln -s /tmp/x dist", "echo x > dist",
+                        "echo x | tee dist", "sed -i '' s/a/b/ dist", "truncate -s 0 dist", "chmod 755 dist",
+                        "install docs/x.md dist", "chflags nohidden dist"):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_F)
+                self.assertIn("dist", r.reason)
+        for tool in ("Write", "Edit", "MultiEdit"):
+            with self.subTest(tool=tool):
+                r = self.edit(self.home.path / "dist", AGENT_F, tool=tool)
+                self.assertEqual((r.code, r.decision), (0, "deny"), r)
+        r = self.edit(self.home.path / "test" / "fixtures" / "movecheck", AGENT_E)
+        self.assertEqual((r.code, r.decision), (0, "deny"), r)  # the Write hook keeps its own reading of the directory
+
+    def test_the_removal_reading_never_asks_the_filesystem(self):
+        """`dist` does not exist and is removed all the same: the reading is the glob's, as path_matches_glob's is, so a
+        member that has not made its directory yet is answered the same as one that has (and the hook stats nothing)."""
+        self.assertFalse((self.home.path / "dist").exists())
+        self.assertSilent("rm -rf dist", agent_id=AGENT_F)
+        (self.home.path / "dist").mkdir()
+        self.assertSilent("rm -rf dist", agent_id=AGENT_F)
+
+    # -- what runs before the globs ----------------------------------------------------
+    def test_the_refusals_before_the_globs_still_win(self):
+        self.spawn(self.plan(actor=self.other["ref"], persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C, caller=AGENT_B)
+        for command, needle in (("mkdir -p .git/hooks", GIT_DIR_WORDING), ("mkdir -p tests/fake/.git/hooks", GIT_DIR_WORDING),
+                                ("rm -rf .git", GIT_DIR_WORDING),
+                                ("mkdir -p .spud/x", "ledger database"),  # the line names .spud: refused before the words are read
+                                ("rm -rf .spud", "ledger database"), ("mkdir -p ledger/x", "generated"),
+                                ("rm -rf reports", "generated"), ("mkdir -p /Users/nobody/x", OUTSIDE)):
+            with self.subTest(command):
+                self.assertRefused(command, needle, agent_id=AGENT_C)
+        self.assertRefused("mkdir -p ledger/x", "generated", agent_id=AGENT_E)
+
+    def test_a_target_the_hook_cannot_resolve_is_still_refused(self):
+        for command in ("mkdir -p $D", "rm -rf \"$D\"", "rmdir $(pwd)/x"):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING, agent_id=AGENT_E)
+        self.assertSilent("D=test/helpers; mkdir -p $D", agent_id=AGENT_E)
+
+    def test_spud_and_an_unbound_agent_id_are_unchanged(self):
+        for command in ("mkdir -p test/helpers", "rm -rf dist", "rmdir dist"):
+            with self.subTest(command):
+                self.assertRefused(command, "Law 1", agent_id=None)  # Spud's own reading: no member, no globs
+                self.assertRefused(command, "not bound", agent_id=AGENT_D)
+
+
 # =============================================================================
 # PreToolUse / Write|Edit|MultiEdit|NotebookEdit
 # =============================================================================
@@ -9158,6 +9310,64 @@ class DeliverableGlobTest(SpudTestCase):
         for glob in ("a/[]]/c", "a/[/c", "a/]/c", "a/[!x]/c", "a/[a-z]/c"):
             self.assertTrue(match(glob, glob), glob)  # each names itself, and none of them raises
             self.assertFalse(match("a/x/c", glob), glob)
+
+    def test_a_globs_literal_directory_prefix(self):
+        """SPD-129: the leading segments that hold no wildcard, dropping the segment the first wildcard is in; with no
+        wildcard at all the glob names a file, and its prefix is the directory that holds it."""
+        spud = load_spud_module()
+        for glob, prefix in (("test/fixtures/movecheck/**", "test/fixtures/movecheck"), ("admin/src/*.ts", "admin/src"),
+                             ("bin/spud", "bin"), ("dist/", "dist"), ("dist/**", "dist"), ("docs/x/*.md", "docs/x"),
+                             ("a/**/b.md", "a"), ("app/[...slug]/**", "app/[...slug]"),  # SPD-086: a bracket is literal, so it is a segment
+                             ("admin/src/app/accounts/[email]/**", "admin/src/app/accounts/[email]"),
+                             ("**/d.md", ""), ("*.md", ""), ("**", ""), ("spud", ""), ("web/app*.js", "web")):
+            with self.subTest(glob):
+                self.assertEqual(spud.glob_directory(glob), prefix)
+
+    def test_a_directory_a_glob_covers(self):
+        """SPD-129: making one is allowed at a glob's literal prefix and at every ancestor of it, since an empty directory
+        writes no content; removing one only where a single glob covers the whole subtree (`D/**` or `D/`)."""
+        spud = load_spud_module()
+        covers = spud.glob_covers_directory
+        for rel in ("test/fixtures/movecheck", "test/fixtures", "test"):
+            self.assertTrue(covers(rel, "test/fixtures/movecheck/**", "make"), rel)
+        for rel in ("test/fixtures", "test"):  # an ancestor is made, never removed: under it are files no glob covers
+            self.assertFalse(covers(rel, "test/fixtures/movecheck/**", "remove"), rel)
+        self.assertTrue(covers("test/fixtures/movecheck", "test/fixtures/movecheck/**", "remove"))
+        self.assertTrue(covers("test/fixtures/movecheck", "test/fixtures/movecheck/", "remove"))
+        self.assertTrue(covers("dist", "dist/**", "remove"))
+        self.assertTrue(covers("dist", "dist/", "remove"))
+        for glob in ("dist/*", "dist/*.ts", "dist", "**", "dist/**/x"):
+            self.assertFalse(covers("dist", glob, "remove"), glob)  # none of these covers the whole subtree
+        for rel in ("test/fixtures/movecheck/x", "test/other", "tests", "", "te"):
+            self.assertFalse(covers(rel, "test/fixtures/movecheck/**", "make"), rel)
+        self.assertFalse(covers("admin", "**/x", "make"))  # a glob that starts with a wildcard has no prefix
+        self.assertFalse(covers("", "**", "make"))
+        self.assertTrue(covers("bin", "bin/spud", "make"))  # the directory of a file glob
+        self.assertFalse(covers("bin/spud", "bin/spud", "remove"))
+        # `fold` where the filesystem folds case, exactly as it does for a match
+        self.assertTrue(covers("TEST/Fixtures", "test/fixtures/movecheck/**", "make", True))
+        self.assertFalse(covers("TEST/Fixtures", "test/fixtures/movecheck/**", "make"))
+        self.assertTrue(covers("Dist", "dist/**", "remove", True))
+        self.assertFalse(covers("Dist", "dist/**", "remove"))
+
+    def test_a_globs_scope_holds_for_the_directory_reading(self):
+        """SPD-129: the new reading sits inside path_reason's own loop, so a `<key>:` or `home:` glob opens its project's
+        directory and no other's, as it does for a match."""
+        spud = load_spud_module()
+        member = {"deliverables": json.dumps(["badtakes:src/lib/**", "home:docs/plans/**"])}
+        for project, rel, directory, allowed in (("badtakes", "src/lib", "make", True), ("badtakes", "src", "make", True),
+                                                 ("badtakes", "src/lib", "remove", True), ("badtakes", "docs/plans", "make", False),
+                                                 ("home", "docs/plans", "make", True), ("home", "docs", "make", True),
+                                                 ("home", "src/lib", "make", False), ("home", "docs/plans", "remove", True),
+                                                 ("spud", "src/lib", "make", False)):
+            with self.subTest(project=project, rel=rel, directory=directory):
+                reason = spud.path_reason(rel, member, "SPUD-129/X", project_key=project, ticket_project_key="badtakes",
+                                          home=(project == "home"), directory=directory)
+                self.assertEqual(reason is None, allowed, reason)
+        # with no directory kind the same paths are refused, which is every other caller of edit_reason
+        for project, rel in (("badtakes", "src/lib"), ("home", "docs/plans")):
+            self.assertIsNotNone(spud.path_reason(rel, member, "SPUD-129/X", project_key=project, ticket_project_key="badtakes",
+                                                  home=(project == "home")))
 
     def test_no_accepted_glob_is_unsatisfiable(self):
         """SPD-086 asked whether `member new` should warn about a deliverable that can match no path.  It cannot check the
