@@ -377,14 +377,18 @@ class ShellAnalysis:
         self.launcher = launcher
         self.findings = []
         self.kinds = []
+        # (the target word, the directories the shell may be in when it opens) per output redirection and tee operand, the
+        # word with every `$NAME` the line settled resolved as arg_writes.resolved resolves one (SPD-127); an assignment-only
+        # command whose own redirection the shells read differently records both readings.
         self.redirects = []
         # SPD-063: one entry per git call on the line, (its repository targets, the directories the shell may be in), so
         # bash_reason can read the config in force at each target repository's local and worktree scopes.  Not a finding:
         # every git line has one, and the findings are the refusals a line has earned.
         self.git_calls = []
         # SPD-049: one entry per file or directory a git call writes through an option or the environment, (the spelling
-        # a reason names it by, the target word as the line spells it, the directories the shell may be in when git
-        # opens it).  Checked in bash_reason with the path rule, like a redirection target, for every caller.
+        # a reason names it by, the target word as the shell passes it to git -- a `$NAME` the line settled resolved
+        # (SPD-127) -- the directories the shell may be in when git opens it).  Checked in bash_reason with the path
+        # rule, like a redirection target, for every caller.
         self.git_writes = []
         # SPD-121: one entry per file a command names as an operand and writes (cp, mv, ln, install, mkdir, touch, rm,
         # rmdir, truncate, chmod and its kin, sed in place), as shell/arg_writes reads it: (the command as spelled, the
