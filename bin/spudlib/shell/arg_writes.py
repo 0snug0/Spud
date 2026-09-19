@@ -12,6 +12,11 @@ the rest of the word or the next one, so `sed -i -e X f` backed f up to f-e.  On
 `resolved` puts the line's own value in a file the command names (`S=<scratchpad>; mkdir -p $S/base`), which the
 differential over 3477 commands spudagents ran showed is how a member writes in its scratchpad.
 
+Each recorded write also carries SPD-129's directory kind, which the command decides and only the path rule reads: mkdir's
+operands and `install -d`'s only make a directory, rmdir's and rm's under -r, -R or -d only remove one, and a member's own
+deliverable glob covers the directory it names without matching it.  Every other write of the same path, a destination
+directory's contents and a backup included, is a file and keeps the reading a redirection target has.
+
 A module of its own because it is one reading with its own users, the analysis and bash_reason, and its own table; a file
 the operand does not spell (xargs's input, find's `{}`, a recursive copy's contents) is not read here.
 
@@ -38,6 +43,9 @@ ACL_MODE_RE = re.compile(r"[+=-]ai?#?\Z")
 # where this Mac's getopt still reads an option, is read as an option too when it may begin with `-` once expanded.
 OPTION_WRITERS = ("sed", "install")
 TARGET_DIRECTORY = "--target-directory"
+# SPD-129: the options that make rm remove a directory rather than a file, on this Mac's BSD rm (-r and -R recursively,
+# -d the empty directory itself); scan reads them as it reads any cluster, so `rm -fr`, `rm -- -r` and `rm -rf` agree.
+RM_DIRECTORY_OPTIONS = ("-r", "-R", "-d")
 # A `$NAME` or `${NAME}` anywhere in a word, which `resolved` puts the line's own value in place of.  A `$` the quoting marked
 # literal is followed by that marker, never by a name, so it never matches.
 _EXPANSION_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
@@ -94,7 +102,9 @@ def chmod_option(word):
 def read_writes(cmd, base, words, a):
     """Record in a.arg_writes each file the command `words` (its command word spelled `cmd`, dispatched as `base`) writes by
     argument: (cmd, the operand word, the directories the shell may be in, the source words a destination directory takes,
-    how -- "path" written, "dest" a destination that is a directory or a file, "into" a directory -- and a backup suffix)."""
+    how -- "path" written, "dest" a destination that is a directory or a file, "into" a directory -- a backup suffix, and
+    the directory kind of SPD-129: "make" when the write only makes a directory, "remove" when it only removes one, else
+    None, which is every write of a file."""
     shape, values, longs = syntax.ARG_WRITE_COMMANDS[base]
     args = words[1:]
     hidden = base in OPTION_WRITERS and hidden_option(args, values, longs)
@@ -104,9 +114,9 @@ def read_writes(cmd, base, words, a):
         entries = mode_writes(base, args)
     else:
         entries = operand_writes(base, shape, args, hidden)
-    for word, sources, how, suffix in entries:
+    for word, sources, how, suffix, kind in entries:
         a.arg_writes.append((cmd, resolved(word, a), a.cwds, tuple(resolved(s, a) for s in sources), how,
-                             resolved(suffix, a) if suffix else suffix))
+                             resolved(suffix, a) if suffix else suffix, kind))
 
 
 def resolved(word, a):
@@ -145,6 +155,18 @@ def expansion_at_start(word):
     return word.startswith(hookio.SUBST) or (word.startswith("$") and not word.startswith("$" + syntax._LITERAL_DOLLAR))
 
 
+def directory_kind(base, names):
+    """SPD-129: what a command does to the operands it writes, when all it does to them is make or remove a directory:
+    "make" for mkdir and `install -d`, whose operands are directories they create and nothing else; "remove" for rmdir,
+    and for rm when -r, -R or -d puts a directory within its reach.  Every other command, and rm without one of those
+    options, writes a file, and the path rule reads its operand as it reads a redirection target."""
+    if base == "mkdir" or (base == "install" and "-d" in names):
+        return "make"
+    if base == "rmdir" or (base == "rm" and any(n in names for n in RM_DIRECTORY_OPTIONS)):
+        return "remove"
+    return None
+
+
 def operand_writes(base, shape, args, hidden=False):
     """The writes of a command whose operands are its files: every operand ("each"), or a destination (cp, install, mv, ln)."""
     shape_values, longs = syntax.ARG_WRITE_COMMANDS[base][1:]
@@ -152,34 +174,34 @@ def operand_writes(base, shape, args, hidden=False):
     names = {n for n, _, _ in options}
     entries, suffix = [], None
     if base == "install":
-        entries += [(v, (), "path", None) for n, v, _ in options if n == "-M" and v]  # the metalog it writes
+        entries += [(v, (), "path", None, None) for n, v, _ in options if n == "-M" and v]  # the metalog it writes, a file
         if "-b" in names:  # a backup of each file it replaces, <file>.old unless -B names the suffix
             suffix = next((v for n, v, _ in reversed(options) if n in ("-B", "--suffix") and v), ".old")
         if "-d" in names:
             shape = "each"
     if hidden:  # `install "$X" a b` may be `install -d`, which makes every operand a directory of its own
-        entries += [(w, (), "path", None) for w in operands[1:]]
+        entries += [(w, (), "path", None, "make") for w in operands[1:]]
     if shape == "each":
-        return entries + [(w, (), "path", None) for w in operands]
+        return entries + [(w, (), "path", None, directory_kind(base, names)) for w in operands]
     target_dir = next((v for n, v, _ in reversed(options) if n in ("-t", TARGET_DIRECTORY)), None)
     # GNU's -T writes the destination itself, never into it; install's -T is BSD's mtree tags, a value
     no_target = "--no-target-directory" in names or ("-T" in names and base != "install")
     if target_dir is not None:
         sources = tuple(operands)
-        entries.append((target_dir, sources, "into", suffix))
+        entries.append((target_dir, sources, "into", suffix, None))
     elif operands:
         dest, sources = operands[-1], tuple(operands[:-1])
         if shape == "link" and not sources:
-            entries.append((".", (dest,), "into", suffix))  # `ln -s TARGET`: the link ./<name of TARGET>
+            entries.append((".", (dest,), "into", suffix, None))  # `ln -s TARGET`: the link ./<name of TARGET>
             sources = ()
         elif no_target:
-            entries.append((dest, (), "path", suffix))
+            entries.append((dest, (), "path", suffix, None))
         else:
-            entries.append((dest, sources, "into" if len(sources) > 1 else "dest", suffix))  # several sources: a directory
+            entries.append((dest, sources, "into" if len(sources) > 1 else "dest", suffix, None))  # several sources: a directory
     else:
         sources = ()
-    if shape == "move":  # mv removes each source
-        entries = [(s, (), "path", None) for s in sources] + entries
+    if shape == "move":  # mv removes each source, which may be a directory and is read as the file it is (SPD-129)
+        entries = [(s, (), "path", None, None) for s in sources] + entries
     return entries
 
 
@@ -195,7 +217,7 @@ def mode_writes(base, args):
     elif base == "chmod" and operands and ACL_MODE_RE.match(prepare.deglob(operands[0])):
         mode = prepare.deglob(operands[0])
         skip = 1 + ("#" in mode) + (mode != "-a#")
-    return [(w, (), "path", None) for w in operands[skip:]]
+    return [(w, (), "path", None, None) for w in operands[skip:]]
 
 
 def sed_writes(args, hidden=False):
@@ -209,13 +231,13 @@ def sed_writes(args, hidden=False):
     in_place = [(v or "", spaced) for n, v, spaced in options if n in ("-i", "-I", "--in-place")]
     script_given = any(n in ("-e", "-f", "--expression", "--file") for n, _, _ in options)
     if not in_place:
-        return [(f, (), "path", None) for f in (operands[1:] if script_given else operands[2:])] if hidden else []
+        return [(f, (), "path", None, None) for f in (operands[1:] if script_given else operands[2:])] if hidden else []
     suffix, spaced = in_place[-1]  # the last in-place option is the one sed keeps
     files = operands if script_given else operands[1:]
-    entries = [(f, (), "path", suffix or None) for f in files]
+    entries = [(f, (), "path", suffix or None, None) for f in files]
     if spaced and "/" in prepare.deglob(suffix):
         gnu = ([suffix] if script_given else []) + list(operands)
-        entries += [(f, (), "path", None) for f in gnu if f not in files]
+        entries += [(f, (), "path", None, None) for f in gnu if f not in files]
     return entries
 
 
@@ -250,11 +272,13 @@ def unresolved(word):
 
 
 def written_paths(entries):
-    """([(named, target, cwds)], capped) for bash_reason: every file the recorded writes by argument name, each target a
-    masked word checked as a redirection target is and `named` the spelling its reason gives, and the first source glob
-    whose files reached the match budget, or None."""
+    """([(named, target, cwds, directory)], capped) for bash_reason: every file the recorded writes by argument name, each
+    target a masked word checked as a redirection target is, `named` the spelling its reason gives and `directory` the
+    kind of SPD-129 the path rule reads a member's globs with; and the first source glob whose files reached the match
+    budget, or None.  Only an operand the command writes as it stands carries a kind: a backup the command leaves beside
+    it is a file, and so is every name a destination directory takes."""
     out, capped = [], None
-    for cmd, word, cwds, sources, how, suffix in entries:
+    for cmd, word, cwds, sources, how, suffix, kind in entries:
         targets = []
         if how == "path":
             targets.append(word)
@@ -269,9 +293,9 @@ def written_paths(entries):
                         capped = "`%s` %s" % (cmd, prepare.deglob(source))
                     targets += [folder + ("" if folder.endswith("/") else "/") + name for name in names]
         for target in targets:
-            out.append(("`%s` %s" % (cmd, target), target, cwds))
+            out.append(("`%s` %s" % (cmd, target), target, cwds, kind if how == "path" else None))
             if suffix:
-                out.append(("`%s` %s" % (cmd, target + suffix), target + suffix, cwds))
+                out.append(("`%s` %s" % (cmd, target + suffix), target + suffix, cwds, None))
     return out, capped
 
 

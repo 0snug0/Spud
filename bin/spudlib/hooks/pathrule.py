@@ -54,6 +54,48 @@ def path_matches_glob(rel, glob, fold=False):
     return re.fullmatch(glob_to_regex(glob), rel, re.IGNORECASE if fold else 0) is not None
 
 
+# SPD-129: the directory a glob covers, which no match of it names.  path_matches_glob reads `X/**` as `X/` plus something,
+# so a member whose deliverable is `test/fixtures/movecheck/**` may write every file under that directory and was refused
+# the `mkdir -p` that makes it (Law 5).  Before SPD-121 a mkdir was unread and the question never arose; now it is the
+# natural first line of a member's work, and SPD-121's differential over the 3477 commands spudagents ran holds five
+# refusals of exactly this shape.  Spud's decision is two readings, one per direction, and they are not symmetrical:
+# making a directory writes no content, so an ancestor of the directory is as harmless as the directory itself, while
+# removing one takes everything under it with it.  The kind of write comes from the command (shell/arg_writes): only
+# mkdir's operands, install -d's, rmdir's and rm's under -r, -R or -d carry one, and every other write of the same path --
+# touch, cp, mv, ln, tee, sed -i, a redirection, a Write or an Edit -- is a file and keeps the reading it had.
+def glob_directory(glob):
+    """A glob's literal directory prefix: its leading segments that hold no wildcard, dropping the segment the first
+    wildcard is in, and, when the glob holds none, its last segment, which is the file it names.  So
+    `test/fixtures/movecheck/**` gives `test/fixtures/movecheck`, `admin/src/*.ts` gives `admin/src`, `bin/spud` gives
+    `bin` and `dist/` gives `dist`, while a glob that starts with a wildcard (`**/x`, `*.md`) or names a single segment
+    gives ``, which is no directory at all.  A bracket is a literal character, never a class (SPD-086), so `[email]` is
+    an ordinary segment."""
+    segments = glob.split("/")
+    for i, segment in enumerate(segments):
+        if "*" in segment or "?" in segment:
+            return "/".join(segments[:i])
+    return "/".join(segments[:-1])
+
+
+def glob_covers_directory(rel, glob, how, fold=False):
+    """Whether one deliverable glob lets its member make (`how` "make") or remove ("remove") the directory `rel`, which no
+    match of that glob names.  Making it: `rel` is the glob's literal directory prefix or an ancestor of it, since an empty
+    directory holds nothing the glob does not already cover.  Removing it: the glob covers the whole subtree -- it is
+    `D/**` or `D/` -- and `rel` is exactly D; an ancestor is never inside, so `rm -rf test` with
+    `test/fixtures/movecheck/**` removes files no glob covers and stays Law 5.  `fold` folds case where the filesystem
+    does, as path_matches_glob's re.IGNORECASE does for a match.  The reading is the glob's alone: nothing here stats the
+    path, so a member is answered the same before and after it has made its own directory."""
+    if fold:
+        rel = rel.casefold()
+    if how == "remove":
+        whole = glob[:-1] if glob.endswith("/") else glob[:-3] if glob.endswith("/**") else None
+        return whole is not None and rel == (whole.casefold() if fold else whole)
+    prefix = glob_directory(glob)
+    if fold:
+        prefix = prefix.casefold()
+    return bool(prefix) and (rel == prefix or prefix.startswith(rel + "/"))
+
+
 HARNESS_FILES_RE = re.compile(r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/subagents/", re.IGNORECASE)
 
 
@@ -180,7 +222,7 @@ OUTSIDE_GONE_WORKTREE_TAIL = ("That worktree is gone, so no checkout is open to 
                               " planning a member from the worktree the work continues in")
 
 
-def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticket_project_key=None, home=True, elsewhere=None):
+def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticket_project_key=None, home=True, elsewhere=None, directory=None):
     """None when the actor may write the repository path `rel` of project `project_key`, else the reason.  The
     generated roots are the home's alone and are matched whatever the case (a case variant is refused on every
     filesystem), case-folded rather than lower-cased so that the simple folds APFS honours
@@ -190,7 +232,10 @@ def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticke
     worktrees.home_roots for the checkout the path was mapped into, so in the transition window a worktree of the tool
     repository still carries the generated roots and Spud's own set, while its globs stay project spud's.  `elsewhere`
     is (ticket key, bound worktree, checkout) when the member's ticket is bound (SPD-098) and the path lies in another
-    checkout of the ticket's own project: no glob of the member's matches there, whatever it says."""
+    checkout of the ticket's own project: no glob of the member's matches there, whatever it says.  `directory` is "make"
+    or "remove" when the write only makes or removes a directory (SPD-129), which a glob covers without matching; it is
+    read inside the glob loop, so a glob's scope and its case folding hold for it exactly as they hold for a match, and
+    every refusal before the loop -- the generated roots, a bound ticket's other checkouts -- wins over it as it did."""
     generated = home and rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS
     if member is None:
         if not home:
@@ -213,7 +258,9 @@ def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticke
     globs = json.loads(member["deliverables"]) if member["deliverables"] else []
     for g in globs:
         key, bare = ops.glob_scope(g)
-        if (key or ticket_project_key) == project_key and path_matches_glob(rel, bare, fold):
+        if (key or ticket_project_key) != project_key:
+            continue
+        if path_matches_glob(rel, bare, fold) or (directory and glob_covers_directory(rel, bare, directory, fold)):
             return None
     shown = rel if project_key == ticket_project_key else "%s:%s" % (project_key, rel)
     return "Law 5: %s is not among %s's deliverables (%s); write only there, or ask your parent to extend them" % (shown, ref, ", ".join(globs) or "none")
@@ -232,7 +279,7 @@ def state_dir_reason(rel):
                         " list cache, the backups and the launcher's cached bytecode; only the CLI writes there, whatever the deliverables" % rel)
 
 
-def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"):
+def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud", directory=None):
     """The path rule for a Write/Edit target (and for a shell redirection target), the table of the design's section 3.2
     (SPD-014).  A path in the ledger state directory at any project root, by any reading of it, is refused to everyone
     before the binding, Law 1 and glob checks (SPD-031).  A bound member is held to its globs in any session; a session
@@ -241,7 +288,12 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
     Since SPD-064 a caller with an agent_id in a Spud session is held outside the projects too: a git configuration file
     (SPD-063) and any other path in a git directory (SPD-066) are refused wherever they lie, and every reading of the target must land either in a registered project, where the
     globs decide, or under an allowed outside root -- the session scratchpad and the system temp directories.  So a symlink
-    that reaches out of a project, and a path in no project at all, are both refused instead of passing unchecked."""
+    that reaches out of a project, and a path in no project at all, are both refused instead of passing unchecked.
+
+    `directory` (SPD-129) says the write only makes ("make") or only removes ("remove") a directory, which shell/arg_writes
+    reads from the command; a member is then held to path_reason's directory reading of its globs as well as to a match.
+    Every other caller leaves it None -- the Write/Edit hook, a redirection, tee, a git call's own writes -- and every
+    refusal above here is unchanged, so a .git component, the state directory and the outside allowlist still win."""
     readings = worktrees.path_readings(path, cwd)
     for candidate in readings:
         if harness_file(candidate):
@@ -278,7 +330,7 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
             if bound is not None and project["key"] == ticket_project and not worktrees.same_directory(root, bound):
                 elsewhere = (ticket["key"], bound, root)
             reason = path_reason(rel, caller_member, ref, worktrees.folds_case(root), project["key"], ticket_project, worktrees.home_roots(project, ctx.home),
-                                 elsewhere)
+                                 elsewhere, directory)
             if reason:
                 return reason, rel
         return None, first

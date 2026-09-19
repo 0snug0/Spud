@@ -293,9 +293,10 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
             if reason:
                 return reason, analysis
 
-    def target_reason(messages, spelled, path):
-        """edit_reason for one concrete file a redirection, a tee, a git call or a write by argument may open, phrased for the write."""
-        reason, rel = pathrule.edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode)
+    def target_reason(messages, spelled, path, directory=None):
+        """edit_reason for one concrete file a redirection, a tee, a git call or a write by argument may open, phrased for
+        the write.  `directory` is SPD-129's kind, which only a write by argument that makes or removes a directory carries."""
+        reason, rel = pathrule.edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode, directory)
         if not reason:
             return None
         # the state directory is refused in the database's words, not Law 1's; a session that is not Spud is not held to Law 1
@@ -304,8 +305,9 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
 
     def targets_reason(entries, messages):
         """The reason one of these writes is refused, or None.  An entry is (the spelling the reason names it by, or None
-        for the target's own, the target word as the line spells it, the directories the shell may be in when it opens)."""
-        for named, target, target_cwds in entries:
+        for the target's own, the target word as the line spells it, the directories the shell may be in when it opens,
+        and SPD-129's directory kind, None for every write that is not a directory's making or removal)."""
+        for named, target, target_cwds, directory in entries:
             spelled = prepare.deglob(named if named else target)
             if "$" in target or "`" in target or hookio.SUBST in target:
                 if strict:
@@ -319,7 +321,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                     return messages["unfollowable"] % spelled
                 matches, capped = expansion
                 for path in matches:
-                    reason = target_reason(messages, spelled, path)
+                    reason = target_reason(messages, spelled, path, directory)
                     if reason:
                         return reason
                 if strict:  # a member: the hook cannot know what the glob opens beyond what it matches now
@@ -329,7 +331,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                         return messages["nomatch"] % spelled
                 else:  # Spud: also the literal name a shell writes when a glob matches nothing
                     for path in redirection_paths(prepare.deglob(target), target_cwds) or []:
-                        reason = target_reason(messages, spelled, path)
+                        reason = target_reason(messages, spelled, path, directory)
                         if reason:
                             return reason
                 continue
@@ -337,7 +339,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
             if paths is None:  # a directory the hook cannot follow: Spud's target was left unchecked until SPD-035
                 return messages["unfollowable"] % spelled
             for path in paths:  # every directory the shell may be in (SPD-030)
-                reason = target_reason(messages, spelled, path)
+                reason = target_reason(messages, spelled, path, directory)
                 if reason:
                     return reason
         return None
@@ -346,8 +348,9 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     # writes through its own options or the environment (SPD-049), and the files a command names as operands and writes
     # (SPD-121), which are held to the same rule.
     written, capped = arg_writes.written_paths(analysis.arg_writes)
-    for entries, messages in (([(None, t, c) for t, c in analysis.redirects], REDIRECT_MESSAGES),
-                              (analysis.git_writes, GIT_WRITE_MESSAGES), (written, ARG_WRITE_MESSAGES)):
+    for entries, messages in (([(None, t, c, None) for t, c in analysis.redirects], REDIRECT_MESSAGES),
+                              ([(n, t, c, None) for n, t, c in analysis.git_writes], GIT_WRITE_MESSAGES),
+                              (written, ARG_WRITE_MESSAGES)):
         reason = targets_reason(entries, messages)
         if reason:
             return reason, analysis

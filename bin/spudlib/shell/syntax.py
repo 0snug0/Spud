@@ -389,8 +389,9 @@ class ShellAnalysis:
         # SPD-121: one entry per file a command names as an operand and writes (cp, mv, ln, install, mkdir, touch, rm,
         # rmdir, truncate, chmod and its kin, sed in place), as shell/arg_writes reads it: (the command as spelled, the
         # operand word, the directories the shell may be in, the source words a destination directory takes, how the
-        # word is written, a backup suffix or None).  bash_reason turns each into the files it names and holds them to the
-        # path rule like a redirection target, for every caller.
+        # word is written, a backup suffix or None, and SPD-129's directory kind -- "make" for mkdir's operands and
+        # install -d's, "remove" for rmdir's and rm's under -r, -R or -d, None for every write of a file).  bash_reason
+        # turns each into the files it names and holds them to the path rule like a redirection target, for every caller.
         self.arg_writes = []
         self.vars = {}
         self.cwds = frozenset([cwd]) if cwd else None
