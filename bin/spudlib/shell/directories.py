@@ -54,17 +54,24 @@ def separate_redirects(tokens):
 def strip_wrapper(words):
     """`env`, `nohup`, `xargs`, `timeout 10`, `sudo -u x`, ...: drop the wrapper, its options and their values; return (the
     words it runs, the command strings it hands a shell, the index in `words` of the first word it did not consume, the
-    (name, value) assignments `env` sets in the command's environment).  The name is matched case-folded (SPD-030: ENV runs
-    /usr/bin/env on macOS); `env -S` splits its string into the words it runs (no shell: none of them is expanded), GNU
-    `script -c` hands its string to a shell; `env NAME=value` puts NAME in the environment of the command it runs (SPD-044)."""
+    (name, value) assignments `env` sets in the command's environment, the directory it runs the command in or None).  The
+    name is matched case-folded (SPD-030: ENV runs /usr/bin/env on macOS); `env -S` splits its string into the words it runs
+    (no shell: none of them is expanded), GNU `script -c` hands its string to a shell; `env NAME=value` puts NAME in the
+    environment of the command it runs (SPD-044).  The directory (SPD-128) is (the value of the last `env -C` or `sudo -D`,
+    whether the shell gave it as a word of its own), since only the last one counts (probed: `env -C /usr -C bin pwd`
+    printed /bin); a value glued to its option or split out of `env -S` is one whose leading `~` no shell expanded."""
     name = os.path.basename(words[0]).casefold()
     values = syntax.WRAPPER_VALUE_OPTIONS.get(name, set())
+    chdirs = syntax.WRAPPER_CHDIR_OPTIONS.get(name, ())
     rest, strings, assignments = words[1:], [], []  # `assignments`: the (name, value) pairs `env` sets in the command's environment
+    chdir = None
     originals = len(rest)  # the words of `words` still in rest, at its end (env -S puts its words before them)
 
-    def take(opt, value):
-        nonlocal rest
-        if name == "env" and opt in ("-S", "--split-string"):
+    def take(opt, value, own_word):
+        nonlocal rest, chdir
+        if opt in chdirs:
+            chdir = (value, own_word)
+        elif name == "env" and opt in ("-S", "--split-string"):
             rest = [globbing.literalize(t) for t in (syntax.shell_tokens(value) or [])] + rest
         elif name == "script" and opt in ("-c", "--command"):
             strings.append(value)
@@ -74,15 +81,16 @@ def strip_wrapper(words):
         if w == "--":
             rest = rest[1:]
             break
+        own_word = len(rest) - 1 <= originals  # rest[1], when an option takes it, is a word the shell gave the wrapper
         if w.startswith("--"):
             opt, eq, value = w.partition("=")
             if opt in values and not eq:
                 value = rest[1] if len(rest) > 1 else ""
                 rest = rest[2:]
             else:
-                rest = rest[1:]
+                rest, own_word = rest[1:], False
             originals = min(originals, len(rest))
-            take(opt, value)
+            take(opt, value, own_word)
             continue
         if w.startswith("-") and len(w) > 1:
             consumed, opt, value = 1, None, None
@@ -98,7 +106,7 @@ def strip_wrapper(words):
             rest = rest[consumed:]
             originals = min(originals, len(rest))
             if opt:
-                take(opt, value)
+                take(opt, value, own_word and consumed == 2)
             continue
         break
     if name == "env":
@@ -113,7 +121,55 @@ def strip_wrapper(words):
         rest = rest[1:]
     elif name == "script" and rest:
         rest = rest[1:]  # the typescript file; what follows it is the command
-    return rest, strings, len(words) - min(originals, len(rest)), assignments
+    return rest, strings, len(words) - min(originals, len(rest)), assignments, chdir
+
+
+# SPD-128: what a glob leaves in a word once analyse_words has read it as spelled (globbing.literalize): its glob characters
+# quoted, a leading `=` marked, and zsh's pattern characters plain -- which no word the shell gives unquoted holds.
+_READ_GLOB_RE = re.compile("[" + re.escape("".join(syntax._GLOB_UNSENTINEL) + syntax._LITERAL_EQUALS + "(|)<>") + "]")
+# SPD-128: a filename glob the shell expands against its own directory (syntax.GLOB_RE without the brace list, which names
+# the same words wherever the shell is)
+_FILENAME_GLOB_RE = re.compile("[*?\\[" + syntax.ZSH_OPEN + syntax.ZSH_RANGE_OPEN + "]")
+
+
+def wrapped_directories(chdir, command, a):
+    """The directories the command `env -C <dir>` or `sudo -D <dir>` runs (SPD-128) may run in, or None when the hook cannot
+    know.  `chdir` is strip_wrapper's (value, whether the shell gave it as a word of its own); `command`, the words the
+    wrapper runs.  Probed by Spud on this Mac's env (the member could not, SPD-094): an absolute, a relative, a glued and a
+    clustered value, a `~` the shell expands, and a string a shell runs all start there; a nested env moves from where the
+    outer one left it.  The program calls chdir(2) itself, so there is no CDPATH and no directory stack; a symlink resolves
+    as the kernel resolves it, before a `..` after it; and a relative value is read once against every directory the shell
+    may be in, never compounding as a cd in a loop does, since the shell's own directory does not move.
+
+    Unknown: a value holding an expansion the analysis left in it, or a glob, which has been read as spelled by the time it
+    gets here, so a quoted glob character reads as one (_READ_GLOB_RE); `~-`, `~name`, and a leading `~` no shell expanded
+    (env would enter a directory named `~`; what sudo makes of one is not probed).  Unknown too when a word of the command
+    is a filename glob or `~+`: the shell expands those in its own directory and the command opens what they name in the
+    one it moved to, which no single set of directories reads.  An empty value leaves the directories as they are: chdir(2)
+    fails on it, and env runs nothing after a directory it cannot enter (probed: exit 125)."""
+    value, own_word = chdir
+    if any(w.startswith("~+") or _FILENAME_GLOB_RE.search(w) for w in command[1:]):
+        return None
+    if value == "":
+        return a.cwds
+    if "$" in value or "`" in value or hookio.SUBST in value or syntax.GLOB_RE.search(value) or _READ_GLOB_RE.search(value):
+        return None
+    value = prepare.deglob(value)
+    if value.startswith("~"):
+        head, _, tail = value.partition("/")
+        if head == "~" and own_word:
+            paths = [os.path.expanduser(value)]
+        elif head == "~+" and own_word and a.cwds is not None:
+            paths = [os.path.join(c, tail) for c in sorted(a.cwds)]
+        else:
+            return None
+    elif os.path.isabs(value):
+        paths = [value]
+    elif a.cwds is None:
+        return None
+    else:
+        paths = [os.path.join(c, value) for c in sorted(a.cwds)]
+    return frozenset(os.path.realpath(p) for p in paths)
 
 
 def prefix_effect(word, following):

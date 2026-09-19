@@ -57,6 +57,11 @@ WRAPPER_VALUE_OPTIONS = {
     "script": {"-t", "-T", "-c", "-O", "-I", "-B", "-E", "-o", "-m", "--command", "--log-out", "--log-in", "--log-io", "--log-timing",
                "--echo", "--output-limit", "--logging-format"},
 }
+# SPD-128: the value options above whose value is the directory the wrapper runs its command in, which strip_wrapper hands
+# analyse_words as the command's own: env's `-C` (this Mac's BSD env, probed; `--chdir` is GNU's, and BSD env refuses it
+# before it runs anything, so reading it too costs nothing) and sudo's `-D`/`--chdir` (sudo(8)).  sudo's `-C` closes
+# descriptors and doas's `-C` names a config file: neither moves anything.
+WRAPPER_CHDIR_OPTIONS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
 DURATION_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?|\.\d+[smhd]?")
 # The shell's operators, longest first: shlex (punctuation_chars) returns a run of them such as `)>` or `;;&` as one token.
 SHELL_OPERATORS = (";;&", "&>>", "<<<", "<<-", ";;", ";&", "&&", "||", "|&", "&>", ">>", ">|", ">&", "<&", "<>", "<<", "<(", ">(",
