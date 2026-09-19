@@ -57,7 +57,9 @@ class ShellWalk:
       `for name ( word ... )` and after a `for`/`select` list closed by `;` or a newline, the body is a `do ... done`, a
       `{ list }`, a `( list )` or one sublist, and the loop ends where that sublist ends;
     - the same holds for an `if`, `while` or `until` whose condition ends in `[[ ... ]]` (SPD-061), which closes the condition
-      the way a terminator closes a loop header, so `then` and `do` are optional there too."""
+      the way a terminator closes a loop header, so `then` and `do` are optional there too;
+    - zsh's try-always form, `{ list } always { list }` (SPD-124), is one compound command holding both lists, so the always
+      block runs where the try block left the shell and the compound ends at the always block's `}` (see close_brace)."""
 
     def __init__(self, a, inner, bodies, depth):
         self.a, self.inner, self.bodies, self.depth = a, list(inner), list(bodies), depth
@@ -67,6 +69,7 @@ class ShellWalk:
         self.expect_body = False  # the header is complete: the next word decides the body's form (SPD-042)
         self.function_next = False  # `name ()` or `function name` was read: the next body is a function's
         self.redirect_cwds = syntax._CURRENT
+        self.toks, self.at = [], 0  # the line's tokens, and the index of the one add_word is reading (SPD-124)
         self.start_list()
 
     # -- lists and pipelines ------------------------------------------------------------
@@ -127,6 +130,40 @@ class ShellWalk:
                 self.stack[-1].body = "sublist"
             else:
                 self.pop()  # the short loop whose body this `{ ... }` or `( ... )` was (SPD-042)
+
+    def close_brace(self):
+        """The `}` that closes a `{ list }` -- a group, a coproc's group, a function body.
+
+        zsh's try-always form (SPD-124, probed in zsh 5.9): an unquoted `always` right after that `}`, then `{` after any
+        number of `;` and newlines, runs the always block after the try block, in the same shell or fork, starting in the
+        directories the try block ended in, and the compound command ends at the always block's `}`.  So the frame stays
+        open and the always block is read as one more list of it, as a list after a `;` would be: `{ A } always { B }` is
+        read as `{ A; B; }`, with its prefixes, redirections and pipelines.  The same holds at the always block's own `}`
+        (a second `always` chained is a parse error, read all the same) and after a function's or a short loop's body,
+        where zsh parses no always form either: over-reading those costs a line no shell runs.  An `always` with no `{`
+        to follow is a parse error too; it is dropped as the keyword it is there, so the words after it are read as
+        commands and not as a command named `always`'s arguments."""
+        toks, j = self.toks, self.at + 1
+        if j < len(toks) and toks[j] == "always":
+            k = j + 1
+            while k < len(toks) and toks[k] == ";":  # a newline reaches here as `;`
+                k += 1
+            if k < len(toks) and toks[k] == "{":
+                self.finish()
+                self.end_list()
+                self.at = k
+                return
+            self.at = j
+        self.pop()
+
+    def brace_closes(self):
+        """Whether a `}` after a word closes a `{ list }`: zsh's sole `}` is significant anywhere, so it ends the short
+        loops' and short conditionals' sublists standing in the group before it closes the group (SPD-081's probe ran
+        `coproc { repeat 1 vcs push }`, which parses only so)."""
+        for frame in reversed(self.stack):
+            if frame.body != "sublist":
+                return frame.closer == "}"
+        return False
 
     def branch(self):
         """then, else, elif, do, a case arm: the body may start from the directories the compound command started in."""
@@ -259,7 +296,10 @@ class ShellWalk:
             if t in ("}", "fi", "done", "esac"):
                 self.close_sublists()
                 if self.stack and self.stack[-1].closer == t:
-                    self.pop()
+                    if t == "}":
+                        self.close_brace()
+                    else:
+                        self.pop()
                 return
             if t in ("if", "while", "until"):
                 self.open_conditional(t)
@@ -296,6 +336,16 @@ class ShellWalk:
             self.discard()
             self.push("sub" if forked else "group", "}")
             return
+        if (t == "{" and not self.skip and not self.function_next and self.words and self.words[-1] == "always"
+                and directories.separate_redirects(self.words)[0] == ["always"]):
+            # SPD-124: an `always` in command position before a `{` -- after a terminator or a newline (`{ a }; always
+            # { b }`), after a subshell (`( a ) always { b }`), after a group's redirection (`{ a } 2>&1 always { b }`) --
+            # is a parse error in zsh, whose sole `}` closes no group there.  The block is read as a group all the same
+            # rather than as a command named `always`'s arguments; the word and any redirection before it are read first,
+            # as the command they would be.
+            self.finish()
+            self.push("group", "}")
+            return
         if not self.skip and self.words and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words) and t in ("for", "select", "repeat", "if", "while", "until"):
             # zsh runs a compound command after `coproc`, `time` and `!` (probed: `coproc repeat 1 git push`, `coproc if
             # [[ -n x ]] git push`, `time if [[ -n x ]] git push` and `! if [[ -n x ]] git push` each ran it)
@@ -305,11 +355,12 @@ class ShellWalk:
             else:
                 self.open_loop(t)
             return
-        if t == "}" and not self.skip and self.words and self.stack and self.stack[-1].closer == "}":
+        if t == "}" and not self.skip and self.words and self.brace_closes():
             # zsh closes a `{ list }` at a `}` that follows a word with no terminator before it (probed: `if [[ -n x ]]
             # { echo then } else { echo else }` printed then, and `repeat 2 { git push }` pushed twice); bash takes the `}`
             # for an argument and leaves the group open, so closing it is the reading that sees what follows as well
-            self.pop()
+            self.close_sublists()
+            self.close_brace()
             return
         self.words.append(t)
         if self.skip and self.header == "repeat":  # `repeat word`: one word of header, then the body (SPD-042)
@@ -320,7 +371,7 @@ class ShellWalk:
             self.end_header()
 
     def walk(self, tokens):
-        toks = [p for t in tokens for p in syntax.operator_parts(t)]
+        toks = self.toks = [p for t in tokens for p in syntax.operator_parts(t)]
         i = 0
         while i < len(toks):
             t = toks[i]
@@ -399,7 +450,9 @@ class ShellWalk:
                 else:
                     self.end_list()
             else:
+                self.at = i  # close_brace reads the tokens after a `}` and may take them (SPD-124)
                 self.add_word(t)
+                i = self.at
             i += 1
         self.finish()
         while self.stack:

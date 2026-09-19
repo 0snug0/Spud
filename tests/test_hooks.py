@@ -5280,6 +5280,347 @@ class PrefixedGroupTest(BashHookCase):
                     self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
+# zsh's try-always form (SPD-124), `{ try-list } always { always-list }`.  Each form fills its first `%s` with the try
+# block's body and its second with the always block's.  TRY_ALWAYS_EVIDENCE is Spud's probe of the forms that ran both
+# blocks, line for line, but for the redirections: out.txt there is /dev/null here, a member's out.txt at the home being
+# refused as outside its deliverables whatever the always block holds.
+TRY_ALWAYS_EVIDENCE = ("{ %s } always { %s }", "{ %s; } always { %s; }",
+                       "{ %s } always\n{ %s }", "{ %s } always\n\n{ %s }", "{ %s } always;{ %s }",
+                       "time { %s } always { %s }", "! { %s } always { %s }", "coproc { %s } always { %s }; wait",
+                       "time coproc { %s } always { %s }", "coproc time { %s } always { %s }",
+                       "{ %s } always { %s } && echo after", "{ %s } always { %s } || echo orelse",
+                       "echo pre && { %s } always { %s }", "{ %s } always { %s } | cat", "echo first | { %s } always { %s }",
+                       "{ %s } always { %s } &; wait", "{ %s } always { %s } ; echo next",
+                       "( { %s } always { %s } )", "x=$( { %s } always { %s } )", "case a in a) { %s } always { %s } ;; esac",
+                       "{ %s } always { %s } > /dev/null", "{ %s } always { %s } 2>&1", "{ %s } always { %s } < /dev/null",
+                       "{ false; %s } always { %s }")
+# The probe's forms with more than two blocks: nested, and two in a row.  Every `%s` is a block of its own.
+TRY_ALWAYS_NESTED = ("{ { %s } always { %s } } always { %s }", "{ %s } always { { %s } always { %s } }",
+                     "{ %s } always { %s }; { %s } always { %s }")
+# The positions zsh refuses to parse, so nothing runs there.  Each is over-read: the block after `always` is read as a
+# group, a subshell or a command of its own, never as the arguments of a command named `always`.
+TRY_ALWAYS_PARSE_ERRORS = ("{ %s }\nalways { %s }", "{ %s }; always { %s }", "( %s ) always { %s }",
+                           "{ %s } always ( %s )", "{ %s } always %s", "{ %s } always { true } always { %s }",
+                           "{ %s } 'always' { %s }", "{ %s } \\always { %s }",
+                           "f() { %s } always { %s }", "function g { %s } always { %s }",
+                           "repeat 1 { %s } always { %s }", "for f (a) { %s } always { %s }",
+                           "while [[ -n x ]] { %s } always { %s }", "if [[ -n x ]] { %s } always { %s }",
+                           "coproc NAME { %s; } always { %s; }")
+
+
+class TryAlwaysTest(BashHookCase):
+    """SPD-124: zsh's try-always form, `{ try-list } always { always-list }`, runs the always block after the try block,
+    and ShellWalk read it as a group and then one simple command named `always`: the group's `}` popped its frame, `always`
+    became a command word, and the `{` after it was appended to that command's words (a `{` opens a group only where no
+    word, or only `coproc`, `time` and `!`, stands before it -- SPD-081), so the whole always block was flattened into
+    arguments.  `{ git status } always { git push }`, its `coproc`, `time` and `!` forms and the rest were kind other with
+    no finding for the push, and `{ cd /tmp } always { git push }` had no finding at all (Laws 1, 5, 6 and 7).  Only
+    `always` followed by a newline or `;` before the `{` found the push, reading the second group as unrelated to the first.
+
+    No shell is probed here: this worktree session's harness refuses to run one (SPD-094).  The evidence is Spud's probe of
+    2026-09-18, recorded on the ticket -- zsh 5.9 -f (identical with -o nobareglobqual, spot-checked), a function `vcs`
+    standing in for the VCS program that appends its arguments to a log file, the line started in a scratch directory D:
+
+    - both blocks ran, try then always, for every form in TRY_ALWAYS_EVIDENCE and TRY_ALWAYS_NESTED: with or without the
+      terminators, with newlines or a `;` between `always` and the second `{`, after `time`, `!` and `coproc`, in an and-or
+      list, a pipeline and the background, in a subshell, a command substitution and a case arm, before a redirection, and
+      whatever the try block's status (`{ false } always { vcs alw }` ran the always block);
+    - the always block's body was read as any group's: `repeat 1 vcs alw`, `if [[ -n x ]] vcs alw`, `eval 'vcs alw'` and
+      `( vcs alw )` each ran;
+    - the positions in TRY_ALWAYS_PARSE_ERRORS, and `echo { vcs try } always { vcs alw }` and a second `always` chained,
+      are parse errors that ran nothing.  A sole `}` is significant anywhere in zsh, so a `}` that closes no group is one;
+    - `always` elsewhere is an ordinary command (`always() { vcs fn }; always` ran the function, `print -r -- always`
+      printed the word), and `}always` glued is no `}`: `{ vcs try } always { vcs alw }always { vcs two }` ran
+      `vcs alw }always { vcs two`, one command;
+    - the line's directory and variables: `{ x=1; cd /tmp } always { y=2; cd /usr }` left the line in /usr with x=1 and
+      y=2, both blocks in the current shell, and so did its `time` and `!` forms; `{ cd /tmp } always { vcs alw-in-$PWD }`
+      logged alw-in-/tmp, the always block starting where the try block ended, inside a coproc's fork too; the `coproc`
+      and `time coproc` forms left the line in D with x and y unset, both blocks being the one fork's; `| cat` and `&`
+      left it in D, the last element of a pipeline moved it; `false && { cd /tmp } always { cd /usr }` left it in D; a
+      redirection after the always block opened where the try block started (D/out.txt); a trap set in either block fired.
+
+    So a `}` that closes a `{ list }` and is followed by an unquoted `always`, any number of `;` and newlines, then `{`,
+    does not close its frame: the always block is one more list of the same compound command, read exactly as a list
+    after a `;` in that group would be, and the frame closes at the always block's `}`.  The reading is therefore the
+    group's own, `{ try-list; always-list; }`, prefixes, pipelines, redirections and all, which is what the tests compare
+    it with.  Each parse-error position is over-read, fail closed: a `{` after a lone `always` opens a group, and an
+    `always` directly after a closing `}` with no `{` to follow is read as the keyword and dropped, so what follows it is
+    read as commands.  `echo { vcs try } always { vcs alw }` stays echo's arguments, as `echo coproc { ... }` does.
+
+    Left to other tickets, and not pinned here: zsh runs `{vcs alw}` with no blank after the `{` as a group, which the hook
+    does not read anywhere yet, so `{ vcs try } always {vcs alw}` waits on that; and SPD-125's named coproc group, so
+    `coproc NAME { a } always { b }` with no terminator inside is read only once that group is a frame (its `;` forms
+    are read already, through the lone `always`).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.out2 = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.addCleanup(shutil.rmtree, self.out2, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def reading(self, command):
+        """What the walk makes of a line: the findings, the directories after it, what it assigned and doubts, and every
+        redirection target with the directories it opens in."""
+        a = self.analysis(command)
+        return a.findings, a.cwds, a.vars, sorted(a.doubt), a.redirects, a.kinds
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)  # Law 7 refuses members only
+        return r
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6's ticket new and `--as spud`, Law 5's --as, and
+        Law 1 through a redirection and through tee."""
+        spud = self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        spud = self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    # -- the hole --------------------------------------------------------------------------
+    def test_the_tickets_evidence_commands(self):
+        """What main read on the ticket: the always block's push was never found, and a cd in the try block hid it too."""
+        push, status = ("git", ("push", "push")), ("git", ("status", None))
+        for line in ("{ git status } always { git push }", "coproc { git status } always { git push }",
+                     "time { git status } always { git push }", "! { git status } always { git push }",
+                     "{ git status } always { repeat 1 git push }", "{ git status } always { git push } > out.txt"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [status, push], line)
+        self.assertEqual(self.analysis("{ git status } always { { git push } always { git commit } }").findings,
+                         [status, push, ("git", ("commit", "commit"))])
+        a = self.analysis("{ cd /tmp } always { git push }")
+        self.assertEqual((a.findings, a.cwds), ([push], frozenset(["/tmp"])))
+        self.refused_for_members("{ git status } always { git push }")
+        self.refused_for_members("{ cd /tmp } always { git push }")
+
+    def test_every_form_the_probe_ran_reaches_the_always_block(self):
+        for form in TRY_ALWAYS_EVIDENCE:
+            line = form % ("git status", "git push")
+            with self.subTest(line=line):
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+            # ... and the try block is read as before, in every form
+            self.assertIn(("git", ("push", "push")), self.analysis(form % ("git push", "git status")).findings, form)
+
+    def test_every_block_of_a_nested_or_repeated_form(self):
+        for form in TRY_ALWAYS_NESTED:
+            slots = form.count("%s")
+            for k in range(slots):
+                line = form % tuple("git push" if j == k else "git status" for j in range(slots))
+                with self.subTest(line=line):
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                    self.assertRefused(line, "Law 7")
+            self.assertSilent(form % tuple("git status" for _ in range(slots)))
+
+    def test_every_body_form_inside_the_always_block(self):
+        """A short loop, a short conditional, a nested group or always form, a subshell, an eval and an `sh -c` in the
+        always block are read as they are inside a group."""
+        for form in ("{ git status } always { %s }", "{ git status; } always { %s; }", "coproc { git status } always { %s }",
+                     "time { git status } always { %s }"):
+            for body in ("repeat 1 %s", "if [[ -n x ]] %s", "eval '%s'", "( %s )", "for f (a) %s", "while [[ -n x ]] %s",
+                         "{ %s }", "{ true } always { %s }", "sh -c '%s'", "if true; then %s; fi", "true && %s",
+                         "%s | cat", "for f in a b; do %s; done"):
+                line = form % (body % "git push")
+                with self.subTest(line=line):
+                    self.assertRefused(line, "Law 7")
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+
+    def test_a_short_loop_ending_the_try_block(self):
+        """zsh's `}` ends a short loop's or a short conditional's sublist and closes the group behind it (a sole `}` is
+        significant anywhere in zsh, and SPD-081's probe ran `coproc { repeat 1 vcs push }`), so what follows is read as the
+        always block and not as more words of the loop's command."""
+        for try_block in ("repeat 1 git status", "if [[ -n x ]] git status", "for f (a) git status",
+                          "while [[ -n x ]] git status"):
+            line = "{ %s } always { git push }" % try_block
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [("git", ("status", None)), ("git", ("push", "push"))])
+                self.refused_for_members(line)
+        # the brace closed the loop and the group, so the loop's command is `git status` and not `git status }`, and what
+        # follows the group is outside both, exactly as after the same group closed by a terminator
+        for tail in ("; git log", " > out.txt", " | cat", " && git log"):
+            line, plain = "{ repeat 1 git status }" + tail, "{ repeat 1 git status; }" + tail
+            with self.subTest(line=line):
+                self.assertEqual(self.reading(line), self.reading(plain), line)
+
+    def test_every_payload_in_the_always_block_for_every_caller(self):
+        for form in ("{ git status } always { %s }", "coproc { git status } always { %s }",
+                     "time { git status; } always { %s; }", "{ git status } always { repeat 1 %s }"):
+            for command, needle in self.member_payloads():
+                line = form % command
+                for agent_id in (AGENT_C, AGENT_A):
+                    with self.subTest(line=line, agent_id=agent_id):
+                        self.assertRefused(line, needle, agent_id)
+            for command, needle in self.spud_payloads():
+                line = form % command
+                with self.subTest(line=line, agent_id="spud"):
+                    self.assertRefused(line, needle, agent_id=None)
+        for agent_id in (AGENT_C, AGENT_A, None):  # the database is refused to everyone, Spud included
+            self.assertRefused("{ true } always { sqlite3 %s/.spud/ledger.db 'select 1' }" % self.home.path,
+                               "spud sql --readonly", agent_id)
+
+    def test_a_target_outside_a_narrow_members_deliverables(self):
+        """AGENT_A plans tests/** and bin/spud, so note.txt at the home is refused it and allowed the ** member."""
+        for form in ("{ true } always { %s }", "coproc { true } always { %s }", "! { true; } always { %s; }"):
+            line = form % "echo x > note.txt"
+            with self.subTest(line=line):
+                self.assertRefused(line, "deliverables")
+                self.assertSilent(line, AGENT_C)
+                self.assertSilent(form % "echo x > tests/zzone/k.py")
+
+    # -- the one compound command -----------------------------------------------------------
+    def test_the_form_reads_as_one_group_holding_both_lists(self):
+        """`{ A } always { B }` is read as `{ A; B; }`, wherever it stands and whatever stands before and after it."""
+        out, out2 = self.out, self.out2
+        bodies = (("x=1; cd %s" % out, "y=2; cd %s" % out2), ("x=1", "cd %s; y=2" % out2), ("cd %s" % out, "y=2"),
+                  ("git status; cd %s" % out, "cd lib"), ("cd %s" % out, "echo x > k.txt"),
+                  ("X=git", "$X push"), ("cd %s" % out, "trap 'git push' EXIT"))
+        for wrap in ("%s", "time %s", "! %s", "coproc %s", "time coproc %s", "coproc time %s", "%s | cat", "%s &",
+                     "echo first | %s", "false && %s", "true || %s", "%s > out.txt", "( %s )", "%s; echo x > k.txt"):
+            for try_body, always_body in bodies:
+                line = wrap % ("{ %s } always { %s }" % (try_body, always_body))
+                plain = wrap % ("{ %s; %s; }" % (try_body, always_body))
+                with self.subTest(line=line):
+                    self.assertEqual(self.reading(line), self.reading(plain), line)
+
+    def test_the_line_runs_on_where_the_probe_left_it(self):
+        home, out, out2 = str(self.home.path), str(self.out), str(self.out2)
+        both = "{ x=1; cd %s } always { y=2; cd %s }" % (out, out2)
+        for line, where in ((both, out2), ("time " + both, out2), ("! " + both, out2),
+                            ("{ x=1 } always { cd %s; y=2 }" % out2, out2), ("{ cd %s } always { y=2 }" % out, out),
+                            ("coproc " + both, home), ("time coproc " + both, home), ("coproc time " + both, home),
+                            (both + " | cat", home), (both + " &", home)):
+            with self.subTest(line=line):
+                a = self.analysis(line)
+                self.assertEqual(a.cwds, frozenset([where]), line)
+                if where != home:  # the current shell's variables, both blocks'
+                    self.assertEqual((a.vars.get("x"), a.vars.get("y")), ("1" if "x=1" in line else None, "2"), line)
+        # the hook keeps each directory the shell may be in: a list that may not run, a cd that fails
+        self.assertIn(home, self.analysis("false && { cd %s } always { cd %s }" % (out, out2)).cwds)
+        self.assertIn(out, self.analysis("{ cd %s } always { cd lib }" % out).cwds)
+        self.assertIn(out2, self.analysis("echo first | " + both).cwds)
+
+    def test_the_always_block_starts_where_the_try_block_ended(self):
+        home, out = self.home.path, self.out
+        for form in ("{ cd %s } always { echo x > k.txt }", "coproc { cd %s } always { echo x > k.txt }",
+                     "{ cd %s; } always\n{ echo x > k.txt; }"):
+            line = form % out
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).redirects, [("k.txt", frozenset([str(out)]))], line)
+        for form in ("{ cd %s } always { echo x > tickets/SPD-001.md }", "coproc { cd %s } always { echo x > tickets/SPD-001.md }"):
+            line = form % (home / "ledger")
+            with self.subTest(line=line):
+                self.assertRefused(line, "generated", AGENT_C)
+                self.assertRefused(line, "Law 1", agent_id=None)
+        self.assertSilent("{ cd %s } always { echo x > note.txt }" % out)
+        self.assertSilent("coproc { cd %s } always { echo x > note.txt }" % out)
+
+    def test_the_compound_ends_at_the_always_blocks_brace(self):
+        home, out = str(self.home.path), self.out
+        # a redirection after it opens where the try block started, as a group's does
+        a = self.analysis("{ cd %s } always { git status } > out.txt" % out)
+        self.assertIn(home, a.redirects[-1][1])
+        self.assertRefused("{ cd %s } always { true } > ledger/tickets/SPD-001.md" % out, "generated", AGENT_C)
+        self.assertRefused("{ cd %s } always { true } > ledger/tickets/SPD-001.md" % out, "Law 1", agent_id=None)
+        # what follows it is outside it, in the directory it left
+        line = "{ true } always { echo a > tests/zzone/k.py }; echo b > ledger/tickets/SPD-001.md"
+        self.assertEqual(len(self.analysis(line).redirects), 2)
+        self.assertRefused(line, "generated")
+        self.assertSilent("{ true } always { cd %s }; echo x > note.txt" % out)
+        self.assertSilent("coproc { true } always { cd %s }; echo x > tests/zzone/k.py" % out)
+        self.assertRefused("coproc { true } always { cd %s }; echo x > note.txt" % out, "deliverables")
+
+    def test_a_trap_set_in_either_block_is_read(self):
+        """The probe's traps fired at the line's exit and at the coproc's fork's (SPD-054)."""
+        for line in ("{ trap 'git push' EXIT } always { git status }", "{ git status } always { trap 'git push' EXIT }",
+                     "coproc { true } always { trap 'git push' EXIT }", "time { true } always { trap 'git push' EXIT; }"):
+            with self.subTest(line=line):
+                self.refused_for_members(line)
+
+    # -- the positions no shell parses ------------------------------------------------------------
+    def test_the_positions_zsh_refuses_to_parse_are_over_read(self):
+        """Nothing runs at these positions; the block after `always` is read all the same, which refuses a line no shell
+        accepts rather than leave a silent always block."""
+        for form in TRY_ALWAYS_PARSE_ERRORS:
+            line = form % ("git status", "git push")
+            with self.subTest(line=line):
+                self.refused_for_members(line)
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+        # Not in the probe: a redirection between the group's `}` and `always`.  Whatever zsh makes of it, the block after
+        # `always` is read as a group, and the redirection before it is checked where the group left it.
+        for line in ("{ git status } 2>&1 always { git push }", "{ git status } > /dev/null always { git push }",
+                     "time { git status; } 2>/dev/null always\n{ git push; }"):
+            with self.subTest(line=line):
+                self.refused_for_members(line)
+        self.assertRefused("{ true } > ledger/tickets/SPD-001.md always { true }", "generated", AGENT_C)
+        self.assertRefused("{ true } > ledger/tickets/SPD-001.md always { true }", "Law 1", agent_id=None)
+
+    def test_always_elsewhere_is_an_ordinary_word(self):
+        for ok in ("always() { echo fn; }; always", "print -r -- always", "echo always", "always",
+                   "echo { git push } always { git push }", "echo always { git push }", "echo x always { git push; }",
+                   "grep -n 'always { git push }' tests/zzone/k.py",
+                   "%s --as %s member log '{ a } always { git push }'" % (self.spud_cli, AGENT_A),
+                   "{ git status } always { echo alw }always { git push }", "{ git status } always"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+        self.assertEqual(self.analysis("echo { git push } always { git push }").findings, [])
+        # `}always` glued is a word, not the always block's brace: the probe ran `vcs alw }always { vcs two`, one command
+        self.assertEqual(self.analysis("{ git status } always { echo alw }always { git push }").findings,
+                         [("git", ("status", None))])
+        self.assertEqual(self.analysis("{ git status } always { git log }always { git push }").findings,
+                         [("git", ("status", None)), ("git", ("log", None))])
+
+    def test_every_other_group_reading_is_unchanged(self):
+        for refused in ("{ git push }", "{ git push; }", "{ git status; }; git push", "time { git push; }", "! { git push }",
+                        "coproc { git push }", "coproc NAME { git push; }", "{ repeat 1 git push }",
+                        "repeat 2 { git push }", "if [[ -n x ]] { echo a } else { git push }", "f() { git push }; f",
+                        "function g { git push }", "{ git status }; always=1; git push"):
+            with self.subTest(refused):
+                self.refused_for_members(refused)
+        for ok in ("{ git status }", "{ echo hi; } > /dev/null", "coproc { echo hi; }", "time { git status; }"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        m = load_spud_module()
+        for line in ("{ git status } always " * 1000 + "{ git push }", "{ " * 500 + "git push" + " } always { true }" * 500,
+                     "{ true } always" + " ;" * 5000 + " { git push }", "{ a } always ; " * 2000 + "git push",
+                     "coproc { " * 300 + "git push" + " } always { git status }" * 300, "} always { " * 2000,
+                     "{ repeat 1 true } always { " * 500 + "git push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
 class PathInForceTest(BashHookCase):
     """SPD-062: the hook reads a line's command words by name -- git, spud, python3.14, sqlite3, tee, a shell, a wrapper --
     and the shell then finds each of them on PATH, so a member that puts a directory of its own first runs its own program
