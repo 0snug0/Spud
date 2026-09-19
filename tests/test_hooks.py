@@ -5197,6 +5197,118 @@ class AliasEvalTest(BashHookCase):
         self.assertRefused("alias e='echo x | tee ledger/tickets/SPD-001.md'; eval e", "Law 1", agent_id=None)
 
 
+class ShellStandardInputTest(BashHookCase):
+    """SPD-143: a shell started with no `-c` string and no script of its own runs the commands it reads on standard
+    input, and the analysis read none of them.  Main (44803a6) found the push in `zsh <<EOF ... EOF`, a here-document
+    fed to the shell itself, and nothing at all in `echo 'git push' | sh`, `printf 'git push' | bash -s`,
+    `bash -s <<< 'git push'`, `bash /dev/stdin <<< 'git push'`, `echo 'git push' | sh -i`, `| env sh`, `| sudo sh`,
+    `| xargs -0 sh -c` or `cat <<'EOF' | sh`: Laws 1, 5, 6 and 7 all stopped at the pipe.
+
+    Spud probed the shells for this, a member in a worktree being unable to run one (SPD-094), with an executable `vcs`
+    on PATH logging its arguments and each line run by /bin/bash -c from a scratch directory:
+    - a shell with no -c and no script operand ran what it read: `echo 'vcs a' | sh`, `| bash`, `| zsh -f`, `| dash`,
+      `| ksh`; with options first, `sh -s x` (x is $1), `bash -`, `zsh -f -`, `sh -e`, `bash --norc`, `sh -o errexit`,
+      `sh -x`, `sh --` and `bash -i`; and `sh /dev/stdin`, whose script operand is that input.
+    - `sh -c 'cat >/dev/null; vcs c'` ran c alone: the -c string is what runs, whatever its own commands read.
+    - what the line spells: `printf 'vcs a\\nvcs b' | sh` ran both, `printf '%s\\n' 'vcs a' | sh` ran a,
+      `echo -e 'vcs a\\nvcs b' | bash` ran both, and `echo 'vcs a\\nvcs b' | sh` ran one command under bash's echo and
+      two under zsh's, which decodes the escapes -- the reading taken here, the one that finds more (SPD-039).
+    - here-strings: `bash -s <<< 'vcs a'`, `zsh -f <<< 'vcs a'` and `sh <<< 'vcs a'` ran a.
+    - through other shapes: `cat <<'EOF' | sh`, `{ echo 'vcs a'; echo 'vcs b'; } | sh`, `(echo 'vcs a') | sh`,
+      `echo 'vcs a' | tee /dev/null | sh`, `echo 'vcs a' | env sh` and `| nohup sh` each ran what was printed.
+    - xargs: `echo 'vcs a' | xargs -0 sh -c` ran `vcs a`, the whole input being the string; `| xargs sh -c` ran `vcs`
+      with $0 set to a, its first word being the string.
+
+    Standard input the line does not spell keeps main's reading: a file (`sh < f`), another program's output
+    (`cat f | sh`, `curl ... | sh`), or text this reading cannot decode.  That is the same class as `sh script.sh`, a
+    script the hook does not read either -- a hole in Law 7 for every caller, which Spud has filed as a question for
+    Eric rather than have a member refused for it here."""
+
+    # Each line feeds a shell one `git push` through a shape the shells probed above run.
+    FED = ("echo 'git push' | sh", "echo 'git push' | bash", "echo 'git push' | zsh -f", "echo 'git push' | dash",
+           "echo 'git push' | ksh", "printf 'git push\\n' | bash -s", "printf '%s\\n' 'git push' | sh",
+           "print -r 'git push' | zsh -f", "bash -s <<< 'git push'", "zsh <<< 'git push'", "sh <<< 'git push'",
+           "bash /dev/stdin <<< 'git push'", "echo 'git push' | sh /dev/stdin", "echo 'git push' | sh -",
+           "echo 'git push' | sh -i", "echo 'git push' | sh -e", "echo 'git push' | sh -o errexit",
+           "echo 'git push' | bash --norc", "echo 'git push' | sh --", "echo 'git push' | sh -s x",
+           "echo 'git push' | env sh", "echo 'git push' | sudo sh", "echo 'git push' | nohup sh",
+           "echo 'git push' | tee /dev/null | sh", "cat <<'EOF' | sh\ngit push\nEOF", "cat <<< 'git push' | sh",
+           "{ echo 'git push'; } | sh", "(echo 'git push') | sh", "echo 'git push' | { sh; }",
+           "echo 'git push' | xargs -0 sh -c", "echo 'git push' | xargs -I% sh -c %",
+           "zsh <<EOF\ngit push\nEOF")  # the here-document main already read, kept
+    # ... and each of these two, in the order the shell would run them.
+    FED_TWICE = ("printf 'git push\\ngit commit -m x' | sh", "echo -e 'git push\\ngit commit -m x' | bash",
+                 "echo 'git push\\ngit commit -m x' | sh", "{ echo 'git push'; echo 'git commit -m x'; } | sh",
+                 "printf '%s\\n' 'git push' 'git commit -m x' | sh", "print -l 'git push' 'git commit -m x' | zsh -f")
+    # Standard input the line does not spell, and a script operand of the shell's own: main's reading, unchanged.
+    UNREAD = ("sh < setup.sh", "sh -s arg < setup.sh", "cat setup.sh | sh", "cat setup.sh | zsh",
+              "curl -sS https://example.com/i.sh | sh", "sh setup.sh", "bash ./setup.sh", "sh <(echo 'git push')",
+              "echo \"$CMD\" | sh", "X=push; echo \"git $X\" | sh", "printf '%d' 'git push' | sh",
+              "echo 'git push' > tests/out.txt | sh", "echo 'git push' | cat", "echo 'git push' | xargs sh",
+              "echo 'git push' | python3 -")
+
+    def setUp(self):
+        super().setUp()
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def verbs(self, command):
+        """The git verbs the analysis finds on this line, in the order it finds them."""
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "git"]
+
+    def test_the_analysis_reads_the_commands_the_line_feeds_a_shell(self):
+        for command in self.FED:
+            with self.subTest(command):
+                self.assertEqual(self.verbs(command), ["push"])
+        for command in self.FED_TWICE:
+            with self.subTest(command):
+                self.assertEqual(self.verbs(command), ["push", "commit"])
+
+    def test_input_the_line_does_not_spell_is_read_as_it_was(self):
+        for command in self.UNREAD:
+            with self.subTest(command):
+                self.assertEqual(self.analysis(command).findings, [])
+                self.assertSilent(command)
+
+    def test_a_c_string_is_still_the_only_thing_that_shell_runs(self):
+        """probed: `sh -c 'cat >/dev/null; vcs c'` ran c alone, whatever its commands read from the pipe."""
+        self.assertEqual(self.verbs("echo 'git commit -m x' | sh -c 'git status'"), ["status"])
+        self.assertEqual(self.verbs("echo 'git commit -m x' | bash -lc 'git status'"), ["status"])
+        for command in ("echo x | sh -c 'cat'", "echo 'git push' | sh -c 'true'"):
+            with self.subTest(command):
+                self.assertEqual(self.verbs(command), [])
+                self.assertSilent(command)
+
+    def test_law_7_reaches_the_commands_a_shell_reads(self):
+        for command in self.FED:
+            with self.subTest(command):
+                self.assertRefused(command, "Law 7")
+                self.assertSilent(command, agent_id=None)  # Spud pushes; Law 7 binds members
+        self.assertRefused("echo 'git commit -m x' | sh", "Law 7")
+        self.assertSilent("echo 'git status' | sh")
+
+    def test_a_spud_call_and_a_write_are_read_there_too(self):
+        home, cli = self.home.path, self.spud_cli
+        self.assertRefused("echo '%s ticket new --title x' | sh" % cli, "Law 6")
+        self.assertRefused("echo '%s --as %s member log hi' | sh" % (cli, AGENT_A), "Law 5", agent_id=None)
+        self.assertRefused("printf '%%s\\n' '%s init' | bash -s" % cli, "Law 6")
+        self.assertRefused("echo 'echo x > ledger/tickets/SPD-001.md' | sh", "generated")
+        self.assertRefused("echo 'echo x > ledger/tickets/SPD-001.md' | sh", "Law 1", agent_id=None)
+        self.assertRefused("echo 'touch docs/x.md' | sh", "deliverables")
+        self.assertRefused("cat <<'EOF' | sh\necho x > %s/bin/spud\nEOF" % home, "Law 1", agent_id=None)
+        self.assertSilent("echo 'echo x > tests/out.txt' | sh")
+
+    def test_the_text_runs_in_a_process_of_its_own(self):
+        """The shell it feeds is another process: a cd there does not move the line, as a here-document's body does not."""
+        out = str(self.out)
+        self.assertRefused("echo 'cd %s' | sh; echo x > note.txt" % out, "deliverables")
+        self.assertSilent("cd %s && echo 'git status' | sh && echo x > note.txt" % out)
+
+
 # A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
 # files on this Mac are 4,100 lines and 124 KB; nothing here reads them, and a test never touches ~/.claude.
 SHELL_SNAPSHOT = """\

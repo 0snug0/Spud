@@ -447,6 +447,11 @@ class ShellAnalysis:
         # picks (mktemp's X, split's suffix).
         self.arg_writes = []
         self.vars = {}
+        # SPD-143: the text the line feeds the simple command being read on its standard input -- a here-string, a
+        # here-document body, or what the pipeline element before it printed -- and None where the line does not spell
+        # it.  A shell that runs what it reads there runs that text (shell/stdin_text).  analyse_segment sets it for
+        # each command and puts back what it found, so a body read in its own process reads its own input, not this one.
+        self.stdin = None
         self.cwds = frozenset([cwd]) if cwd else None
         self.unparseable = False
         self.loop_depth = 0  # inside a loop or a function body, where a relative cd may repeat
