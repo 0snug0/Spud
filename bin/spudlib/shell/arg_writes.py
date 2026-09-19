@@ -8,9 +8,10 @@ wherever tee is read: behind every wrapper, in a pipeline, a subshell, eval, a f
 record into the masked words bash_reason's targets_reason checks, a directory destination read against the filesystem as
 a redirection glob is.  The grammar is syntax.ARG_WRITE_COMMANDS, this Mac's BSD one (probed in a scratch directory):
 options end at `--` or the first operand, so `mkdir new -p` made ./-p; a cluster's first letter that takes a value takes
-the rest of the word or the next one, so `sed -i -e X f` backed f up to f-e.  One reading is narrower than a redirection's:
-`resolved` puts the line's own value in a file the command names (`S=<scratchpad>; mkdir -p $S/base`), which the
-differential over 3477 commands spudagents ran showed is how a member writes in its scratchpad.
+the rest of the word or the next one, so `sed -i -e X f` backed f up to f-e.  `resolved` puts the line's own value in a
+file the command names (`S=<scratchpad>; mkdir -p $S/base`), which the differential over 3477 commands spudagents ran
+showed is how a member writes in its scratchpad; since SPD-127 it is the one reading of every write target the hook
+checks -- a redirection's, a tee operand's and a git call's own write option's alike, resolved where each is recorded.
 
 Each recorded write also carries SPD-129's directory kind, which the command decides and only the path rule reads: mkdir's
 operands and `install -d`'s only make a directory, rmdir's and rm -d's only remove one, and a member's own deliverable glob
@@ -135,10 +136,19 @@ def read_writes(cmd, base, words, a):
 def resolved(word, a):
     """The word with every `$NAME` or `${NAME}` the line assigned put in its place, when both shells pass that value as the
     one plain word it spells: a value the line settled (not doubted, not a loop's or a function body's, not one the shells
-    set themselves), holding no blank (bash would split it), no glob character (bash expands an unquoted expansion's), and
+    set themselves), holding no blank (bash would split it), no glob character (bash expands an unquoted expansion's) and
     nothing left to expand.  A member writes into its scratchpad through a variable it set on the line
-    (`S=<scratchpad>; mkdir -p $S/base`) far too often for the raw word a redirection target keeps to be the reading here;
-    everything else stays as spelled and earns the unresolvable-target refusal a redirection's spelling earns."""
+    (`S=<scratchpad>; mkdir -p $S/base`) far too often for the raw word to be the reading here; everything else stays as
+    spelled and earns the unresolvable-target refusal a redirection's spelling earns.
+
+    A glob character counts wherever the value holds one, quoted or not (SPD-127): the quoting that made it literal is
+    the assignment's, and bash expands the unquoted expansion's characters afterwards while zsh does not, so `S='docs*';
+    rm $S/f` removes docs/f in one shell and the literal docs*/f in the other.  The hook settles neither reading and
+    keeps the refusal the raw word earns.
+
+    SPD-127: every write target the hook checks is read this way -- a file a command names as an operand, a redirection
+    target, a tee operand and the file a git call's own option or environment names -- each resolved where the analysis
+    records it, which is the point of the walk that holds the value the shell would use there."""
     if not word or "$" not in word or hookio.SUBST in word or "`" in word:
         return word
 
@@ -147,7 +157,8 @@ def resolved(word, a):
         value = a.vars.get(name)
         if value is None or name in a.doubt or name in a.sticky or a.all_doubt or name in syntax.DYNAMIC_VARIABLES:
             return m.group(0)
-        if not value or unresolved(value) or syntax._IFS_BLANKS_RE.search(value) or syntax.GLOB_RE.search(value) or syntax._ARRAY_VALUE in value:
+        if not value or unresolved(value) or syntax._IFS_BLANKS_RE.search(value) or syntax._ARRAY_VALUE in value \
+                or syntax.GLOB_RE.search(prepare.deglob(value)):  # deglob: a glob character the assignment's own quoting marked literal counts too
             return m.group(0)
         return value
 

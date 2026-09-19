@@ -222,7 +222,8 @@ def git_write_env_targets(variables):
     reason names it by, the path word): a GIT_TRACE* sibling whose value is a path git appends to -- an absolute one, or
     a `~` the shell expanded before git saw it, a descriptor, an off value and a relative one writing nothing -- or whose
     value the hook cannot read, which fails closed, and GIT_INDEX_FILE and GIT_OBJECT_DIRECTORY, whose value is a path
-    whatever its shape.  A fixed order so the reason is deterministic."""
+    whatever its shape.  `variables` holds each value as the shell passes it to git, a `$NAME` the line settled resolved
+    (SPD-127), so the shape that decides here is the one git sees.  A fixed order so the reason is deterministic."""
     out = []
     for name in sorted(variables):
         value = variables[name]

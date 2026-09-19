@@ -2297,10 +2297,14 @@ class GlobRedirectTest(BashHookCase):
         self.assertRefused("printf x | tee ledger/tickets/SPD-00?.md tests/keep.py", "generated", AGENT_C)
         self.assertSilent("printf x | tee tests/*.py")
 
-    def test_a_variable_in_a_glob_target_is_refused_for_a_member(self):
-        # Existing behaviour, pinned: a $ in a target is unresolvable.
-        self.assertRefused("X=ledger; echo x > $X/tickets/SPD-00?.md", "spell the path out", AGENT_C)
-        self.assertSilent("X=ledger; echo x > $X/tickets/SPD-001.md", agent_id=None)
+    def test_a_variable_in_a_glob_target(self):
+        # SPD-127: a value the line itself settled is put in the target's place, and the glob it spells is expanded and
+        # checked as a spelled one is -- the refusal is the path rule's, not the unresolvable-target one.  A variable the
+        # line does not settle keeps that refusal, for a member, and stays unread for Spud.
+        self.assertRefused("X=ledger; echo x > $X/tickets/SPD-00?.md", "generated", AGENT_C)
+        self.assertRefused("X=ledger; echo x > $X/tickets/SPD-001.md", "Law 1", agent_id=None)
+        self.assertRefused("echo x > $X/tickets/SPD-00?.md", "spell the path out", AGENT_C)
+        self.assertSilent("echo x > $X/tickets/SPD-001.md", agent_id=None)
 
     def test_tilde_before_a_glob(self):
         home = self.home.path
@@ -4697,6 +4701,294 @@ class ZshShortConditionalTest(BashHookCase):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
         self.assertEqual(self.analysis("if [ -n x ] git push").findings, [])
+
+
+# SPD-136: an `elif` after zsh's short conditional.  Each form fills its `%s` slots with the command the `if`'s body runs
+# and the command the `elif`'s body runs; ELIF_EVIDENCE is Spud's probe of 2026-09-19, the spellings zsh 5.9 ran the elif's
+# body for -- with an `else`, with a terminator after the body, with `fi`, with a sublist body, and with a short loop or an
+# eval inside the body -- and ELIF_CHAINED the same with a second elif (four slots: the if's body, both elifs' bodies, and
+# the else's body or the command after the conditional).  ELIF_PARSE_ERRORS are the spellings zsh refused to parse, read as
+# the running form all the same (fail closed), the ticket's own headline example among them.
+ELIF_EVIDENCE = ("if [[ -z x ]] { %s } elif [[ -n y ]] { %s } else { true }",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] { %s }; true",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] { %s } fi",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] %s",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] %s; true",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] { repeat 1 %s } else { true }",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] { eval '%s' } else { true }")
+ELIF_CHAINED = ("if [[ -z x ]] { %s } elif [[ -z y ]] { %s } elif [[ -n z ]] { %s } else { %s }",
+                "if [[ -z x ]] { %s } elif [[ -z y ]] { %s } elif [[ -n z ]] { %s }; %s",
+                "if [[ -z x ]] { %s } elif [[ -z y ]] { %s } elif [[ -n z ]] %s; %s")
+ELIF_PARSE_ERRORS = ("if [[ -z x ]] { %s } elif [[ -n y ]] { %s }",
+                     "if [[ -z x ]] { %s } elif [[ -z y ]] { %s } elif [[ -n z ]] { %s }",
+                     "if [[ -z x ]] { %s } elif [[ -n y ]] {%s}",
+                     "if [[ -z x ]] { %s } elif [[ -n y ]] { %s } else true",
+                     "if [[ -z x ]] { %s } elif [[ -n y ]] { %s } always { true }")
+# The long forms, read correctly before this ticket and unchanged by it: the `then` after an elif's condition, whether the
+# branch before it was the short conditional's body or the long form's, and an elif whose condition is a plain command.
+ELIF_LONG_FORMS = ("if [[ -z x ]]; then %s; elif [[ -n y ]]; then %s; fi",
+                   "if [[ -z x ]] { %s } elif [[ -n y ]]; then %s; fi",
+                   "if [[ -z x ]]; then %s; elif true; then %s; fi",
+                   "if [[ -z x ]]; then %s; elif git status; then %s; fi",
+                   "if [[ -z x ]]; then %s; elif [[ -n y ]]; then true; else %s; fi")
+
+
+class ElifShortConditionalTest(BashHookCase):
+    """SPD-136: SPD-061 reads zsh's short conditional -- an `if`, `while` or `until` whose condition ends in `[[ ... ]]`
+    needs no `then` or `do` -- but its frame's body was left at "sublist" when an `elif` followed, so the elif's own `]]`
+    ended no condition (end_header fires only while the body is "cond") and the `{` after it was appended to the elif's
+    words as an ordinary argument.  Everything in the elif's condition and body was then read as arguments of one simple
+    command whose command word was `[[`: a member's push, write, spud call or cd there was never checked (Laws 1, 5, 6
+    and 7).  branch() now reopens the condition at an `elif` on a conditional's frame, so the elif is read exactly as the
+    `if`'s own condition and body were.
+
+    No shell is probed here: this worktree session's harness refuses to run one (SPD-094).  The evidence is Spud's probe
+    of 2026-09-19, recorded on the ticket -- zsh 5.9 -f, a function `vcs` standing in for the VCS program that logs its
+    arguments, the line started in a scratch directory D.  It corrects the ticket's own headline example, `if [[ -z x ]]
+    { vcs a } elif [[ -n y ]] { vcs b }` with nothing after it: that spelling is a parse error and runs nothing.  The
+    forms that ran are ELIF_EVIDENCE and ELIF_CHAINED -- with an `else`, with a terminator after the elif's body, with
+    `fi`, with a sublist body (`elif [[ -n y ]] vcs b`), and with `repeat 1` or `eval` inside the body -- each of which
+    was findings=[] for a push in the elif's body on main.  The probe also showed:
+
+    - the directory carries out of an elif's body: `if [[ -z x ]] { vcs a } elif [[ -n y ]] { cd /tmp; vcs in-$PWD } else
+      { vcs c }` logged in-/tmp and left the line in /tmp, while main left it in D, missing the cd in both directions.
+      The elif's body is a branch, so either directory follows the whole conditional, as `else`'s body already gave;
+    - a redirection inside the elif's body was recorded even on main (separate_redirects sees a target wherever the words
+      fall), but in the directory the line started in; the commands around it were what went unread;
+    - the parse errors ELIF_PARSE_ERRORS, and the headline example above, ran nothing.  Each is over-read as the running
+      form, which costs a refusal on a line no shell accepts.  `elif true { vcs b }` is the one parse error left as it
+      was: no `]]` ends that condition, so the body is not a short conditional's, exactly as `if true { vcs b }` is not
+      one either -- zsh parses neither, and reading them would take a short conditional's body where no condition ended;
+    - the long forms ELIF_LONG_FORMS were read correctly before this ticket and must stay that way.
+
+    A `( list )` body after an elif is read as it is after an `if`.  Where an earlier `{ ... }` on the line leaves
+    mark_zsh_patterns outside command position, zsh's reading takes that `( ... )` for one glob pattern word, and the
+    hook doubts a command word it cannot read: main does the same for `if c { a } if [[ -n y ]] ( cd /tmp/o )` and for
+    `{ true } ( cd /tmp/o )`, so the elif only joins them.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)  # Law 7 refuses members only
+        return r
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    # -- the hole ---------------------------------------------------------------------------
+    def test_the_tickets_headline_example_and_the_probes_running_forms(self):
+        """The headline example is a parse error, over-read here; every form the probe ran finds the elif's push, which
+        main found in none of them."""
+        push, status = ("git", ("push", "push")), ("git", ("status", None))
+        self.assertEqual(self.analysis("if [[ -z x ]] { git status } elif [[ -n y ]] { git push }").findings,
+                         [status, push])
+        for form in ELIF_EVIDENCE:
+            line = form % ("git status", "git push")
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [status, push], line)
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+
+    def test_every_running_form_reaches_both_bodies(self):
+        for form in ELIF_EVIDENCE + ELIF_CHAINED + ELIF_PARSE_ERRORS:
+            slots = form.count("%s")
+            for k in range(slots):
+                line = form % tuple("git push" if j == k else "git status" for j in range(slots))
+                with self.subTest(line=line):
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                    self.assertRefused(line, "Law 7")
+                    self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(form % tuple("git status" for _ in range(slots)))
+
+    def test_every_payload_in_the_elifs_body_for_every_caller(self):
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] { %s } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { %s }; true",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] %s",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { %s } fi",
+                     "if [[ -z x ]] { true } elif [[ -z y ]] { true } elif [[ -n z ]] { %s } else { true }"):
+            for command, needle in self.member_payloads():
+                line = form % command
+                for agent_id in (AGENT_C, AGENT_A):
+                    with self.subTest(line=line, agent_id=agent_id):
+                        self.assertRefused(line, needle, agent_id)
+            for command, needle in self.spud_payloads():
+                line = form % command
+                with self.subTest(line=line, agent_id="spud"):
+                    self.assertRefused(line, needle, agent_id=None)
+
+    def test_a_target_outside_a_narrow_members_deliverables(self):
+        """AGENT_A plans tests/** and bin/spud, so note.txt at the home is refused it and allowed the ** member."""
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] { %s } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] %s",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { %s } fi"):
+            line = form % "echo x > note.txt"
+            with self.subTest(line=line):
+                self.assertRefused(line, "deliverables")
+                self.assertSilent(line, AGENT_C)
+                self.assertSilent(form % "echo x > tests/zzone/k.py")
+
+    def test_the_elifs_condition_is_read_as_the_ifs_is(self):
+        """Every command of the elif's condition list runs, and only the last `]]` ends it (SPD-061's rule, now reached
+        through the elif as well)."""
+        for line in ("if [[ -z x ]] { true } elif git push; then true; fi",
+                     "if [[ -z x ]] { true } elif git push && [[ -n y ]] { true } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] && [[ -n z ]] git push",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] || [[ -z z ]] git push",
+                     "if [[ -z x ]] { true } elif [[ -n $(git push) ]] { true } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { true } elif git push; then true; fi"):
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                self.refused_for_members(line)
+
+    def test_every_body_form_inside_the_elifs_body(self):
+        """The elif's body is read as the if's is: a nested conditional, a short loop, a long loop, an eval, a group, a
+        subshell, an `sh -c`, an and-or list, a pipeline and a case arm."""
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] { %s } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { %s }; true",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] %s"):
+            for body in ("%s", "if [[ -n z ]] %s", "repeat 1 %s", "for f in a b; do %s; done", "eval '%s'", "{ %s }",
+                         "( %s )", "sh -c '%s'", "true && %s", "false || %s", "%s | cat",
+                         "case x in x) %s;; esac", "if true; then %s; fi"):
+                line = form % (body % "git push")
+                with self.subTest(line=line):
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                    self.assertRefused(line, "Law 7")
+
+    # -- the directory model -------------------------------------------------------------------
+    def test_the_directory_carries_out_of_an_elifs_body_in_both_directions(self):
+        """The probe's `... elif [[ -n y ]] { cd /tmp; vcs in-$PWD } else { vcs c }` logged in-/tmp and left the line in
+        /tmp; the elif's condition may be false, so either directory follows the whole conditional."""
+        home, out = str(self.home.path), str(self.out)
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { cd %s }; true",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] cd %s",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { cd %s } fi",
+                     "if [[ -z x ]] { true } elif [[ -z y ]] { true } elif [[ -n z ]] { cd %s } else { true }",
+                     "if [[ -z x ]]; then true; elif [[ -n y ]]; then cd %s; fi"):
+            line = form % out
+            with self.subTest(line=line):
+                self.assertEqual(sorted(self.analysis(line).cwds), sorted([home, out]), line)
+                self.assertIn(("k.txt", frozenset([home, out])), self.analysis(line + "; echo x > k.txt").redirects, line)
+        # the ledger through the elif's cd, and the directory the line started in through the same line
+        self.assertRefused("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s/ledger }; echo x > tickets/SPD-001.md" % home,
+                           "generated", AGENT_C)
+        self.assertRefused("if [[ -z x ]] { true } elif [[ -n y ]] cd %s; echo x > note.txt" % out, "deliverables")
+        self.assertSilent("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s }; echo x > tests/zzone/k.py" % out)
+        # a `( )` body runs in its own process, so its cd does not carry; a relative cd in the body runs at most once
+        self.assertEqual(self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] ( cd %s ) else { true }" % out).cwds,
+                         frozenset([home]))
+        self.assertEqual(sorted(self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] { cd docs } else { true }").cwds),
+                         sorted([home, home + "/docs"]))
+
+    def test_a_redirection_in_the_elifs_body_opens_where_the_body_left_the_shell(self):
+        """main recorded the target wherever the words fell (separate_redirects), but always in the directory the line
+        started in; the commands around it were what went unread."""
+        home, out = str(self.home.path), str(self.out)
+        a = self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s; echo x > k.txt } else { true }" % out)
+        self.assertIn(("k.txt", frozenset([out])), a.redirects)
+        self.assertEqual(self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] { echo x > k.txt } else { true }").redirects,
+                         [("k.txt", frozenset([home]))])
+        self.assertRefused("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s/ledger; echo x > tickets/SPD-001.md }" % home,
+                           "generated", AGENT_C)
+        self.assertRefused("if [[ -z x ]] { true } elif [[ -n y ]] { echo x > ledger/tickets/SPD-001.md } else { true }",
+                           "generated", AGENT_C)
+
+    # -- controls ------------------------------------------------------------------------------
+    def test_the_long_forms_are_read_as_before(self):
+        home, out = str(self.home.path), str(self.out)
+        for form in ELIF_LONG_FORMS:
+            for k in range(2):
+                line = form % tuple("git push" if j == k else "git status" for j in range(2))
+                with self.subTest(line=line):
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                    self.assertRefused(line, "Law 7")
+            self.assertSilent(form % ("git status", "git status"))
+        self.assertEqual(sorted(self.analysis("if [[ -z x ]]; then true; elif [[ -n y ]]; then cd %s; fi" % out).cwds),
+                         sorted([home, out]))
+        self.assertRefused("if [[ -z x ]]; then true; elif [[ -n y ]]; then cd %s/ledger; fi; echo x > tickets/SPD-001.md"
+                           % home, "generated", AGENT_C)
+
+    def test_an_elif_that_reaches_no_conditional_is_read_as_before(self):
+        """A loop's frame, a group's and no frame at all: an `elif` there is not a conditional's branch, and nothing about
+        those readings changes (zsh parses none of them)."""
+        status = ("git", ("status", None))
+        self.assertEqual(self.analysis("while [[ -n x ]] { git status } elif [[ -n y ]] { git push }").findings, [status])
+        self.assertEqual(self.analysis("elif [[ -n y ]] { git push }").findings, [])
+        self.assertEqual(self.analysis("echo x elif [[ -n y ]] { git push }").findings, [])
+        # `elif true { git push }`: no `]]` ends that condition, so no short body follows it -- as after `if true`
+        self.assertEqual(self.analysis("if [[ -z x ]] { git status } elif true { git push }").findings, [status])
+        self.assertEqual(self.analysis("if true { git push }").findings, [])
+        for ok in ("echo 'if [[ -z x ]] { a } elif [[ -n y ]] { git push }'",
+                   "echo \"elif [[ -n y ]] { git push }\"",
+                   "grep -n 'elif \\[\\[ -n y \\]\\] { git push }' tests/zzone/k.py",
+                   "%s --as %s member log 'elif [[ -n y ]] { git push }'" % (self.spud_cli, AGENT_A),
+                   "if [[ -z x ]] { git status } elif [[ -n y ]] { git log } else { git status }"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+
+    def test_the_other_short_forms_are_unchanged(self):
+        """SPD-042's short loops, SPD-061's short conditionals, SPD-124's try-always and SPD-132's glued braces, on lines
+        with no elif: an elif's reading is the only thing this ticket moves."""
+        for condition in SHORT_CONDITIONS:
+            for body in SHORT_CONDITION_BODIES:
+                with self.subTest(condition=condition, body=body):
+                    self.assertRefused(condition % (body % "git push"), "Law 7")
+        for refused in ("repeat 2 { git push }", "for f (a) git push", "{ git status } always { git push }",
+                        "{git push}", "if [[ -n x ]] { echo a } else { git push }",
+                        "if [[ -n x ]] { echo a } else { repeat 1 git push }",
+                        "if [[ -n x ]]; then echo a; else git push; fi"):
+            with self.subTest(refused):
+                self.refused_for_members(refused)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        m = load_spud_module()
+        for line in ("if [[ -z x ]] { true } " + "elif [[ -n y ]] { true } " * 1000 + "elif [[ -n z ]] { git push }",
+                     "if [[ -z x ]] " + "elif " * 5000 + "git push",
+                     "if [[ -z x ]] { true } elif " * 1000 + "[[ -n y ]] { git push }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { " * 500 + "git push" + " }" * 500,
+                     "elif [[ " * 2000, "if [[ -z x ]] { true } elif [[ -n y ]] && " * 1000 + "[[ -n z ]] git push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
 class AliasEvalTest(BashHookCase):
@@ -8963,6 +9255,226 @@ class ExtractionWriteTest(TreeWriteCase):
         for command in ("tar -xf a.tar -C /tmp/spd-126-x", "tar -xPf a.tar -C /tmp/spd-126-x", "curl -K cfg https://example.com/x"):
             with self.subTest(command):
                 self.assertSilent(command, agent_id=None)
+
+
+PROBE = "/tmp/spd-127-probe"  # the scratch directory D of Spud's probe of zsh 5.9 -f and bash 3.2, 2026-09-18
+NOBODY = "/Users/nobody"  # a directory outside every registered project and every temp root, as OutsideProjectTest's
+
+
+class TargetResolutionTest(BashHookCase):
+    """SPD-127: SPD-121 put the line's own value in a file a command names as an operand (arg_writes.resolved), because the
+    differential over the 3477 commands spudagents ran showed that is how a member writes in its scratchpad: with the raw
+    word 75 of those commands were refused, 70 of them a variable the line assigns pointing at the session scratchpad.
+    The same line's redirection (`S=<scratchpad>; echo hi > $S/f`), its tee operand and a git call's own write option kept
+    the raw word and the unresolvable-target refusal, so one line's halves answered differently.  Spud's decision: resolve,
+    everywhere, with the one function, at the point of the walk that holds the value the shell uses there.
+
+    A member in a worktree cannot run a shell (SPD-094), so Spud probed the two readings himself, 2026-09-18 in zsh 5.9 -f
+    and bash 3.2, recording which file each line made in a scratch directory D; every line asserted here is one of them.
+
+    Both shells make a.f for `S=$D/a; echo hi > $S.f` and its `>>`, `2>`, `export`, `&&` and `cd /tmp &&` forms -- the
+    value decides, not the directory -- and a.t for `... | tee $S.t`.  A prefix assignment on the command itself reaches
+    neither its redirection nor its arguments (`S=$D/a; S=$D/b echo hi > $S.f` made a.f, `S=$D/a; S=$D/b tee $S.t` made
+    a.t, `S=$D/a; S=$D/b mkdir $S.m` made a.m), so the target is read before the command's own words and the prefix's value
+    never counts.  An assignment-only command's own redirection is the one place the shells part (`S=$D/a; S=$D/b > $S.f`
+    made a.f in zsh and b.f in bash), so both readings are recorded and neither shell's decides alone.  A later assignment
+    wins in both (`S=$D/a; S=$D/b; echo hi > $S.f` made b.f); a loop's variable and a value the hook doubts settle nothing
+    and keep the refusal the raw word earns, which refuses rather than name one of the two values.
+
+    AGENT_A plans home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        home = self.home.path
+        for d in ("tests/out", "docs", "ledger/tickets", "reports", "tests/fake/.git/hooks"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        for f in ("tests/keep.py", "docs/x.md", "ledger/tickets/SPD-001.md"):
+            (home / f).write_text("orig\n", encoding="utf-8")
+        self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def targets(self, command):
+        """The redirection and tee targets the analysis recorded, in order: the words bash_reason holds to the path rule."""
+        return [t for t, _cwds in self.analysis(command).redirects]
+
+    # -- what the analysis records (Spud's probe, line by line) ------------------------
+
+    def test_the_value_the_line_settled_is_in_the_targets_place(self):
+        for command, recorded in (("S=%s/a; echo hi > $S.f" % PROBE, ["%s/a.f" % PROBE]),
+                                  ("S=%s/a; echo hi >> ${S}.f" % PROBE, ["%s/a.f" % PROBE]),
+                                  ("S=%s/a; echo hi 2> $S.f" % PROBE, ["%s/a.f" % PROBE]),
+                                  ("S=%s/a; cd /tmp && echo hi > $S.f" % PROBE, ["%s/a.f" % PROBE]),
+                                  ("S=%s/a; export S; echo hi > $S.f" % PROBE, ["%s/a.f" % PROBE]),
+                                  ("S=%s/a && echo hi > $S.f" % PROBE, ["%s/a.f" % PROBE]),
+                                  ("S=%s/a; echo hi | tee $S.t" % PROBE, ["%s/a.t" % PROBE])):
+            with self.subTest(command):
+                self.assertEqual(self.targets(command), recorded)
+
+    def test_a_prefix_assignment_never_reaches_the_targets_of_its_own_command(self):
+        """Both shells opened the value the line had before the command, so the target is read before the command's words;
+        where that value is not the line's own the word stays raw, which refuses rather than name the prefix's."""
+        both = "S=%s/a; S=%s/b %%s" % (PROBE, PROBE)
+        self.assertEqual(self.targets(both % "echo hi > $S.f"), ["%s/a.f" % PROBE])
+        self.assertEqual(self.targets(both % "tee $S.t"), ["$S.t"])  # the tee operand is read after the prefix doubts it
+        self.assertEqual(self.targets("S=%s/a echo hi > $S.f" % PROBE), ["$S.f"])  # S unset before: the shells made `.f`
+        a = self.analysis(both % "mkdir $S.m")  # SPD-121's own reading, unchanged
+        self.assertEqual(([w[1] for w in a.arg_writes], self.targets(both % "mkdir $S.m")), (["$S.m"], []))
+
+    def test_an_assignment_only_commands_redirection_records_both_readings(self):
+        """The one place the shells differ: zsh opens the redirection with the value before the command, bash with the one
+        the command assigns.  Both are recorded, as hidden_option reads both of sed's (SPD-121); a reading the hook cannot
+        settle stays raw and keeps the refusal it earns, so neither shell's reading decides alone."""
+        self.assertEqual(self.targets("S=%s/a; S=%s/b > $S.f" % (PROBE, PROBE)), ["%s/a.f" % PROBE, "%s/b.f" % PROBE])
+        self.assertEqual(self.targets("S=%s/b > $S.f" % PROBE), ["$S.f", "%s/b.f" % PROBE])  # zsh's `.f` is unresolvable
+
+    def test_a_value_that_refuses_to_settle_leaves_the_target_raw(self):
+        """resolved's own conditions, now read for a redirection and a tee as well as for a write by argument: a value
+        holding a blank (bash would split it), an array, an expansion, or a name the shells set themselves.  A glob
+        character counts quoted as well as bare (SPD-121 settled a quoted one, which is zsh's reading of `S='docs*';
+        rm $S/f` and not bash's, where the unquoted expansion's `*` expands): the value settles in neither shell's
+        reading now, and the raw word keeps the refusal it earns."""
+        for command in ("S='docs x'; echo hi > $S/f", "S=(docs tests); echo hi > $S/f", "S=$T; echo hi > $S/f",
+                        "PWD=docs; echo hi > $PWD/f", "S=docs*; echo hi > $S/f", "S='docs*'; echo hi > $S/f",
+                        'S="docs?"; echo hi > $S/f', "S='doc[s]'; echo hi | tee $S/f", "S='docs{1,2}'; echo hi > $S/f"):
+            with self.subTest(command):
+                self.assertEqual(self.targets(command), [command.rsplit(" ", 1)[1]])
+                self.assertRefused(command, VARIABLE_WORDING)
+        a = self.analysis("S='docs*'; rm $S/f")  # the same reading for a write by argument, which SPD-121 settled
+        self.assertEqual([w[1] for w in a.arg_writes], ["$S/f"])
+
+    def test_a_later_assignment_a_compound_and_a_loop(self):
+        """A later assignment wins in both shells; an assignment the hook doubts (a compound command's, a loop's own
+        variable) settles nothing, and the raw word keeps the refusal it had."""
+        self.assertEqual(self.targets("S=%s/a; S=%s/b; echo hi > $S.f" % (PROBE, PROBE)), ["%s/b.f" % PROBE])
+        self.assertEqual(self.targets("S=%s/a; { S=%s/b; }; echo hi > $S.f" % (PROBE, PROBE)), ["$S.f"])
+        self.assertEqual(self.targets("for S in %s/a; do echo hi > $S.f; done" % PROBE), ["$S.f"])
+
+    # -- what the hook answers ---------------------------------------------------------
+
+    def test_the_differentials_own_shape_is_silent_for_a_member(self):
+        """The 70: a member writing into its session scratchpad through a variable it set on the line.  The `mkdir` half
+        was already silent (SPD-121); the redirection and the tee beside it were refused."""
+        for command in ("S=%s; echo hi > $S/f" % self.scratchpad,
+                        "S=%s; echo hi | tee $S/f" % self.scratchpad,
+                        "S=%s; mkdir -p $S/base && echo hi > $S/base/f" % self.scratchpad,
+                        "S=%s; printf x | tee -a ${S}/f" % self.scratchpad,
+                        "S=%s; echo hi > $S/f 2> $S/err" % self.scratchpad):
+            with self.subTest(command):
+                self.assertSilent(command)
+
+    def test_a_resolved_target_is_checked_by_the_path_rule_as_a_spelled_one_is(self):
+        for command, needle, path in (("S=docs; echo x > $S/x.md", "deliverables", "docs/x.md"),
+                                      ("S=docs; printf x | tee $S/x.md", "deliverables", "docs/x.md"),
+                                      ("S=ledger/tickets; echo x > $S/SPD-001.md", "generated", "ledger/tickets/SPD-001.md"),
+                                      ("S=%s; echo x > $S/.zshrc" % NOBODY, OUTSIDE, ".zshrc"),
+                                      ("S=%s; echo x >> ${S}/notes.txt" % NOBODY, OUTSIDE, "notes.txt"),
+                                      ("S=tests/fake/.git/hooks; echo x > $S/post-index-change", GIT_DIR_WORDING,
+                                       "tests/fake/.git/hooks/post-index-change")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle)
+                self.assertIn(path, r.reason)
+                self.assertNotIn(VARIABLE_WORDING, r.reason)  # the path rule's reason, not the unresolvable-target one
+        # The state directory, which the raw-text regex does not see here (`.spud` is followed by `;`, not `/`), is
+        # refused in the database's words for every caller, with no Law 1 before them.
+        for agent_id in (AGENT_A, None):
+            with self.subTest(agent_id=agent_id):
+                r = self.assertRefused("S=.spud; echo x > $S/pycache/x", DB_WORDING, agent_id)
+                self.assertNotIn("Law", r.reason)
+
+    def test_a_target_the_line_does_not_settle_keeps_its_refusal(self):
+        for command in ("echo x > $S/x.md", "printf x | tee $S/x.md", "echo x > $(pwd)/x.md",
+                        "for S in docs tests; do echo x > $S/x.md; done", "S=$OTHER; echo x > $S/x.md"):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING)
+                self.assertSilent(command, agent_id=None)  # Spud: the hook cannot read it, as before
+
+    def test_a_prefix_assignment_moves_no_write(self):
+        """The value before the command is the one both shells open: a prefix assignment neither launders a write into the
+        scratchpad nor moves one out of it, and a tee operand under one stays raw and refused."""
+        self.assertRefused("S=docs; S=%s echo x > $S/x.md" % self.scratchpad, "deliverables")
+        self.assertSilent("S=%s; S=docs echo x > $S/x.md" % self.scratchpad)
+        self.assertRefused("S=%s; S=docs tee $S/x.md" % self.scratchpad, VARIABLE_WORDING)
+
+    def test_both_readings_of_an_assignment_only_command_are_checked(self):
+        self.assertRefused("S=%s; S=docs > $S/x.md" % self.scratchpad, "deliverables")  # bash's reading
+        self.assertRefused("S=docs; S=%s > $S/x.md" % self.scratchpad, "deliverables")  # zsh's reading
+        self.assertSilent("S=%s; S=%s/b > $S/f" % (self.scratchpad, self.scratchpad))   # both inside the scratchpad
+        self.assertRefused("S=docs > $S/x.md", VARIABLE_WORDING)                        # zsh's reading is unresolvable
+        self.assertRefused("S=docs > $S/x.md", "Law 1", agent_id=None)                  # Spud: bash's reading is checked
+
+    def test_a_git_calls_own_write_option_and_trace_variable(self):
+        home = self.home.path
+        r = self.assertRefused("S=%s/docs; git diff --output $S/d.txt" % home, "deliverables")
+        self.assertIn("docs/d.txt", r.reason)
+        self.assertSilent("S=%s/tests/out; git diff --output $S/d.txt" % home)
+        r = self.assertRefused("S=%s/docs; GIT_TRACE=$S/trace.log git status" % home, "deliverables")
+        self.assertIn("docs/trace.log", r.reason)
+        self.assertSilent("S=%s/tests/out; GIT_TRACE2_EVENT=$S/trace.log git status" % home)
+        # The settled value decides the shape git reads as well as the path git writes: a relative trace value and a
+        # descriptor write nothing (probed on SPD-049), where the raw word refused a member.
+        for command in ("T=docs/trace.log; GIT_TRACE=$T git status", "T=1; GIT_TRACE=$T git status"):
+            with self.subTest(command):
+                self.assertSilent(command)
+        self.assertRefused("GIT_TRACE=$T git status", "cannot resolve")  # nothing settled: fail closed, as before
+
+    def test_spuds_own_targets_follow_the_same_reading(self):
+        self.assertRefused("S=docs; echo x > $S/x.md", "Law 1", agent_id=None)
+        self.assertRefused("S=ledger/tickets; printf x | tee $S/SPD-001.md", "generated", agent_id=None)
+        self.assertRefused("S=%s/docs; GIT_TRACE=$S/trace.log git status" % self.home.path, "Law 1", agent_id=None)
+        self.assertSilent("S=%s; echo hi > $S/f" % self.scratchpad, agent_id=None)
+        self.assertSilent("S=%s; echo x > $S/.zshrc" % NOBODY, agent_id=None)
+
+    def test_the_allow_is_unchanged_and_the_resolved_target_still_decides(self):
+        """A spud call is allowed past the harness's prompt only when the line sets nothing but a SPUD_HOME the hook
+        checks (SPD-032, vouched_spud_call), so a line that assigns the variable its redirection names is silent whatever
+        that variable holds -- and the file it resolves to is still held to the path rule beside it."""
+        log = "%s --as %s member log x" % (self.spud_cli, AGENT_A)
+        self.assertAllowed(log + " > /dev/null")
+        self.assertSilent("N=/dev/null; %s > $N" % log)
+        self.assertSilent("N=tests/out/log.txt; %s > $N" % log)
+        self.assertRefused("N=docs; %s > $N/log.txt" % log, "deliverables")
+
+
+SETTLED_SNAPSHOT = """\
+# Functions
+keepvar () {
+\tlocal out=tests/kept.txt
+\techo hi > $out
+}
+ledgervar () {
+\tlocal out=ledger/Home.md
+\techo hi > $out
+}
+datavar () {
+\techo hi > "${CLAUDE_CODE_DATA:-}"/log
+}
+"""
+
+
+class ResolvedTargetInShellTextTest(ShellSnapshotCase):
+    """SPD-127 under SPD-133's prune: a body the shell holds keeps its writes whose target the hook can resolve and drops
+    the ones it cannot, so that the harness's own shadows -- which write through `$_cc_bin` and `$data`-shaped names of
+    their own -- do not refuse a member every grep it runs.  Resolution moves a target the body's own line settles from
+    the second group into the first: it is a concrete file now, and the path rule reads it for the caller exactly as it
+    reads the file an alias spells out.  A target nothing settles is as unresolvable as it was and stays pruned."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000002-cccccc.sh", SETTLED_SNAPSHOT)
+
+    def test_a_body_that_settles_its_own_target_reaches_the_path_rule(self):
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent("keepvar", agent_id)  # tests/** is what these members plan
+        self.assertRefused("keepvar", "Law 1", agent_id=None)
+        self.refused_for_members("ledgervar", "ledger/Home.md")
+        self.assertSilent("ledgervar", agent_id=None)  # ledger/Home.md is Spud's own, as `toledger` is
+
+    def test_a_target_the_body_does_not_settle_stays_pruned(self):
+        self.silent_for_everyone("datavar")
 
 
 # =============================================================================

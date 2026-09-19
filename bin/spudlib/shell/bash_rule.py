@@ -346,8 +346,9 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
 
     def targets_reason(entries, messages):
         """The reason one of these writes is refused, or None.  An entry is (the spelling the reason names it by, or None
-        for the target's own, the target word as the line spells it, the directories the shell may be in when it opens,
-        and SPD-129's directory kind, None for every write that is not a directory's making or removal)."""
+        for the target's own, the target word as the shell passes it -- a `$NAME` the line settled already resolved where
+        the analysis recorded it (SPD-127), everything else as the line spells it -- the directories the shell may be in
+        when it opens, and SPD-129's directory kind, None for every write that is not a directory's making or removal)."""
         for named, target, target_cwds, directory in entries:
             spelled = syntax.shown_operands(prepare.deglob(named if named else target))
             if syntax.unknown_operand(target):  # SPD-126: an operand the line does not spell, for a member as a variable is

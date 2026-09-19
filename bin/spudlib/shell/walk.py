@@ -48,7 +48,8 @@ class ShellFrame:
         # once that is complete, until the body's first word, and then "long" (`do ... done`, `then ... fi`), "compound" (a
         # `{ ... }` or `( ... )` body) or "sublist" (zsh's SHORT_LOOPS and SHORT_REPEAT: one and-or list, closing this frame
         # where the list ends).  A loop's compound body closes the loop with it; a conditional's becomes "sublist", since an
-        # `else` may still follow it (probed: `if [[ -n x ]] { echo a } else { echo b }` ran).
+        # `else` or an `elif` may still follow it (probed: `if [[ -n x ]] { echo a } else { echo b }` ran).  An `elif`
+        # puts a conditional's frame back to "cond", the elif's own condition list, from any of these (SPD-136: branch).
         self.body = None
 
 
@@ -67,7 +68,8 @@ class ShellWalk:
       `for name ( word ... )` and after a `for`/`select` list closed by `;` or a newline, the body is a `do ... done`, a
       `{ list }`, a `( list )` or one sublist, and the loop ends where that sublist ends;
     - the same holds for an `if`, `while` or `until` whose condition ends in `[[ ... ]]` (SPD-061), which closes the condition
-      the way a terminator closes a loop header, so `then` and `do` are optional there too;
+      the way a terminator closes a loop header, so `then` and `do` are optional there too; an `elif` after such a body
+      opens the next condition list the same way, so its own `[[ ... ]]` and body are read as the `if`'s were (SPD-136);
     - zsh's try-always form, `{ list } always { list }` (SPD-124), is one compound command holding both lists, so the always
       block runs where the try block left the shell and the compound ends at the always block's `}` (see close_brace);
     - zsh splits a brace off the word it is glued to (SPD-132): `{git push}` is the group `{ git push }` (see add_word).
@@ -191,13 +193,24 @@ class ShellWalk:
             closer = None
         return False
 
-    def branch(self):
-        """then, else, elif, do, a case arm: the body may start from the directories the compound command started in."""
+    def branch(self, word=None):
+        """then, else, elif, do, a case arm: the body may start from the directories the compound command started in.
+        `word` is the reserved word that reached this branch, where one did; a case arm's `)` passes none.
+
+        SPD-136: an `elif` reopens the conditional's condition list, whatever form the branch before it took -- a short
+        conditional's "sublist", the "compound" it passes through, or the long form's "long".  The frame is then in the
+        state the `if`'s own condition list put it in, so a `]]` at the end of the elif's condition ends it (end_header)
+        and the body after it is a `then ... fi`, a `{ ... }` or `( ... )`, or one sublist, exactly as the `if`'s was
+        (probed in zsh 5.9: `if [[ -z x ]] { vcs a } elif [[ -n y ]] { vcs b } else { vcs c }` ran b, and so did its
+        `fi`, terminator and sublist spellings).  A condition with no `]]` runs on to the `then` below, which turns it
+        into the long form the hook read before this ticket."""
         self.finish()
         self.end_list()
         if self.stack and self.stack[-1].kind in ("cond", "case", "loop"):
             top = self.stack[-1]
-            if top.body in ("cond", "cond-pending"):
+            if word == "elif" and top.kind == "cond":
+                top.body, self.expect_body = "cond", False  # the elif's own condition list (SPD-136)
+            elif top.body in ("cond", "cond-pending"):
                 top.body, self.expect_body = "long", False  # `then` or `do`: the condition is over (SPD-061)
             top.seen = directories.union_dirs(top.seen, self.a.cwds)  # where the branch before this one ended
             self.a.doubt.update(self.a.assigned[top.mark :])  # a branch may run without what an earlier one assigned (SPD-043)
@@ -440,7 +453,7 @@ class ShellWalk:
                 self.push("case", "esac")
                 return
             if t in ("then", "else", "elif", "do"):
-                self.branch()
+                self.branch(t)  # `elif` reopens the condition (SPD-136)
                 return
             if t == "function":
                 self.function_next = self.skip = True
