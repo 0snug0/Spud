@@ -13,7 +13,9 @@ from ..hooks import hookio
 GLOB_COMMAND_SAMPLES = frozenset(syntax.WRAPPERS | syntax.SHELLS | syntax.DIRECTORY_COMMANDS | syntax.SHELL_DECLARATIONS | syntax.JS_RUNTIMES
                                  | {"git", "spud", "eval", "source", ".", "trap", "sqlite3", "sqlite", "tee", "python", "python3", "python3.14",
                                     "hash"}  # `hash` shadows a name the hook reads (SPD-062)
-                                 | set(syntax.ARG_WRITE_COMMANDS))  # SPD-121: `/bin/c? a b` runs cp
+                                 | set(syntax.ARG_WRITE_COMMANDS)  # SPD-121: `/bin/c? a b` runs cp
+                                 | syntax.TREE_WRITE_COMMANDS  # SPD-126: `fin? . -delete` runs find
+                                 | syntax.SPELLED_WRITE_COMMANDS | {"perl"})  # SPD-126: `/bin/d? of=x` runs dd
 GLOB_SAMPLES = frozenset(
     GLOB_COMMAND_SAMPLES | syntax.GIT_WRITE_VERBS | syntax.GIT_GLOBAL_VALUE_FLAGS | syntax.BRANCH_READ_FLAGS | syntax.BRANCH_READ_VALUE_FLAGS | syntax.TAG_READ_FLAGS
     # CONFIG_READ_SUBCOMMANDS are left out: a glob read as `get` or `list` refuses nothing, so sampling them would only

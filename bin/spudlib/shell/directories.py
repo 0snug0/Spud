@@ -154,6 +154,8 @@ def wrapped_directories(chdir, command, a):
         return a.cwds
     if "$" in value or "`" in value or hookio.SUBST in value or syntax.GLOB_RE.search(value) or _READ_GLOB_RE.search(value):
         return None
+    if syntax.unknown_operand(value):  # SPD-126: `find . -exec env -C {} ...`, `xargs -I% env -C % ...`
+        return None
     value = prepare.deglob(value)
     if value.startswith("~"):
         head, _, tail = value.partition("/")
@@ -237,6 +239,8 @@ def cd_target(word, a, physical=False):
     if word == "":
         return a.cwds  # both shells stay
     if word == "-" or "$" in word or "`" in word or hookio.SUBST in word or syntax.GLOB_RE.search(word) or re.fullmatch(r"[+-]\d+", word):
+        return None
+    if syntax.unknown_operand(word):  # SPD-126: a path find hands its command, or what xargs reads from its input
         return None
     word = prepare.deglob(word)  # a quoted or escaped metacharacter (the GLOB_RE above sees only unquoted ones) is a literal path char
     if word.startswith("~"):

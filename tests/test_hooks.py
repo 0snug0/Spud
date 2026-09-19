@@ -8855,6 +8855,731 @@ class DirectoryWriteTest(BashHookCase):
                 self.assertRefused(command, "not bound", agent_id=AGENT_D)
 
 
+AGENT_G = "d1e2f3a4b5c6d7e8f"  # SPD-126: out/**, a partial bin/* and a partial docs/*.md
+AGENT_H = "e2f3a4b5c6d7e8f9a"  # SPD-126: bin/** and vendor/**, whole subtrees
+INPUT_WORDING = "xargs reads from its input"  # SPD-126: a write whose file the line does not spell
+ANYWHERE_WORDING = "places files where the line cannot say"  # SPD-126: a command that may write anywhere
+CHECKOUT_WORDING = "the root of a checkout the ledger knows"  # SPD-126: a whole-subtree write at or above a checkout
+UNWALKED_WORDING = "could not read whole"  # SPD-126: a copied tree the walk for a git directory could not finish
+
+
+class TreeWriteCase(BashHookCase):
+    """SPD-126's scratch world: AGENT_A plans home:tests/** and home:bin/spud (BashHookCase's), AGENT_G home:out/**, home:bin/*
+    and home:docs/*.md, AGENT_H home:bin/** and home:vendor/**.  out/, bin/sub/, vendor/plain/ and vendor/repo/ (which holds a
+    git directory, as a copied checkout does) exist, tests/fake/.git is a nested repository, and bin/link is a symlink to
+    bin/sub.  The home is the checkout root the Bash hook runs in."""
+
+    def setUp(self):
+        super().setUp()
+        # Children of the lead: the ticket's root fan-out is spent on BashHookCase's two engineers.
+        self.partial = self.spawn(self.plan(actor=self.lead["ref"], persona="engineer", model="opus",
+                                            deliverable=["home:out/**", "home:bin/*", "home:docs/*.md"]), AGENT_G, caller=AGENT_A)
+        self.whole = self.spawn(self.plan(actor=self.lead["ref"], persona="engineer", model="opus",
+                                          deliverable=["home:bin/**", "home:vendor/**"]), AGENT_H, caller=AGENT_A)
+        home = self.home.path
+        for d in ("out/tmp", "bin/sub", "vendor/plain/sub", "vendor/repo/src", "tests/out", "docs", "ledger/tickets"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        for f in ("out/tmp/a.pyc", "out/keep.txt", "bin/sub/x.py", "bin/x.py", "vendor/plain/a.txt", "vendor/plain/sub/b.txt",
+                  "vendor/repo/src/c.py", "docs/x.md", "ledger/tickets/SPD-001.md", "a.tar", "a.zip", "x.patch", "list"):
+            (home / f).write_text("a\n", encoding="utf-8")
+        plant_git_dir(home / "vendor" / "repo" / ".git")
+        plant_git_dir(home / "tests" / "fake" / ".git")
+        (home / "bin" / "link").symlink_to(home / "bin" / "sub")
+        self.module = load_spud_module()
+
+    def analysis(self, command, cwd=None):
+        m = self.module
+        return m.analyse_command(command, m.ShellAnalysis(cwd=cwd or self.cwd, home=str(self.home.path)))
+
+    def writes(self, command, cwd=None):
+        """(the word, the kind) of each write by argument the line records, in order, the walks find adds left out."""
+        return [(w[1], w[6]) for w in self.analysis(command, cwd).arg_writes if w[4] != "walk"]
+
+    def wide(self):
+        """A member holding home:**, whose globs let in every whole subtree: only the refusals before the globs stop it."""
+        return self.spawn(self.plan(actor=self.other["ref"], persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C,
+                          caller=AGENT_B)
+
+
+class FindWriteTest(TreeWriteCase):
+    """SPD-126: find's writes were never read.  With cwd /Users/x/repo, main (08c344e) recorded no finding for `find .
+    -exec git push \\;` -- a member's push past Law 7, since find's -exec utility was never a command the analysis read --
+    and no write for `find tests/tmp -name '*.pyc' -delete` or `find . -name x -exec rm {} \\;`.
+
+    Read now on find(1) (this Mac's BSD find) and bfs, which Claude Code's shadow of `find` runs in the Bash tool (its
+    --help: flags, paths and expression "may be freely mixed in any order"): every word that is no flag, primary, operator
+    or primary argument is a starting point, `.` when there is none; -delete (and bfs's -rm) removes every starting point's
+    subtree; the utility of -exec, -execdir, -ok and -okdir is analysed as a command with `{}` standing for a path under
+    the starting points, and a write of such a path is a write anywhere under each starting point, whose tree is walked for
+    a git directory; -execdir runs where the hook cannot know; -fprint and its kin write the file they name.  A whole-subtree
+    write is inside a member's deliverables only where one glob covers everything under the directory (`D/**`), never at
+    or above a checkout's root.  The differential over the 1167 commands spudagents ran that name find, xargs, rm, cp, mv,
+    rsync, ditto, tar, unzip, patch or curl is in the ticket's result."""
+
+    def test_the_analysis_records_what_find_writes(self):
+        cwd = frozenset([self.cwd])
+        for command, writes in (
+            ("find out/tmp -name '*.pyc' -delete", [("out/tmp", "rm-tree")]),
+            ("find . -name x -exec rm {} \\;", [(".", "rm-tree")]),
+            ("find -name x -delete", [(".", "rm-tree")]),  # no starting point: `.`, as bfs reads it
+            ("find -name x out -delete", [("out", "rm-tree")]),  # bfs: a path anywhere
+            ("find out -type f -exec sed -i '' s/a/b/ {} +", [("out", "find-tree")]),
+            ("find out -execdir rm {} \\;", [("out", "rm-tree")]),
+            ("find out -exec mv {} {}.bak \\;", [("out", "rm-tree"), ("out", "find-tree")]),
+            ("find out -fprint out/list.txt", [("out/list.txt", None)]),
+            ("find out -fprintf out/list.txt '%p\\n'", [("out/list.txt", None)]),
+            ("find -L out -delete", [("out", "tree")]),  # a starting point that is a link is traversed
+            ("find out -name x -print", []),
+            ("find out -exec grep -l x {} +", []),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+                self.assertTrue(all(w[2] == cwd for w in self.analysis(command).arg_writes))
+
+    def test_find_past_an_escaped_operator_is_still_find(self):
+        """A quoted or escaped `;`, `(` or `)` is a character of its word, not the operator: until SPD-126 the walk ended
+        find at `\\;` and read `-delete` as a command of its own, and `\\(` opened a subshell."""
+        for command, writes in (("find out -exec true \\; -delete", [("out", "rm-tree")]),
+                                ("find out \\( -name a -o -name b \\) -delete", [("out", "rm-tree")]),
+                                ("find out -exec true ';' -exec rm {} ';'", [("out", "rm-tree")]),
+                                ("find out -name '(' -delete", [("out", "rm-tree")])):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+        a = self.analysis("find out -exec true \\; -exec git push \\;")
+        self.assertIn(("git", ("push", "push")), a.findings)
+        # the same holds outside find: an escaped operator is an argument, as the shell passes it
+        self.assertEqual(self.analysis("echo foo \\; git push").findings, [])
+        self.assertEqual(self.analysis("echo \\> docs/x.md").redirects, [])
+
+    def test_the_exec_utility_is_read_as_a_command(self):
+        for command, needle in (("find . -exec git push \\;", "Law 7"), ("find out -exec git commit -m x {} +", "Law 7"),
+                                ("find out -ok git push \\;", "Law 7"), ("find out -execdir git push \\;", "Law 7"),
+                                ("find out -exec sh -c 'git push' \\;", "Law 7"), ("find out -exec env git push \\;", "Law 7"),
+                                ("find out -exec {} \\;", "command word"),  # the program is a file find found
+                                ("find out -exec find . -exec git push \\; \\;", "Law 7")):
+            with self.subTest(command):
+                for agent in (AGENT_A, AGENT_G):
+                    self.assertRefused(command, needle, agent_id=agent)
+
+    def test_a_member_removes_and_writes_under_its_own_whole_subtree(self):
+        for command in ("find out/tmp -name '*.pyc' -delete", "find out -exec rm {} \\;", "find out -name '*.pyc' -exec rm -f {} +",
+                        "find out -type f -exec sed -i '' s/a/b/ {} +", "find out -exec touch {} \\;", "find out -rm",
+                        "find -name x out -delete", "find out -exec sh -c 'rm {}' \\;", "find out -fprint out/list.txt",
+                        "cd out && find . -delete", "find out -exec cp {} out/copy/ \\;", "find out -name x -print",
+                        "find /tmp/spd-126-x -delete"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+
+    def test_a_partial_glob_the_checkout_root_and_other_paths_are_refused(self):
+        for command, needle, path in (("find bin -delete", "deliverables", "bin"),  # bin/* covers bin's files, not its tree
+                                      ("find bin/sub -exec rm {} \\;", "deliverables", "bin/sub"),
+                                      ("find docs -name '*.md' -exec sed -i '' s/a/b/ {} +", "deliverables", "docs"),
+                                      ("find . -name '*.pyc' -delete", "deliverables", "home:"),  # the root: no glob of its covers it
+                                      ("find out ledger -delete", "generated", "ledger"),
+                                      ("find out -exec cp {} docs/ \\;", "deliverables", "docs"),
+                                      ("find out -fprint docs/list.txt", "deliverables", "docs/list.txt"),
+                                      ("find %s -delete" % os.path.dirname(self.home.path), CHECKOUT_WORDING, str(self.home.path))):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                self.assertIn(path, r.reason)
+
+    def test_a_checkout_root_is_refused_whatever_the_globs(self):
+        """home:** covers every whole subtree of the home, but the home's root holds its state directory and rendered roots,
+        and a checkout's root its .git: SPD-066's rule refuses the write before the globs are asked."""
+        self.wide()
+        for command in ("find . -name '*.pyc' -delete", "find -name '*.pyc' -delete", "find . -exec touch {} +", "rm -rf .",
+                        "cd out && find .. -delete", "find %s -delete" % os.path.dirname(self.home.path)):
+            with self.subTest(command):
+                r = self.assertRefused(command, CHECKOUT_WORDING, agent_id=AGENT_C)
+                self.assertIn(str(self.home.path), r.reason)
+        for command in ("find out -delete", "find ledger -delete"):
+            with self.subTest(command):
+                r = self.bash(command, AGENT_C)
+                self.assertNotIn(CHECKOUT_WORDING, r.reason or "")
+        self.assertSilent("find out bin -delete", agent_id=AGENT_C)
+
+    def test_what_find_hands_its_command_is_walked_for_a_git_directory(self):
+        """tests/fake holds a nested repository: a command that writes what find finds under tests could write its hooks."""
+        for command in ("find tests -name post-index-change -exec cp /tmp/x {} \\;", "find tests -exec touch {} \\;",
+                        "find tests -exec cp -R {} tests/out/ \\;"):
+            with self.subTest(command):
+                self.assertRefused(command, GIT_DIR_WORDING, agent_id=AGENT_A)
+        self.assertSilent("find tests -name '*.pyc' -delete", agent_id=AGENT_A)  # a removal under the member's own tree
+        self.assertSilent("find tests/out -exec touch {} \\;", agent_id=AGENT_A)
+
+    def test_what_the_hook_cannot_place_is_refused(self):
+        for command, needle in (("find out -execdir touch x \\;", "cannot follow"),  # -execdir: the found file's directory
+                                ("find out -exec sh -c 'rm \"$1\"' _ {} \\;", VARIABLE_WORDING),
+                                ("find out $(printf -- -delete)", WORD_WORDING),  # a substitution where a primary stands
+                                ("for p in -delete; do find out $p; done", WORD_WORDING),
+                                ("find -files0-from list -delete", INPUT_WORDING)):
+            with self.subTest(command):
+                self.assertRefused(command, needle, agent_id=AGENT_G)
+        self.assertSilent("find $HOME -name x -print", agent_id=AGENT_G)  # the environment's value, and nothing written
+        # a loop's variable is the member's, unless every word of its list starts with something other than `-` (the
+        # differential's `for d in <scratchpads>/*/; do find "$d" -maxdepth 3 ...; done`)
+        self.assertSilent("for d in /tmp/*/ out; do find \"$d\" -maxdepth 3 -name x; done", agent_id=AGENT_G)
+        for command in ("for d in /tmp/x -delete; do find out $d; done", "for d in $X; do find out $d; done",
+                        "for d in /tmp/x; do d=-delete; find out $d; done"):
+            with self.subTest(command):
+                self.assertRefused(command, WORD_WORDING, agent_id=AGENT_G)
+
+    def test_spuds_answers(self):
+        self.assertRefused("find out -delete", "Law 1", agent_id=None)
+        self.assertRefused("find ledger -delete", "generated", agent_id=None)
+        self.assertRefused("find . -exec git push \\;", "Law 7", agent_id=AGENT_D)  # an unbound agent_id is held too
+        for command in ("find /tmp/spd-126-x -delete", "find . -exec git push \\;", "find out -name x -print"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)
+
+
+class XargsInputTest(TreeWriteCase):
+    """SPD-126: xargs was read as a wrapper and its utility dispatched on the words the line spells, so `xargs rm < list`
+    read as an `rm` with no operand and wrote nothing (main 08c344e: arg_writes=[]).  xargs(1) appends what it reads after
+    those words, or puts it where -J's replstr stands, or into every argument (not the utility) holding -I's; the hook
+    cannot know it.  A write whose file holds it is refused to a member as an unresolvable target is; a destination the
+    line names that only such operands land in (`xargs -J % cp % out/`) is a whole-subtree write of it; a command word
+    holding it is a program the input names.  Spud is not held to a target the hook cannot resolve."""
+
+    def test_the_analysis_marks_what_xargs_reads(self):
+        m = self.module
+        # appended twice: one input may be several operands, and the first may be -r, so rm is read as rm -r
+        self.assertEqual(self.writes("xargs rm < list"), [(m.INPUT_OPERAND, "rm-tree")] * 2)
+        self.assertEqual(self.writes("xargs -J % cp % out/"), [("out/", ("recursive", None, True))])
+        self.assertEqual(self.writes("xargs -I{} cp {} out/{}.bak"), [("out/" + m.INPUT_OPERAND + ".bak", ("recursive", None, True))])
+        self.assertEqual(self.writes("xargs grep -l x"), [])
+
+    def test_a_write_xargs_names_from_its_input_is_refused(self):
+        for command in ("xargs rm < list", "cat list | xargs rm -f", "ls | grep -v '^keep' | xargs rm -f", "xargs -0 rm -rf < list",
+                        "xargs touch < list", "xargs chmod < list", "xargs -n1 sed -i '' s/a/b/ < list", "xargs mv -t out < list",
+                        "xargs -I{} cp {} out/{}.bak < list", "xargs -I % sh -c 'rm %' < list", "xargs -J % mv % out/ < list",
+                        "xargs sudo rm < list", "xargs -J % rm -f % out/x < list", "xargs find -delete < list"):
+            with self.subTest(command):
+                self.assertRefused(command, INPUT_WORDING if "find" not in command else WORD_WORDING, agent_id=AGENT_G)
+
+    def test_a_destination_the_line_names_is_a_whole_subtree(self):
+        for command in ("xargs -J % cp % out/ < list", "xargs -J % cp -R % out/copy < list", "xargs -J % ln -s % out/ < list",
+                        "xargs -J % cp % out/%.bak < list"):  # -J replaces a word that is the replstr alone (xargs(1))
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command, path in (("xargs -J % cp % docs/ < list", "docs"), ("xargs -J % cp % bin/ < list", "bin")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_G)
+                self.assertIn(path, r.reason)
+        self.assertSilent("xargs -J % cp % bin/ < list", agent_id=AGENT_H)
+
+    def test_every_other_xargs_is_unchanged(self):
+        for command in ("xargs grep -l x < list", "find out -print0 | xargs -0 wc -l", "xargs cat < list", "xargs < list",
+                        "xargs -I{} grep x {} < list", "xargs -n1 basename < list"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        self.assertRefused("xargs git push < list", "Law 7", agent_id=AGENT_G)
+        self.assertRefused("xargs -J % % x < list", "command word", agent_id=AGENT_G)  # the program is the input
+
+    def test_what_xargs_hands_a_tree_writer_may_move_where_it_writes(self):
+        """An input word may be an option: `-C /elsewhere` to tar, `-d /elsewhere` to unzip, `--output-dir` to curl."""
+        for command in ("xargs -n1 tar -xf < list", "xargs unzip -o < list", "xargs curl -O < list", "xargs patch -p1 < list",
+                        "cd out && xargs curl -sS < list", "xargs -J % tar -xf a.tar % -C out < list"):
+            with self.subTest(command):
+                self.assertRefused(command, ANYWHERE_WORDING, agent_id=AGENT_G)
+
+    def test_spuds_answers(self):
+        for command in ("xargs rm < list", "xargs -J % cp % docs/ < list"):
+            with self.subTest(command):
+                r = self.bash(command, None)
+                self.assertNotIn(INPUT_WORDING, r.reason or "")
+        self.assertRefused("xargs -J % cp % docs/ < list", "Law 1", agent_id=None)
+
+
+class RecursiveWriteTest(TreeWriteCase):
+    """SPD-126: what a recursive removal, copy or move carries under the directory it names.  Main (08c344e) read `rm -rf
+    bin/sub` as SPD-129's "remove", which `bin/*` matches, so the removal of bin/sub/<anything> was allowed; `cp -R src dest`
+    checked dest and dest/src and nothing under them, so a source tree holding a `.git` planted one wherever it landed
+    (SPD-066: no caller with an agent_id writes a git directory, its own deliverables included); and `rsync -a src/ dest/`
+    and `ditto src dst` recorded nothing.
+
+    Read now: rm -r/-R of a directory, or of a path that does not exist, is a whole-subtree removal, and of a file or a
+    symlink the removal of that path alone, as before (rm(1): "removes symbolic links, not the files referenced"); chmod,
+    chown, chgrp and chflags under -R, and mv of a directory, are that file and a whole subtree too; cp -R (-r, -a) and mv
+    land each source that is a directory now as a whole tree, `src/` as its contents (cp(1)), and walk it for a git
+    directory, failing closed when the walk reaches syntax.GLOB_SCAN_CAP entries or a directory it cannot list; openrsync
+    (rsync(1)) writes its destination whole and lands each source there, honouring a plain `--exclude NAME`; ditto(1)
+    merges each source's contents into its destination."""
+
+    def test_the_analysis_records_the_kinds(self):
+        for command, writes in (("rm -rf bin/sub", [("bin/sub", "rm-tree")]), ("rm -d bin/sub", [("bin/sub", "remove")]),
+                                ("chmod -R u+w bin/sub", [("bin/sub", "file-tree")]), ("chmod u+w bin/sub", [("bin/sub", None)]),
+                                ("mv bin/sub vendor/", [("bin/sub", "file-tree"), ("vendor/", ("recursive", None, False))]),
+                                ("cp -R vendor/plain bin/", [("bin/", ("recursive", None, True))]),
+                                ("cp vendor/plain/a.txt bin/", [("bin/", None)]),
+                                ("rsync -a --exclude .git vendor/repo/ bin/r/",
+                                 [("bin/r/", "tree"), ("bin/r/", ("recursive", (".git",), True))]),
+                                ("ditto vendor/plain bin/d", [("bin/d", "tree"), ("bin/d", ("recursive", (), True))])):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+
+    def test_a_recursive_removal_needs_a_whole_subtree(self):
+        for command in ("rm -rf bin/sub", "rm -r bin/sub", "rm -R bin/sub/", "chmod -R u+w bin/sub", "chown -R nobody bin/sub",
+                        "mv bin/sub /tmp/spd-126-x"):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_G)  # bin/* matches bin/sub, not what is in it
+                self.assertIn("bin/sub", r.reason)
+                self.assertSilent(command, agent_id=AGENT_H)
+        for command in ("rm -rf bin/x.py", "rm -r bin/link", "chmod -R u+w bin/x.py", "rm -rf out/tmp", "rm -d bin/sub"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)  # a file, a symlink rm removes as itself, a tree it covers
+
+    def test_a_copied_git_directory_is_refused_wherever_it_lands(self):
+        for command, landing in (("cp -R vendor/repo bin/", "bin/repo/.git"), ("cp -a vendor/repo bin/copy", "bin/copy/.git"),
+                                 ("cp -R vendor/repo/ bin/copy", "bin/copy/.git"), ("cp -R vendor bin/", "bin/vendor/repo/.git"),
+                                 ("mv vendor/repo bin/moved", "bin/moved/.git"), ("rsync -a vendor/repo/ bin/r/", "bin/r/.git"),
+                                 ("rsync -a vendor/repo bin/r", "bin/r/repo/.git"), ("ditto vendor/repo bin/d", "bin/d/.git"),
+                                 ("cp -R vendor/repo /tmp/spd-126-x", "/tmp/spd-126-x/.git"), ("cp -R vendor/* bin/", "bin/repo/.git"),
+                                 ("rsync -a --exclude .git --include .git vendor/repo/ bin/r/", "bin/r/.git")):
+            with self.subTest(command):
+                r = self.assertRefused(command, GIT_DIR_WORDING, agent_id=AGENT_H)
+                self.assertIn(landing, r.reason)
+        for command in ("cp -R vendor/plain bin/", "cp -R vendor/plain/ bin/copy", "rsync -a --exclude .git vendor/repo/ bin/r/",
+                        "rsync -a --exclude=.git vendor/repo/ bin/r/", "ditto vendor/plain bin/d", "mv vendor/plain bin/moved",
+                        "cp vendor/repo/src/c.py bin/", "rsync -a vendor/plain/ /tmp/spd-126-x/"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_H)
+
+    def test_a_tree_the_walk_cannot_read_whole_is_refused(self):
+        locked = self.home.path / "vendor" / "plain" / "locked"
+        locked.mkdir()
+        locked.chmod(0)
+        self.addCleanup(locked.chmod, 0o755)
+        r = self.assertRefused("cp -R vendor/plain bin/", UNWALKED_WORDING, agent_id=AGENT_H)
+        self.assertIn("vendor/plain", r.reason)
+        self.assertSilent("cp -R vendor/plain /tmp/spd-126-x", agent_id=None)  # Spud: no walk, and outside every project
+
+    def test_the_walk_stops_at_the_scan_budget(self):
+        m = self.module
+        root = self.home.path / "vendor" / "plain"
+        self.assertEqual(m.first_git_entry(str(root)), (None, False))
+        self.assertEqual(m.first_git_entry(str(self.home.path / "vendor")), ("repo/.git", False))
+        with mock.patch("spudlib.shell.syntax.GLOB_SCAN_CAP", 2):
+            self.assertEqual(m.first_git_entry(str(root)), (None, True))
+        self.assertEqual(m.first_git_entry(str(self.home.path / "vendor"), (".git",)), (None, False))  # rsync's --exclude .git
+        self.assertEqual(m.first_git_entry(str(self.home.path / "vendor"), ("re*",)), (None, False))
+        self.assertEqual(m.first_git_entry(str(self.home.path / "vendor"), (".git/",)), (None, False))  # a directory pattern
+        self.assertEqual(m.first_git_entry(str(self.home.path / "vendor"), ("repo/.git",)), ("repo/.git", False))  # not honoured
+
+    def test_rsync_and_ditto_write_their_destination_whole(self):
+        for command, path in (("rsync -a vendor/plain/ docs/", "docs"), ("rsync -a vendor/plain bin/", "bin"),
+                              ("ditto vendor/plain docs/d", "docs/d"), ("ditto -x -k a.zip docs", "docs")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_G)
+                self.assertIn(path, r.reason)
+        for command in ("rsync -a vendor/plain/ out/", "rsync -a --delete vendor/plain/ out/p/", "ditto vendor/plain out/d",
+                        "ditto -x -k a.zip out", "ditto -c -k vendor/plain out/p.zip", "rsync -a out/ remote:backup/",
+                        "rsync -av host:src/ out/"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        self.assertRefused("rsync -e 'git push #' -a remote:x out/", "Law 7", agent_id=AGENT_G)  # a program rsync runs
+        self.assertRefused("rsync --daemon", ANYWHERE_WORDING, agent_id=AGENT_G)
+        self.assertRefused("rsync -a --remove-source-files docs/ out/", "deliverables", agent_id=AGENT_G)
+
+    def test_spuds_answers(self):
+        self.assertRefused("rm -rf bin/sub", "Law 1", agent_id=None)
+        for command in ("cp -R vendor/repo /tmp/spd-126-x", "rsync -a vendor/repo/ /tmp/spd-126-x/", "rm -rf /tmp/spd-126-x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)  # SPD-066's rule and the walk are a caller's with an agent_id
+
+
+class ExtractionWriteTest(TreeWriteCase):
+    """SPD-126: an archive extracted, a patch applied and a download named by the URL or the server write files the line
+    does not spell, and main (08c344e) recorded nothing for `tar -xf a.tar -C out`, `unzip a.zip -d out`, `patch -p1 <
+    x.patch` or `curl -O url`.  Read now as a whole-subtree write of the directory the files land in: bsdtar's (tar(1))
+    x mode, under the directory each -C changes to or the line's own, -O writing none; Info-ZIP unzip's -d exdir, wherever
+    it stands on the line, or the line's directory, -l, -t, -p and kin writing none; BSD patch(1) without -o and without a
+    file operand (the second SPD-126 engineer's), under -d's directory or the line's; curl's -O, --remote-name-all and -J
+    under --output-dir or the line's directory.  What the line cannot place is refused to a member: bsdtar's -P (it keeps
+    absolute paths and `..`) and a -T list; unzip's `-:` (it keeps `../`); a config file curl reads (-K, or CURL_HOME,
+    XDG_CONFIG_HOME or HOME set on the line); an option a substitution may hold.  wget is not installed on this Mac and is
+    left to the second engineer."""
+
+    def test_the_analysis_records_the_directory(self):
+        m = self.module
+        for command, writes in (("tar -xf a.tar -C out", [("out", "tree")]), ("tar xzf a.tar -C out", [("out", "tree")]),
+                                ("tar -x -C out -C sub -f a.tar", [("out/sub", "tree")]), ("tar -xf a.tar -C /tmp/x", [("/tmp/x", "tree")]),
+                                ("tar -xf a.tar", [(".", "tree")]), ("tar -tf a.tar", []), ("tar -xOf a.tar", []),
+                                ("tar -xPf a.tar -C out", [(m.ANY_PATH, "tree")]),
+                                ("tar -cf out/a.tar docs", [("out/a.tar", None)]),  # SPD-126's second engineer: the archive
+                                ("unzip -q a.zip -d out", [("out", "tree")]), ("unzip -dout a.zip", [("out", "tree")]),
+                                ("unzip a.zip", [(".", "tree")]), ("unzip -l a.zip", []), ("unzip -: a.zip -d out", [(m.ANY_PATH, "tree")]),
+                                ("patch -p1 < x.patch", [(".", "tree")]), ("patch -d out -p1 -i x.patch", [("out", "tree")]),
+                                ("patch --dry-run -p1 < x.patch", []),
+                                # SPD-126's second engineer: a later patch in the file names its own file, so the tree
+                                # stays; the named file, its backups and its reject file beside it
+                                ("patch -o out/y x.patch", [(".", "tree"), ("out/y", None), ("out/y.orig", None),
+                                                            ("out/y.~" + m.NAME_CHAR + m.NAME_MORE + "~", None), ("out/y.rej", None)]),
+                                ("patch docs/x.md x.patch", [(".", "tree"), ("docs/x.md", None), ("docs/x.md.orig", None),
+                                                             ("docs/x.md.~" + m.NAME_CHAR + m.NAME_MORE + "~", None),
+                                                             ("docs/x.md.rej", None)]),
+                                ("curl -O https://example.com/x", [(".", "tree")]), ("curl -sSLO https://example.com/x", [(".", "tree")]),
+                                ("curl -O --output-dir out https://example.com/x", [("out", "tree")]),
+                                ("curl --remote-name-all https://example.com/x", [(".", "tree")]),
+                                ("curl -s https://example.com/x", []), ("curl -K cfg https://example.com/x", [(m.ANY_PATH, "tree")])):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+
+    def test_into_the_members_own_subtree_is_silent(self):
+        for command in ("tar -xf a.tar -C out", "tar xzf a.tar -C out", "tar -x -C out -f a.tar", "tar -xf a.tar --directory=out/x",
+                        "unzip -q a.zip -d out", "unzip -o a.zip -d out/z", "patch -d out -p1 < x.patch", "patch -p1 -i x.patch -d out",
+                        "curl -O --output-dir out https://example.com/x", "cd out && curl -sSLO https://example.com/x",
+                        "cd out && tar -xf ../a.tar", "tar -xf a.tar -C /tmp/spd-126-x", "tar -tf a.tar", "unzip -l a.zip",
+                        "patch --dry-run -p1 < x.patch", "curl -s https://example.com/x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+
+    def test_into_the_checkout_root_a_rendered_root_or_a_partial_glob_is_refused(self):
+        self.wide()
+        for command in ("tar -xf a.tar", "tar -xf a.tar -C .", "unzip a.zip", "patch -p1 < x.patch", "curl -O https://example.com/x"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables", agent_id=AGENT_G)
+                self.assertRefused(command, CHECKOUT_WORDING, agent_id=AGENT_C)  # home:** too: the root holds the home's own
+        for command, needle in (("tar -xf a.tar -C ledger", "generated"),
+                                ("unzip a.zip -d reports", "generated"), ("patch -d ledger/tickets -p1 < x.patch", "generated"),
+                                ("curl -O --output-dir ledger https://example.com/x", "generated"), ("tar -xf a.tar -C docs", "deliverables"),
+                                ("unzip a.zip -d bin", "deliverables"), ("tar -xf a.tar -C tests/fake/.git", GIT_DIR_WORDING),
+                                ("tar -xf a.tar -C /Users/nobody", OUTSIDE)):
+            with self.subTest(command):
+                self.assertRefused(command, needle, agent_id=AGENT_G)
+
+    def test_what_the_line_cannot_place_is_refused(self):
+        for command in ("tar -xPf a.tar -C out", "tar -x --absolute-paths -f a.tar -C out", "tar -x -T list -f a.tar -C out",
+                        "unzip -: a.zip -d out", "UNZIP=-d/x unzip a.zip -d out", "curl -K cfg https://example.com/x",
+                        "CURL_HOME=out curl https://example.com/x", "tar -xf a.tar $(echo -C /)", "unzip a.zip $(echo -d /)"):
+            with self.subTest(command):
+                self.assertRefused(command, ANYWHERE_WORDING, agent_id=AGENT_G)
+        self.assertSilent("curl -q -s https://example.com/x", agent_id=AGENT_G)
+        self.assertRefused("tar -x --use-compress-program 'git push' -f a.tar -C out", "Law 7", agent_id=AGENT_G)
+
+    def test_spuds_answers(self):
+        self.assertRefused("tar -xf a.tar -C out", "Law 1", agent_id=None)
+        self.assertRefused("unzip a.zip -d ledger", "generated", agent_id=None)
+        for command in ("tar -xf a.tar -C /tmp/spd-126-x", "tar -xPf a.tar -C /tmp/spd-126-x", "curl -K cfg https://example.com/x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)
+
+
+AGENT_I = "f3a4b5c6d7e8f9a0b"  # SPD-126: a member whose one glob names split's pieces exactly, home:out/x??
+
+# SPD-126's second engineer: one line per writer the Bash hook now reads by the name it spells, `{}` the file it writes.
+SPELLED_WRITERS = (
+    ("dd of=", "dd if=/dev/zero of={} count=1"),
+    ("sort -o", "sort -o {} a.tar"),
+    ("sort --output=", "sort a.tar --output={}"),  # getopt_long permutes: an option after the operand is an option
+    ("curl -o", "curl -sS -o {} https://example.com/x"),
+    ("curl -D", "curl -D {} https://example.com/x"),
+    ("curl -c", "curl -c {} https://example.com/x"),
+    ("curl --trace", "curl --trace {} https://example.com/x"),
+    ("curl --trace-ascii", "curl --trace-ascii {} https://example.com/x"),
+    ("curl --stderr", "curl --stderr {} https://example.com/x"),
+    ("curl --libcurl", "curl --libcurl {} https://example.com/x"),
+    ("curl --etag-save", "curl --etag-save {} https://example.com/x"),
+    ("curl --hsts", "curl --hsts {} https://example.com/x"),
+    ("curl --alt-svc", "curl --alt-svc {} https://example.com/x"),
+    ("curl -w %output", "curl -o /dev/null -w '%output{{}}%{http_code}' https://example.com/x"),
+    ("mkfifo", "mkfifo -m 600 {}"),
+    ("perl -i", "perl -i -pe s/a/b/ {}"),
+    ("perl -0pi", "perl -0pi -e s/a/b/ {}"),
+    ("tar -c", "tar -czf {} docs"),
+    ("tar c bundle", "tar cf {} docs"),
+    ("tar -r", "tar -rf {} docs"),
+    ("wget -O", "wget --no-hsts -O {} https://example.com/x"),
+    ("wget -o", "wget --no-hsts -O - -o {} https://example.com/x"),
+    ("wget --save-cookies", "wget --no-hsts -O - --save-cookies {} https://example.com/x"),
+    ("wget --hsts-file", "wget -O - --hsts-file={} https://example.com/x"),
+)
+
+
+class SpelledWriteTest(TreeWriteCase):
+    """SPD-126 (its second engineer): the writers whose file the line spells but SPD-121 never read.  Main (08c344e) recorded
+    nothing -- no redirect, no write by argument -- for `dd if=/dev/zero of=out/f count=1`, `sort -o out/f in`, `curl -o
+    out/f https://x`, `perl -i -pe 's/a/b/' out/f` or `mktemp out/tmp.XXXX`, so a member's `sort -o
+    ledger/tickets/SPD-001.md x` or `dd of=tests/fake/.git/hooks/pre-commit` met neither Law 5 nor SPD-066's rule.
+
+    Each is read on this Mac's man page and held to the path rule as a redirection target is (shell/spelled_writes,
+    shell/downloads, shell/tree_writes): dd(1)'s last `of=`; sort(1)'s -o/--output (getopt_long: permuted, abbreviated) and
+    -T's directory, whole; curl(1) 8.7.1's -o under --output-dir, -D, -c, --trace, --trace-ascii, --stderr, --libcurl,
+    --etag-save, --hsts, --alt-svc and -w's %output{}, `-` being standard output; mkfifo(1)'s operands; mktemp(1)'s
+    templates, read under -p, their trailing Xs picked from [0-9A-Za-z]; split(1)'s pieces, the prefix and a suffix of -a's
+    length, two letters that grow when -a and -d are absent (text_cmds' split.c); perlrun's -i[extension] over every file
+    after the program, `<file><ext>` or the extension with `*` for the file as the backup; bsdtar's (tar(1)) archive under
+    -c, -r and -u, relative to the line's directory whatever -C comes first ("In c and r mode, this changes the directory
+    before adding the following files"); BSD patch(1)'s file operand or -o, with its backup (.orig, -z, -B, -Y, numbered)
+    and its reject file (-r, or <file>.rej), and a whole-subtree write of -d's directory or the line's, since each later
+    patch in the file names its own (FreeBSD patch.c, reinitialize_almost_everything); and wget, from GNU wget's manual
+    alone (it is not installed here): -O's file, -o, -a, --save-cookies, --hsts-file (~/.wget-hsts unless --no-hsts),
+    and without -O the -P directory, whole.  A name a command picks (mktemp's X, split's suffix) is held by
+    hooks/pathrule.NAME_CHAR, which a glob's wildcards match and its literals do not, so a glob lets it in only where it
+    lets in every name the command may pick; each name the path rule refuses by spelling (.git, a generated root) that it
+    may pick is checked as itself.  A word the line cannot settle where an option may stand is a write anywhere.
+
+    The differential over the 945 Bash commands spudagents ran that name dd, sort, curl, mkfifo, mktemp, split, perl, tar,
+    patch or wget is in the ticket's result: every newly refused one is a target the hook cannot resolve (a loop's or a
+    substitution's `-o "$n"`), a cd the hook cannot follow, or patch -o at a checkout's root.  TreeWriteCase's members:
+    AGENT_G out/**, bin/* and docs/*.md; AGENT_H bin/** and vendor/**; AGENT_A tests/** and bin/spud; AGENT_I out/x??."""
+
+    def setUp(self):
+        super().setUp()
+        self.home.env["HOME"] = "/Users/nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
+        for d in ("tests/fake/.git/hooks", "out/sub", ".claude"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+        self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+
+    def full(self, command, cwd=None):
+        """(the word, the backup suffix, the kind) of each write by argument the line records."""
+        return [(w[1], w[5], w[6]) for w in self.analysis(command, cwd).arg_writes if w[4] != "walk"]
+
+    def picked(self, text):
+        """`text` with each `?` a character the command picks and `*` a run of them, as the analysis records them."""
+        return text.replace("?", self.module.NAME_CHAR).replace("*", self.module.NAME_MORE)
+
+    def test_the_analysis_records_what_each_writer_names(self):
+        m, p = self.module, self.picked
+        for command, writes in (
+            ("dd if=/dev/zero of=out/f count=1", [("out/f", None)]),
+            ("dd of=out/a of=out/f", [("out/f", None)]),  # BSD dd refuses a second of=, GNU's keeps the last
+            ("dd if=out/f of=/dev/null", [("/dev/null", None)]),
+            ("dd if=out/f", []),
+            ("sort -o out/f in", [("out/f", None)]), ("sort in -o out/f", [("out/f", None)]), ("sort -uo out/f in", [("out/f", None)]),
+            ("sort --out out/f in", [("out/f", None)]),  # getopt_long takes an abbreviation
+            ("sort --output=out/f in", [("out/f", None)]), ("sort -o - in", []), ("sort in", []),
+            ("sort -T out/tmp in", [("out/tmp", "tree")]),
+            ("curl -o out/f https://x", [("out/f", None)]), ("curl -sSLo out/f https://x", [("out/f", None)]),
+            ("curl --output-dir out -o f https://x", [("out/f", None)]),
+            ("curl --output-dir out -O https://x --next -o g https://y", [("out", "tree"), ("g", None)]),  # per -: section
+            ("curl -o - https://x", []), ("curl -D - -o /dev/null https://x", [("/dev/null", None)]), ("curl --hsts '' https://x", []),
+            ("curl -w '%output{out/w}%{http_code}' https://x", [("out/w", None)]),
+            ("curl -g -o 'out/#1' 'https://x/[1-3]'", [("out/#1", None)]),  # -g: no URL globbing, the name as spelled
+            ("curl --no-clobber -o out/f https://x", [("out/f", None), (p("out/f.?*"), None)]),
+            ("curl -o 'out/#1' 'https://x/[1-3]'", [(m.ANY_PATH, "tree")]),  # #1 is the text the URL's set puts there
+            ("curl -w @fmt https://x", [(m.ANY_PATH, "tree")]), ("curl --expand-output '{{f}}' https://x", [(m.ANY_PATH, "tree")]),
+            ("mkfifo -m 600 out/p out/q", [("out/p", None), ("out/q", None)]),
+            ("mktemp out/tmp.XXXX", [(p("out/tmp.????"), None)]), ("mktemp -d out/d.XXXXXX", [(p("out/d.??????"), "make")]),
+            ("mktemp -p out x.XXXX", [(p("out/x.????"), None)]), ("mktemp -p out /tmp/x.XX", [(p("/tmp/x.??"), None)]),
+            ("mktemp -p out -t foo", [(p("out/foo.????????"), None)]), ("mktemp out/plain", [("out/plain", None)]),
+            ("mktemp -u out/x.XXXX", []), ("mktemp -d", []), ("mktemp -t foo", []),  # -u makes nothing; the temp root is open
+            ("mktemp -d .giX", [(p(".gi?"), "make"), (".git", "make")]),  # the one name the path rule refuses by spelling
+            ("split -l 10 big out/part_", [(p("out/part_??*"), None)]), ("split -a 3 big out/p", [(p("out/p???"), None)]),
+            ("split -d big out/p", [(p("out/p??"), None)]), ("split big", [(p("x??*"), None)]),
+            ("split -a 1 big .gi", [(p(".gi?"), None), (".git", None)]),
+            ("perl -i -pe s/a/b/ out/f", [("out/f", None)]), ("perl -0pi -e s/a/b/ out/f out/g", [("out/f", None), ("out/g", None)]),
+            ("perl -i script.pl out/f", [("out/f", None)]),  # no -e: the first operand is the program
+            ("perl -pie s/a/b/ out/f", [("out/f", None)]),  # -i takes the rest of its word: extension "e", no -e
+            ("perl -pi'old/*.orig' -e s/a/b/ out/f", [("out/f", None), ("old/out/f.orig", None)]),
+            ("perl -pe s/a/b/ out/f", []), ("perl -e 'print 1' -- -i", []),
+            ("tar -czf out/a.tgz src", [("out/a.tgz", None)]), ("tar czf out/a.tgz src", [("out/a.tgz", None)]),
+            ("tar -C src -cf out/a.tar .", [("out/a.tar", None)]), ("tar -uf out/a.tar src", [("out/a.tar", None)]),
+            ("tar -cf - src", []), ("export TAPE=out/t; tar -c src", [("out/t", None)]),
+            ("patch -d out -r rej f x.patch", [("out", "tree"), ("out/f", None), ("out/f.orig", None), (p("out/f.~?*~"), None),
+                                              ("out/rej", None)]),
+            ("patch -d out -V none f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None)]),
+            ("patch -d out --posix f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None)]),
+            ("patch -d out -V simple -z .bak f x.patch", [("out", "tree"), ("out/f", None), ("out/f.bak", None), ("out/f.rej", None)]),
+            ("patch -d out -B bak/ f x.patch", [("out", "tree"), ("out/bak", "tree"), ("out/f", None), ("out/bak/f", None),
+                                                ("out/f.rej", None)]),
+            ("patch -d out -d sub -p1 < x.patch", [("out/sub", "tree")]),  # each -d from the one before it
+            ("wget -O out/f https://x", [("out/f", None), ("~/.wget-hsts", None)]),
+            ("wget --no-hsts -P out https://x", [("out", "tree")]), ("wget --no-hsts https://x", [(".", "tree")]),
+            ("wget --no-hsts -O - https://x", []), ("wget --no-hsts -b -P out https://x", [(p("wget-log*"), None), ("out", "tree")]),
+            ("wget -e robots=off https://x", [(m.ANY_PATH, "tree")]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+
+    def test_backups_and_suffixes_are_recorded_beside_the_file(self):
+        for command, writes in (("perl -pi.bak -e s/a/b/ out/f", [("out/f", ".bak", None)]),
+                                ("perl -pi~ -e s/a/b/ out/f", [("out/f", "~", None)]),
+                                ("perl -pi -e s/a/b/ out/f", [("out/f", None, None)]),
+                                ("perl -pi'*' -e s/a/b/ out/f", [("out/f", None, None)])):  # `*`: overwrite, no backup (perlrun)
+            with self.subTest(command):
+                self.assertEqual(self.full(command), writes)
+
+    def test_every_writer_is_held_to_the_path_rule(self):
+        for label, form in SPELLED_WRITERS:
+            for target, needle in (("ledger/tickets/SPD-001.md", "generated"), ("tests/fake/.git/hooks/pre-commit", GIT_DIR_WORDING),
+                                   ("/Users/nobody/x", OUTSIDE), ("docs/new.txt", "deliverables")):
+                command = form.replace("{}", target)
+                with self.subTest(command=command):
+                    r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                    self.assertIn(ARG_WORDING, r.reason)
+                    self.assertIn(target, r.reason)
+
+    def test_every_writer_is_silent_into_the_members_own_files_the_scratchpad_and_tmp(self):
+        for label, form in SPELLED_WRITERS:
+            for target in ("out/new", "docs/new.md", self.scratchpad + "/probe.txt", "/tmp/spd-126-y"):
+                command = form.replace("{}", target)
+                with self.subTest(command=command):
+                    self.assertSilent(command, agent_id=AGENT_G)
+
+    def test_the_tickets_lines(self):
+        for command, needle in (("sort -o ledger/tickets/SPD-001.md out/keep.txt", "generated"),
+                                ("dd if=/dev/zero of=tests/fake/.git/hooks/pre-commit count=1", GIT_DIR_WORDING),
+                                ("curl -c tests/fake/.git/config https://example.com/x", GIT_FILE_WORDING)):
+            with self.subTest(command):
+                self.assertRefused(command, needle, agent_id=AGENT_A)  # tests/** is AGENT_A's, .git no member's
+        self.assertSilent("sort -o tests/sorted.txt out/keep.txt", agent_id=AGENT_A)
+
+    def test_mktemp_is_held_by_every_name_it_may_pick(self):
+        for command in ("mktemp out/tmp.XXXX", "mktemp -d out/d.XXXXXX", "mktemp bin/tmp.XXXX",  # bin/*: any name in bin
+                        "mktemp -p out x.XXXX", "mktemp docs/x.XXXX.md",  # no trailing X: the name as spelled, docs/*.md's
+                        "mktemp -d /tmp/spd-126-x.XXXX", "mktemp -d", "mktemp -t foo", "mktemp -d %s/h.XXXX" % self.scratchpad,
+                        "T=$(mktemp -d); echo $T", "mktemp -u docs/x.XXXX"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command, needle, shown in (("mktemp docs/x.XXXX", "deliverables", "docs/x.????"),  # docs/*.md: not every name
+                                       ("mktemp -p docs x.XXXX", "deliverables", "docs/x.????"),
+                                       ("mktemp tmp.XXXX", "deliverables", "tmp.????"),  # the checkout root
+                                       ("mktemp ledger/tickets/x.XXXX", "generated", "ledger/tickets/x.????"),
+                                       ("mktemp -d /Users/nobody/x.XXXX", OUTSIDE, "/Users/nobody/x.????")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                self.assertIn(shown, r.reason)  # the picked characters shown as a glob shows them
+        # a name the path rule refuses by spelling, which the template may become, is checked as itself
+        r = self.assertRefused("mktemp -d tests/fake/.giX", GIT_DIR_WORDING, agent_id=AGENT_A)
+        self.assertIn("tests/fake/.git", r.reason)
+        self.assertSilent("mktemp -d tests/fake/.gX", agent_id=AGENT_A)  # three characters: never .git
+        self.assertSilent("mktemp -d tests/x.XXXX", agent_id=AGENT_A)
+        self.wide()
+        self.assertRefused("mktemp -d ledgXX", "generated", agent_id=AGENT_C)  # home:** lets in ledg??, but not ledger
+        self.assertSilent("mktemp -d out/ledgXX", agent_id=AGENT_C)
+
+    def test_split_is_held_by_every_piece_it_may_write(self):
+        for command in ("split -l 1 a.tar out/p_", "split -l 1 a.tar bin/p_", "split -b 1k -a 3 a.tar out/sub/x",
+                        "split -l 1 a.tar /tmp/spd-126-x/p"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command, needle, shown in (("split -l 1 a.tar docs/p_", "deliverables", "docs/p_??*"),
+                                       ("split -l 1 a.tar", "deliverables", "x??*"),  # prefix x, at the checkout root
+                                       ("split -a 2 a.tar ledger/x", "generated", "ledger/x??")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                self.assertIn(shown, r.reason)
+        self.assertRefused("split -a 1 a.tar tests/fake/.gi", GIT_DIR_WORDING, agent_id=AGENT_A)  # .git among its pieces
+        # out/x?? names every piece of two letters, and no longer one: split's suffix grows past two letters unless -a
+        # fixes its length (or -d makes it digits), so only then are the pieces all the member's
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:out/x??"]), AGENT_I)
+        for command in ("cd out && split -a 2 ../a.tar", "split -a 2 a.tar out/x", "split -d a.tar out/x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_I)
+        r = self.assertRefused("split a.tar out/x", "deliverables", agent_id=AGENT_I)
+        self.assertIn("out/x??*", r.reason)
+        self.assertRefused("split -a 3 a.tar out/x", "deliverables", agent_id=AGENT_I)
+
+    def test_perl_in_place_and_its_backup(self):
+        for command in ("perl -pi -e s/a/b/ bin/spud", "perl -0pi -e s/a/b/ tests/x.txt", "perl -pi.bak -e s/a/b/ tests/x.txt",
+                        "perl -pe s/a/b/ docs/x.md", "perl -ne 'print if /x/' docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'",
+                        "sleep_ms() { perl -e 'select undef, undef, undef, $ARGV[0]' \"$1\"; }; sleep_ms 20",  # the differential's
+                        "find tests/out -exec perl -pi -e s/a/b/ {} +"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_A)
+        for command, needle, shown in (("perl -pi.bak -e s/a/b/ bin/spud", "deliverables", "bin/spud.bak"),
+                                       ("perl -pi'orig_*' -e s/a/b/ bin/spud", "deliverables", "orig_bin/spud"),
+                                       ("perl -pie s/a/b/ bin/spud", "deliverables", "bin/spude"),  # -pie: extension "e"
+                                       ("perl -i -pe s/a/b/ docs/x.md", "deliverables", "docs/x.md"),
+                                       ("perl -pi -e s/a/b/ tests/fake/.git/config", GIT_FILE_WORDING, "tests/fake/.git/config"),
+                                       ("find docs -exec perl -pi -e s/a/b/ {} +", "deliverables", "docs")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=AGENT_A)
+                self.assertIn(shown, r.reason)
+        for command in ("xargs perl -pi -e s/a/b/ < list", "perl -e s/a/b/ $(echo -i) tests/x.txt", "f() { perl -pi -e s/a/b/ \"$1\" tests/x; }; f x"):
+            with self.subTest(command):
+                self.assertRefused(command, ANYWHERE_WORDING, agent_id=AGENT_A)  # a word that may be -i<anything>
+
+    def test_tar_writes_its_archive_where_the_line_is(self):
+        for command in ("tar -czf out/a.tgz docs", "tar -C docs -czf out/a.tgz .", "cd out && tar -cf a.tar ../docs",
+                        "tar -cf - docs | wc -c", "tar -tf a.tar", "tar -xf a.tar -C out"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command, needle, shown in (("tar -C out -cf docs/a.tar .", "deliverables", "docs/a.tar"),  # -C moves no archive
+                                       ("tar -cf ledger/tickets/x.tar out", "generated", "ledger/tickets/x.tar"),
+                                       ("tar -rf tests/fake/.git/hooks/pre-commit out", GIT_DIR_WORDING, "pre-commit"),
+                                       ("export TAPE=docs/t; tar -c out", "deliverables", "docs/t")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                self.assertIn(shown, r.reason)
+        self.assertRefused("tar -cf out/a.tar $(ls)", ANYWHERE_WORDING, agent_id=AGENT_G)  # may be -f elsewhere
+
+    def test_patch_writes_its_file_its_backup_and_its_reject(self):
+        for command in ("patch -d out f ../x.patch", "patch -d out -o g f ../x.patch", "patch -d out -r f.rej f < x.patch",
+                        "patch -d bin -z .bak x.py ../x.patch", "patch --dry-run docs/x.md x.patch"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_H if "bin" in command else AGENT_G)
+        for command, needle, shown, agent in (
+            ("patch -d out -r ../docs/x.rej f ../x.patch", "deliverables", "docs/x.rej", AGENT_G),
+            ("patch -d out -o ../ledger/tickets/SPD-001.md f ../x.patch", "generated", "ledger/tickets/SPD-001.md", AGENT_G),
+            ("patch -d bin -Y ../docs/ x.py ../x.patch", "deliverables", "docs/x.py.orig", AGENT_H),  # -Y: before the basename
+            ("patch -d bin /Users/nobody/f ../x.patch", OUTSIDE, "/Users/nobody/f", AGENT_H),
+            ("patch -d tests fake/.git/hooks/pre-commit ../x.patch", GIT_DIR_WORDING, "pre-commit", AGENT_A),
+            # a later patch in the file names its own file under the line's directory, whatever -o or the operand say
+            ("patch -o out/y out/keep.txt x.patch", "deliverables", "home:", AGENT_G),
+        ):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=agent)
+                self.assertIn(shown, r.reason)
+
+    def test_downloads_write_their_named_files(self):
+        for command in ("curl -sS -o out/f https://example.com/x", "curl -o /dev/null -w '%{http_code}' https://example.com/x",
+                        "curl --output-dir out -o f https://example.com/x", "curl -D - -s https://example.com/x",
+                        "curl -g -o 'out/#1' 'https://example.com/[1-2]'", "wget --no-hsts -P out https://example.com/x",
+                        "wget --no-hsts -O out/f https://example.com/x", "a=$(echo x); curl -s -D - \"https://example.com/$a\"",
+                        "wget --no-hsts -b -P out -o out/log https://example.com/x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command, needle in (("curl --output-dir docs -o f https://example.com/x", "deliverables"),
+                                ("curl -w '%output{docs/w}' https://example.com/x", "deliverables"),
+                                ("wget --no-hsts https://example.com/x", "deliverables"),  # the checkout root, whole
+                                ("wget --no-hsts -o ledger/x.log -P out https://example.com/x", "generated"),
+                                ("wget -P out https://example.com/x", OUTSIDE),  # the HSTS database, ~/.wget-hsts
+                                ("wget --no-hsts -b -P out https://example.com/x", "deliverables"),  # ./wget-log, the root's
+                                ("curl -o 'out/#1' 'https://example.com/[1-2]'", ANYWHERE_WORDING),
+                                ("curl -w @fmt https://example.com/x", ANYWHERE_WORDING),
+                                ("curl -o out/f \"$(cat list)\"", ANYWHERE_WORDING),  # may be -o anything
+                                ("wget -e robots=off --no-hsts -P out https://example.com/x", ANYWHERE_WORDING),
+                                ("for n in a b; do curl -o \"$n.html\" https://example.com/$n; done", VARIABLE_WORDING)):
+            with self.subTest(command):
+                self.assertRefused(command, needle, agent_id=AGENT_G)
+        self.assertRefused("sort --compress-program='git push' -o out/s a.tar", "Law 7", agent_id=AGENT_G)
+        self.assertRefused("wget --use-askpass='git push' --no-hsts -P out https://example.com/x", "Law 7", agent_id=AGENT_G)
+
+    def test_a_word_the_line_cannot_settle_where_an_option_may_stand(self):
+        for command in ("sort -u \"$(cat list)\"", "sort $(echo -o) docs/x a.tar", "X=$(echo -o); sort $X docs/y a.tar",
+                        "mktemp \"$(echo -p)\" /x.XXXX"):
+            with self.subTest(command):
+                self.assertRefused(command, ANYWHERE_WORDING, agent_id=AGENT_G)
+        r = self.assertRefused("dd $(echo of=docs/x)", VARIABLE_WORDING, agent_id=AGENT_G)  # may begin with of=
+        self.assertIn(ARG_WORDING, r.reason)
+        for command in ("sort -u \"out/$(cat list)\"", "X=-o; sort $X out/s a.tar", "dd if=\"$(ls | head -1)\" of=out/f",
+                        "sort \"$HOME/x\""):  # the environment's HOME, which the line does not set
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        r = self.assertRefused("X=-o; sort $X docs/s a.tar", "deliverables", agent_id=AGENT_G)  # the line's own value, read
+        self.assertIn("docs/s", r.reason)
+
+    def test_spuds_answers(self):
+        """Spud is held to Law 1 in a project and is free in his own files and outside every project, as for a redirection."""
+        for label, form in SPELLED_WRITERS:
+            with self.subTest(label):
+                r = self.assertRefused(form.replace("{}", "docs/x.md"), "Law 1", agent_id=None)
+                self.assertIn(ARG_WORDING, r.reason)
+                self.assertRefused(form.replace("{}", "ledger/tickets/SPD-001.md"), "generated", agent_id=None)
+                self.assertSilent(form.replace("{}", "/Users/nobody/x"), agent_id=None)
+                self.assertSilent(form.replace("{}", ".claude/x"), agent_id=None)  # his own .claude/**
+        self.assertSilent("mktemp .claude/x.XXXX", agent_id=None)
+        self.assertRefused("mktemp docs/x.XXXX", "Law 1", agent_id=None)
+        self.assertRefused("split -l 1 a.tar ledger/x", "generated", agent_id=None)
+        for command in ("wget https://example.com/x -P /tmp/spd-126-x", "sort -u \"$(cat list)\"", "curl -o \"$n\" https://example.com/x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)  # outside every project, or a target Spud's reading leaves unread
+        r = self.assertRefused("dd if=/dev/zero of=tests/fake/.git/hooks/pre-commit", "Law 1", agent_id=None)
+        self.assertNotIn(GIT_DIR_WORDING, r.reason)  # SPD-066's rule is a caller's with an agent_id
+
+
 PROBE = "/tmp/spd-127-probe"  # the scratch directory D of Spud's probe of zsh 5.9 -f and bash 3.2, 2026-09-18
 NOBODY = "/Users/nobody"  # a directory outside every registered project and every temp root, as OutsideProjectTest's
 
@@ -9861,6 +10586,29 @@ class DeliverableGlobTest(SpudTestCase):
         self.assertFalse(covers("TEST/Fixtures", "test/fixtures/movecheck/**", "make"))
         self.assertTrue(covers("Dist", "dist/**", "remove", True))
         self.assertFalse(covers("Dist", "dist/**", "remove"))
+
+    def test_a_whole_subtree_a_glob_covers(self):
+        """SPD-126: a write anywhere under a directory is inside one glob only when that glob matches every path under it:
+        `**`, or a glob ending in `/**` (or `/`) that matches the directory or whose literal root is it.  A glob that matches
+        the directory but not everything below it never covers the subtree, nor does one whose root holds a wildcard, at that
+        root; and no directory "tree" lets in is one SPD-129's "remove" refuses."""
+        spud = load_spud_module()
+        covers = spud.glob_covers_directory
+        for rel, glob in (("dist", "dist/**"), ("dist", "dist/"), ("dist/sub", "dist/**"), ("dist/a/b", "dist/"), ("x/y", "**"),
+                          ("", "**"), ("a/x/b", "a/*/**"), ("a/x/y/z", "**/y/**")):
+            with self.subTest(rel=rel, glob=glob):
+                self.assertTrue(covers(rel, glob, "tree"))
+        for rel, glob in (("bin/sub", "bin/*"), ("docs", "docs/*.md"), ("docs/x", "docs/*.md"), ("bin", "bin/spud"),
+                          ("test", "test/fixtures/movecheck/**"), ("a/x", "a/*/**"), ("dist", "dist"), ("dist", "dist/**/x"),
+                          ("dist", "**/x"), ("distx", "dist/**")):
+            with self.subTest(rel=rel, glob=glob):
+                self.assertFalse(covers(rel, glob, "tree"))
+        self.assertTrue(covers("Dist/Sub", "dist/**", "tree", True))
+        self.assertFalse(covers("Dist/Sub", "dist/**", "tree"))
+        for rel in ("dist", "dist/sub", "a/x", "a/x/b", "bin/sub", ""):  # tree never lets in what remove refuses
+            for glob in ("dist/**", "dist/", "**", "a/*/**", "bin/*", "bin/**"):
+                if covers(rel, glob, "tree"):
+                    self.assertTrue(covers(rel, glob, "remove") or spud.path_matches_glob(rel, glob), (rel, glob))
 
     def test_a_globs_scope_holds_for_the_directory_reading(self):
         """SPD-129: the new reading sits inside path_reason's own loop, so a `<key>:` or `home:` glob opens its project's

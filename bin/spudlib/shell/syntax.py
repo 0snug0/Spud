@@ -117,8 +117,27 @@ _LITERAL_DOLLAR, _QUOTED_DOLLAR, _ARRAY_VALUE, _NAME_END = chr(0xE021), chr(0xE0
 _ARITH_CHARS = "()<>|&;\n \t"
 _ARITH_SENTINELS = {c: chr(0xE030 + i) for i, c in enumerate(_ARITH_CHARS)}
 _ARITH_UNSENTINEL = {v: k for k, v in _ARITH_SENTINELS.items()}
-_SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **_ARITH_UNSENTINEL,
+# SPD-126: a shell operator character that is quoted or escaped (`\;`, `';'`, `\(`, `"|"`) is an ordinary character of the
+# word it stands in, and neutralize_quoted_globs replaces it with one of these so shlex keeps it there.  Until SPD-126 shlex
+# took the quotes away and handed the walk a bare `;` or `(`, which it read as the operator: `find . -exec rm {} \; -delete`
+# ended the find at `\;` and read `-delete` as a command of its own, and `find . \( -name a \) -delete` opened a subshell,
+# so no primary past the first escaped operator was ever find's.  deglob restores the character, so a string a shell or
+# eval reads again (`sh -c 'a; b'`, `eval echo x \; git push`) still has its operators when it is read the second time.
+_PUNCT_CHARS = ";&|<>()"
+_PUNCT_SENTINELS = {c: chr(0xE040 + i) for i, c in enumerate(_PUNCT_CHARS)}
+_PUNCT_UNSENTINEL = {v: k for k, v in _PUNCT_SENTINELS.items()}
+_SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **_ARITH_UNSENTINEL, **_PUNCT_UNSENTINEL,
                       **{_LITERAL_EQUALS: "=", _LITERAL_DOLLAR: "", _QUOTED_DOLLAR: "", _ARRAY_VALUE: "", _NAME_END: ""})
+# SPD-126: the operands a line does not spell.  FIND_PATH stands where find's -exec, -execdir, -ok and -okdir put `{}`: a path
+# under find's starting points, which shell/find_xargs turns into a whole-subtree write of each starting point.  INPUT_OPERAND
+# stands for what xargs reads from its input -- appended after the words the line spells, or where -I or -J put it -- which
+# the hook cannot know at all.  Neither is a glob, an expansion or a sentinel deglob removes, so a string a shell reads again
+# (`find . -exec sh -c 'rm {}' \;`, `xargs -I% sh -c 'rm %'`) still holds it; every write channel reads a target holding one
+# as a target it cannot resolve (unknown_operand), and a reason shows it as `{}` or `{input}` (shown_operands).  ANY_PATH
+# stands for the files a command places where the line cannot say -- an archive extracted with -P, unzip's `-:`, a curl
+# config file, tar's -T list -- which may lie anywhere at all.
+FIND_PATH, INPUT_OPERAND, ANY_PATH = chr(0xE050), chr(0xE051), chr(0xE052)
+_OPERAND_TEXT = {FIND_PATH: "{}", INPUT_OPERAND: "{input}", ANY_PATH: "(anywhere)"}
 _LITERALIZE = str.maketrans(dict(_GLOB_SENTINELS, **_ZSH_UNSENTINEL))
 _GLOB_SENTINEL_RE = re.compile("[" + "".join(_SENTINEL_TEXT) + "]")
 GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}|[" + ZSH_OPEN + ZSH_RANGE_OPEN + "]")
@@ -320,7 +339,8 @@ GIT_VERB_FILE_POSITIONALS = {"bundle": ("create", 1), "mailinfo": (None, 2), "pa
 # `unlink` rm's two-argument forms (their man pages).  Shapes: "dest" writes its last operand (or -t's directory) and, when
 # that is a directory, each source inside it; "move" also removes each source; "link" writes its link name, `./<name>` for
 # a single operand; "each" writes every operand; "mode" every operand after the mode, owner or flags; "sed" every file
-# after the script, only in place.
+# after the script, only in place.  SPD-126: mkfifo (mkfifo(1): `mkfifo [-m mode] fifo_name ...`, getopt's) makes every
+# operand, "each" as mkdir's.
 ARG_WRITE_COMMANDS = {
     "cp": ("dest", "t", ("--target-directory", "--suffix")),
     "install": ("dest", "BDfghlMmoTt", ("--target-directory", "--suffix", "--mode", "--owner", "--group", "--strip-program")),
@@ -338,11 +358,28 @@ ARG_WRITE_COMMANDS = {
     "chgrp": ("mode", "", ("--from", "--reference")),
     "chflags": ("mode", "", ()),
     "sed": ("sed", "efiI", ("--expression", "--file", "--line-length")),
+    "mkfifo": ("each", "m", ("--mode",)),
 }
 # The options of those commands that change which files they write, so a glob word the shell may expand to one of them is
 # read as it (SPD-041's GLOB_SAMPLES): the destination directory, install's -d (every operand a directory it makes) and -M
 # (its metalog), and sed's in-place forms.
 ARG_WRITE_OPTIONS = frozenset({"-t", "-T", "--target-directory", "--no-target-directory", "-d", "-M", "-i", "-I", "--in-place"})
+# SPD-126: the commands whose files the line does not spell, which the analysis hands to shell/find_xargs (find: what it
+# deletes, the files -fprint names, the command -exec runs), shell/downloads (a download named by the URL or the server:
+# curl -O and -J, wget without -O) and shell/tree_writes (the rest): an archive extracted (bsdtar, this Mac's tar; unzip;
+# ditto -x), a patch applied, a tree synced or copied (rsync, which is openrsync here; ditto).  Each is a whole-subtree
+# write of the directory the files land in, beside the files the same command names.
+TREE_WRITE_COMMANDS = frozenset({"find", "tar", "bsdtar", "unzip", "patch", "curl", "wget", "rsync", "ditto"})
+# SPD-126: the two downloaders, which shell/downloads reads whole: the files curl and wget are told to write by name (curl's
+# -o, -D, -c and kin; wget's -O, -o, -a and kin) and the ones the URL or the server names under a directory (curl -O, wget
+# without -O).  wget is not installed on this Mac; its reading rests on GNU wget's manual alone.
+DOWNLOAD_COMMANDS = frozenset({"curl", "wget"})
+# SPD-126: the commands that write a file the line names past SPD-121's table, whose grammar is no shape of it, read by
+# shell/spelled_writes: dd's of= operand, sort's -o and -T, mktemp's templates and split's prefix (names the command picks,
+# read with hooks/pathrule.NAME_CHAR), and perl's -i, each on this Mac's man page (perl: perlrun).  perl is matched by
+# PERL_RE, which takes its versioned names too.
+SPELLED_WRITE_COMMANDS = frozenset({"dd", "sort", "mktemp", "split"})
+PERL_RE = re.compile(r"^perl(?:\d+(?:\.\d+)*)?$")
 BRANCH_READ_FLAGS = {"-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", "--all", "--remotes", "--verbose", "--color",
                      "--no-color", "--column", "--no-column", "-i", "--ignore-case", "--no-abbrev"}
 BRANCH_READ_VALUE_FLAGS = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--abbrev"}
@@ -399,8 +436,15 @@ class ShellAnalysis:
         # rmdir, truncate, chmod and its kin, sed in place), as shell/arg_writes reads it: (the command as spelled, the
         # operand word, the directories the shell may be in, the source words a destination directory takes, how the
         # word is written, a backup suffix or None, and SPD-129's directory kind -- "make" for mkdir's operands and
-        # install -d's, "remove" for rmdir's and rm's under -r, -R or -d, None for every write of a file).  bash_reason
-        # turns each into the files it names and holds them to the path rule like a redirection target, for every caller.
+        # install -d's, "remove" for rmdir's and rm -d's, None for every write of a file).  bash_reason turns each into
+        # the files it names and holds them to the path rule like a redirection target, for every caller.  SPD-126: the
+        # kind is also "tree" (anything under the directory), "rm-tree" (rm -r, find -delete), "file-tree" (chmod -R, mv's
+        # source) or "find-tree" (under find's starting point), which bash_rule.path_directories reads per path; how is
+        # also "walk" (find's starting point, walked for a git directory only) or "itself" (GNU -T); and a destination's
+        # kind is (arg_writes.RECURSIVE, rsync's excludes, whether `src/` lands as its contents) when what lands there may be
+        # a whole tree.  Records come from shell/arg_writes, shell/find_xargs, shell/tree_writes, shell/downloads and
+        # shell/spelled_writes, the last with hooks/pathrule.NAME_CHAR standing for each character of a name the command
+        # picks (mktemp's X, split's suffix).
         self.arg_writes = []
         self.vars = {}
         self.cwds = frozenset([cwd]) if cwd else None
@@ -436,6 +480,9 @@ class ShellAnalysis:
         # still leaves the hook unable to say which program a name finds, and the refusal is the safe answer.  zsh's
         # `commands[name]=<path>` fills the same table (SPD-105), and UNKNOWN_NAME stands for a name it cannot read.
         self.hashed = set()
+        # SPD-126: the variables of a `for` or `select` loop whose every listed word starts with something other than `-`,
+        # so a word such a variable fills may be read as the operand it is where a command reads options (tree_writes).
+        self.dashless_loops = set()
         # SPD-084: the names a `name () { ... }`/`function name` definition earlier on the line bound to a shell function, so
         # a later bare call of one of them (in command position) runs that function, not the program the hook read.  Kept as a
         # set like `hashed`, but scoped: a definition in a branch, a loop or another function's body may exist at the call, so
@@ -449,6 +496,19 @@ class ShellAnalysis:
     def all_spud(self):
         """Every simple command is a spud call (a `cd` beside it changes nothing that matters)."""
         return "spud" in self.kinds and all(k in ("spud", "cd") for k in self.kinds) and not self.unparseable
+
+
+def unknown_operand(word):
+    """True when a word holds an operand the line does not spell (SPD-126): find's `{}`, xargs's input, or a file a command
+    places where the line cannot say."""
+    return FIND_PATH in word or INPUT_OPERAND in word or ANY_PATH in word
+
+
+def shown_operands(text):
+    """A word or reason with SPD-126's operand markers shown as the line spells them: `{}` for find's, `{input}` for xargs's."""
+    for marker, shown in _OPERAND_TEXT.items():
+        text = text.replace(marker, shown)
+    return text
 
 
 def shell_tokens(text):

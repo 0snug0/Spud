@@ -984,6 +984,52 @@ class DirectoryWriteProjectTest(ProjectHookCase):
         self.assertHookSilent(self.run_line(self.CLAIMED, "cd %s && mkdir -p docs" % self.home.path))
 
 
+CHECKOUT_WORDING = "the root of a checkout the ledger knows"  # SPD-126: a whole-subtree write at or above a checkout's root
+
+
+class TreeWriteProjectTest(ProjectHookCase):
+    """SPD-126: a whole-subtree write -- what find deletes or runs, an archive extracted, a tree synced or copied -- in a
+    project's bound worktree.  BAD-001's members: AGENT_A holds `src/**`, AGENT_B `**`.  A subtree `src/**` covers is
+    AGENT_A's in the worktree BAD-001 is bound to and nowhere else; the worktree's root is no glob's subtree for AGENT_A,
+    and for AGENT_B, whose `**` covers it, it holds the worktree's .git gitfile, as the directory above both checkouts
+    holds both: SPD-066's rule refuses the write before the globs are asked.  A copied source holding a git directory is
+    refused wherever it lands."""
+
+    def setUp(self):
+        super().setUp()
+        self.spawn_in(self.CLAIMED, self.plan_bad(name="Russet", deliverables=("src/**",)), AGENT_A)
+        self.spawn_in(self.CLAIMED, self.plan_bad(name="Yukon", deliverables=("**",)), AGENT_B)
+        for checkout in (self.bad, self.bad_wt):
+            (Path(checkout) / "src" / "plain").mkdir(parents=True, exist_ok=True)
+            (Path(checkout) / "a.tar").write_text("a\n", encoding="utf-8")
+        plant_git_dir(Path(self.bad_wt) / "src" / "fake" / ".git")
+
+    def run_line(self, s, cwd, line, agent_id=AGENT_A):
+        return self.hook_in(s, "PreToolUse", self.bash_p(s, "cd %s && %s" % (cwd, line), agent_id))
+
+    def test_the_members_own_subtree_in_the_bound_worktree(self):
+        for line in ("find src -name '*.pyc' -delete", "find src/plain -exec touch {} +", "tar -xf a.tar -C src",
+                     "rsync -a src/plain/ src/copy/", "cp -R src/plain src/copy", "rm -rf src/plain", "unzip -o a.zip -d src/z"):
+            with self.subTest(line):
+                self.assertHookSilent(self.run_line(self.CLAIMED, self.bad_wt, line), line)
+
+    def test_the_root_the_main_checkout_and_a_copied_git_directory_are_refused(self):
+        for cwd, line, needle, agent in ((self.bad_wt, "find . -delete", LAW_5, AGENT_A), (self.bad_wt, "tar -xf a.tar", LAW_5, AGENT_A),
+                                         (self.bad_wt, "find . -delete", CHECKOUT_WORDING, AGENT_B),
+                                         (self.bad_wt, "tar -xf a.tar", CHECKOUT_WORDING, AGENT_B),
+                                         (self.bad_wt, "find %s -delete" % os.path.dirname(self.bad), CHECKOUT_WORDING, AGENT_B),
+                                         (self.bad, "find src -delete", BOUND_WORKTREE, AGENT_A),
+                                         (self.bad, "tar -xf a.tar -C src", BOUND_WORKTREE, AGENT_A),
+                                         (self.bad_wt, "cp -R src/fake src/copy", GIT_DIR, AGENT_A),
+                                         (self.bad_wt, "find src -exec touch {} +", GIT_DIR, AGENT_A)):  # src holds src/fake/.git
+            with self.subTest(cwd=str(cwd), line=line, agent=agent):
+                self.assertDenied(self.run_line(self.CLAIMED, cwd, line, agent), needle, line)
+
+    def test_spud_and_a_plain_session_keep_their_readings(self):
+        self.assertDenied(self.run_line(self.CLAIMED, self.bad_wt, "find src -delete", None), LAW_1)  # Spud: every path a deliverable
+        self.assertHookSilent(self.run_line(self.PLAIN, self.bad_wt, "find src -delete", None))  # Eric's own session
+
+
 class StopProjectTest(ProjectHookCase):
     """A member with no known session holds every Spud session once it has waited ten minutes (SPD-018); a plain session
     it never holds."""

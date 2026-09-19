@@ -10,10 +10,23 @@ from ..state import lookup
 # What a refused write is called in each channel's reasons: the path rule's own reason wrapped for the write ("into"),
 # a target holding an expansion ("variable", a member alone: Spud's own such target the hook simply cannot read), a
 # target relative to a directory the hook cannot follow ("unfollowable", every caller since SPD-035), and the two a glob
-# earns a member ("capped", "nomatch").
+# earns a member ("capped", "nomatch").  SPD-126: a target holding an operand the line does not spell (syntax.unknown_operand)
+# earns a member "input" -- what xargs reads from its input, what find hands its command -- or "anywhere", files a command
+# places where the line cannot say.
 _UNFOLLOWABLE = ("a cd into a variable, `cd -`, popd, a directory stack entry or ~name, an option or a CDPATH it cannot"
                  " read, a relative cd in a loop, a sourced file)")
+_INPUT = (" names a file xargs reads from its input (or find hands its command as {}), which the hook cannot know; spell the"
+          " paths out, or give find the files to change as its own starting points")
+_ANYWHERE = (" places files where the line cannot say -- an archive tar extracts with -P (it keeps absolute paths and `..`) or"
+             " from a -T list, unzip's -: (it keeps `../`), a config file curl reads (-K, or a CURL_HOME, XDG_CONFIG_HOME or"
+             " HOME the line sets), a -w format curl reads from a file, a {{variable}} an --expand- option of curl's holds,"
+             " an -o name holding #N under curl's URL globbing, a wgetrc wget reads or runs (-e, --config, or a WGETRC or HOME"
+             " the line sets), rsync's daemon, or options a substitution or a variable the line cannot settle may hold (sort's"
+             " -o, perl's -i and kin among them) -- so they may lie anywhere; name the files, and extract or download into a"
+             " directory the line names")
 REDIRECT_MESSAGES = {
+    "input": "the redirection target %s" + _INPUT,
+    "anywhere": "the redirection target %s" + _ANYWHERE,
     "into": "a redirection or tee into %s: %s",
     "variable": "the redirection target %s holds a variable or substitution the hook cannot resolve; spell the path out",
     "unfollowable": "the redirection target %s is relative to a directory the hook cannot follow (" + _UNFOLLOWABLE + "; use an absolute path",
@@ -34,6 +47,8 @@ GIT_WRITE_MESSAGES = {
                " name the file explicitly"),
     "nomatch": ("the file this git call writes (%s) is a glob that matches no file now, so the hook cannot know what git"
                 " would open; name the file explicitly"),
+    "input": "the file this git call writes (%s)" + _INPUT,
+    "anywhere": "the file this git call writes (%s)" + _ANYWHERE,
 }
 # SPD-121: a file a command names as an operand and writes (cp, mv, ln, install, mkdir, touch, rm, rmdir, truncate, chmod
 # and its kin, sed in place), `%s` naming the command and the file as the line spells them.
@@ -47,7 +62,38 @@ ARG_WRITE_MESSAGES = {
     "nomatch": ("a write by argument (%s) names a glob that matches no file now, so the hook cannot know what the command"
                 " would write (a matching file may appear before it runs, or the shell may pass the name literally);"
                 " name the files explicitly"),
+    "input": "a write by argument (%s)" + _INPUT,
+    "anywhere": "a write by argument (%s)" + _ANYWHERE,
+    # SPD-126: a tree a recursive copy lands, or find hands its command, that the walk for a git directory could not read whole
+    "unwalked": ("a write by argument (%s) lands a directory tree the hook could not read whole (more than %d entries, or a"
+                 " directory it cannot list), so it cannot tell whether a git directory or config file lands with it, which"
+                 " no spudagent writes (SPD-066); copy or search a smaller tree, or exclude .git"),
 }
+
+
+def path_directories(kind, path):
+    """SPD-126: the kinds the path rule reads a write of `path` with, every one of which must let it in.  A whole-subtree
+    write, "tree", never loosens what the line earned before SPD-126:
+    - "rm-tree" (rm -r, find -delete) is "tree" -- narrower than SPD-129's "remove", which rm -r was -- unless the path
+      exists now as something other than a directory (a file, or a symlink, which rm removes as itself): "remove" then.
+    - "file-tree" (chmod -R and its kin, mv's source) is the file the path is, and "tree" too while it is a directory now.
+    - "find-tree" (a write under find's starting point) is "tree" unless the path exists as something other than a
+      directory, which is then the one file find hands its command."""
+    if kind not in ("rm-tree", "file-tree", "find-tree"):
+        return (kind,)
+    p = os.path.expanduser(path)
+    directory = os.path.isdir(p) and not os.path.islink(p)
+    if kind == "file-tree":
+        return (None, "tree") if directory else (None,)
+    if directory or not os.path.lexists(p):
+        return ("tree",)
+    return ("remove",) if kind == "rm-tree" else (None,)
+
+
+def shown_picked(text):
+    """SPD-126: a reason with the characters a command picks for a name (hooks/pathrule.NAME_CHAR, NAME_MORE) shown as a glob
+    shows them: `?` one, `*` any number more."""
+    return text.replace(pathrule.NAME_CHAR, "?").replace(pathrule.NAME_MORE, "*")
 
 
 def redirection_paths(target, cwds):
@@ -295,13 +341,17 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
 
     def target_reason(messages, spelled, path, directory=None):
         """edit_reason for one concrete file a redirection, a tee, a git call or a write by argument may open, phrased for
-        the write.  `directory` is SPD-129's kind, which only a write by argument that makes or removes a directory carries."""
-        reason, rel = pathrule.edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode, directory)
+        the write.  `directory` is the kind only a write by argument carries: SPD-129's making or removal of a directory,
+        SPD-126's whole-subtree writes, each read with the kinds path_directories gives for this path."""
+        for kind in path_directories(directory, path):
+            reason, rel = pathrule.edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode, kind)
+            if reason:
+                break
         if not reason:
             return None
         # the state directory is refused in the database's words, not Law 1's; a session that is not Spud is not held to Law 1
         law_1 = not caller_agent_id and not plain and not (rel is not None and pathrule.in_state_dir(rel))
-        return ("Law 1: " if law_1 else "") + messages["into"] % (spelled, reason)
+        return shown_picked(("Law 1: " if law_1 else "") + messages["into"] % (spelled, reason))
 
     def targets_reason(entries, messages):
         """The reason one of these writes is refused, or None.  An entry is (the spelling the reason names it by, or None
@@ -309,7 +359,11 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         the analysis recorded it (SPD-127), everything else as the line spells it -- the directories the shell may be in
         when it opens, and SPD-129's directory kind, None for every write that is not a directory's making or removal)."""
         for named, target, target_cwds, directory in entries:
-            spelled = prepare.deglob(named if named else target)
+            spelled = shown_picked(syntax.shown_operands(prepare.deglob(named if named else target)))
+            if syntax.unknown_operand(target):  # SPD-126: an operand the line does not spell, for a member as a variable is
+                if strict:
+                    return messages["anywhere" if syntax.ANY_PATH in target else "input"] % spelled
+                continue
             if "$" in target or "`" in target or hookio.SUBST in target:
                 if strict:
                     return messages["variable"] % spelled
@@ -348,7 +402,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     # The redirections first, so a line that already earned a redirection's reason keeps it; then the files a git call
     # writes through its own options or the environment (SPD-049), and the files a command names as operands and writes
     # (SPD-121), which are held to the same rule.
-    written, capped = arg_writes.written_paths(analysis.arg_writes)
+    # SPD-126: for a caller the path rule holds, each tree a recursive copy lands or find hands its command is walked too.
+    written, capped, unwalked = arg_writes.written_paths(analysis.arg_writes, walk=strict)
     for entries, messages in (([(None, t, c, None) for t, c in analysis.redirects], REDIRECT_MESSAGES),
                               ([(n, t, c, None) for n, t, c in analysis.git_writes], GIT_WRITE_MESSAGES),
                               (written, ARG_WRITE_MESSAGES)):
@@ -357,4 +412,6 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
             return reason, analysis
     if strict and capped:  # a source glob whose files, each written into a directory, reach the budget
         return ARG_WRITE_MESSAGES["capped"] % (capped, syntax.GLOB_MATCH_CAP), analysis
+    if strict and unwalked:  # a tree whose walk for a git directory stopped short
+        return ARG_WRITE_MESSAGES["unwalked"] % (unwalked, syntax.GLOB_SCAN_CAP), analysis
     return None, analysis
