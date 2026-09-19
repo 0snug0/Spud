@@ -90,10 +90,24 @@ def analyse_new_shell(a, command, depth):
 
 
 def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT):
+    """A simple command: its output targets, then its words.  SPD-127: a target is resolved here, before analyse_words reads
+    the command's own prefix assignments, because those reach neither the redirection nor the arguments in either shell
+    (probed 2026-09-18: `S=$D/a; S=$D/b echo hi > $S.f` made a.f, and `S=$D/a echo hi > $S.f` with S unset made `.f`)."""
     words, targets = directories.separate_redirects(tokens)
-    for t in targets:
-        a.redirects.append((t, a.cwds if redirect_cwds is syntax._CURRENT else redirect_cwds))
+    cwds = a.cwds if redirect_cwds is syntax._CURRENT else redirect_cwds
+    settled = [arg_writes.resolved(t, a) for t in targets]
+    for target in settled:
+        a.redirects.append((target, cwds))
     analyse_words(words, bodies, a, depth, [globbing.GLOB_READING_BUDGET], "shell", False)
+    if targets and words and all(assignment_words.assignment_word(w) for w in words):
+        # An assignment-only command's own redirection is where the shells part: zsh opens it with the value the line had
+        # before the command, bash with the one the command assigns (probed: `S=$D/a; S=$D/b > $S.f` made a.f in zsh and
+        # b.f in bash).  Both readings are checked, as hidden_option checks both of sed's (SPD-121), so neither shell's
+        # reading decides alone; where one of them stays raw it keeps the refusal an unresolvable target earns.
+        for word, before in zip(targets, settled):
+            after = arg_writes.resolved(word, a)
+            if after != before:
+                a.redirects.append((after, cwds))
 
 
 def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
@@ -283,10 +297,13 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             a.findings.append(("git-repo", (spelled, target, a.cwds)))
         # ... and the repository this call does read, whose local and worktree scopes bash_reason holds to the allowlist (SPD-063)
         a.git_calls.append((tuple(targets), a.cwds))
-        for spelled, target in git_verbs.git_write_targets(words, a.vars):
+        # SPD-127: git is handed the value, not the spelling, so a `$NAME` the line settled is resolved in the option that
+        # names the file and in the variable whose value decides whether git writes a file at all (a GIT_TRACE* sibling
+        # traces to a path only when its value is absolute; a descriptor or a relative one writes nothing).
+        for spelled, target in git_verbs.git_write_targets(words, {n: arg_writes.resolved(v, a) for n, v in a.vars.items()}):
             # SPD-049: a file the call writes through one of its own options or the environment, held to the path rule
             # in bash_reason like a redirection target, for every caller
-            a.git_writes.append((spelled, target, a.cwds))
+            a.git_writes.append((spelled, arg_writes.resolved(target, a), a.cwds))
     elif base in syntax.SHELLS:
         if not read_points(lambda ws, start: expansions.option_point(expansions.shell_read_index(ws, start))):
             return
@@ -353,8 +370,10 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     elif base == "tee":
         a.kinds.append("tee")
         for w in words[1:]:
+            # the word as spelled decides whether tee reads it as an option, as this Mac's getopt does; what it names is
+            # the value the line settled (SPD-127), which is the file tee opens
             if not w.startswith("-"):
-                a.redirects.append((w, a.cwds))
+                a.redirects.append((arg_writes.resolved(w, a), a.cwds))
     elif base in syntax.ARG_WRITE_COMMANDS:
         # SPD-121: a command that writes the files it names as operands, read where tee is, so bash_reason holds each to
         # the path rule as it holds a redirection target.  The words this Mac's getopt reads as options are read by name
@@ -443,7 +462,11 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False):
     exactly what the unresolvable-target rule exists to refuse -- `md $HOME/planted` recorded no write while
     `mkdir -p $HOME/planted` was refused.  A concrete file the text writes is held to the path rule for the caller, as an
     alias's redirection is anywhere else.  Only the outermost of these readings prunes, so a nested one never drops what
-    the reading closest to the member's words keeps (SPD-133)."""
+    the reading closest to the member's words keeps (SPD-133).
+
+    A target the text's own line settles is resolved before this sees it (SPD-127), so it is a concrete file and the prune
+    does not reach it: a body that writes `$data` after assigning it goes to the path rule like any spelled path, while the
+    harness's `"$_cc_bin"` and the environment it reads, which no line settles, stay as unresolvable as they were."""
     outermost = a.shell_reading == 0
     marks = (len(a.findings), len(a.redirects), len(a.git_writes), len(a.arg_writes))
     a.shell_reading += 1
