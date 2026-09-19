@@ -6,7 +6,7 @@ import sys
 
 from . import ghread, prcmds, publish, settings_sync
 from ..core import homeconf, kernel, launchagents
-from ..hooks import gitrepos, hookio, worktrees
+from ..hooks import gitrepos, hookio, snapshots, worktrees
 from ..projects import install
 from ..render import prices
 from ..state import backup, ledgerdb, lookup, schema
@@ -226,6 +226,11 @@ def doctor_projects(ctx, problems, notes):
         out.append({"key": p["key"], "root": root, "installed": bool(p["installed"]), "checks": checks, "problems": bad})
     if (ctx.home / hookio.STATE_DIR / "worktrees.json").exists():
         notes.append(".spud/worktrees.json is superseded by .spud/worktrees/<key>.json and ignored")
+    problem, note = snapshots.table_report(str(ctx.home))  # SPD-133: what the Bash hook reads a command word against
+    if problem:
+        problems.append(problem)
+    if note:
+        notes.append(note)
     return out
 
 
