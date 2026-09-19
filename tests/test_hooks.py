@@ -7189,6 +7189,211 @@ class WrapperCommandWordTest(BashHookCase):
                 self.refused_for_members(cmd)
 
 
+class WrapperDirectoryTest(BashHookCase):
+    """SPD-128: strip_wrapper took env's `-C` and sudo's `-D`/`--chdir` as value options and dropped the value, so the command
+    such a wrapper runs was read in the line's own directories.  With cwd /Users/x/repo, main (4364362) read `env -C
+    tests/fake/.git/hooks tee post-index-change` as a redirect into /Users/x/repo, `env -C ledger/tickets touch SPD-001.md`
+    as a write by argument there, `env -C tests/fake git status` as a git call discovering its repository there, `env -C /usr
+    sh -c 'echo x > f'` as a redirect there and `sudo -D sub touch f` as a write there: a bound member's tee into a nested
+    .git's hooks, its touch of a ticket and its git call into a nested repository were each silent where the plain spelling
+    (`cd <dir> && ...`) is refused, and every relative path, SPD-121's writes by argument, SPD-049's git write options, git's
+    repository discovery for SPD-047/SPD-063/SPD-066 and a spud call's launcher were read in the wrong directory.
+
+    The member who built this could not run a shell (SPD-094); Spud probed this Mac's /usr/bin/env from bash in `/`
+    (2026-09-18): `env -C /usr pwd`, `env -C usr pwd` (relative to the line's directory), `env -C/usr pwd` (glued), `env -iC
+    /usr /bin/pwd` (a cluster), `env -P /bin -C /usr pwd`, `env -C /usr X=1 pwd`, `env -C ~ pwd` (the shell expands the
+    tilde) and `env -C /usr sh -c pwd` each started in the directory; `env -C /usr -C bin pwd` printed /bin (only the last
+    -C counts, relative to the line's directory); `env -C /usr env -C bin pwd` printed /usr/bin (a nested env moves from
+    where the outer one left it); `env -C /nonexistent pwd` and `env -C /usr` alone exit 125 and run nothing; BSD env
+    refuses GNU's `--chdir` before it runs anything, so reading it too is harmless.  sudo's `-D`/`--chdir` is read from
+    sudo(8), the same way (`sudo -n -D /usr pwd` asked for a password).
+
+    So the wrapped command -- its words, a string it hands a shell, a nested wrapper -- is read with its directories set to
+    the value, resolved as chdir(2) resolves it (no CDPATH, a symlink before a `..` after it) against every directory the
+    shell may be in, and the line's own directories after it are unchanged.  A redirection on the wrapper's own line is
+    opened by the shell before env runs, in the line's directory.  The hook cannot know the directory, and fails closed as
+    a relative write after `cd $X` does, when the value holds an expansion it did not resolve or a glob, when a leading `~`
+    was not the shell's to expand, and when an argument is a filename glob or `~+`, which the shell expands in its own
+    directory while the command opens what they name in the one it moved to.  AGENT_A plans home:tests/** and
+    home:bin/spud, AGENT_C home:**; the home is a git repository with a nested one at tests/fake, as NestedRepositoryTest's."""
+
+    R = "/Users/x/repo"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        scratch_git(home, "init", "-q", "-b", "main")
+        scratch_git(home, "commit", "-q", "--allow-empty", "-m", "root")
+        self.nested = home / "tests" / "fake"
+        plant_git_dir(self.nested / ".git")
+        for d in ("tests/fake/.git/hooks", "tests/out", "ledger/tickets"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("a\n", encoding="utf-8")
+        self.module = load_spud_module()
+
+    def analysis(self, command, cwd=R):
+        m = self.module
+        return m.analyse_command(command, m.ShellAnalysis(cwd=cwd, home=str(self.home.path)))
+
+    def write_dirs(self, command, cwd=R):
+        """The directories each write by argument the line makes is read in, in order."""
+        return [w[2] for w in self.analysis(command, cwd).arg_writes]
+
+    def moved(self, *parts):
+        return frozenset([os.path.realpath(os.path.join(*parts))])
+
+    # -- the analysis ---------------------------------------------------------------
+    def test_the_tickets_forms_are_read_where_the_wrapper_moves_the_command(self):
+        R = self.R
+        a = self.analysis("env -C tests/fake/.git/hooks tee post-index-change")
+        self.assertEqual(a.redirects, [("post-index-change", self.moved(R, "tests/fake/.git/hooks"))])
+        self.assertEqual(self.write_dirs("env -C ledger/tickets touch SPD-001.md"), [self.moved(R, "ledger/tickets")])
+        a = self.analysis("env -C tests/fake git status")
+        self.assertEqual(a.findings, [("git", ("status", None))])
+        self.assertEqual(a.git_calls, [((), self.moved(R, "tests/fake"))])
+        self.assertEqual(self.analysis("env -C /usr sh -c 'echo x > f'").redirects, [("f", self.moved("/usr"))])
+        self.assertEqual(self.write_dirs("sudo -D sub touch f"), [self.moved(R, "sub")])
+        # the shell opens a redirection on the wrapper's own line before env runs, in the line's directory
+        self.assertEqual(self.analysis("env -C sub echo x > f").redirects, [("f", frozenset([R]))])
+        a = self.analysis("env -C sub git -C x log --output=out HEAD")
+        self.assertEqual(a.git_calls, [((("-C x", "x"),), self.moved(R, "sub"))])
+        self.assertEqual([w[2] for w in a.git_writes], [self.moved(R, "sub")])  # SPD-049's option, where git runs
+
+    def test_every_spelling_of_the_directory_moves_the_command(self):
+        for wrapper in ("env -C sub", "env -Csub", "env -iC sub", "env -iCsub", "env -C /usr -C sub", "env -P /bin -C sub",
+                        "env -C sub X=1", "env -u HOME -C sub", "env -C sub --", "env --chdir=sub", "env --chdir sub",
+                        "ENV -C sub", "/usr/bin/env -C sub", "sudo -D sub", "sudo -Dsub", "sudo --chdir=sub",
+                        "sudo --chdir sub", "sudo -u root -D sub", "sudo -n -D sub", "sudo -D /usr --chdir sub"):
+            with self.subTest(wrapper):
+                self.assertEqual(self.write_dirs(wrapper + " touch f"), [self.moved(self.R, "sub")])
+
+    def test_everything_the_wrapper_runs_starts_there(self):
+        R, home = self.R, os.path.expanduser("~")
+        for command, where in (("env -C /usr env -C bin touch f", self.moved("/usr/bin")),  # probed: /usr/bin
+                               ("env -C sub nice -n 5 env -C x touch f", self.moved(R, "sub/x")),
+                               ("nice env -C sub touch f", self.moved(R, "sub")),
+                               ("env -C sub nohup touch f", self.moved(R, "sub")),
+                               ("env -C sub sh -c 'touch f'", self.moved(R, "sub")),
+                               ("env -C sub sh -c 'cd x && touch f'", self.moved(R, "sub/x")),
+                               ("env -C sub bash <<'EOF'\ntouch f\nEOF", self.moved(R, "sub")),
+                               ("env -C sub script -q -c 'touch f' /dev/null", self.moved(R, "sub")),
+                               ("env -C sub -S 'touch f'", self.moved(R, "sub")),
+                               ("env -C sub eval 'touch f'", self.moved(R, "sub")),
+                               ("env -C ~ touch f", self.moved(home)), ("env -C ~/x touch f", self.moved(home, "x")),
+                               ("env -C ~+/sub touch f", self.moved(R, "sub")), ("env -C .. touch f", self.moved("/Users/x")),
+                               ("D=sub; env -C $D touch f", self.moved(R, "sub")),  # a value the line assigned, as SPD-043 reads one
+                               ("cd tests && env -C sub touch f", self.moved(R, "tests/sub")),
+                               ("cd $X; env -C /usr touch f", self.moved("/usr")),  # absolute: known wherever the shell is
+                               ("for i in 1 2; do env -C sub touch f; done", self.moved(R, "sub"))):  # no cd compounds
+            with self.subTest(command):
+                self.assertEqual(self.write_dirs(command), [where])
+
+    def test_the_line_keeps_its_own_directories(self):
+        R = frozenset([self.R])
+        for command in ("env -C /usr touch f; touch g", "env -C /usr true && touch g", "env -C /usr cd x; touch g",
+                        "env -C /usr sh -c 'cd /tmp'; touch g", "env -C /usr env -C bin true; touch g", "env -C /usr; touch g"):
+            with self.subTest(command):
+                self.assertEqual(self.write_dirs(command)[-1], R)
+                self.assertEqual(self.analysis(command).cwds, R)
+        self.assertEqual(self.write_dirs("cd sub && env -C /usr true && touch g"), [self.moved(self.R, "sub")])
+        self.assertEqual(self.write_dirs("env -C '' touch f"), [R])  # env cannot enter it and runs nothing
+
+    def test_a_directory_the_hook_cannot_resolve_is_unknown(self):
+        """Read as a relative write after `cd $X` is, and refused as one (the hook test below)."""
+        for command in ("env -C $D touch f", 'env -C "$(pwd)" touch f', "env -C `pwd` touch f", "env -C ${D:-x} touch f",
+                        "env -C s?b touch f", "env -C 'sub*' touch f",  # the read loop has quoted a glob by the time it is read
+                        "env -C ~- touch f", "env -C ~nobody touch f", "env -C~/x touch f", "sudo --chdir=~/x touch f",
+                        "env -S '-C ~/x touch f'",  # a `~` no shell expanded: env would enter a directory named `~`
+                        "env -C sub touch *.txt", "env -C sub touch f[12]", "env -C sub touch ~+/f",  # the shell expands those in its own
+                        "cd $X; env -C sub touch f", "env -C /usr env -C ~+/bin touch f"):
+            with self.subTest(command):
+                self.assertEqual(self.write_dirs(command), [None])
+        self.assertEqual(self.analysis("env -C sub tee ~+/f").redirects, [("~+/f", None)])
+        # a glob that can become a name the hook samples is read each way, the directory unknown among them
+        self.assertIn(None, self.write_dirs("env -C gi? touch f"))
+
+    def test_a_value_option_that_moves_nothing_leaves_the_directories(self):
+        R = frozenset([self.R])
+        for command in ("sudo -C 3 touch f", "doas -C /etc/doas.conf touch f", "nice -n 5 touch f", "timeout -s KILL 5 touch f",
+                        "env -u C touch f", "env -S '-u C' touch f", "env --unset=C touch f"):
+            with self.subTest(command):
+                self.assertEqual(self.write_dirs(command), [R])
+
+    # -- the hook -------------------------------------------------------------------
+    def test_the_tickets_lines_are_refused_for_a_member(self):
+        """Silent on main for AGENT_C, whose home:** covers the line's own directory."""
+        for command, needle in (("env -C tests/fake/.git/hooks tee post-index-change", GIT_DIR_WORDING),
+                                ("env -C tests/fake/.git/hooks sh -c 'echo x > post-index-change'", GIT_DIR_WORDING),
+                                ("env -C ledger/tickets touch SPD-001.md", "generated"),
+                                ("env -C ledger/tickets tee SPD-001.md", "generated"),
+                                ("sudo -D ledger/tickets touch SPD-001.md", "generated"),
+                                ("sudo --chdir=ledger/tickets touch SPD-001.md", "generated"),
+                                ("sudo --chdir ledger/tickets sed -i '' s/a/b/ SPD-001.md", "generated")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, AGENT_C)
+                self.assertIn("SPD-001.md" if "ledger" in command else "post-index-change", r.reason)
+
+    def test_a_nested_repository_is_refused_as_a_cd_into_it_is(self):
+        for command in ("env -C tests/fake git status", "env -C %s git log --oneline" % self.nested, "sudo -D tests/fake git status",
+                        "env -C tests env -C fake git fetch", "cd tests/fake; git status"):
+            for agent_id in (AGENT_A, AGENT_C):
+                with self.subTest(command=command, agent_id=agent_id):
+                    r = self.assertRefused(command, GIT_NESTED_WORDING, agent_id)
+                    self.assertIn(str(self.nested), r.reason)
+            with self.subTest(command=command, agent_id="spud"):  # SPD-123: it lies in a checkout the ledger knows
+                self.assertIn(SPUD_PLANTED_WORDING, self.assertRefused(command, GIT_NESTED_WORDING, agent_id=None).reason)
+
+    def test_a_harmless_move_stays_silent(self):
+        scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        for command in ("env -C tests/out tee f", "env -C tests/out touch new.txt", "env -C %s tee probe.txt" % scratchpad,
+                        "env -C /tmp tee spd-128-x", "sudo -D tests/out touch f", "sudo --chdir=tests/out tee f",
+                        "env -C tests git status", "env -C tests/fake/.git/hooks ls", "env -C ledger/tickets cat SPD-001.md"):
+            for agent_id in (AGENT_A, AGENT_C):
+                with self.subTest(command=command, agent_id=agent_id):
+                    self.assertSilent(command, agent_id)
+
+    def test_a_redirection_on_the_wrappers_line_opens_where_the_shell_is(self):
+        self.assertRefused("env -C tests/out echo x > ledger/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertRefused("env -C tests/out tee f < /dev/null > ledger/tickets/SPD-001.md", "generated", AGENT_C)
+        self.assertSilent("env -C ledger/tickets echo x > tests/out/f")
+        self.assertRefused("env -C ledger/tickets tee tests/out/f", "generated")  # tee's own operand: in ledger/tickets
+
+    def test_a_spud_call_is_read_where_the_wrapper_moves_it(self):
+        """A launcher reached by a relative path under another name (SPD-029: a symlink runs it whatever it is called) is
+        the file in the directory the command runs in: from tests/, bin/launch behind `env -C ..` is the home's launcher,
+        where main read tests/bin/launch, no file at all, and let `--as spud` through."""
+        (self.home.path / "bin" / "launch").symlink_to(self.home.path / "bin" / "spud")
+        tests = str(self.home.path / "tests")
+        for command in ("env -C .. bin/launch --as spud ticket new x", "env -C .. python3.14 -I -S bin/launch --as spud board",
+                        "sudo -D .. python3.14 -I -S bin/launch --as spud board", "env -C %s ./bin/launch --as spud board" % self.home.path):
+            with self.subTest(command):
+                self.assertRefused(command, "Law 6", cwd=tests)
+        self.assertSilent("env -C .. python3.14 -I -S bin/launch --as %s board" % AGENT_A, cwd=tests)
+
+    def test_a_symlink_resolves_before_a_dotdot_after_it(self):
+        """As chdir(2) resolves it: tests/deep/.. is ledger/, the link target's parent, not tests/."""
+        (self.home.path / "tests" / "deep").symlink_to(self.home.path / "ledger" / "tickets")
+        r = self.assertRefused("env -C tests/deep/.. touch SPD-001.md", "generated")
+        self.assertIn("ledger/SPD-001.md", r.reason)
+
+    def test_an_unknown_directory_fails_closed(self):
+        """In a scratch directory outside every project, where a relative write is every caller's own: after a move the
+        hook cannot follow it is refused, as after `cd $X`, Spud included (SPD-035)."""
+        scratch = tempfile.mkdtemp(prefix="spd-128-", dir="/tmp")
+        self.addCleanup(shutil.rmtree, scratch, True)
+        for command in ("env -C s?b touch f", "env -C sub touch *.txt", "sudo -D s?b touch f", "cd $X; touch f"):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(command=command, agent_id=agent_id):
+                    self.assertRefused(command, "cannot follow", agent_id, cwd=scratch)
+        self.assertRefused("env -C $D touch f", "cannot follow", agent_id=None, cwd=scratch)
+        self.assertRefused("env -C $D touch f", WORD_WORDING, cwd=scratch)  # a member hears SPD-043's reason first
+        for command in ("env -C sub touch f", "env -C /tmp touch f", "cd $X; env -C /tmp touch f"):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(command=command, agent_id=agent_id):
+                    self.assertSilent(command, agent_id, cwd=scratch)
+
+
 class GitVerbProgramOptionTest(BashHookCase):
     """SPD-051: SPD-046's table of verb options that name a program git runs listed only ls-remote/fetch --upload-pack,
     grep -O/--open-files-in-pager, difftool -x/--extcmd and archive --exec.  The same class lives on other verbs Law 7

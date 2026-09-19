@@ -111,6 +111,18 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT):
 
 
 def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
+    """A simple command's words, its redirections taken, read by dispatch_words.  SPD-128: a wrapper that moves the command
+    it runs (`env -C <dir>`, `sudo -D <dir>`) moves that command alone, so the directories the shell may be in after it are
+    the ones it had before, wherever the wrapper took the command and whatever that command would change."""
+    before, moved = a.cwds, []
+    try:
+        dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, moved)
+    finally:
+        if moved:
+            a.cwds = before
+
+
+def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, moved):
     """A simple command's words, its redirections taken: the prefixes, then what the command word dispatches on.  `effect` is
     where a builtin behind the prefixes runs (prefix_effect); `prefixed`, a wrapper, zsh's `-` or coproc runs the command
     (SPD-032: no spud call behind one is allowed).  A word the dispatch reads by name that the shell expands first (the command
@@ -118,7 +130,8 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
     options and script, a spud call's arguments) is read as each word it can become (SPD-041, resolve_glob), an expansion in it
     before a glob (SPD-043, resolve_expansion).  `fresh`: the leading words an expansion in the command word gave, none of which
     the shell reads as an assignment or a reserved word, since it finds those before it expands -- and the same for the words a
-    wrapper that execs its command word is handed (SPD-055: `nice x=./git push` runs git push, nice having exec'd `x=./git`)."""
+    wrapper that execs its command word is handed (SPD-055: `nice x=./git push` runs git push, nice having exec'd `x=./git`).
+    `moved`: set once a wrapper has moved the command into directories of its own, which analyse_words then gives back."""
 
     def read(i, wrapper_command=False, **kind):
         nonlocal fresh
@@ -187,7 +200,7 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
             words = words[1:]
             fresh = max(fresh - 1, 0)
         elif os.path.basename(w).casefold() in syntax.WRAPPERS and w not in a.vars:
-            rest, strings, consumed, env_assignments = directories.strip_wrapper(words)
+            rest, strings, consumed, env_assignments, chdir = directories.strip_wrapper(words)
             k = expansions.first_read_index(words[: consumed + 1], wrapper_from)  # its options, their values, and the command word it runs
             if k is not None:
                 outcome = read(k, wrapper_command=k == consumed, command=k == consumed, dash=True, shift=k < consumed)
@@ -196,6 +209,11 @@ def analyse_words(words, bodies, a, depth, budget, effect, prefixed, fresh=0):
                 wrapper_from = k + 1 if outcome == expansions._FLAGGED else k
                 continue
             wrapper_from = 1
+            if chdir is not None:
+                # SPD-128: everything the wrapper runs -- its words, a string it hands a shell, a nested wrapper -- starts in the
+                # directory it moved to, once its own words are read (a glob or an expansion there leaves it unknown)
+                a.cwds = directories.wrapped_directories(chdir, rest, a)
+                moved.append(chdir)
             for aname, avalue in env_assignments:
                 if aname.startswith(assignment_words.ENV_FUNCTION_PREFIX):
                     a.findings.append(("env-function", prepare.deglob(aname)))  # SPD-106: a function bash and sh import
