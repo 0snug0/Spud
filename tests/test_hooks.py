@@ -4703,6 +4703,294 @@ class ZshShortConditionalTest(BashHookCase):
         self.assertEqual(self.analysis("if [ -n x ] git push").findings, [])
 
 
+# SPD-136: an `elif` after zsh's short conditional.  Each form fills its `%s` slots with the command the `if`'s body runs
+# and the command the `elif`'s body runs; ELIF_EVIDENCE is Spud's probe of 2026-09-19, the spellings zsh 5.9 ran the elif's
+# body for -- with an `else`, with a terminator after the body, with `fi`, with a sublist body, and with a short loop or an
+# eval inside the body -- and ELIF_CHAINED the same with a second elif (four slots: the if's body, both elifs' bodies, and
+# the else's body or the command after the conditional).  ELIF_PARSE_ERRORS are the spellings zsh refused to parse, read as
+# the running form all the same (fail closed), the ticket's own headline example among them.
+ELIF_EVIDENCE = ("if [[ -z x ]] { %s } elif [[ -n y ]] { %s } else { true }",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] { %s }; true",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] { %s } fi",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] %s",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] %s; true",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] { repeat 1 %s } else { true }",
+                 "if [[ -z x ]] { %s } elif [[ -n y ]] { eval '%s' } else { true }")
+ELIF_CHAINED = ("if [[ -z x ]] { %s } elif [[ -z y ]] { %s } elif [[ -n z ]] { %s } else { %s }",
+                "if [[ -z x ]] { %s } elif [[ -z y ]] { %s } elif [[ -n z ]] { %s }; %s",
+                "if [[ -z x ]] { %s } elif [[ -z y ]] { %s } elif [[ -n z ]] %s; %s")
+ELIF_PARSE_ERRORS = ("if [[ -z x ]] { %s } elif [[ -n y ]] { %s }",
+                     "if [[ -z x ]] { %s } elif [[ -z y ]] { %s } elif [[ -n z ]] { %s }",
+                     "if [[ -z x ]] { %s } elif [[ -n y ]] {%s}",
+                     "if [[ -z x ]] { %s } elif [[ -n y ]] { %s } else true",
+                     "if [[ -z x ]] { %s } elif [[ -n y ]] { %s } always { true }")
+# The long forms, read correctly before this ticket and unchanged by it: the `then` after an elif's condition, whether the
+# branch before it was the short conditional's body or the long form's, and an elif whose condition is a plain command.
+ELIF_LONG_FORMS = ("if [[ -z x ]]; then %s; elif [[ -n y ]]; then %s; fi",
+                   "if [[ -z x ]] { %s } elif [[ -n y ]]; then %s; fi",
+                   "if [[ -z x ]]; then %s; elif true; then %s; fi",
+                   "if [[ -z x ]]; then %s; elif git status; then %s; fi",
+                   "if [[ -z x ]]; then %s; elif [[ -n y ]]; then true; else %s; fi")
+
+
+class ElifShortConditionalTest(BashHookCase):
+    """SPD-136: SPD-061 reads zsh's short conditional -- an `if`, `while` or `until` whose condition ends in `[[ ... ]]`
+    needs no `then` or `do` -- but its frame's body was left at "sublist" when an `elif` followed, so the elif's own `]]`
+    ended no condition (end_header fires only while the body is "cond") and the `{` after it was appended to the elif's
+    words as an ordinary argument.  Everything in the elif's condition and body was then read as arguments of one simple
+    command whose command word was `[[`: a member's push, write, spud call or cd there was never checked (Laws 1, 5, 6
+    and 7).  branch() now reopens the condition at an `elif` on a conditional's frame, so the elif is read exactly as the
+    `if`'s own condition and body were.
+
+    No shell is probed here: this worktree session's harness refuses to run one (SPD-094).  The evidence is Spud's probe
+    of 2026-09-19, recorded on the ticket -- zsh 5.9 -f, a function `vcs` standing in for the VCS program that logs its
+    arguments, the line started in a scratch directory D.  It corrects the ticket's own headline example, `if [[ -z x ]]
+    { vcs a } elif [[ -n y ]] { vcs b }` with nothing after it: that spelling is a parse error and runs nothing.  The
+    forms that ran are ELIF_EVIDENCE and ELIF_CHAINED -- with an `else`, with a terminator after the elif's body, with
+    `fi`, with a sublist body (`elif [[ -n y ]] vcs b`), and with `repeat 1` or `eval` inside the body -- each of which
+    was findings=[] for a push in the elif's body on main.  The probe also showed:
+
+    - the directory carries out of an elif's body: `if [[ -z x ]] { vcs a } elif [[ -n y ]] { cd /tmp; vcs in-$PWD } else
+      { vcs c }` logged in-/tmp and left the line in /tmp, while main left it in D, missing the cd in both directions.
+      The elif's body is a branch, so either directory follows the whole conditional, as `else`'s body already gave;
+    - a redirection inside the elif's body was recorded even on main (separate_redirects sees a target wherever the words
+      fall), but in the directory the line started in; the commands around it were what went unread;
+    - the parse errors ELIF_PARSE_ERRORS, and the headline example above, ran nothing.  Each is over-read as the running
+      form, which costs a refusal on a line no shell accepts.  `elif true { vcs b }` is the one parse error left as it
+      was: no `]]` ends that condition, so the body is not a short conditional's, exactly as `if true { vcs b }` is not
+      one either -- zsh parses neither, and reading them would take a short conditional's body where no condition ended;
+    - the long forms ELIF_LONG_FORMS were read correctly before this ticket and must stay that way.
+
+    A `( list )` body after an elif is read as it is after an `if`.  Where an earlier `{ ... }` on the line leaves
+    mark_zsh_patterns outside command position, zsh's reading takes that `( ... )` for one glob pattern word, and the
+    hook doubts a command word it cannot read: main does the same for `if c { a } if [[ -n y ]] ( cd /tmp/o )` and for
+    `{ true } ( cd /tmp/o )`, so the elif only joins them.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)  # Law 7 refuses members only
+        return r
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    # -- the hole ---------------------------------------------------------------------------
+    def test_the_tickets_headline_example_and_the_probes_running_forms(self):
+        """The headline example is a parse error, over-read here; every form the probe ran finds the elif's push, which
+        main found in none of them."""
+        push, status = ("git", ("push", "push")), ("git", ("status", None))
+        self.assertEqual(self.analysis("if [[ -z x ]] { git status } elif [[ -n y ]] { git push }").findings,
+                         [status, push])
+        for form in ELIF_EVIDENCE:
+            line = form % ("git status", "git push")
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [status, push], line)
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+
+    def test_every_running_form_reaches_both_bodies(self):
+        for form in ELIF_EVIDENCE + ELIF_CHAINED + ELIF_PARSE_ERRORS:
+            slots = form.count("%s")
+            for k in range(slots):
+                line = form % tuple("git push" if j == k else "git status" for j in range(slots))
+                with self.subTest(line=line):
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                    self.assertRefused(line, "Law 7")
+                    self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(form % tuple("git status" for _ in range(slots)))
+
+    def test_every_payload_in_the_elifs_body_for_every_caller(self):
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] { %s } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { %s }; true",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] %s",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { %s } fi",
+                     "if [[ -z x ]] { true } elif [[ -z y ]] { true } elif [[ -n z ]] { %s } else { true }"):
+            for command, needle in self.member_payloads():
+                line = form % command
+                for agent_id in (AGENT_C, AGENT_A):
+                    with self.subTest(line=line, agent_id=agent_id):
+                        self.assertRefused(line, needle, agent_id)
+            for command, needle in self.spud_payloads():
+                line = form % command
+                with self.subTest(line=line, agent_id="spud"):
+                    self.assertRefused(line, needle, agent_id=None)
+
+    def test_a_target_outside_a_narrow_members_deliverables(self):
+        """AGENT_A plans tests/** and bin/spud, so note.txt at the home is refused it and allowed the ** member."""
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] { %s } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] %s",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { %s } fi"):
+            line = form % "echo x > note.txt"
+            with self.subTest(line=line):
+                self.assertRefused(line, "deliverables")
+                self.assertSilent(line, AGENT_C)
+                self.assertSilent(form % "echo x > tests/zzone/k.py")
+
+    def test_the_elifs_condition_is_read_as_the_ifs_is(self):
+        """Every command of the elif's condition list runs, and only the last `]]` ends it (SPD-061's rule, now reached
+        through the elif as well)."""
+        for line in ("if [[ -z x ]] { true } elif git push; then true; fi",
+                     "if [[ -z x ]] { true } elif git push && [[ -n y ]] { true } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] && [[ -n z ]] git push",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] || [[ -z z ]] git push",
+                     "if [[ -z x ]] { true } elif [[ -n $(git push) ]] { true } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { true } elif git push; then true; fi"):
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                self.refused_for_members(line)
+
+    def test_every_body_form_inside_the_elifs_body(self):
+        """The elif's body is read as the if's is: a nested conditional, a short loop, a long loop, an eval, a group, a
+        subshell, an `sh -c`, an and-or list, a pipeline and a case arm."""
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] { %s } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { %s }; true",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] %s"):
+            for body in ("%s", "if [[ -n z ]] %s", "repeat 1 %s", "for f in a b; do %s; done", "eval '%s'", "{ %s }",
+                         "( %s )", "sh -c '%s'", "true && %s", "false || %s", "%s | cat",
+                         "case x in x) %s;; esac", "if true; then %s; fi"):
+                line = form % (body % "git push")
+                with self.subTest(line=line):
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                    self.assertRefused(line, "Law 7")
+
+    # -- the directory model -------------------------------------------------------------------
+    def test_the_directory_carries_out_of_an_elifs_body_in_both_directions(self):
+        """The probe's `... elif [[ -n y ]] { cd /tmp; vcs in-$PWD } else { vcs c }` logged in-/tmp and left the line in
+        /tmp; the elif's condition may be false, so either directory follows the whole conditional."""
+        home, out = str(self.home.path), str(self.out)
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s } else { true }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { cd %s }; true",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] cd %s",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { cd %s } fi",
+                     "if [[ -z x ]] { true } elif [[ -z y ]] { true } elif [[ -n z ]] { cd %s } else { true }",
+                     "if [[ -z x ]]; then true; elif [[ -n y ]]; then cd %s; fi"):
+            line = form % out
+            with self.subTest(line=line):
+                self.assertEqual(sorted(self.analysis(line).cwds), sorted([home, out]), line)
+                self.assertIn(("k.txt", frozenset([home, out])), self.analysis(line + "; echo x > k.txt").redirects, line)
+        # the ledger through the elif's cd, and the directory the line started in through the same line
+        self.assertRefused("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s/ledger }; echo x > tickets/SPD-001.md" % home,
+                           "generated", AGENT_C)
+        self.assertRefused("if [[ -z x ]] { true } elif [[ -n y ]] cd %s; echo x > note.txt" % out, "deliverables")
+        self.assertSilent("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s }; echo x > tests/zzone/k.py" % out)
+        # a `( )` body runs in its own process, so its cd does not carry; a relative cd in the body runs at most once
+        self.assertEqual(self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] ( cd %s ) else { true }" % out).cwds,
+                         frozenset([home]))
+        self.assertEqual(sorted(self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] { cd docs } else { true }").cwds),
+                         sorted([home, home + "/docs"]))
+
+    def test_a_redirection_in_the_elifs_body_opens_where_the_body_left_the_shell(self):
+        """main recorded the target wherever the words fell (separate_redirects), but always in the directory the line
+        started in; the commands around it were what went unread."""
+        home, out = str(self.home.path), str(self.out)
+        a = self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s; echo x > k.txt } else { true }" % out)
+        self.assertIn(("k.txt", frozenset([out])), a.redirects)
+        self.assertEqual(self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] { echo x > k.txt } else { true }").redirects,
+                         [("k.txt", frozenset([home]))])
+        self.assertRefused("if [[ -z x ]] { true } elif [[ -n y ]] { cd %s/ledger; echo x > tickets/SPD-001.md }" % home,
+                           "generated", AGENT_C)
+        self.assertRefused("if [[ -z x ]] { true } elif [[ -n y ]] { echo x > ledger/tickets/SPD-001.md } else { true }",
+                           "generated", AGENT_C)
+
+    # -- controls ------------------------------------------------------------------------------
+    def test_the_long_forms_are_read_as_before(self):
+        home, out = str(self.home.path), str(self.out)
+        for form in ELIF_LONG_FORMS:
+            for k in range(2):
+                line = form % tuple("git push" if j == k else "git status" for j in range(2))
+                with self.subTest(line=line):
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                    self.assertRefused(line, "Law 7")
+            self.assertSilent(form % ("git status", "git status"))
+        self.assertEqual(sorted(self.analysis("if [[ -z x ]]; then true; elif [[ -n y ]]; then cd %s; fi" % out).cwds),
+                         sorted([home, out]))
+        self.assertRefused("if [[ -z x ]]; then true; elif [[ -n y ]]; then cd %s/ledger; fi; echo x > tickets/SPD-001.md"
+                           % home, "generated", AGENT_C)
+
+    def test_an_elif_that_reaches_no_conditional_is_read_as_before(self):
+        """A loop's frame, a group's and no frame at all: an `elif` there is not a conditional's branch, and nothing about
+        those readings changes (zsh parses none of them)."""
+        status = ("git", ("status", None))
+        self.assertEqual(self.analysis("while [[ -n x ]] { git status } elif [[ -n y ]] { git push }").findings, [status])
+        self.assertEqual(self.analysis("elif [[ -n y ]] { git push }").findings, [])
+        self.assertEqual(self.analysis("echo x elif [[ -n y ]] { git push }").findings, [])
+        # `elif true { git push }`: no `]]` ends that condition, so no short body follows it -- as after `if true`
+        self.assertEqual(self.analysis("if [[ -z x ]] { git status } elif true { git push }").findings, [status])
+        self.assertEqual(self.analysis("if true { git push }").findings, [])
+        for ok in ("echo 'if [[ -z x ]] { a } elif [[ -n y ]] { git push }'",
+                   "echo \"elif [[ -n y ]] { git push }\"",
+                   "grep -n 'elif \\[\\[ -n y \\]\\] { git push }' tests/zzone/k.py",
+                   "%s --as %s member log 'elif [[ -n y ]] { git push }'" % (self.spud_cli, AGENT_A),
+                   "if [[ -z x ]] { git status } elif [[ -n y ]] { git log } else { git status }"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+
+    def test_the_other_short_forms_are_unchanged(self):
+        """SPD-042's short loops, SPD-061's short conditionals, SPD-124's try-always and SPD-132's glued braces, on lines
+        with no elif: an elif's reading is the only thing this ticket moves."""
+        for condition in SHORT_CONDITIONS:
+            for body in SHORT_CONDITION_BODIES:
+                with self.subTest(condition=condition, body=body):
+                    self.assertRefused(condition % (body % "git push"), "Law 7")
+        for refused in ("repeat 2 { git push }", "for f (a) git push", "{ git status } always { git push }",
+                        "{git push}", "if [[ -n x ]] { echo a } else { git push }",
+                        "if [[ -n x ]] { echo a } else { repeat 1 git push }",
+                        "if [[ -n x ]]; then echo a; else git push; fi"):
+            with self.subTest(refused):
+                self.refused_for_members(refused)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        m = load_spud_module()
+        for line in ("if [[ -z x ]] { true } " + "elif [[ -n y ]] { true } " * 1000 + "elif [[ -n z ]] { git push }",
+                     "if [[ -z x ]] " + "elif " * 5000 + "git push",
+                     "if [[ -z x ]] { true } elif " * 1000 + "[[ -n y ]] { git push }",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] { " * 500 + "git push" + " }" * 500,
+                     "elif [[ " * 2000, "if [[ -z x ]] { true } elif [[ -n y ]] && " * 1000 + "[[ -n z ]] git push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
 class AliasEvalTest(BashHookCase):
     """SPD-059 (Burbank's SPD-054 proposal): `alias NAME=body` stores shell text the hook never read, and `eval NAME` on the
     same line ran it, so a member's VCS write behind an alias reached the hook with no finding (Law 7).  Probed in bash 3.2,
