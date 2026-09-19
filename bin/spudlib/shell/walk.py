@@ -1,6 +1,6 @@
 """shell/walk: ShellFrame and ShellWalk: one pass over a line's tokens.  Moved from bin/spud_ledger.py (SPD-065)."""
 
-from . import analyse, assignment_words, directories, globbing, prepare, syntax
+from . import analyse, assignment_words, directories, globbing, prepare, stdin_text, syntax
 from ..hooks import hookio
 
 
@@ -34,7 +34,7 @@ class ShellFrame:
     `{ list }` group, whose fork the `coproc` before it makes -- SPD-081), "loop" a for, select, repeat, while or until,
     "cond" an if, "case" a case, "func" a function body."""
 
-    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs")
+    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints")
 
     def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
@@ -51,6 +51,12 @@ class ShellFrame:
         # `else` or an `elif` may still follow it (probed: `if [[ -n x ]] { echo a } else { echo b }` ran).  An `elif`
         # puts a conditional's frame back to "cond", the elif's own condition list, from any of these (SPD-136: branch).
         self.body = None
+        # SPD-143: the text the pipeline element around it had printed when it opened, the text the lists before that
+        # element in the enclosing compound command had printed, and that element's standard input with the one every
+        # list inside this compound starts from -- all of it put back by ShellWalk.pop.  `prints`: what the commands in
+        # it print reaches the enclosing element's own output -- not so for a function body, which prints when it is
+        # called, nor for a process substitution, whose output goes to the file it stands for.
+        self.printed, self.earlier, self.stdin, self.prints = "", "", (None, None), kind != "func"
 
 
 class ShellWalk:
@@ -87,6 +93,11 @@ class ShellWalk:
         self.function_next = False  # `name ()` or `function name` was read: the next body is a function's
         self.redirect_cwds = syntax._CURRENT
         self.toks, self.at = [], 0  # the line's tokens, and the index of the one add_word is reading (SPD-124)
+        # SPD-143: the text the pipeline element being read has printed so far, the text the elements before it in this
+        # compound command printed, the text the element before it in its pipeline printed -- which this one reads on
+        # standard input -- and the input the compound command itself was given.  None is text the line does not spell,
+        # which absorbs (stdin_text.joined).
+        self.printed, self.frame_printed, self.piped_text, self.frame_stdin = "", "", None, None
         self.start_list()
 
     # -- lists and pipelines ------------------------------------------------------------
@@ -94,6 +105,19 @@ class ShellWalk:
         self.list_start = self.list_seen = self.pipeline_start = self.a.cwds
         self.uncertain = self.conditional = self.piped = False
         self.list_mark = len(self.a.assigned)  # the assignments before this and-or list (SPD-043)
+        self.end_element()  # SPD-143: no pipe feeds the first element of a new list
+
+    def end_element(self, into_pipe=False):
+        """SPD-143: the pipeline element read so far is over.  What it printed feeds the element after the `|`
+        (`into_pipe`), or joins what this compound command has printed, which is where its own output goes: a `;`, a
+        `&&`, a `||` or a `&` ends an element without ending the compound command around it, and the text a shell after
+        a later `|` runs is the one element before it, never the list before that (`echo x; echo 'git push' | sh`)."""
+        if into_pipe:
+            self.piped_text = self.printed
+        else:
+            self.frame_printed = stdin_text.joined(self.frame_printed, self.printed)
+            self.piped_text = self.frame_stdin
+        self.printed = ""
 
     def end_pipeline(self):
         if self.piped:
@@ -112,7 +136,12 @@ class ShellWalk:
         outer = (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words,
                  self.skip, self.header, self.expect_body)
         funcs = set(self.a.functions) if kind == "sub" else None  # SPD-084: a subshell's own function definitions do not escape
-        self.stack.append(ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned), funcs))
+        frame = ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned), funcs)
+        # SPD-143: what the element around it printed so far is kept for after the compound command, and the standard
+        # input that element was given is the input every list inside it starts from
+        frame.printed, frame.earlier, frame.stdin = self.printed, self.frame_printed, (self.piped_text, self.frame_stdin)
+        self.printed, self.frame_printed, self.frame_stdin = "", "", self.piped_text
+        self.stack.append(frame)
         if kind in ("loop", "func"):
             self.a.loop_depth += 1
         self.words, self.skip, self.header, self.expect_body = [], False, None, False
@@ -120,8 +149,12 @@ class ShellWalk:
 
     def pop(self):
         self.finish()
-        self.end_list()
+        self.end_list()  # ... which joins the last element's text to the rest of what this compound command printed
         frame = self.stack.pop()
+        # SPD-143: the compound command's own output stands where it opened, in the element that holds it
+        self.printed = stdin_text.joined(frame.printed, self.frame_printed) if frame.prints else frame.printed
+        self.frame_printed = frame.earlier
+        self.piped_text, self.frame_stdin = frame.stdin
         if frame.kind == "sub":
             self.a.functions = frame.funcs  # SPD-084: a function defined in a subshell does not reach a call after it
         if frame.kind in ("loop", "func"):
@@ -332,11 +365,13 @@ class ShellWalk:
         if self.function_next:  # zsh's `name () command`: a body that runs when called, perhaps more than once
             self.function_next = False
             a.loop_depth += 1
-            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds)
+            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, self.piped_text)
             a.loop_depth -= 1
             a.cwds = directories.union_dirs(before, a.cwds)
         else:
-            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds)
+            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, self.piped_text)
+            # SPD-143: what this command adds to the text its pipeline element prints, which a shell after a `|` runs
+            self.printed = stdin_text.joined(self.printed, stdin_text.printed_text(cleaned, bodies, self.piped_text))
         a.unsure -= unsure
         if a.cd_uncertain or (a.cwds != before and self.conditional):
             self.uncertain = True
@@ -526,6 +561,7 @@ class ShellWalk:
             elif t in ("(", "<(", ">("):
                 self.function_next = False
                 self.push("sub", ")")
+                self.stack[-1].prints = t == "("  # SPD-143: a process substitution's output goes to the file it stands for
             elif t == ")":
                 self.close_sublists()
                 if self.stack and self.stack[-1].closer == ")":
@@ -540,11 +576,13 @@ class ShellWalk:
                     self.a.cwds = directories.union_dirs(self.list_seen, self.a.cwds)
                 self.conditional = True
                 self.pipeline_start = self.a.cwds
+                self.end_element()  # SPD-143: no pipe feeds what follows the operator
             elif t in ("|", "|&"):
                 self.reopen_condition()
                 self.finish(unsure=True)
                 self.a.cwds = self.pipeline_start  # that element ran in its own process
                 self.piped = True
+                self.end_element(into_pipe=True)  # SPD-143: the next element reads what this one printed
             elif t == "&":
                 self.reopen_condition()
                 self.finish(unsure=True)

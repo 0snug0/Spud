@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, prepare, spelled_writes, spud_calls, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, prepare, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -89,16 +89,23 @@ def analyse_new_shell(a, command, depth):
         a.alias_scope, a.aliases, a.alias_unknown = state
 
 
-def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT):
+def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, piped=None):
     """A simple command: its output targets, then its words.  SPD-127: a target is resolved here, before analyse_words reads
     the command's own prefix assignments, because those reach neither the redirection nor the arguments in either shell
-    (probed 2026-09-18: `S=$D/a; S=$D/b echo hi > $S.f` made a.f, and `S=$D/a echo hi > $S.f` with S unset made `.f`)."""
+    (probed 2026-09-18: `S=$D/a; S=$D/b echo hi > $S.f` made a.f, and `S=$D/a echo hi > $S.f` with S unset made `.f`).
+    SPD-143: `piped` is the text the pipeline element before this one printed, which with the command's own redirections
+    makes the standard input a shell here would run (stdin_text.command_input); a.stdin holds it while the words are read
+    and is put back after, so a body read in its own process reads its own input and not this one."""
     words, targets = directories.separate_redirects(tokens)
     cwds = a.cwds if redirect_cwds is syntax._CURRENT else redirect_cwds
     settled = [arg_writes.resolved(t, a) for t in targets]
     for target in settled:
         a.redirects.append((target, cwds))
-    analyse_words(words, bodies, a, depth, [globbing.GLOB_READING_BUDGET], "shell", False)
+    outer_stdin, a.stdin = a.stdin, stdin_text.command_input(tokens, bodies, piped)
+    try:
+        analyse_words(words, bodies, a, depth, [globbing.GLOB_READING_BUDGET], "shell", False)
+    finally:
+        a.stdin = outer_stdin
     if targets and words and all(assignment_words.assignment_word(w) for w in words):
         # An assignment-only command's own redirection is where the shells part: zsh opens it with the value the line had
         # before the command, bash with the one the command assigns (probed: `S=$D/a; S=$D/b > $S.f` made a.f in zsh and
@@ -159,6 +166,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     # still expanded here (a reserved word and an assignment keep it, a wrapper other than zsh's `time` does not).
     coproc, command_position = False, True
     input_appended = False  # SPD-126: an xargs this command runs under appends what it reads to the words (find_xargs)
+    # SPD-143: the standard input the line gives this command, which a shell here runs as its commands, and the command
+    # string an xargs makes of that input for the shell it runs (`echo 'git push' | xargs -0 sh -c`)
+    stdin, input_string = a.stdin, None
     while words:
         w = words[0]
         # SPD-085: `name[subscript]=value` too, read before any glob reading of its brackets
@@ -214,6 +224,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 # SPD-126: what xargs reads from its input stands where -J or -I puts it, or after the words it runs
                 rest, appended = find_xargs.xargs_input(words, consumed, rest)
                 input_appended = input_appended or appended
+                # SPD-143: xargs reads that input itself, so the command it runs does not; where the line spells it, it
+                # is the command string a shell run with a `-c` and no string is handed
+                input_string, stdin = stdin_text.xargs_string(words, consumed, appended, stdin), None
             if chdir is not None:
                 # SPD-128: everything the wrapper runs -- its words, a string it hands a shell, a nested wrapper -- starts in the
                 # directory it moved to, once its own words are read (a glob or an expansion there leaves it unknown)
@@ -320,18 +333,28 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         if not read_points(lambda ws, start: expansions.option_point(expansions.shell_read_index(ws, start))):
             return
         a.kinds.append("shell")
-        i = 1
+        i, dash_c = 1, False
         while i < len(words):
             w = words[i]
             if w.startswith("-") and "c" in w[1:] and not w.startswith("--"):
-                if i + 1 < len(words):
-                    analyse_new_shell(a, prepare.deglob(words[i + 1]), depth + 1)  # read with its own quotes: `sh -c 'g?t push'` (SPD-041)
+                dash_c = True
+                string = prepare.deglob(words[i + 1]) if i + 1 < len(words) else None
+                if input_string is not None:
+                    # SPD-143: an xargs hands the shell the input the line spells, where its -I or -J replstr stands in
+                    # the string (`xargs -I% sh -c 'rm %'`) or as the whole string (`xargs -0 sh -c`)
+                    string = input_string if string is None else string.replace(syntax.INPUT_OPERAND, input_string)
+                if string is not None:
+                    analyse_new_shell(a, string, depth + 1)  # read with its own quotes: `sh -c 'g?t push'` (SPD-041)
                 break
             if not w.startswith("-"):
                 break
             i += 1
         for body in bodies:
             analyse_new_shell(a, body, depth + 1)
+        if not bodies and not dash_c and stdin is not None and stdin_text.reads_commands(words):
+            # SPD-143: with no -c string and no script of its own the shell runs what it reads on standard input, and
+            # the line spells that text: `echo 'git push' | sh`, `bash -s <<< 'git push'`, `cat <<'EOF' | sh`
+            analyse_new_shell(a, stdin, depth + 1)
     elif base == "eval":
         a.kinds.append("eval")
         before = a.cwds
