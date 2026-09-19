@@ -954,6 +954,36 @@ class ArgumentWriteProjectTest(ProjectHookCase):
                         self.assertIn("a write by argument", r.reason)
 
 
+class DirectoryWriteProjectTest(ProjectHookCase):
+    """SPD-129: a member makes, and removes, the directory its own deliverable glob covers, and a bare glob opens that
+    directory in its own project's bound worktree alone.  A member of BAD-001 holds `src/**` and `home:docs/x.md`: it may
+    `mkdir -p src` and `rm -rf src` in the worktree BAD-001 is bound to, and nowhere else -- not the same path in the main
+    checkout (SPD-098), not the home's own `src`, and not `docs`, whose glob names a file in another scope."""
+
+    def setUp(self):
+        super().setUp()
+        self.spawn_in(self.CLAIMED, self.plan_bad(name="Russet"), AGENT_A)
+
+    def run_line(self, s, line, agent_id=AGENT_A):
+        return self.hook_in(s, "PreToolUse", self.bash_p(s, line, agent_id))
+
+    def test_the_bound_worktrees_own_directory_is_the_members(self):
+        for line in ("mkdir -p src", "mkdir -p src/lib", "install -d src", "rm -rf src", "rmdir src", "rm -r src/lib"):
+            with self.subTest(line):
+                self.assertHookSilent(self.run_line(self.CLAIMED, "cd %s && %s" % (self.bad_wt, line)), line)
+
+    def test_the_same_directory_elsewhere_is_not(self):
+        for cwd, line, needle in ((self.bad, "mkdir -p src", BOUND_WORKTREE), (self.bad, "rm -rf src", BOUND_WORKTREE),
+                                  (self.home.path, "mkdir -p src", LAW_5), (self.home.path, "rm -rf src", LAW_5),
+                                  (self.bad_wt, "mkdir -p docs", LAW_5), (self.bad_wt, "rm -rf .", LAW_5),
+                                  (self.home.path, "rm -rf docs", LAW_5), (self.home.path, "rm -rf ledger", LAW_5)):
+            with self.subTest(cwd=str(cwd), line=line):
+                self.assertDenied(self.run_line(self.CLAIMED, "cd %s && %s" % (cwd, line)), needle, line)
+        # `home:docs/x.md` names a file in the home, so the home's `docs` is the directory that glob covers -- and only the
+        # home's: the same name in badtakes is no glob of this member's (the cell above).
+        self.assertHookSilent(self.run_line(self.CLAIMED, "cd %s && mkdir -p docs" % self.home.path))
+
+
 class StopProjectTest(ProjectHookCase):
     """A member with no known session holds every Spud session once it has waited ten minutes (SPD-018); a plain session
     it never holds."""
