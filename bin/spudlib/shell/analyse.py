@@ -25,18 +25,22 @@ def analyse_command(command, analysis=None, depth=0):
             analyse_isolated(a, sub, depth + 1)
         a.unparseable = True
         return a
-    if other == marked:  # one reading: the line holds no zsh pattern, or only markings both shells make (SPD-088: arithmetic)
-        walk.ShellWalk(a, inner, bodies, depth).walk(tokens)
+    cwds, variables, loop_depth, aliases = a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases)
+    zsh_walk = walk.ShellWalk(a, inner, bodies, depth)
+    zsh_walk.walk(tokens)
+    if other == marked and not zsh_walk.split_brace:
+        # one reading: the line holds no zsh pattern, or only markings both shells make (SPD-088: arithmetic), and no brace
+        # glued to a word that zsh splits off (SPD-132)
         return a
     # Two readings of one line (SPD-039): zsh's, its groups and ranges kept whole, then the other shell's, where a range is two
     # redirections (bash) and a group opening a word is read as shlex reads it, a subshell where one runs (mark_zsh_patterns).
+    # SPD-132: zsh's reading splits a brace off the word it is glued to (`{git push}` is a group), bash's keeps it in the
+    # word (`{git` is a command, `{ cd /tmp}` a cd into `/tmp}`), which is how the hook read every line before.
     # Every command and target either reading finds is checked, zsh's first; the directories and variables after the line are
     # those of both.  The quotes are the same, so both tokenize.
-    cwds, variables, loop_depth, aliases = a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases)
-    walk.ShellWalk(a, inner, bodies, depth).walk(tokens)
     zsh_cwds, zsh_vars, zsh_aliases = a.cwds, a.vars, a.aliases
     a.cwds, a.vars, a.loop_depth, a.cd_uncertain, a.aliases = cwds, variables, loop_depth, False, aliases
-    walk.ShellWalk(a, inner, bodies, depth).walk(syntax.shell_tokens(other) or [])
+    walk.ShellWalk(a, inner, bodies, depth, glued=False).walk(tokens if other == marked else syntax.shell_tokens(other) or [])
     a.cwds = directories.union_dirs(zsh_cwds, a.cwds)
     a.doubt.update(set(zsh_vars) ^ set(a.vars))  # a variable only one reading assigns (SPD-043)
     for name, value in zsh_vars.items():

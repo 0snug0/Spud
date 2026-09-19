@@ -5348,7 +5348,7 @@ class TryAlwaysTest(BashHookCase):
     read as commands.  `echo { vcs try } always { vcs alw }` stays echo's arguments, as `echo coproc { ... }` does.
 
     Left to other tickets, and not pinned here: zsh runs `{vcs alw}` with no blank after the `{` as a group, which the hook
-    does not read anywhere yet, so `{ vcs try } always {vcs alw}` waits on that; and SPD-125's named coproc group, so
+    reads since SPD-132, `{ vcs try } always {vcs alw}` included (GluedBraceTest); and SPD-125's named coproc group, so
     `coproc NAME { a } always { b }` with no terminator inside is read only once that group is a frame (its `;` forms
     are read already, through the lone `always`).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
 
@@ -5619,6 +5619,358 @@ class TryAlwaysTest(BashHookCase):
                 self.assertLess(time.monotonic() - started, 5.0)
                 if "git push" in line:
                     self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# zsh's braces glued to a word (SPD-132).  Each form fills its `%s` with the command the group runs, and
+# GLUED_BRACE_EVIDENCE is Spud's probe of the forms zsh ran as a group, line for line but for that command: the opening
+# brace glued, the closing one, or both; what may follow the group; and every command position the hook already reads a
+# group in, after a prefix, as a short loop's or conditional's body, as a function's, in the always block, after an
+# operator, inside `$(...)` and eval.
+GLUED_BRACE_EVIDENCE = ("{%s}", "{%s;}", "{%s }", "{%s\n}", "{ %s}", "{true;%s}", "{true&&%s}", "{%s|cat}", "{true\n%s}",
+                        "{repeat 1 %s}", "{(%s)}", "{ {%s} }", "{ true }; {%s}; { true}",
+                        "{%s}; true", "{%s}&&true", "{%s}||true", "{%s}|cat", "{%s}&\nwait", "{%s};", "{%s} # c",
+                        "{%s}>/dev/null", "{%s} 2>/dev/null", "{%s}<<<in",
+                        "time {%s}", "! {%s}", "coproc {%s}", "repeat 1 {%s}", "for f (a) {%s}", "if [[ -n x ]] {%s}",
+                        "if [[ -n x ]] {true} else {%s}", "f() {%s}; f", "(){%s}", "() {%s}", "true; {%s}",
+                        "true && {%s}", "false || {%s}", "true | {%s}", "true & {%s}", "true\n{%s}", "({%s})",
+                        "x=$({%s})", "eval '{%s}'", "case a in a) {%s};; esac", "if true; then {%s}; fi",
+                        "if false; then true; else {%s}; fi", "for f in a; do {%s}; done", "{%s} always {true}",
+                        "{true} always {%s}", "{ true } always {%s}", "select x in a; {%s; break} <<< 1")
+# The words whose `}` zsh split off and closed the group with, each after `{ echo ` (the probe logged the word before the
+# `}`): after an expansion, a brace expansion, a word holding a `}` of its own, a quoted `}` and a redirection's target.
+GLUED_BRACE_CLOSERS = ("a", "${HOME}", "${x-q}", "${#x}", "$((1+1))", "$(true)", "{a}", "{a,b}", "x{a,b}", "a}b", "a}",
+                       '"a}"', "'a}'", '"}"', "a >/dev/null", "a 2>&1")
+# The words that keep their `}`, so the group stays open: no `}` at the end, one a `{` or `${` in the word matches, a
+# quoted or escaped one, and an assignment's value.
+GLUED_BRACE_WORDS = ("a}x", "{a}", "${x-q}", "${HOME}", "a\\}", '"a}"', "'a}'")
+# The positions zsh reads no group at, parse errors that ran nothing: a quoted or escaped brace, a brace after a word that
+# is not a prefix, and a named coproc's (SPD-125).  Each stays the word it is, as main read it.
+GLUED_BRACE_NOT_GROUPS = ('"{git" push}', "\\{git push}", "echo {git push}", "builtin {git push}", "nocorrect {git push}",
+                          "x=1 {git push}", "x={git push}", "coproc NAME {git push}", "{git status} always{git push}")
+# The parse errors the hook over-reads, fail closed: a second group glued to the first, `function name` before a glued
+# brace (`f() {vcs a}` ran, `function g {vcs a}` did not), a stray `}` after the group, words after it.
+GLUED_BRACE_PARSE_ERRORS = ("{git status} {git push}", "{git push} {git status}", "function g {git push}",
+                            "function {git push}", "{git push}; }", "{ git push} b }", "{git push}()")
+
+
+class GluedBraceTest(BashHookCase):
+    """SPD-132: zsh reads a brace glued to the words of a group -- `{git push}`, `{ git push}`, `{git push }` -- as the group
+    it runs, and ShellWalk opened a group only at a token that is exactly `{` and closed one only at a token that is exactly
+    `}`.  So `{git push}` was a command named `{git` with an argument `push}`, and `time {git push}`, `coproc {git push}`,
+    `{repeat 1 git push}`, `if [[ -n x ]] {git push}`, `f() {git push}; f` and the rest had no finding; `{ git push}` found
+    a verb `push}`, no push; `{x=1; cd /tmp}` left the line in `/tmp}`; and `{echo x > ledger/tickets/SPD-001.md}` wrote
+    `SPD-001.md}`, a file the path rule never matches, so a member's write to a rendered note was allowed (Laws 1, 5, 6, 7).
+
+    No shell is probed here: this worktree session's harness refuses to run one (SPD-094).  The evidence is Spud's probe of
+    2026-09-18, recorded on the ticket -- zsh 5.9 -f (the ticket's own probe found -o nobareglobqual identical), a
+    function `vcs` standing in for the VCS program that appends its arguments and $PWD to a log, each line started in a
+    scratch directory D:
+
+    - an unquoted `{` at the start of a word in command position opened a group, the rest of the word read as the next
+      word: every form in GLUED_BRACE_EVIDENCE ran as a group, and so did `{"vcs" try}`, `{\\vcs try}`, `{vcs}` and `{}`.
+      Commas and `..` make no brace expansion there: `{vcs,x}` ran a function named `vcs,x`, `{1..2}` was "command not
+      found: 1..2".  `{fd}>out.txt` in command position is a group too (only `exec {fd}>` allocates a descriptor);
+    - an unquoted, unescaped `}` ending a word closed the group when no `{` or `${` in the same word matched it, and only
+      the last one: GLUED_BRACE_CLOSERS, each logged as the word before its `}` (`{vcs try}}` logged `try}`), a redirection
+      too (`{vcs a >out.txt}` wrote out.txt, `{vcs a}>out.txt` redirected the group).  `{vcs a}x`, `{vcs {a}`,
+      `{vcs ${x-q}`, `{vcs a\\}`, `{vcs "a}"` stayed words and left the group open (a parse error at the end);
+    - an assignment keeps its `}`: `{x=1}`, `{ x=1}` and `while [[ -z $x ]] {vcs a; x=1}` never closed, while `{x=1 }` set
+      x and `{vcs x=1}` logged `x=1`;
+    - GLUED_BRACE_NOT_GROUPS and GLUED_BRACE_PARSE_ERRORS are parse errors that ran nothing, and so is a word-ending `}`
+      outside any group (`vcs a}`, `print -r -- a}`, `[[ -n a} ]]`, `for i in a}; do ...`);
+    - the line's directory and variables, as after a spaced group: `{cd /tmp}` left it in /tmp, `{cd /tmp} && y=2` and
+      `time {cd /tmp}` too, `{cd /tmp} | cat` left it in D, `{x=1; cd /tmp}` left x=1 in /tmp.
+
+    bash 3.2 reads neither brace: `{echo a}` is "{echo: command not found", `{ echo a}; }` printed `a}`, and
+    `{ cd /tmp}; pwd; }` failed the cd and stayed.  So where the line holds a glued brace zsh splits off, the hook reads it
+    twice, as it reads zsh's glob groups (SPD-039): zsh's reading, the group exactly as a spaced group in its place, and
+    main's, which is bash's, and every finding either makes is checked, the directories after the line are both
+    readings', and a variable only one of them assigns is doubted (SPD-030: keep both rather than guess).  So `{cd /tmp}`
+    leaves the hook with both D and /tmp, `{git,push}` is still bash's brace expansion, and nothing main found is lost.
+
+    The decisions this class pins: every glued `{` opens where a lone `{` would -- a group, a function body after `f()`,
+    `()` and `function name` (zsh rejects the last glued; over-read), a prefixed group, a coproc's fork, the always
+    block -- and never in a case pattern; a glued `}` closes only where a lone `}` would (after `fi`, `done` or `esac` in
+    the same word too), so a word-ending `}` outside any group stays a word, as today; GLUED_BRACE_PARSE_ERRORS are read as
+    the groups they spell; GLUED_BRACE_NOT_GROUPS stay words, since neither shell runs a command there.  The reading
+    assumes zsh's IGNORE_BRACES and IGNORE_CLOSE_BRACES off, as they are by default.  zsh's `elif [[ ... ]] {vcs b}` ran
+    too, but the hook reads no elif short body even spaced (proposal 185).  AGENT_A plans tests/** and bin/spud; AGENT_C
+    plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)  # Law 7 refuses members only
+        return r
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6's ticket new and `--as spud`, and Law 1 through a
+        redirection and through tee."""
+        spud = self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        return (("%s --as %s member log hi" % (self.spud_cli, AGENT_A), "--as"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    # -- the hole --------------------------------------------------------------------------
+    def test_the_tickets_evidence_commands(self):
+        """What main read on the ticket: no finding, a verb `push}`, a cd into `/tmp}`, a write to `SPD-001.md}`."""
+        push = ("git", ("push", "push"))
+        for line in ("{git push}", "{git push }", "{git push; }", "time {git push}", "coproc {git push}",
+                     "{repeat 1 git push}", "{git push} | cat", "echo pre && {git push}", "if [[ -n x ]] {git push}",
+                     "for f (a) {git push}", "repeat 1 {git push}", "f() {git push}; f", "(){git push}",
+                     "{git push} always { git status }", "{ git status } always {git push}", "{ git push}",
+                     "{cd /tmp; git push}"):
+            with self.subTest(line=line):
+                self.assertIn(push, self.analysis(line).findings, line)
+                self.refused_for_members(line)
+        self.assertEqual(self.analysis("{git push}").findings, [push])
+        self.assertEqual(self.analysis("{repeat 1 git status}").findings, [("git", ("status", None))])
+        # `{ git push}`: zsh's push, and main's verb `push}` still read beside it (bash's reading, see the docstring)
+        self.assertEqual(self.analysis("{ git push}").findings, [push, ("git-verb", ("verb", "push}"))])
+        self.assertRefused("{ git status}", "not one of git's own commands")
+        self.assertIn("/tmp", self.analysis("{x=1; cd /tmp}").cwds)
+        self.assertRefused("{%s --as spud ticket new}" % self.spud_cli, "Law 6")
+        self.assertRefused("{echo x > ledger/tickets/SPD-001.md}", "generated", AGENT_C)
+        self.assertRefused("{echo x > ledger/tickets/SPD-001.md}", "Law 1", agent_id=None)
+
+    def test_every_form_the_probe_ran_reaches_the_group(self):
+        for form in GLUED_BRACE_EVIDENCE:
+            line = form % "git push"
+            with self.subTest(line=line):
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+            with self.subTest(line=form % "git status"):
+                self.assertSilent(form % "git status", agent_id=None)
+                # zsh's reading adds no refusal to a harmless line; a member is refused only where bash's, main's, reads
+                # a verb `status}` after a separator (`{true;git status}`: `{true` is a command there, then `git status}`)
+                r = self.bash(form % "git status")
+                self.assertTrue(r.decision != "deny" or "`git status}` is not one of git's own commands" in r.reason, r)
+        for line in ('{"git" push}', "{\\git push}", "{git push;git status}", "{git status\ngit push}",
+                     "{git status&&git push}", "{git push|cat}", "{ {git push} }", "{git push }; {git status}; { git status}",
+                     "{git status} always {git push}", "{git push} always {git status}", "sh -c '{git push}'",
+                     "echo $({git push})", "if [[ -n x ]] {git status} else {git push}"):
+            with self.subTest(line=line):
+                self.refused_for_members(line)
+
+    def test_every_payload_in_a_glued_group_for_every_caller(self):
+        for form in ("{%s}", "{ %s}", "{%s }", "time {%s}", "coproc {%s}", "{repeat 1 %s}", "if [[ -n x ]] {%s}",
+                     "f() {%s}; f", "{true} always {%s}", "eval '{%s}'"):
+            for command, needle in self.member_payloads():
+                line = form % command
+                for agent_id in (AGENT_C, AGENT_A):
+                    with self.subTest(line=line, agent_id=agent_id):
+                        self.assertRefused(line, needle, agent_id)
+            for command, needle in self.spud_payloads():
+                line = form % command
+                with self.subTest(line=line, agent_id="spud"):
+                    self.assertRefused(line, needle, agent_id=None)
+        for agent_id in (AGENT_C, AGENT_A, None):  # the database is refused to everyone, Spud included
+            self.assertRefused("{sqlite3 %s/.spud/ledger.db 'select 1'}" % self.home.path, "spud sql --readonly", agent_id)
+
+    def test_a_target_outside_a_narrow_members_deliverables(self):
+        """AGENT_A plans tests/** and bin/spud, so note.txt at the home is refused it and allowed the ** member."""
+        for form in ("{%s}", "{ %s}", "time {%s}", "{true} always {%s}"):
+            line = form % "echo x > note.txt"
+            with self.subTest(line=line):
+                self.assertRefused(line, "deliverables")
+                self.assertSilent(line, AGENT_C)
+                self.assertSilent(form % "echo x > tests/zzone/k.py")
+
+    # -- the closing brace ------------------------------------------------------------------------
+    def test_a_word_ending_brace_closes_the_group_after_the_word(self):
+        """The always block after the group is read only where the `}` closed it: otherwise it is more words of the
+        command before it, as it is in both shells."""
+        for word in GLUED_BRACE_CLOSERS:
+            line = "{ echo %s} always { git push }" % word
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                for agent_id in (AGENT_C, AGENT_A):
+                    self.assertRefused(line, "Law 7", agent_id)
+        for word in GLUED_BRACE_WORDS:
+            line = "{ echo %s always { git push }" % word
+            with self.subTest(line=line):
+                self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                self.assertSilent(line)
+        # the word before the `}` is the command's last, redirection targets included, and a descriptor stays one
+        a = self.analysis("{echo x >%s/k.txt} && {echo y 2>&1}" % self.out)
+        self.assertIn(("%s/k.txt" % self.out, frozenset([str(self.home.path)])), a.redirects)
+        self.assertNotIn("1", [t for t, _ in a.redirects])
+        # ... while bash's reading, main's, still opens `1}`: bash runs `{echo` there, and `>&1}` names a file
+        self.assertIn("1}", [t for t, _ in a.redirects])
+        self.assertRefused("{echo y 2>&1}", "Law 1", agent_id=None)
+        # only the last `}` is split off: `{git push}}` is a verb `push}`, no push
+        self.assertEqual(self.analysis("{git push}}").findings, [("git-verb", ("verb", "push}"))])
+
+    def test_an_assignment_keeps_its_brace(self):
+        """`{x=1}` and `{ x=1}` never closed in zsh: the value is `1}`, and what follows is read inside the group."""
+        for line in ("{x=1}", "{ x=1}", "{ y=2 x=1}"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).vars.get("x"), "1}", line)
+        self.assertEqual(self.analysis("{x=1 }").vars.get("x"), "1")
+        self.refused_for_members("{echo x=1} always { git push }")  # an argument's `}` closes
+        self.assertNotIn(("git", ("push", "push")), self.analysis("{ x=1} always { git push }").findings)
+        self.refused_for_members("{x=1}; git push")
+        self.refused_for_members("while [[ -z $x ]] {git status; x=1}; git push")
+
+    def test_a_closer_word_glued_to_the_brace(self):
+        """`fi}`, `done}` and `esac}` close their compound command, then the group, as `fi }` would."""
+        for line in ("{ if true; then git status; fi} always { git push }",
+                     "{ for f in a; do git status; done} always { git push }",
+                     "{ case a in a) git status;; esac} always { git push }"):
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                self.refused_for_members(line)
+
+    # -- the directory and the variables ---------------------------------------------------------
+    def test_the_line_runs_on_where_either_shell_leaves_it(self):
+        """zsh's directory is a spaced group's, and bash's -- the line where it was, `{cd` a command it cannot find -- is
+        kept beside it."""
+        home, out = str(self.home.path), str(self.out)
+        for wrap in ("%s", "time %s", "! %s", "coproc %s", "%s | cat", "%s &", "false && %s", "true || %s",
+                     "repeat 1 %s", "if [[ -n x ]] %s", "f() %s", "%s && y=2", "( %s )"):
+            for body in ("cd %s" % out, "cd %s; git status" % out, "cd %s && true" % out):
+                line, spaced = wrap % ("{%s}" % body), wrap % ("{ %s; }" % body)
+                with self.subTest(line=line):
+                    self.assertEqual(self.analysis(line).cwds, self.analysis(spaced).cwds | {home}, line)
+        for line, where in (("{cd %s}" % out, {home, out}), ("{cd %s} | cat" % out, {home}), ("coproc {cd %s}" % out, {home}),
+                            ("time {cd %s}" % out, {home, out}), ("{cd %s} && y=2" % out, {home, out})):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).cwds, frozenset(where), line)
+        # the variables zsh's group assigns, doubted where bash's reading does not assign them (`{x=1` is a command there)
+        a = self.analysis("{x=1; cd %s}" % out)
+        self.assertEqual((a.vars.get("x"), "x" in a.doubt, out in a.cwds, home in a.cwds), ("1", True, True, True))
+        a = self.analysis("{cd %s} && y=2" % out)
+        self.assertEqual(a.vars.get("y"), "2")
+        # main read `ls push` for both, `{X=git` being a command to it
+        for line in ("X=ls; {X=git; true}; $X push", "X=ls; {X=git }; $X push"):
+            with self.subTest(line=line):
+                self.assertIn(("var-doubt", "$X"), self.analysis(line).findings)
+                self.assertRefused(line, "git push")
+
+    def test_what_follows_the_group_is_checked_where_either_shell_left_it(self):
+        home, out = self.home.path, self.out
+        # zsh's: the group's cd moved the line into the ledger
+        for form in ("{cd %s}", "{ cd %s}", "time {cd %s}", "{true; cd %s}", "{true} always {cd %s}"):
+            line = (form % (home / "ledger")) + "; echo x > tickets/SPD-001.md"
+            with self.subTest(line=line):
+                self.assertRefused(line, "generated", AGENT_C)
+                self.assertRefused(line, "Law 1", agent_id=None)
+        # bash's, kept beside it: `{cd` is a command there and the line stays at the home, outside AGENT_A's deliverables
+        for line in ("{cd %s}; echo x > note.txt" % out, "{ cd %s}; echo x > note.txt; }" % out,
+                     "{cd %s} | cat; echo x > note.txt" % out, "coproc {cd %s}; echo x > note.txt" % out):
+            with self.subTest(line=line):
+                self.assertRefused(line, "deliverables")
+                self.assertSilent(line, AGENT_C)
+        self.assertSilent("{cd %s}; echo x > tests/zzone/k.py" % out)
+        # the brief's own: bash runs the push in the line's own directory, and the hook keeps it
+        a = self.analysis("{ cd /tmp}; git push; }")
+        self.assertIn(("git", ("push", "push")), a.findings)
+        self.assertIn(str(home), a.cwds)
+
+    def test_the_always_block_starts_where_the_try_block_ended(self):
+        out = str(self.out)
+        for line in ("{ cd %s } always {echo x > k.txt}" % out, "{cd %s} always { echo x > k.txt }" % out,
+                     "{cd %s} always {echo x > k.txt}" % out):
+            with self.subTest(line=line):
+                self.assertIn(("k.txt", frozenset([out])), self.analysis(line).redirects, line)
+
+    # -- the positions zsh reads no group at --------------------------------------------------------
+    def test_the_parse_errors_are_over_read(self):
+        for line in GLUED_BRACE_PARSE_ERRORS:
+            with self.subTest(line=line):
+                self.refused_for_members(line)
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings, line)
+        # `{{git push}}`: two groups, the last `}` of `push}}` alone split off, so the verb is `push}` -- git runs no such
+        # verb, which a member is refused anyway (SPD-047)
+        self.assertEqual(self.analysis("{{git push}}").findings, [("git-verb", ("verb", "push}"))])
+        self.assertRefused("{{git push}}", "not one of git's own commands")
+
+    def test_a_brace_neither_shell_reads_as_a_group_stays_a_word(self):
+        for line in GLUED_BRACE_NOT_GROUPS:
+            with self.subTest(line=line):
+                self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings, line)
+                self.assertSilent(line)
+        # a case pattern is no command position: `{git}` is a pattern, not a group running git
+        self.assertEqual(self.analysis("case a in b) true;; {git}) git status;; esac").findings, [("git", ("status", None))])
+
+    def test_a_word_ending_brace_outside_any_group_stays_a_word(self):
+        """zsh rejects each of these; bash runs them, and the hook reads them as before."""
+        self.assertEqual(self.analysis("git push}").findings, [("git-verb", ("verb", "push}"))])
+        self.assertEqual(self.analysis("echo x > ledger/tickets/SPD-001.md}").redirects,
+                         [("ledger/tickets/SPD-001.md}", frozenset([str(self.home.path)]))])
+        for ok in ("echo a}", "print -r -- a}", "[[ -n a} ]]", "for i in a}; do echo $i; done", "echo ${x:-a}}",
+                   "echo x > tests/zzone/k.py}", "git status}"):
+            with self.subTest(ok):
+                self.assertEqual(self.analysis(ok).cwds, frozenset([str(self.home.path)]))
+        self.assertSilent("echo a} b")
+        self.assertRefused("echo a} > ledger/tickets/SPD-001.md", "generated", AGENT_C)
+
+    # -- controls ----------------------------------------------------------------------------------
+    def test_bashs_brace_expansion_and_every_other_reading_are_unchanged(self):
+        # bash expands `{git,push}` into `git push`; zsh runs a command named `git,push`.  The push is still found.
+        self.refused_for_members("{git,push}")
+        self.refused_for_members("echo {a,b}; {git,push}")
+        for refused in ("{ git push }", "{ git push; }", "time { git push; }", "coproc { git push }", "f() { git push }; f",
+                        "{ git status } always { git push }", "repeat 1 { git push }", "if [[ -n x ]] { git push }"):
+            with self.subTest(refused):
+                self.refused_for_members(refused)
+        for ok in ("echo {a,b}", "echo ${HOME}", "echo x{a,b}y", "exec {fd}>/dev/null", "echo {}", "find . -exec echo {} \\;",
+                   "git status", "{ git status }", "%s --as %s member log '{git push}'" % (self.spud_cli, AGENT_A),
+                   "grep -n '{git push}' tests/zzone/k.py", "printf '{git push}\\n' > tests/zzone/k.py",
+                   "{git status}", "time {git status}", "{echo hi} > /dev/null"):
+            with self.subTest(ok):
+                r = self.bash(ok)
+                self.assertNotEqual(r.decision, "deny", (ok, r))
+        for line in ("echo {a,b}", "echo ${HOME}", "exec {fd}>/dev/null", "echo {git push}", "{ echo hi; }", "a=${b}"):
+            with self.subTest(line):
+                self.assertEqual(self.analysis(line).findings, [], line)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        m = load_spud_module()
+        for line in ("{" * 5000 + "git push", "{" * 3000 + "git push" + "}" * 3000, "{git status} " * 2000 + "{git push}",
+                     "{ " * 1000 + "git push" + "}" * 1000, "{a} always " * 2000 + "{git push}", "}" * 20000,
+                     "{true} always {" * 1000 + "git push", "{repeat 1 {" * 500 + "git push", "{x=1}" * 3000,
+                     "time {" * 1000 + "git push}", "echo " + "a}" * 20000):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
+                self.assertLess(time.monotonic() - started, 5.0)
+                if line.endswith("git push") or line.endswith("git push}"):
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+        # two readings at every level of nested substitutions, each starting the next level in a directory of its own
+        command = "git push"
+        for _ in range(8):
+            command = "{cd /tmp; echo $(%s)}" % command
+        started = time.monotonic()
+        a = m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+        self.assertLess(time.monotonic() - started, 5.0)
 
 
 class PathInForceTest(BashHookCase):

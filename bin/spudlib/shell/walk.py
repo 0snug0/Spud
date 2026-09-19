@@ -59,10 +59,15 @@ class ShellWalk:
     - the same holds for an `if`, `while` or `until` whose condition ends in `[[ ... ]]` (SPD-061), which closes the condition
       the way a terminator closes a loop header, so `then` and `do` are optional there too;
     - zsh's try-always form, `{ list } always { list }` (SPD-124), is one compound command holding both lists, so the always
-      block runs where the try block left the shell and the compound ends at the always block's `}` (see close_brace)."""
+      block runs where the try block left the shell and the compound ends at the always block's `}` (see close_brace);
+    - zsh splits a brace off the word it is glued to (SPD-132): `{git push}` is the group `{ git push }` (see add_word).
+      bash does not, so `glued` says which reading this walk is, and `split_brace` whether zsh's split one off this line:
+      analyse_command then walks the line again the other way and keeps both readings, as it does for zsh's globs."""
 
-    def __init__(self, a, inner, bodies, depth):
+    def __init__(self, a, inner, bodies, depth, glued=True):
         self.a, self.inner, self.bodies, self.depth = a, list(inner), list(bodies), depth
+        self.glued = glued  # zsh's reading: a brace glued to a word opens or closes a group where a lone one would (SPD-132)
+        self.split_brace = False  # ... and it did on this line, so the reading differs from bash's
         self.words, self.stack = [], []
         self.skip = False  # the words are a for, select or case header or a function's name, not a command
         self.header = None  # which header they are: "for" (for, select), "repeat" or "func"
@@ -142,27 +147,38 @@ class ShellWalk:
         (a second `always` chained is a parse error, read all the same) and after a function's or a short loop's body,
         where zsh parses no always form either: over-reading those costs a line no shell runs.  An `always` with no `{`
         to follow is a parse error too; it is dropped as the keyword it is there, so the words after it are read as
-        commands and not as a command named `always`'s arguments."""
+        commands and not as a command named `always`'s arguments.  In zsh's reading the always block's `{` may be glued
+        to its first word (SPD-132: `{vcs try} always {vcs alw}` ran both): the token is read again without it, by the
+        walk's own loop, so a chain of such blocks never recurses."""
         toks, j = self.toks, self.at + 1
         if j < len(toks) and toks[j] == "always":
             k = j + 1
             while k < len(toks) and toks[k] == ";":  # a newline reaches here as `;`
                 k += 1
-            if k < len(toks) and toks[k] == "{":
+            if k < len(toks) and toks[k][:1] == "{" and (toks[k] == "{" or self.glued):
                 self.finish()
                 self.end_list()
-                self.at = k
+                if toks[k] == "{":
+                    self.at = k
+                else:
+                    toks[k], self.at, self.split_brace = toks[k][1:], k - 1, True
                 return
             self.at = j
         self.pop()
 
-    def brace_closes(self):
+    def brace_closes(self, closer=None):
         """Whether a `}` after a word closes a `{ list }`: zsh's sole `}` is significant anywhere, so it ends the short
         loops' and short conditionals' sublists standing in the group before it closes the group (SPD-081's probe ran
-        `coproc { repeat 1 vcs push }`, which parses only so)."""
+        `coproc { repeat 1 vcs push }`, which parses only so).  `closer`: a `fi`, `done` or `esac` read first, which
+        must close the compound command it reaches before the `}` does (SPD-132: zsh reads `fi}` as `fi` and `}`)."""
         for frame in reversed(self.stack):
-            if frame.body != "sublist":
+            if frame.body == "sublist":
+                continue
+            if closer is None:
                 return frame.closer == "}"
+            if frame.closer != closer:
+                return False
+            closer = None
         return False
 
     def branch(self):
@@ -214,7 +230,8 @@ class ShellWalk:
         frame = self.stack[-1] if self.stack else None
         if frame is None or frame.body not in ("pending", "cond-pending"):
             return
-        frame.body = "long" if t in ("do", "then") else ("compound" if t in ("{", "(") else "sublist")
+        braced = t[:1] == "{" and (t == "{" or self.glued)  # `repeat 1 {git push}`: a group, its brace glued (SPD-132)
+        frame.body = "long" if t in ("do", "then") else ("compound" if braced or t == "(" else "sublist")
 
     def close_sublists(self):
         """A short loop or conditional whose body is one sublist ends where that sublist ends."""
@@ -287,12 +304,98 @@ class ShellWalk:
         a.cd_uncertain = False
         self.list_seen = directories.union_dirs(self.list_seen, a.cwds)
 
-    def add_word(self, t):
+    # -- braces (SPD-132) ----------------------------------------------------------------
+    def in_pattern(self):
+        """A case command is reading its subject, `in` or a pattern: no command position, so no word there opens a group."""
+        return bool(self.stack) and self.stack[-1].kind == "case" and self.stack[-1].pattern
+
+    def open_brace(self):
+        """Open the `{ list }` a `{` read now begins, and say whether it did: in command position a group, or a function's
+        body after `name ()` and zsh's anonymous `()`; after `function name` a function's body; after only `coproc`,
+        `time` and `!` a prefixed group; after a lone `always` a group.  Anywhere else the `{` is a word."""
         if not self.words and not self.skip:
+            self.push("func" if self.function_next else "group", "}")
+            self.function_next = False
+            return True
+        if self.skip and self.function_next:  # function name {
+            self.a.functions.update(_function_names(self.words))  # SPD-084
+            self.discard()
+            self.skip, self.header = False, None
+            self.push("func", "}")
+            self.function_next = False
+            return True
+        if self.skip or self.function_next or not self.words:
+            return False
+        if all(w in syntax.LOOP_PREFIX_WORDS for w in self.words):
+            # zsh runs a `{ list }` after `coproc`, `time` and `!` as well (SPD-081, probed: `coproc { repeat 1 vcs push }`,
+            # `time { repeat 1 vcs push; }`, `! { repeat 1 vcs push; }`, `time ! { ... }`, `! time { ... }`,
+            # `time coproc { ... }`, `coproc time { ... }` and `time { { ... } }` each ran the body), so the group is read as
+            # a group and a short loop or short conditional inside it is checked.  With `coproc` among the prefix words the
+            # group is a forked shell's, as `coproc ( ... )` already was: its directory and its assignments never reach the
+            # line (probed: `coproc { x=1; cd /tmp; }` left the line where it was with x unset, while `time { x=1; cd /tmp; }`
+            # and `! { x=1; cd /tmp; }` left it in /tmp with x=1), and a trap set there still fires (SPD-054).
+            forked = "coproc" in self.words  # read before discard takes the prefix words away
+            self.discard()
+            self.push("sub" if forked else "group", "}")
+            return True
+        if self.words[-1] == "always" and directories.separate_redirects(self.words)[0] == ["always"]:
+            # SPD-124: an `always` in command position before a `{` -- after a terminator or a newline (`{ a }; always
+            # { b }`), after a subshell (`( a ) always { b }`), after a group's redirection (`{ a } 2>&1 always { b }`) --
+            # is a parse error in zsh, whose sole `}` closes no group there.  The block is read as a group all the same
+            # rather than as a command named `always`'s arguments; the word and any redirection before it are read first,
+            # as the command they would be.
+            self.finish()
+            self.push("group", "}")
+            return True
+        return False
+
+    def glued_close(self, t):
+        """The word before the `}` zsh splits off the end of `t`, where a lone `}` after that word would close a frame; else
+        None, the `}` staying in the word (probed in zsh 5.9, SPD-132).  The `}` is unquoted and unescaped -- a quoted or
+        escaped one is a sentinel by now -- and closes no `{` or `${` opened earlier in the word, and only the last is split:
+        `{vcs a}b}` logged `a}b`, `{vcs try}}` `try}`, `{vcs ${x-q}}` q and `{vcs x{a,b}}` xa xb, while `{vcs a}x`,
+        `{vcs {a}`, `{vcs ${x-q}` and `{vcs a\\}` left the group open.  An assignment in assignment position keeps its `}`
+        (`{x=1}` and `{ x=1}` never closed; `{x=1 }` set x and `{vcs x=1}` logged `x=1`), and so does a word in a header
+        the walk skips.  Outside any group zsh rejects the line and bash runs it with the `}` in the word, which is how the
+        hook always read it.  After `fi`, `done` or `esac` the `}` closes what a lone one would after that word."""
+        if self.skip:
+            return None
+        rest = t[:-1]
+        if "{" in rest:
+            depth = 0
+            for c in rest:
+                if c == "{":
+                    depth += 1
+                elif c == "}" and depth:
+                    depth -= 1
+            if depth:
+                return None
+        if assignment_words.assignment_word(t) and all(assignment_words.assignment_word(w) for w in self.words):
+            return None
+        closer = rest if not self.words and rest in ("fi", "done", "esac") else None
+        return rest if self.brace_closes(closer) else None
+
+    def add_word(self, t):
+        """One word, read in its place.  In zsh's reading (SPD-132) a word that starts with `{` opens the group a lone `{`
+        would open there -- never in a case pattern -- and the rest of it is read as the next word, from command position
+        (probed: `{vcs try}`, `time {vcs try}`, `f() {vcs a}`, `{vcs}` and `{}` ran as groups, `{"vcs" try}` and
+        `{\\vcs try}` too; `{vcs,x}` ran a command named `vcs,x`, no brace expansion); and a word whose `}` glued_close
+        splits off is read, then the `}` is, as a lone one after it.  bash reads both braces as part of their words."""
+        while t[:1] == "{" and (t == "{" or (self.glued and not self.in_pattern())) and self.open_brace():
             if t == "{":
-                self.push("func" if self.function_next else "group", "}")
-                self.function_next = False
                 return
+            t, self.split_brace = t[1:], True
+        rest = self.glued_close(t) if self.glued and len(t) > 1 and t[-1] == "}" else None
+        if rest is None:
+            self.read_word(t)
+            return
+        self.split_brace = True
+        self.read_word(rest)
+        self.read_word("}")
+
+    def read_word(self, t):
+        """add_word's reading of a word once its braces are settled: a reserved word, a `}`, or one more word of the command."""
+        if not self.words and not self.skip:
             if t in ("}", "fi", "done", "esac"):
                 self.close_sublists()
                 if self.stack and self.stack[-1].closer == t:
@@ -317,35 +420,6 @@ class ShellWalk:
                 self.function_next = self.skip = True
                 self.header = "func"
                 return
-        if self.skip and self.function_next and t == "{":  # function name {
-            self.a.functions.update(_function_names(self.words))  # SPD-084
-            self.discard()
-            self.skip, self.header = False, None
-            self.push("func", "}")
-            self.function_next = False
-            return
-        if t == "{" and not self.skip and not self.function_next and self.words and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words):
-            # zsh runs a `{ list }` after `coproc`, `time` and `!` as well (SPD-081, probed: `coproc { repeat 1 vcs push }`,
-            # `time { repeat 1 vcs push; }`, `! { repeat 1 vcs push; }`, `time ! { ... }`, `! time { ... }`,
-            # `time coproc { ... }`, `coproc time { ... }` and `time { { ... } }` each ran the body), so the group is read as
-            # a group and a short loop or short conditional inside it is checked.  With `coproc` among the prefix words the
-            # group is a forked shell's, as `coproc ( ... )` already was: its directory and its assignments never reach the
-            # line (probed: `coproc { x=1; cd /tmp; }` left the line where it was with x unset, while `time { x=1; cd /tmp; }`
-            # and `! { x=1; cd /tmp; }` left it in /tmp with x=1), and a trap set there still fires (SPD-054).
-            forked = "coproc" in self.words  # read before discard takes the prefix words away
-            self.discard()
-            self.push("sub" if forked else "group", "}")
-            return
-        if (t == "{" and not self.skip and not self.function_next and self.words and self.words[-1] == "always"
-                and directories.separate_redirects(self.words)[0] == ["always"]):
-            # SPD-124: an `always` in command position before a `{` -- after a terminator or a newline (`{ a }; always
-            # { b }`), after a subshell (`( a ) always { b }`), after a group's redirection (`{ a } 2>&1 always { b }`) --
-            # is a parse error in zsh, whose sole `}` closes no group there.  The block is read as a group all the same
-            # rather than as a command named `always`'s arguments; the word and any redirection before it are read first,
-            # as the command they would be.
-            self.finish()
-            self.push("group", "}")
-            return
         if not self.skip and self.words and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words) and t in ("for", "select", "repeat", "if", "while", "until"):
             # zsh runs a compound command after `coproc`, `time` and `!` (probed: `coproc repeat 1 git push`, `coproc if
             # [[ -n x ]] git push`, `time if [[ -n x ]] git push` and `! if [[ -n x ]] git push` each ran it)
