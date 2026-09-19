@@ -1,7 +1,7 @@
 """shell/expansions: Parameter expansions and a command's read points.  Moved from bin/spud_ledger.py (SPD-065)."""
 
 from . import analyse, globbing, prepare, spud_calls, syntax
-from ..hooks import hookio
+from ..hooks import hookio, snapshots
 
 
 # What reading one word leaves its caller to do (SPD-043): read on from where the word was (its readings replaced it in place),
@@ -132,6 +132,60 @@ def alias_substitution(name, a):
         return None, a.alias_unknown
     key = syntax.ALIAS_KEY + name
     return a.aliases[name], key in a.doubt or key in a.sticky or a.all_doubt
+
+
+# SPD-133: the aliases and functions the shell already holds.  Claude Code starts a shell for every Bash call and sources
+# its snapshot of the user's interactive shell in it (~/.claude/shell-snapshots/snapshot-zsh-*.sh), so a member's command
+# word is expanded by that profile's aliases and run by its functions before any program does: on this Mac `gp` pushed,
+# `gc -m x` committed, `g commit -m x` committed and `ggp` pushed, each reaching the hook as an unknown command with no
+# finding at all.  Confirmed from a member's own Bash call (SPD-133): `type gp` printed "gp is an alias for git push",
+# `type ggp` "ggp is a shell function from <that snapshot>", and `gst --short --branch` ran git and printed the worktree's
+# status.  hooks/snapshots holds the table; these two read a command word against it.  An alias the line itself defines is
+# a different thing and still SPD-059's: it reaches only text the line parses again, which is `eval`.
+def shell_aliased(words, a):
+    """(the text the shell's own aliases put in place of `words`, the member's own words that follow that expansion,
+    [(the name, what it runs)] for each one expanded, the first name whose body the hook cannot read), or
+    (None, [], [], None) when the command word is none of them.  The own words are kept apart because a write a body
+    makes into one of them is the member's write, which analyse_shell_text never prunes (SPD-133).
+
+    A shell expands an alias where it parses the command word, textually and before any rule reads it, so the body and
+    the words after it are analysed as the text the shell would have parsed -- `gc -m x` is `git commit --verbose -m x`
+    and earns Law 7's own refusal.  When the body ends in a blank the next word is expanded too (zsh's chaining rule,
+    `_='sudo '`), and a name is not expanded again while its own expansion is in flight, which is what stops
+    `alias ls='ls -G'`.  A word the line quoted or escaped (`\\gp`, `'gp'`) reaches this with its quotes already taken
+    and is expanded all the same: that is fail-closed -- the name it spells is no program -- and telling the two apart
+    would need a mark inside the command word that every reading by name would then have to strip (SPD-043 records the
+    same choice for `'$X' push`)."""
+    found = snapshots.shell_table(a.home)
+    if not found.aliases:  # a machine with no snapshot, and every scratch home the suite builds: nothing to read
+        return None, [], [], None
+    out, expanded, i, at_command = [], [], 0, True
+    while i < len(words) and at_command:
+        name = prepare.deglob(words[i])
+        if name in a.expanding or name not in found.aliases:
+            break
+        body = found.aliases[name]
+        if body is None:
+            return None, [], expanded, name
+        spelled = body.strip()
+        expanded.append((name, "an alias for `%s`" % (spelled if len(spelled) <= 120 else spelled[:117] + "...")))
+        out.append(body)
+        at_command = body.endswith((" ", "\t"))
+        i += 1
+    if not expanded:
+        return None, [], [], None
+    own_words = [prepare.deglob(w) for w in words[i:]]
+    return " ".join(out + own_words), own_words, expanded, None
+
+
+def shell_function(name, a):
+    """The shell text a function the shell already defines runs for this command word, or None.  Read once per name per
+    line, so a line that names it twice -- or a body that calls itself -- reads it no further; an alias of the same name
+    is expanded first, as the shell does it (shell_aliased runs before this)."""
+    if name in a.bodies_read:
+        return None
+    found = snapshots.shell_table(a.home)
+    return found.body(name) if name in found.functions else None
 
 
 def variable_readings(a, name):

@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from . import hookio, pathrule, recording
+from . import hookio, pathrule, recording, snapshots
 from ..core import kernel
 from ..projects import sessions
 from ..shell import bash_rule, spud_calls
@@ -131,6 +131,14 @@ def hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member,
     if not isinstance(command, str) or not command.strip():
         return deny_and_record(con, at, payload, "malformed PreToolUse(Bash) payload: tool_input.command is missing", caller_agent_id, caller_member)
     reason, analysis = bash_rule.bash_reason(ctx, con, caller_agent_id, caller_member, command, payload.get("cwd") or None, mode)
+    gap = snapshots.shell_table(str(ctx.home)).gap
+    if gap is not None:
+        # SPD-133: the snapshot directory is there but the hook could not read it, so a command word the shell already
+        # defines ran unread and a line that would otherwise be silent kept the reading it had.  Fail open on the line --
+        # a member must never be refused every command because a table is cold -- and spool the gap, which `spud doctor`
+        # reports and the next command drains into a hook.error event.  A machine with no snapshots at all is no gap.
+        hookio.spool_write(ctx, {"at": at, "event": "PreToolUse", "agent_id": caller_agent_id,
+                                 "error": "the shell alias table is missing: %s" % gap})
     if reason:
         return deny_and_record(con, at, payload, reason, caller_agent_id, caller_member, extra={"command": command[:2000]})
     # The allow skips the harness's prompt, so it needs more than recognition (SPD-032): every spud call runs the ledger root's
