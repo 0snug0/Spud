@@ -25,16 +25,17 @@ DISPATCH = "hooks.dispatch"
 # shell.assignment_words for the Bash rule's reading of a subscripted assignment (SPD-085), shell.arg_writes for the files a
 # command names as operands and writes (SPD-121), hooks.gitrepos for the repository check the Bash rule and SessionStart's
 # line share (SPD-123), hooks.snapshots for the aliases and functions the Bash tool's shell already holds (SPD-133),
-# shell.find_xargs, shell.tree_writes and shell.tree_walk for the writes a line does not spell (SPD-126).
+# shell.find_xargs, shell.tree_writes and shell.tree_walk for the writes a line does not spell, shell.spelled_writes and
+# shell.downloads for the files a line names past SPD-121's table (SPD-126).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
     "render.prices", "projects.sessions",
     "hooks.dispatch", "hooks.gitrepos", "hooks.hookio", "hooks.pathrule", "hooks.pretool", "hooks.recording", "hooks.sessionhooks",
     "hooks.snapshots", "hooks.stophook", "hooks.subagent_stop", "hooks.worktrees",
-    "shell.analyse", "shell.arg_writes", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.expansions", "shell.find_xargs",
+    "shell.analyse", "shell.arg_writes", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
     "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.globbing", "shell.prepare", "shell.redirect_globs", "shell.spud_calls",
-    "shell.syntax", "shell.tree_walk", "shell.tree_writes", "shell.walk", "shell.zsh",
+    "shell.spelled_writes", "shell.syntax", "shell.tree_walk", "shell.tree_writes", "shell.walk", "shell.zsh",
 }
 
 

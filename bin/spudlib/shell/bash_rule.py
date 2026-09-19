@@ -19,8 +19,11 @@ _INPUT = (" names a file xargs reads from its input (or find hands its command a
           " paths out, or give find the files to change as its own starting points")
 _ANYWHERE = (" places files where the line cannot say -- an archive tar extracts with -P (it keeps absolute paths and `..`) or"
              " from a -T list, unzip's -: (it keeps `../`), a config file curl reads (-K, or a CURL_HOME, XDG_CONFIG_HOME or"
-             " HOME the line sets), rsync's daemon, or options a substitution or a variable the line cannot settle may hold --"
-             " so they may lie anywhere; extract or download into a directory the line names")
+             " HOME the line sets), a -w format curl reads from a file, a {{variable}} an --expand- option of curl's holds,"
+             " an -o name holding #N under curl's URL globbing, a wgetrc wget reads or runs (-e, --config, or a WGETRC or HOME"
+             " the line sets), rsync's daemon, or options a substitution or a variable the line cannot settle may hold (sort's"
+             " -o, perl's -i and kin among them) -- so they may lie anywhere; name the files, and extract or download into a"
+             " directory the line names")
 REDIRECT_MESSAGES = {
     "input": "the redirection target %s" + _INPUT,
     "anywhere": "the redirection target %s" + _ANYWHERE,
@@ -85,6 +88,12 @@ def path_directories(kind, path):
     if directory or not os.path.lexists(p):
         return ("tree",)
     return ("remove",) if kind == "rm-tree" else (None,)
+
+
+def shown_picked(text):
+    """SPD-126: a reason with the characters a command picks for a name (hooks/pathrule.NAME_CHAR, NAME_MORE) shown as a glob
+    shows them: `?` one, `*` any number more."""
+    return text.replace(pathrule.NAME_CHAR, "?").replace(pathrule.NAME_MORE, "*")
 
 
 def redirection_paths(target, cwds):
@@ -342,7 +351,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
             return None
         # the state directory is refused in the database's words, not Law 1's; a session that is not Spud is not held to Law 1
         law_1 = not caller_agent_id and not plain and not (rel is not None and pathrule.in_state_dir(rel))
-        return ("Law 1: " if law_1 else "") + messages["into"] % (spelled, reason)
+        return shown_picked(("Law 1: " if law_1 else "") + messages["into"] % (spelled, reason))
 
     def targets_reason(entries, messages):
         """The reason one of these writes is refused, or None.  An entry is (the spelling the reason names it by, or None
@@ -350,7 +359,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         the analysis recorded it (SPD-127), everything else as the line spells it -- the directories the shell may be in
         when it opens, and SPD-129's directory kind, None for every write that is not a directory's making or removal)."""
         for named, target, target_cwds, directory in entries:
-            spelled = syntax.shown_operands(prepare.deglob(named if named else target))
+            spelled = shown_picked(syntax.shown_operands(prepare.deglob(named if named else target)))
             if syntax.unknown_operand(target):  # SPD-126: an operand the line does not spell, for a member as a variable is
                 if strict:
                     return messages["anywhere" if syntax.ANY_PATH in target else "input"] % spelled

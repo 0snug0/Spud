@@ -48,9 +48,24 @@ def glob_to_regex(glob):
     return "^" + "".join(out) + "$"
 
 
+# SPD-126: a character of a name a command picks for itself -- mktemp's X, split's suffix letter, a numbered backup's
+# digit -- in a write target the Bash hook records (shell/spelled_writes).  It is no character a glob spells, so every
+# wildcard of a deliverable glob matches it and no literal does: a glob matches a target holding it only when it matches
+# every name the command may pick there.  NAME_MORE stands for any number more of them (split's suffix grows past its
+# initial length, a numbered backup's number has as many digits as it needs).  Private-use characters, as the shell
+# modules' own sentinels are; a reason shows them as `?` and `*`.
+NAME_CHAR, NAME_MORE = chr(0xE053), chr(0xE054)
+
+
 def path_matches_glob(rel, glob, fold=False):
     if glob.endswith("/"):
         glob += "**"
+    if NAME_MORE in rel:
+        # SPD-126: a run of picked characters of any length.  Read one at a time, the glob's matcher settles within the
+        # glob's own length -- each state that is not a star's either dies or reaches one, and a star keeps what it has --
+        # so a run longer than the glob changes nothing, and the lengths up to it and one more decide every length.
+        return all(re.fullmatch(glob_to_regex(glob), rel.replace(NAME_MORE, NAME_CHAR * n), re.IGNORECASE if fold else 0)
+                   is not None for n in range(len(glob) + 2))
     return re.fullmatch(glob_to_regex(glob), rel, re.IGNORECASE if fold else 0) is not None
 
 

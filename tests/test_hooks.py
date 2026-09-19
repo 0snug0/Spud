@@ -9205,11 +9205,19 @@ class ExtractionWriteTest(TreeWriteCase):
         for command, writes in (("tar -xf a.tar -C out", [("out", "tree")]), ("tar xzf a.tar -C out", [("out", "tree")]),
                                 ("tar -x -C out -C sub -f a.tar", [("out/sub", "tree")]), ("tar -xf a.tar -C /tmp/x", [("/tmp/x", "tree")]),
                                 ("tar -xf a.tar", [(".", "tree")]), ("tar -tf a.tar", []), ("tar -xOf a.tar", []),
-                                ("tar -xPf a.tar -C out", [(m.ANY_PATH, "tree")]), ("tar -cf out/a.tar docs", []),
+                                ("tar -xPf a.tar -C out", [(m.ANY_PATH, "tree")]),
+                                ("tar -cf out/a.tar docs", [("out/a.tar", None)]),  # SPD-126's second engineer: the archive
                                 ("unzip -q a.zip -d out", [("out", "tree")]), ("unzip -dout a.zip", [("out", "tree")]),
                                 ("unzip a.zip", [(".", "tree")]), ("unzip -l a.zip", []), ("unzip -: a.zip -d out", [(m.ANY_PATH, "tree")]),
                                 ("patch -p1 < x.patch", [(".", "tree")]), ("patch -d out -p1 -i x.patch", [("out", "tree")]),
-                                ("patch --dry-run -p1 < x.patch", []), ("patch -o out/y x.patch", []), ("patch docs/x.md x.patch", []),
+                                ("patch --dry-run -p1 < x.patch", []),
+                                # SPD-126's second engineer: a later patch in the file names its own file, so the tree
+                                # stays; the named file, its backups and its reject file beside it
+                                ("patch -o out/y x.patch", [(".", "tree"), ("out/y", None), ("out/y.orig", None),
+                                                            ("out/y.~" + m.NAME_CHAR + m.NAME_MORE + "~", None), ("out/y.rej", None)]),
+                                ("patch docs/x.md x.patch", [(".", "tree"), ("docs/x.md", None), ("docs/x.md.orig", None),
+                                                             ("docs/x.md.~" + m.NAME_CHAR + m.NAME_MORE + "~", None),
+                                                             ("docs/x.md.rej", None)]),
                                 ("curl -O https://example.com/x", [(".", "tree")]), ("curl -sSLO https://example.com/x", [(".", "tree")]),
                                 ("curl -O --output-dir out https://example.com/x", [("out", "tree")]),
                                 ("curl --remote-name-all https://example.com/x", [(".", "tree")]),
@@ -9255,6 +9263,321 @@ class ExtractionWriteTest(TreeWriteCase):
         for command in ("tar -xf a.tar -C /tmp/spd-126-x", "tar -xPf a.tar -C /tmp/spd-126-x", "curl -K cfg https://example.com/x"):
             with self.subTest(command):
                 self.assertSilent(command, agent_id=None)
+
+
+AGENT_I = "f3a4b5c6d7e8f9a0b"  # SPD-126: a member whose one glob names split's pieces exactly, home:out/x??
+
+# SPD-126's second engineer: one line per writer the Bash hook now reads by the name it spells, `{}` the file it writes.
+SPELLED_WRITERS = (
+    ("dd of=", "dd if=/dev/zero of={} count=1"),
+    ("sort -o", "sort -o {} a.tar"),
+    ("sort --output=", "sort a.tar --output={}"),  # getopt_long permutes: an option after the operand is an option
+    ("curl -o", "curl -sS -o {} https://example.com/x"),
+    ("curl -D", "curl -D {} https://example.com/x"),
+    ("curl -c", "curl -c {} https://example.com/x"),
+    ("curl --trace", "curl --trace {} https://example.com/x"),
+    ("curl --trace-ascii", "curl --trace-ascii {} https://example.com/x"),
+    ("curl --stderr", "curl --stderr {} https://example.com/x"),
+    ("curl --libcurl", "curl --libcurl {} https://example.com/x"),
+    ("curl --etag-save", "curl --etag-save {} https://example.com/x"),
+    ("curl --hsts", "curl --hsts {} https://example.com/x"),
+    ("curl --alt-svc", "curl --alt-svc {} https://example.com/x"),
+    ("curl -w %output", "curl -o /dev/null -w '%output{{}}%{http_code}' https://example.com/x"),
+    ("mkfifo", "mkfifo -m 600 {}"),
+    ("perl -i", "perl -i -pe s/a/b/ {}"),
+    ("perl -0pi", "perl -0pi -e s/a/b/ {}"),
+    ("tar -c", "tar -czf {} docs"),
+    ("tar c bundle", "tar cf {} docs"),
+    ("tar -r", "tar -rf {} docs"),
+    ("wget -O", "wget --no-hsts -O {} https://example.com/x"),
+    ("wget -o", "wget --no-hsts -O - -o {} https://example.com/x"),
+    ("wget --save-cookies", "wget --no-hsts -O - --save-cookies {} https://example.com/x"),
+    ("wget --hsts-file", "wget -O - --hsts-file={} https://example.com/x"),
+)
+
+
+class SpelledWriteTest(TreeWriteCase):
+    """SPD-126 (its second engineer): the writers whose file the line spells but SPD-121 never read.  Main (08c344e) recorded
+    nothing -- no redirect, no write by argument -- for `dd if=/dev/zero of=out/f count=1`, `sort -o out/f in`, `curl -o
+    out/f https://x`, `perl -i -pe 's/a/b/' out/f` or `mktemp out/tmp.XXXX`, so a member's `sort -o
+    ledger/tickets/SPD-001.md x` or `dd of=tests/fake/.git/hooks/pre-commit` met neither Law 5 nor SPD-066's rule.
+
+    Each is read on this Mac's man page and held to the path rule as a redirection target is (shell/spelled_writes,
+    shell/downloads, shell/tree_writes): dd(1)'s last `of=`; sort(1)'s -o/--output (getopt_long: permuted, abbreviated) and
+    -T's directory, whole; curl(1) 8.7.1's -o under --output-dir, -D, -c, --trace, --trace-ascii, --stderr, --libcurl,
+    --etag-save, --hsts, --alt-svc and -w's %output{}, `-` being standard output; mkfifo(1)'s operands; mktemp(1)'s
+    templates, read under -p, their trailing Xs picked from [0-9A-Za-z]; split(1)'s pieces, the prefix and a suffix of -a's
+    length, two letters that grow when -a and -d are absent (text_cmds' split.c); perlrun's -i[extension] over every file
+    after the program, `<file><ext>` or the extension with `*` for the file as the backup; bsdtar's (tar(1)) archive under
+    -c, -r and -u, relative to the line's directory whatever -C comes first ("In c and r mode, this changes the directory
+    before adding the following files"); BSD patch(1)'s file operand or -o, with its backup (.orig, -z, -B, -Y, numbered)
+    and its reject file (-r, or <file>.rej), and a whole-subtree write of -d's directory or the line's, since each later
+    patch in the file names its own (FreeBSD patch.c, reinitialize_almost_everything); and wget, from GNU wget's manual
+    alone (it is not installed here): -O's file, -o, -a, --save-cookies, --hsts-file (~/.wget-hsts unless --no-hsts),
+    and without -O the -P directory, whole.  A name a command picks (mktemp's X, split's suffix) is held by
+    hooks/pathrule.NAME_CHAR, which a glob's wildcards match and its literals do not, so a glob lets it in only where it
+    lets in every name the command may pick; each name the path rule refuses by spelling (.git, a generated root) that it
+    may pick is checked as itself.  A word the line cannot settle where an option may stand is a write anywhere.
+
+    The differential over the 945 Bash commands spudagents ran that name dd, sort, curl, mkfifo, mktemp, split, perl, tar,
+    patch or wget is in the ticket's result: every newly refused one is a target the hook cannot resolve (a loop's or a
+    substitution's `-o "$n"`), a cd the hook cannot follow, or patch -o at a checkout's root.  TreeWriteCase's members:
+    AGENT_G out/**, bin/* and docs/*.md; AGENT_H bin/** and vendor/**; AGENT_A tests/** and bin/spud; AGENT_I out/x??."""
+
+    def setUp(self):
+        super().setUp()
+        self.home.env["HOME"] = "/Users/nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
+        for d in ("tests/fake/.git/hooks", "out/sub", ".claude"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+        self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+
+    def full(self, command, cwd=None):
+        """(the word, the backup suffix, the kind) of each write by argument the line records."""
+        return [(w[1], w[5], w[6]) for w in self.analysis(command, cwd).arg_writes if w[4] != "walk"]
+
+    def picked(self, text):
+        """`text` with each `?` a character the command picks and `*` a run of them, as the analysis records them."""
+        return text.replace("?", self.module.NAME_CHAR).replace("*", self.module.NAME_MORE)
+
+    def test_the_analysis_records_what_each_writer_names(self):
+        m, p = self.module, self.picked
+        for command, writes in (
+            ("dd if=/dev/zero of=out/f count=1", [("out/f", None)]),
+            ("dd of=out/a of=out/f", [("out/f", None)]),  # BSD dd refuses a second of=, GNU's keeps the last
+            ("dd if=out/f of=/dev/null", [("/dev/null", None)]),
+            ("dd if=out/f", []),
+            ("sort -o out/f in", [("out/f", None)]), ("sort in -o out/f", [("out/f", None)]), ("sort -uo out/f in", [("out/f", None)]),
+            ("sort --out out/f in", [("out/f", None)]),  # getopt_long takes an abbreviation
+            ("sort --output=out/f in", [("out/f", None)]), ("sort -o - in", []), ("sort in", []),
+            ("sort -T out/tmp in", [("out/tmp", "tree")]),
+            ("curl -o out/f https://x", [("out/f", None)]), ("curl -sSLo out/f https://x", [("out/f", None)]),
+            ("curl --output-dir out -o f https://x", [("out/f", None)]),
+            ("curl --output-dir out -O https://x --next -o g https://y", [("out", "tree"), ("g", None)]),  # per -: section
+            ("curl -o - https://x", []), ("curl -D - -o /dev/null https://x", [("/dev/null", None)]), ("curl --hsts '' https://x", []),
+            ("curl -w '%output{out/w}%{http_code}' https://x", [("out/w", None)]),
+            ("curl -g -o 'out/#1' 'https://x/[1-3]'", [("out/#1", None)]),  # -g: no URL globbing, the name as spelled
+            ("curl --no-clobber -o out/f https://x", [("out/f", None), (p("out/f.?*"), None)]),
+            ("curl -o 'out/#1' 'https://x/[1-3]'", [(m.ANY_PATH, "tree")]),  # #1 is the text the URL's set puts there
+            ("curl -w @fmt https://x", [(m.ANY_PATH, "tree")]), ("curl --expand-output '{{f}}' https://x", [(m.ANY_PATH, "tree")]),
+            ("mkfifo -m 600 out/p out/q", [("out/p", None), ("out/q", None)]),
+            ("mktemp out/tmp.XXXX", [(p("out/tmp.????"), None)]), ("mktemp -d out/d.XXXXXX", [(p("out/d.??????"), "make")]),
+            ("mktemp -p out x.XXXX", [(p("out/x.????"), None)]), ("mktemp -p out /tmp/x.XX", [(p("/tmp/x.??"), None)]),
+            ("mktemp -p out -t foo", [(p("out/foo.????????"), None)]), ("mktemp out/plain", [("out/plain", None)]),
+            ("mktemp -u out/x.XXXX", []), ("mktemp -d", []), ("mktemp -t foo", []),  # -u makes nothing; the temp root is open
+            ("mktemp -d .giX", [(p(".gi?"), "make"), (".git", "make")]),  # the one name the path rule refuses by spelling
+            ("split -l 10 big out/part_", [(p("out/part_??*"), None)]), ("split -a 3 big out/p", [(p("out/p???"), None)]),
+            ("split -d big out/p", [(p("out/p??"), None)]), ("split big", [(p("x??*"), None)]),
+            ("split -a 1 big .gi", [(p(".gi?"), None), (".git", None)]),
+            ("perl -i -pe s/a/b/ out/f", [("out/f", None)]), ("perl -0pi -e s/a/b/ out/f out/g", [("out/f", None), ("out/g", None)]),
+            ("perl -i script.pl out/f", [("out/f", None)]),  # no -e: the first operand is the program
+            ("perl -pie s/a/b/ out/f", [("out/f", None)]),  # -i takes the rest of its word: extension "e", no -e
+            ("perl -pi'old/*.orig' -e s/a/b/ out/f", [("out/f", None), ("old/out/f.orig", None)]),
+            ("perl -pe s/a/b/ out/f", []), ("perl -e 'print 1' -- -i", []),
+            ("tar -czf out/a.tgz src", [("out/a.tgz", None)]), ("tar czf out/a.tgz src", [("out/a.tgz", None)]),
+            ("tar -C src -cf out/a.tar .", [("out/a.tar", None)]), ("tar -uf out/a.tar src", [("out/a.tar", None)]),
+            ("tar -cf - src", []), ("export TAPE=out/t; tar -c src", [("out/t", None)]),
+            ("patch -d out -r rej f x.patch", [("out", "tree"), ("out/f", None), ("out/f.orig", None), (p("out/f.~?*~"), None),
+                                              ("out/rej", None)]),
+            ("patch -d out -V none f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None)]),
+            ("patch -d out --posix f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None)]),
+            ("patch -d out -V simple -z .bak f x.patch", [("out", "tree"), ("out/f", None), ("out/f.bak", None), ("out/f.rej", None)]),
+            ("patch -d out -B bak/ f x.patch", [("out", "tree"), ("out/bak", "tree"), ("out/f", None), ("out/bak/f", None),
+                                                ("out/f.rej", None)]),
+            ("patch -d out -d sub -p1 < x.patch", [("out/sub", "tree")]),  # each -d from the one before it
+            ("wget -O out/f https://x", [("out/f", None), ("~/.wget-hsts", None)]),
+            ("wget --no-hsts -P out https://x", [("out", "tree")]), ("wget --no-hsts https://x", [(".", "tree")]),
+            ("wget --no-hsts -O - https://x", []), ("wget --no-hsts -b -P out https://x", [(p("wget-log*"), None), ("out", "tree")]),
+            ("wget -e robots=off https://x", [(m.ANY_PATH, "tree")]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+
+    def test_backups_and_suffixes_are_recorded_beside_the_file(self):
+        for command, writes in (("perl -pi.bak -e s/a/b/ out/f", [("out/f", ".bak", None)]),
+                                ("perl -pi~ -e s/a/b/ out/f", [("out/f", "~", None)]),
+                                ("perl -pi -e s/a/b/ out/f", [("out/f", None, None)]),
+                                ("perl -pi'*' -e s/a/b/ out/f", [("out/f", None, None)])):  # `*`: overwrite, no backup (perlrun)
+            with self.subTest(command):
+                self.assertEqual(self.full(command), writes)
+
+    def test_every_writer_is_held_to_the_path_rule(self):
+        for label, form in SPELLED_WRITERS:
+            for target, needle in (("ledger/tickets/SPD-001.md", "generated"), ("tests/fake/.git/hooks/pre-commit", GIT_DIR_WORDING),
+                                   ("/Users/nobody/x", OUTSIDE), ("docs/new.txt", "deliverables")):
+                command = form.replace("{}", target)
+                with self.subTest(command=command):
+                    r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                    self.assertIn(ARG_WORDING, r.reason)
+                    self.assertIn(target, r.reason)
+
+    def test_every_writer_is_silent_into_the_members_own_files_the_scratchpad_and_tmp(self):
+        for label, form in SPELLED_WRITERS:
+            for target in ("out/new", "docs/new.md", self.scratchpad + "/probe.txt", "/tmp/spd-126-y"):
+                command = form.replace("{}", target)
+                with self.subTest(command=command):
+                    self.assertSilent(command, agent_id=AGENT_G)
+
+    def test_the_tickets_lines(self):
+        for command, needle in (("sort -o ledger/tickets/SPD-001.md out/keep.txt", "generated"),
+                                ("dd if=/dev/zero of=tests/fake/.git/hooks/pre-commit count=1", GIT_DIR_WORDING),
+                                ("curl -c tests/fake/.git/config https://example.com/x", GIT_FILE_WORDING)):
+            with self.subTest(command):
+                self.assertRefused(command, needle, agent_id=AGENT_A)  # tests/** is AGENT_A's, .git no member's
+        self.assertSilent("sort -o tests/sorted.txt out/keep.txt", agent_id=AGENT_A)
+
+    def test_mktemp_is_held_by_every_name_it_may_pick(self):
+        for command in ("mktemp out/tmp.XXXX", "mktemp -d out/d.XXXXXX", "mktemp bin/tmp.XXXX",  # bin/*: any name in bin
+                        "mktemp -p out x.XXXX", "mktemp docs/x.XXXX.md",  # no trailing X: the name as spelled, docs/*.md's
+                        "mktemp -d /tmp/spd-126-x.XXXX", "mktemp -d", "mktemp -t foo", "mktemp -d %s/h.XXXX" % self.scratchpad,
+                        "T=$(mktemp -d); echo $T", "mktemp -u docs/x.XXXX"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command, needle, shown in (("mktemp docs/x.XXXX", "deliverables", "docs/x.????"),  # docs/*.md: not every name
+                                       ("mktemp -p docs x.XXXX", "deliverables", "docs/x.????"),
+                                       ("mktemp tmp.XXXX", "deliverables", "tmp.????"),  # the checkout root
+                                       ("mktemp ledger/tickets/x.XXXX", "generated", "ledger/tickets/x.????"),
+                                       ("mktemp -d /Users/nobody/x.XXXX", OUTSIDE, "/Users/nobody/x.????")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                self.assertIn(shown, r.reason)  # the picked characters shown as a glob shows them
+        # a name the path rule refuses by spelling, which the template may become, is checked as itself
+        r = self.assertRefused("mktemp -d tests/fake/.giX", GIT_DIR_WORDING, agent_id=AGENT_A)
+        self.assertIn("tests/fake/.git", r.reason)
+        self.assertSilent("mktemp -d tests/fake/.gX", agent_id=AGENT_A)  # three characters: never .git
+        self.assertSilent("mktemp -d tests/x.XXXX", agent_id=AGENT_A)
+        self.wide()
+        self.assertRefused("mktemp -d ledgXX", "generated", agent_id=AGENT_C)  # home:** lets in ledg??, but not ledger
+        self.assertSilent("mktemp -d out/ledgXX", agent_id=AGENT_C)
+
+    def test_split_is_held_by_every_piece_it_may_write(self):
+        for command in ("split -l 1 a.tar out/p_", "split -l 1 a.tar bin/p_", "split -b 1k -a 3 a.tar out/sub/x",
+                        "split -l 1 a.tar /tmp/spd-126-x/p"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command, needle, shown in (("split -l 1 a.tar docs/p_", "deliverables", "docs/p_??*"),
+                                       ("split -l 1 a.tar", "deliverables", "x??*"),  # prefix x, at the checkout root
+                                       ("split -a 2 a.tar ledger/x", "generated", "ledger/x??")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                self.assertIn(shown, r.reason)
+        self.assertRefused("split -a 1 a.tar tests/fake/.gi", GIT_DIR_WORDING, agent_id=AGENT_A)  # .git among its pieces
+        # out/x?? names every piece of two letters, and no longer one: split's suffix grows past two letters unless -a
+        # fixes its length (or -d makes it digits), so only then are the pieces all the member's
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:out/x??"]), AGENT_I)
+        for command in ("cd out && split -a 2 ../a.tar", "split -a 2 a.tar out/x", "split -d a.tar out/x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_I)
+        r = self.assertRefused("split a.tar out/x", "deliverables", agent_id=AGENT_I)
+        self.assertIn("out/x??*", r.reason)
+        self.assertRefused("split -a 3 a.tar out/x", "deliverables", agent_id=AGENT_I)
+
+    def test_perl_in_place_and_its_backup(self):
+        for command in ("perl -pi -e s/a/b/ bin/spud", "perl -0pi -e s/a/b/ tests/x.txt", "perl -pi.bak -e s/a/b/ tests/x.txt",
+                        "perl -pe s/a/b/ docs/x.md", "perl -ne 'print if /x/' docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'",
+                        "sleep_ms() { perl -e 'select undef, undef, undef, $ARGV[0]' \"$1\"; }; sleep_ms 20",  # the differential's
+                        "find tests/out -exec perl -pi -e s/a/b/ {} +"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_A)
+        for command, needle, shown in (("perl -pi.bak -e s/a/b/ bin/spud", "deliverables", "bin/spud.bak"),
+                                       ("perl -pi'orig_*' -e s/a/b/ bin/spud", "deliverables", "orig_bin/spud"),
+                                       ("perl -pie s/a/b/ bin/spud", "deliverables", "bin/spude"),  # -pie: extension "e"
+                                       ("perl -i -pe s/a/b/ docs/x.md", "deliverables", "docs/x.md"),
+                                       ("perl -pi -e s/a/b/ tests/fake/.git/config", GIT_FILE_WORDING, "tests/fake/.git/config"),
+                                       ("find docs -exec perl -pi -e s/a/b/ {} +", "deliverables", "docs")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=AGENT_A)
+                self.assertIn(shown, r.reason)
+        for command in ("xargs perl -pi -e s/a/b/ < list", "perl -e s/a/b/ $(echo -i) tests/x.txt", "f() { perl -pi -e s/a/b/ \"$1\" tests/x; }; f x"):
+            with self.subTest(command):
+                self.assertRefused(command, ANYWHERE_WORDING, agent_id=AGENT_A)  # a word that may be -i<anything>
+
+    def test_tar_writes_its_archive_where_the_line_is(self):
+        for command in ("tar -czf out/a.tgz docs", "tar -C docs -czf out/a.tgz .", "cd out && tar -cf a.tar ../docs",
+                        "tar -cf - docs | wc -c", "tar -tf a.tar", "tar -xf a.tar -C out"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command, needle, shown in (("tar -C out -cf docs/a.tar .", "deliverables", "docs/a.tar"),  # -C moves no archive
+                                       ("tar -cf ledger/tickets/x.tar out", "generated", "ledger/tickets/x.tar"),
+                                       ("tar -rf tests/fake/.git/hooks/pre-commit out", GIT_DIR_WORDING, "pre-commit"),
+                                       ("export TAPE=docs/t; tar -c out", "deliverables", "docs/t")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                self.assertIn(shown, r.reason)
+        self.assertRefused("tar -cf out/a.tar $(ls)", ANYWHERE_WORDING, agent_id=AGENT_G)  # may be -f elsewhere
+
+    def test_patch_writes_its_file_its_backup_and_its_reject(self):
+        for command in ("patch -d out f ../x.patch", "patch -d out -o g f ../x.patch", "patch -d out -r f.rej f < x.patch",
+                        "patch -d bin -z .bak x.py ../x.patch", "patch --dry-run docs/x.md x.patch"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_H if "bin" in command else AGENT_G)
+        for command, needle, shown, agent in (
+            ("patch -d out -r ../docs/x.rej f ../x.patch", "deliverables", "docs/x.rej", AGENT_G),
+            ("patch -d out -o ../ledger/tickets/SPD-001.md f ../x.patch", "generated", "ledger/tickets/SPD-001.md", AGENT_G),
+            ("patch -d bin -Y ../docs/ x.py ../x.patch", "deliverables", "docs/x.py.orig", AGENT_H),  # -Y: before the basename
+            ("patch -d bin /Users/nobody/f ../x.patch", OUTSIDE, "/Users/nobody/f", AGENT_H),
+            ("patch -d tests fake/.git/hooks/pre-commit ../x.patch", GIT_DIR_WORDING, "pre-commit", AGENT_A),
+            # a later patch in the file names its own file under the line's directory, whatever -o or the operand say
+            ("patch -o out/y out/keep.txt x.patch", "deliverables", "home:", AGENT_G),
+        ):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle, agent_id=agent)
+                self.assertIn(shown, r.reason)
+
+    def test_downloads_write_their_named_files(self):
+        for command in ("curl -sS -o out/f https://example.com/x", "curl -o /dev/null -w '%{http_code}' https://example.com/x",
+                        "curl --output-dir out -o f https://example.com/x", "curl -D - -s https://example.com/x",
+                        "curl -g -o 'out/#1' 'https://example.com/[1-2]'", "wget --no-hsts -P out https://example.com/x",
+                        "wget --no-hsts -O out/f https://example.com/x", "a=$(echo x); curl -s -D - \"https://example.com/$a\"",
+                        "wget --no-hsts -b -P out -o out/log https://example.com/x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command, needle in (("curl --output-dir docs -o f https://example.com/x", "deliverables"),
+                                ("curl -w '%output{docs/w}' https://example.com/x", "deliverables"),
+                                ("wget --no-hsts https://example.com/x", "deliverables"),  # the checkout root, whole
+                                ("wget --no-hsts -o ledger/x.log -P out https://example.com/x", "generated"),
+                                ("wget -P out https://example.com/x", OUTSIDE),  # the HSTS database, ~/.wget-hsts
+                                ("wget --no-hsts -b -P out https://example.com/x", "deliverables"),  # ./wget-log, the root's
+                                ("curl -o 'out/#1' 'https://example.com/[1-2]'", ANYWHERE_WORDING),
+                                ("curl -w @fmt https://example.com/x", ANYWHERE_WORDING),
+                                ("curl -o out/f \"$(cat list)\"", ANYWHERE_WORDING),  # may be -o anything
+                                ("wget -e robots=off --no-hsts -P out https://example.com/x", ANYWHERE_WORDING),
+                                ("for n in a b; do curl -o \"$n.html\" https://example.com/$n; done", VARIABLE_WORDING)):
+            with self.subTest(command):
+                self.assertRefused(command, needle, agent_id=AGENT_G)
+        self.assertRefused("sort --compress-program='git push' -o out/s a.tar", "Law 7", agent_id=AGENT_G)
+        self.assertRefused("wget --use-askpass='git push' --no-hsts -P out https://example.com/x", "Law 7", agent_id=AGENT_G)
+
+    def test_a_word_the_line_cannot_settle_where_an_option_may_stand(self):
+        for command in ("sort -u \"$(cat list)\"", "sort $(echo -o) docs/x a.tar", "X=$(echo -o); sort $X docs/y a.tar",
+                        "mktemp \"$(echo -p)\" /x.XXXX"):
+            with self.subTest(command):
+                self.assertRefused(command, ANYWHERE_WORDING, agent_id=AGENT_G)
+        r = self.assertRefused("dd $(echo of=docs/x)", VARIABLE_WORDING, agent_id=AGENT_G)  # may begin with of=
+        self.assertIn(ARG_WORDING, r.reason)
+        for command in ("sort -u \"out/$(cat list)\"", "X=-o; sort $X out/s a.tar", "dd if=\"$(ls | head -1)\" of=out/f",
+                        "sort \"$HOME/x\""):  # the environment's HOME, which the line does not set
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        r = self.assertRefused("X=-o; sort $X docs/s a.tar", "deliverables", agent_id=AGENT_G)  # the line's own value, read
+        self.assertIn("docs/s", r.reason)
+
+    def test_spuds_answers(self):
+        """Spud is held to Law 1 in a project and is free in his own files and outside every project, as for a redirection."""
+        for label, form in SPELLED_WRITERS:
+            with self.subTest(label):
+                r = self.assertRefused(form.replace("{}", "docs/x.md"), "Law 1", agent_id=None)
+                self.assertIn(ARG_WORDING, r.reason)
+                self.assertRefused(form.replace("{}", "ledger/tickets/SPD-001.md"), "generated", agent_id=None)
+                self.assertSilent(form.replace("{}", "/Users/nobody/x"), agent_id=None)
+                self.assertSilent(form.replace("{}", ".claude/x"), agent_id=None)  # his own .claude/**
+        self.assertSilent("mktemp .claude/x.XXXX", agent_id=None)
+        self.assertRefused("mktemp docs/x.XXXX", "Law 1", agent_id=None)
+        self.assertRefused("split -l 1 a.tar ledger/x", "generated", agent_id=None)
+        for command in ("wget https://example.com/x -P /tmp/spd-126-x", "sort -u \"$(cat list)\"", "curl -o \"$n\" https://example.com/x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)  # outside every project, or a target Spud's reading leaves unread
+        r = self.assertRefused("dd if=/dev/zero of=tests/fake/.git/hooks/pre-commit", "Law 1", agent_id=None)
+        self.assertNotIn(GIT_DIR_WORDING, r.reason)  # SPD-066's rule is a caller's with an agent_id
 
 
 PROBE = "/tmp/spd-127-probe"  # the scratch directory D of Spud's probe of zsh 5.9 -f and bash 3.2, 2026-09-18

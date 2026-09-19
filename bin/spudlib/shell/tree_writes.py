@@ -1,29 +1,31 @@
 """shell/tree_writes: the commands whose files land under a directory the line names but whose names it does not spell
-(SPD-126) -- an archive extracted, a patch applied, a download named by the URL or the server, a tree synced or copied.
+(SPD-126) -- an archive extracted, a patch applied, a tree synced or copied -- and the files the same commands name.
 
-Until SPD-126 none of them was read: `tar -xf a.tar -C out`, `unzip a.zip -d out`, `patch -p1 < x.patch`, `curl -O url`,
-`rsync -a src/ dest/` and `ditto src dst` recorded no write at all, and `cp -R src dest` checked dest and dest/src and
-nothing under them, so a source tree holding a `.git` planted one wherever it landed.  Each command here is read on this
-Mac's grammar (its man page: bsdtar, Info-ZIP unzip, BSD patch, curl 8, openrsync, ditto), and records a write anywhere under
-the directory its files land in (arg_writes' kind "tree"), which the path rule lets a member make only where one of its globs
-covers the whole subtree (hooks/pathrule.glob_covers_directory).  What the line cannot place at all -- bsdtar's -P, which
-keeps absolute paths and `..`; unzip's `-:`, which keeps `../`; a list tar reads with -T; a config file curl reads; rsync's
-daemon; an option a substitution may hide -- is syntax.ANY_PATH, refused to a member as a target the hook cannot resolve.
-A file such a command names on the line (tar -f, curl -o, patch -o and its file operand, rsync --log-file, ditto -c's
-archive) is the second SPD-126 engineer's reading, except the few that sit in a grammar read here anyway.
+Until SPD-126 none of them was read: `tar -xf a.tar -C out`, `unzip a.zip -d out`, `patch -p1 < x.patch`, `rsync -a src/
+dest/` and `ditto src dst` recorded no write at all, and `cp -R src dest` checked dest and dest/src and nothing under them,
+so a source tree holding a `.git` planted one wherever it landed.  Each command here is read on this Mac's grammar (its man
+page: bsdtar, Info-ZIP unzip, BSD patch, openrsync, ditto), and records a write anywhere under the directory its files land
+in (arg_writes' kind "tree"), which the path rule lets a member make only where one of its globs covers the whole subtree
+(hooks/pathrule.glob_covers_directory).  What the line cannot place at all -- bsdtar's -P, which keeps absolute paths and
+`..`; unzip's `-:`, which keeps `../`; a list tar reads with -T; rsync's daemon; an option a substitution may hide -- is
+syntax.ANY_PATH, refused to a member as a target the hook cannot resolve.  The files these commands name on the line are
+read here too, since their grammar is: tar's archive under -c, -r and -u, and patch's file operand, -o, -r and backups (the
+second SPD-126 engineer's), rsync's --log-file and batch files, ditto -c's archive.  A download (curl, wget) is
+shell/downloads' reading.
 
 What rsync and ditto copy is walked for a git directory by shell/tree_walk, as cp -R's and mv's are, through the destination
 entry each records with arg_writes.RECURSIVE.  An archive's, a patch's or a download's names are not on disk to read, and
 are not walked: such a command may land a `.git` under the directory it writes into, which the tree reading cannot see.
 
-Past 250 lines (SPD-065's look-again point) it stays whole: it is a list of six grammars, each one short reader with its
+Past 250 lines (SPD-065's look-again point) it stays whole: it is a list of five grammars, each one short reader with its
 table, and its one caller, the analysis, dispatches to all of them through read_tree_writes; the walk, which another caller
-wants alone, is the seam taken (shell/tree_walk)."""
+wants alone, is the seam taken (shell/tree_walk), and so are the downloads, whose two grammars read files and trees alike
+(shell/downloads)."""
 
 import re
 
 from . import analyse, arg_writes, prepare, syntax
-from ..hooks import hookio
+from ..hooks import hookio, pathrule
 
 
 # bsdtar (tar(1)): the letters and long options whose value is the rest of the word or the next one, the mode options, and
@@ -38,6 +40,7 @@ TAR_VALUE_LONGS = frozenset({
 TAR_MODES = {"-x": "x", "--extract": "x", "--get": "x", "-c": "c", "--create": "c", "-t": "t", "--list": "t", "-r": "r",
              "--append": "r", "-u": "u", "--update": "u"}
 TAR_CHDIR = ("-C", "--cd", "--directory")
+TAR_ARCHIVE_MODES = ("c", "r", "u")  # SPD-126: the modes that write the archive -f names
 TAR_STDOUT = ("-O", "--to-stdout")  # x mode writes each entry to standard output, no file
 TAR_ANYWHERE = ("-P", "--absolute-paths", "-T", "-I", "--files-from")  # -P keeps `/` and `..`; -T's list may hold -C lines
 # unzip (Info-ZIP): the modes that write no file (-c, -p to standard output; -l, -v list; -t test; -z the comment), the
@@ -48,28 +51,6 @@ UNZIP_ENV = ("UNZIP", "UNZIPOPT")  # options unzip reads from the environment, "
 PATCH_VALUE_LETTERS = frozenset("BDdFgioprVxYz")
 PATCH_VALUE_LONGS = frozenset({"--prefix", "--ifdef", "--directory", "--fuzz", "--get", "--input", "--output", "--strip",
                                "--reject-file", "--version-control", "--debug", "--basename-prefix", "--suffix", "--quoting-style"})
-# curl 8 (curl --help all): the short and long options that take the next word as their value (curl takes no `--opt=value`).
-CURL_VALUE_LETTERS = frozenset("ACDEFHKPQTUXYbcdehmortuwxyz")
-CURL_VALUE_LONGS = frozenset("""--abstract-unix-socket --alt-svc --aws-sigv4 --cacert --capath --cert --cert-type --ciphers
-    --config --connect-timeout --connect-to --continue-at --cookie --cookie-jar --create-file-mode --crlfile --curves --data
-    --data-ascii --data-binary --data-raw --data-urlencode --delegation --dns-interface --dns-ipv4-addr --dns-ipv6-addr
-    --dns-servers --doh-url --dump-header --egd-file --engine --etag-compare --etag-save --expect100-timeout --form
-    --form-string --ftp-account --ftp-alternative-to-user --ftp-method --ftp-port --ftp-ssl-ccc-mode --happy-eyeballs-timeout-ms
-    --haproxy-clientip --header --help --hostpubmd5 --hostpubsha256 --hsts --interface --ipfs-gateway --json --keepalive-time
-    --key --key-type --krb --libcurl --limit-rate --local-port --login-options --mail-auth --mail-from --mail-rcpt
-    --max-filesize --max-redirs --max-time --netrc-file --noproxy --oauth2-bearer --output --output-dir --parallel-max --pass
-    --pinnedpubkey --preproxy --proto --proto-default --proto-redir --proxy --proxy-cacert --proxy-capath --proxy-cert
-    --proxy-cert-type --proxy-ciphers --proxy-crlfile --proxy-header --proxy-key --proxy-key-type --proxy-pass
-    --proxy-pinnedpubkey --proxy-service-name --proxy-tls13-ciphers --proxy-tlsauthtype --proxy-tlspassword --proxy-tlsuser
-    --proxy-user --proxy1.0 --pubkey --quote --random-file --range --rate --referer --request --request-target --resolve
-    --retry --retry-delay --retry-max-time --sasl-authzid --service-name --socks4 --socks4a --socks5 --socks5-gssapi-service
-    --socks5-hostname --speed-limit --speed-time --stderr --telnet-option --tftp-blksize --time-cond --tls-max --tls13-ciphers
-    --tlsauthtype --tlspassword --tlsuser --trace --trace-ascii --trace-config --unix-socket --upload-file --url --url-query
-    --user --user-agent --variable --write-out""".split())
-CURL_REMOTE_NAME = ("--remote-name", "--remote-name-all", "--remote-header-name")  # -O and -J: a name from the URL or server
-# The variables that point curl at a config file of the line's choosing, which can name any output (curl(1): the default
-# config file is looked for under CURL_HOME, XDG_CONFIG_HOME and HOME, unless -q comes first).
-CURL_CONFIG_VARS = ("CURL_HOME", "XDG_CONFIG_HOME", "HOME")
 # openrsync (rsync(1) here, "rsync version 2.6.9 compatible") and GNU rsync: the options taking a value, the flags, the
 # options naming a program it runs, a file it writes or a directory it writes into, and the filter options under which a
 # plain --exclude no longer settles what is copied.
@@ -107,9 +88,10 @@ _START_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])")
 def read_tree_writes(cmd, base, words, a, depth):
     """Record what `words`, a command of syntax.TREE_WRITE_COMMANDS other than find, writes under a directory (module
     docstring); `cmd` is its command word as spelled, `base` what it dispatches on."""
-    reader = {"tar": read_tar, "bsdtar": read_tar, "unzip": read_unzip, "patch": read_patch, "curl": read_curl,
-              "rsync": read_rsync, "ditto": read_ditto}[base]
-    reader(cmd, words[1:], a, depth)
+    reader = {"tar": read_tar, "bsdtar": read_tar, "unzip": read_unzip, "patch": read_patch, "rsync": read_rsync,
+              "ditto": read_ditto}[base]
+    # SPD-127's one reading of a variable: a `$NAME` the line settled is read as the option or the file it holds
+    reader(cmd, [arg_writes.resolved(w, a) for w in words[1:]], a, depth)
 
 
 def record(a, cmd, word, kind="tree", how="path", sources=()):
@@ -188,7 +170,10 @@ def names_of(options):
 def read_tar(cmd, args, a, depth):
     """bsdtar: x mode extracts every entry under the directory -C changes to (each -C relative to the one before it, as
     chdir(2) goes) or the line's own; -O writes none; -P, and a -T list, may put one anywhere.  --use-compress-program names
-    a program tar runs, read as a command."""
+    a program tar runs, read as a command.  SPD-126's second engineer: c, r and u modes write the archive -f names (or TAPE,
+    set on the line, when -f is not given; `-` is standard output), relative to the line's own directory: tar opens it
+    before it adds a file, and -C "changes the directory before adding the following files" (tar(1)), so a -C before -f
+    moves only what goes into the archive."""
     bundle = []
     if args and not prepare.deglob(args[0]).startswith("-"):
         letters, rest = prepare.deglob(args[0]), args[1:]
@@ -206,6 +191,15 @@ def read_tar(cmd, args, a, depth):
             analyse.analyse_new_shell(a, prepare.deglob(value), depth + 1)
     mode = next((TAR_MODES[n] for n, _ in reversed(options) if n in TAR_MODES), None)
     names = names_of(options)
+    if mode in TAR_ARCHIVE_MODES:
+        archive = last_value(options, ("-f", "--file"))
+        if archive is None and ("TAPE" in a.vars or "TAPE" in a.assigned):
+            archive = "$TAPE"
+        if hidden:  # the first operand may be -f /elsewhere
+            record(a, cmd, syntax.ANY_PATH, None)
+        elif archive is not None and prepare.deglob(archive) not in ("", "-"):
+            record(a, cmd, archive, None)
+        return
     if mode != "x" or names.intersection(TAR_STDOUT):
         return
     if hidden or names.intersection(TAR_ANYWHERE):
@@ -255,19 +249,24 @@ def read_unzip(cmd, args, a, depth):
 
 
 def read_patch(cmd, args, a, depth):
-    """BSD patch without -o and without a file operand: writes the files its patch names under -d's directory or the line's
-    (the second SPD-126 engineer reads -o and the operand, which name the file); -C writes nothing; a -B backup prefix
-    holding a directory puts the backups under it."""
+    """BSD patch: writes the files its patch names under -d's directory or the line's -- a whole-subtree write -- whether
+    or not the line names one, since a patch file may hold several patches and only the first takes the file operand and
+    -o (patch.c's reinitialize_almost_everything clears both, and each later patch names its own file); -C writes nothing;
+    each -d changes directory from the one before it, as patch does when it reads the option; a -B backup prefix holding a
+    directory puts the backups under it.  SPD-126's second engineer: the file operand, or -o's file in its place, is
+    written as named, with its backup (patch_backups) and its reject file, -r's or <file>.rej (patch(1))."""
     options, operands, hidden = scan_options(args, PATCH_VALUE_LETTERS, PATCH_VALUE_LONGS, a, permute=True)
     names = names_of(options)
-    if names.intersection(("-C", "--check", "--dry-run", "-o", "--output")):
+    if names.intersection(("-C", "--check", "--dry-run")):
         return
     if hidden:  # an operand the member controls may be -d /elsewhere, before it is a file
         record(a, cmd, syntax.ANY_PATH)
         return
-    if operands:
-        return
-    directory = last_value(options, ("-d", "--directory"))
+    directory = None
+    for name, value in options:
+        if name in ("-d", "--directory") and value is not None:
+            text = prepare.deglob(value)
+            directory = value if directory is None or text.startswith(("/", "~")) else directory.rstrip("/") + "/" + value
     record(a, cmd, directory if directory is not None else ".")
     prefix = last_value(options, ("-B", "--prefix"))
     text = prepare.deglob(prefix) if prefix else ""
@@ -277,28 +276,52 @@ def read_patch(cmd, args, a, depth):
             head = directory.rstrip("/") + "/" + head
         record(a, cmd, head or "/")
 
+    def here(word):  # a name patch opens once it has changed directory
+        return word if directory is None or prepare.deglob(word).startswith(("/", "~")) else directory.rstrip("/") + "/" + word
 
-def read_curl(cmd, args, a, depth):
-    """curl: -O, --remote-name-all and -J write a file the URL or the server names under --output-dir's directory or the
-    line's; a config file -K reads, or one the line points CURL_HOME, XDG_CONFIG_HOME or HOME at (unless -q comes first),
-    may name any output; so may what xargs hands it, which may be `-o` or `--output-dir` (curl reads options anywhere).
-    -o and the files curl writes by name are the second SPD-126 engineer's."""
-    first = prepare.deglob(args[0]) if args else ""
-    anywhere = first not in ("-q", "--disable") and any(v in a.vars for v in CURL_CONFIG_VARS)
-    anywhere = anywhere or any(syntax.INPUT_OPERAND in w for w in args)
-    remote, output_dir = False, None
-    options, _, _ = scan_options(args, CURL_VALUE_LETTERS, CURL_VALUE_LONGS, a, permute=True)
-    for name, value in options:
-        if name in ("-O", "-J") or name in CURL_REMOTE_NAME:
-            remote = True
-        elif name in ("-K", "--config"):
-            anywhere = True
-        elif name == "--output-dir":
-            output_dir = value
-    if anywhere:
-        record(a, cmd, syntax.ANY_PATH)
-    elif remote:
-        record(a, cmd, output_dir if output_dir is not None else ".")
+    written = last_value(options, ("-o", "--output"))
+    written = written if written is not None else (operands[0] if operands else None)
+    if written is not None and prepare.deglob(written) in ("", "-"):
+        written = None
+    if written is not None:
+        record(a, cmd, here(written), None)
+        patch_backups(a, cmd, written, here, options, names)
+    reject = last_value(options, ("-r", "--reject-file"))
+    if reject is not None and prepare.deglob(reject) not in ("", "-"):
+        record(a, cmd, here(reject), None)
+    elif written is not None:
+        record(a, cmd, here(written) + ".rej", None)
+
+
+def patch_backups(a, cmd, written, here, options, names):
+    """The backups BSD patch makes of the file it writes (patch(1), Backup Files): on a mismatch by default and for every
+    file under -b, unless -V none, or --posix (POSIXLY_CORRECT set on the line) without -b, turns them off.  Named -B's
+    prefix and the file, or -Y's prefix before its basename, or the file and -z's suffix (SIMPLE_BACKUP_SUFFIX set on the
+    line, else .orig); a numbered <file>.~N~ too unless -V (PATCH_VERSION_CONTROL, VERSION_CONTROL) says simple."""
+    version = last_value(options, ("-V", "--version-control"))
+    for var in ("PATCH_VERSION_CONTROL", "VERSION_CONTROL"):
+        if version is None and (var in a.vars or var in a.assigned):
+            version = arg_writes.resolved("$" + var, a)
+    kind = prepare.deglob(version) if version is not None and not arg_writes.unresolved(version) else ""
+    asked = names.intersection(("-b", "--backup"))
+    if (len(kind) > 1 and "none".startswith(kind)) or (("--posix" in names or "POSIXLY_CORRECT" in a.vars) and not asked):
+        return
+    prefix = last_value(options, ("-B", "--prefix"))
+    basename_prefix = last_value(options, ("-Y", "--basename-prefix"))
+    suffix = last_value(options, ("-z", "--suffix"))
+    if suffix is None and ("SIMPLE_BACKUP_SUFFIX" in a.vars or "SIMPLE_BACKUP_SUFFIX" in a.assigned):
+        suffix = "$SIMPLE_BACKUP_SUFFIX"
+    suffix = suffix if suffix is not None else ".orig"
+    if prefix is not None:
+        record(a, cmd, here(prefix + written), None)
+        return
+    if basename_prefix is not None:
+        folder, _, base = written.rpartition("/")
+        record(a, cmd, here((folder + "/" if folder else "") + basename_prefix + base + suffix), None)
+        return
+    record(a, cmd, here(written) + suffix, None)
+    if not (kind and ("never".startswith(kind) and len(kind) > 1 or "simple".startswith(kind))):
+        record(a, cmd, here(written) + ".~" + pathrule.NAME_CHAR + pathrule.NAME_MORE + "~", None)
 
 
 def remote_operand(word):

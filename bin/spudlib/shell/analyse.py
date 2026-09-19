@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, expansions, find_xargs, git_programs, git_verbs, globbing, prepare, spud_calls, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, prepare, spelled_writes, spud_calls, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -396,12 +396,20 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         arg_writes.read_writes(prepare.deglob(cmd), base, words + unspelled, a)
     elif base in syntax.TREE_WRITE_COMMANDS:
         # SPD-126: a command whose files the line does not spell -- what find deletes and runs, an archive extracted, a
-        # patch applied, a download the server names, a tree synced -- read where tee is, a whole-subtree write each
+        # patch applied, a download the server names, a tree synced -- read where tee is, a whole-subtree write each, with
+        # the files the same command names (a download's in shell/downloads)
         a.kinds.append("other")
         if base == "find":
             find_xargs.read_find(prepare.deglob(cmd), words + unspelled, a, depth)
+        elif base in syntax.DOWNLOAD_COMMANDS:
+            downloads.read_download(prepare.deglob(cmd), base, words + unspelled, a, depth)
         else:
             tree_writes.read_tree_writes(prepare.deglob(cmd), base, words + unspelled, a, depth)
+    elif base in syntax.SPELLED_WRITE_COMMANDS or syntax.PERL_RE.match(base):
+        # SPD-126: a command that writes a file it names past SPD-121's table -- dd's of=, sort's -o, mktemp's templates,
+        # split's pieces, perl -i -- read where tee is, each held to the path rule as a redirection target
+        a.kinds.append("other")
+        spelled_writes.read_spelled_writes(prepare.deglob(cmd), base, words + unspelled, a, depth)
     elif cmd in ("alias", "unalias") and directories.builtin_runs(effect):
         # SPD-059: the builtin, spelled exactly, stores text the shell runs wherever it next parses this name in command
         # position -- which on one line means `eval`.  Never a spud call, so an aliasing line is not allowed on its own.

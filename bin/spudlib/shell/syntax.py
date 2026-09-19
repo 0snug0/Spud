@@ -339,7 +339,8 @@ GIT_VERB_FILE_POSITIONALS = {"bundle": ("create", 1), "mailinfo": (None, 2), "pa
 # `unlink` rm's two-argument forms (their man pages).  Shapes: "dest" writes its last operand (or -t's directory) and, when
 # that is a directory, each source inside it; "move" also removes each source; "link" writes its link name, `./<name>` for
 # a single operand; "each" writes every operand; "mode" every operand after the mode, owner or flags; "sed" every file
-# after the script, only in place.
+# after the script, only in place.  SPD-126: mkfifo (mkfifo(1): `mkfifo [-m mode] fifo_name ...`, getopt's) makes every
+# operand, "each" as mkdir's.
 ARG_WRITE_COMMANDS = {
     "cp": ("dest", "t", ("--target-directory", "--suffix")),
     "install": ("dest", "BDfghlMmoTt", ("--target-directory", "--suffix", "--mode", "--owner", "--group", "--strip-program")),
@@ -357,16 +358,28 @@ ARG_WRITE_COMMANDS = {
     "chgrp": ("mode", "", ("--from", "--reference")),
     "chflags": ("mode", "", ()),
     "sed": ("sed", "efiI", ("--expression", "--file", "--line-length")),
+    "mkfifo": ("each", "m", ("--mode",)),
 }
 # The options of those commands that change which files they write, so a glob word the shell may expand to one of them is
 # read as it (SPD-041's GLOB_SAMPLES): the destination directory, install's -d (every operand a directory it makes) and -M
 # (its metalog), and sed's in-place forms.
 ARG_WRITE_OPTIONS = frozenset({"-t", "-T", "--target-directory", "--no-target-directory", "-d", "-M", "-i", "-I", "--in-place"})
 # SPD-126: the commands whose files the line does not spell, which the analysis hands to shell/find_xargs (find: what it
-# deletes, the files -fprint names, the command -exec runs) and shell/tree_writes (the rest): an archive extracted (bsdtar,
-# this Mac's tar; unzip; ditto -x), a patch applied, a download named by the URL or the server (curl -O, -J), a tree synced or
-# copied (rsync, which is openrsync here; ditto).  Each is a whole-subtree write of the directory the files land in.
-TREE_WRITE_COMMANDS = frozenset({"find", "tar", "bsdtar", "unzip", "patch", "curl", "rsync", "ditto"})
+# deletes, the files -fprint names, the command -exec runs), shell/downloads (a download named by the URL or the server:
+# curl -O and -J, wget without -O) and shell/tree_writes (the rest): an archive extracted (bsdtar, this Mac's tar; unzip;
+# ditto -x), a patch applied, a tree synced or copied (rsync, which is openrsync here; ditto).  Each is a whole-subtree
+# write of the directory the files land in, beside the files the same command names.
+TREE_WRITE_COMMANDS = frozenset({"find", "tar", "bsdtar", "unzip", "patch", "curl", "wget", "rsync", "ditto"})
+# SPD-126: the two downloaders, which shell/downloads reads whole: the files curl and wget are told to write by name (curl's
+# -o, -D, -c and kin; wget's -O, -o, -a and kin) and the ones the URL or the server names under a directory (curl -O, wget
+# without -O).  wget is not installed on this Mac; its reading rests on GNU wget's manual alone.
+DOWNLOAD_COMMANDS = frozenset({"curl", "wget"})
+# SPD-126: the commands that write a file the line names past SPD-121's table, whose grammar is no shape of it, read by
+# shell/spelled_writes: dd's of= operand, sort's -o and -T, mktemp's templates and split's prefix (names the command picks,
+# read with hooks/pathrule.NAME_CHAR), and perl's -i, each on this Mac's man page (perl: perlrun).  perl is matched by
+# PERL_RE, which takes its versioned names too.
+SPELLED_WRITE_COMMANDS = frozenset({"dd", "sort", "mktemp", "split"})
+PERL_RE = re.compile(r"^perl(?:\d+(?:\.\d+)*)?$")
 BRANCH_READ_FLAGS = {"-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", "--all", "--remotes", "--verbose", "--color",
                      "--no-color", "--column", "--no-column", "-i", "--ignore-case", "--no-abbrev"}
 BRANCH_READ_VALUE_FLAGS = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--abbrev"}
@@ -429,7 +442,9 @@ class ShellAnalysis:
         # source) or "find-tree" (under find's starting point), which bash_rule.path_directories reads per path; how is
         # also "walk" (find's starting point, walked for a git directory only) or "itself" (GNU -T); and a destination's
         # kind is (arg_writes.RECURSIVE, rsync's excludes, whether `src/` lands as its contents) when what lands there may be
-        # a whole tree.  Records come from shell/arg_writes, shell/find_xargs and shell/tree_writes.
+        # a whole tree.  Records come from shell/arg_writes, shell/find_xargs, shell/tree_writes, shell/downloads and
+        # shell/spelled_writes, the last with hooks/pathrule.NAME_CHAR standing for each character of a name the command
+        # picks (mktemp's X, split's suffix).
         self.arg_writes = []
         self.vars = {}
         self.cwds = frozenset([cwd]) if cwd else None
