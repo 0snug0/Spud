@@ -61,16 +61,22 @@ def move_preconditions(ctx, con, target):
     return problems
 
 
-def move_steps(ctx, target):
-    """The nine steps as --dry-run prints them, with this home's paths filled in."""
+def move_steps(ctx, con, target):
+    """The nine steps as --dry-run prints them, with this home's paths filled in.  SPW-001: step 5's line is true only
+    when a row 1 is there to claim; a project-less home has none, so it says that instead."""
+    has_project = con.execute("SELECT 1 FROM projects WHERE id = 1").fetchone() is not None
+    step5 = ("set project spud's sessions to claim; settings sync into %s; strip the ledger's entries from %s; project install spud and re-sync"
+             " every installed project and the ~/.claude copies" % (target / ".claude" / "settings.json", ctx.tool / ".claude" / "settings.json")
+             if has_project else
+             "no project registered, so nothing to claim; settings sync into %s; strip the ledger's entries from %s; re-sync every"
+             " installed project and the ~/.claude copies" % (target / ".claude" / "settings.json", ctx.tool / ".claude" / "settings.json"))
     return [
         "write a checked backup in %s" % backup.backups_dir(ctx),
         "copy the database into %s with SQLite's online backup, run integrity_check, compare row counts table by table" % (target / ".spud"),
         "copy %s, %s and %s; render into %s and require zero files written" % (
             ", ".join(d + "/" for d in COPIED_DIRS), ", ".join(COPIED_FILES), backup.backups_dir(ctx), target),
         "write %s" % (homeconf.spud_config_dir() / "home"),
-        "set project spud's sessions to claim; settings sync into %s; strip the ledger's entries from %s; project install spud and re-sync"
-        " every installed project and the ~/.claude copies" % (target / ".claude" / "settings.json", ctx.tool / ".claude" / "settings.json"),
+        step5,
         "install %s and %s with the new paths" % (launchagents.SCHEDULE_LABEL, launchagents.RENDER_LABEL),
         "render again (the move's own events) and run doctor on %s" % target,
         "rename %s to %s" % (ctx.home / ".spud", ctx.home / MOVED_STATE),
@@ -161,20 +167,29 @@ def strip_home_settings(ctx, settings):
 
 def move_resync(old, new, args):
     """Step 5 over the new home: project spud claims, the report entry, the new home's settings, the tool's tracked settings
-    stripped, project spud installed and every installed project re-synced (the user-scope agent and skill with them)."""
+    stripped, project spud installed and every installed project re-synced (the user-scope agent and skill with them).  SPW-001:
+    a project-less home has no row 1 to claim, so 5a records that instead and the move otherwise proceeds -- moving a legal
+    home is reasonable whether or not one is registered."""
     done = []
     con = ledgerdb.connect(new)
     try:
         at = kernel.now()
         with ledgerdb.write_txn(con):
             row = con.execute("SELECT * FROM projects WHERE id = 1").fetchone()
-            if row["sessions"] != "claim":
-                con.execute("UPDATE projects SET sessions = 'claim' WHERE id = 1")
-                ledgerdb.write_event(con, at, "spud", "project.edited", "project %s edited: sessions" % row["key"],
-                                     data={"project": row["key"], "fields": ["sessions"], "from": {"sessions": row["sessions"]}, "to": {"sessions": "claim"}})
+            if row is None:
+                tool_line = "Tool: %s (no project registered)" % new.tool
+            else:
+                if row["sessions"] != "claim":
+                    con.execute("UPDATE projects SET sessions = 'claim' WHERE id = 1")
+                    ledgerdb.write_event(con, at, "spud", "project.edited", "project %s edited: sessions" % row["key"],
+                                         data={"project": row["key"], "fields": ["sessions"], "from": {"sessions": row["sessions"]}, "to": {"sessions": "claim"}})
+                tool_line = "Tool: %s (project %s, sessions claim)" % (new.tool, row["key"])
             entry = reportentry.write_report_entry(con, at, "Home moved from %s to %s" % (old.home, new.home), "home move", None,
-                                                   lines=["Tool: %s (project %s, sessions claim)" % (new.tool, row["key"])], next_line=args.next)
-        done.append("5a. project %s: sessions claim; %s" % (row["key"], reportentry.report_entry_line(entry)))
+                                                   lines=[tool_line], next_line=args.next)
+        if row is None:
+            done.append("5a. no project registered; nothing to claim; %s" % reportentry.report_entry_line(entry))
+        else:
+            done.append("5a. project %s: sessions claim; %s" % (row["key"], reportentry.report_entry_line(entry)))
         synced = settings_sync.cmd_settings_sync(new, lazy.argparse.Namespace(path=None, dry_run=False))
         done.append("5b. %s %s" % (synced.data["path"], "written" if synced.data["written"] else "unchanged"))
         tracked = old.tool / ".claude" / "settings.json"
@@ -233,7 +248,7 @@ def cmd_home_move(ctx, args):
         problems = move_preconditions(ctx, con, target)
         if problems:
             raise kernel.SpudError(kernel.EXIT_ERROR, "home move refused: " + "; ".join(problems), data={"problems": problems, "to": str(target)})
-        steps = move_steps(ctx, target)
+        steps = move_steps(ctx, con, target)
         if args.dry_run:
             return kernel.Result({"dry_run": True, "to": str(target), "steps": steps},
                                  "home move --dry-run: the preconditions hold; the move would\n" + "\n".join("  %d. %s" % (n, s) for n, s in enumerate(steps, start=1)))

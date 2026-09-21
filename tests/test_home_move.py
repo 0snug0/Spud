@@ -208,5 +208,67 @@ class FullMoveTest(HomeMoveCase):
         self.assertEqual(self.home.json("project", "show", "spud")["project"]["sessions"], "always")  # the old database never changed
 
 
+class ProjectlessMoveTest(LaunchdMixin, RepoMixin, SpudTestCase):
+    """SPW-007: `home move` on a home with no project registered at all -- SPW-001 phase 2's legal, project-less home, the
+    one `spud init --no-project` will leave.  Before the fix, step 5 (move_resync) subscripted the `None` row 1 and died
+    with a TypeError, mid-procedure, after the backup and the database copy.  The fix chosen: the move proceeds, since a
+    project-less home is legal and moving it is reasonable, and step 5a records that there was nothing to claim."""
+
+    seed_project = False  # the whole point: no project at all, not even one
+
+    def setUp(self):
+        self.home = Home()
+        self.addCleanup(self.home.cleanup)
+        home = self.home.path
+        shutil.copytree(REPO / "bin", home / "bin", ignore=shutil.ignore_patterns("__pycache__"))
+        (home / ".claude" / "agents").mkdir(parents=True)
+        shutil.copyfile(REPO / ".claude" / "agents" / "spudagent.md", home / ".claude" / "agents" / "spudagent.md")
+        (home / ".gitignore").write_text(".spud/\n.user-claude/\n.user-config/\n.claude/settings.local.json\n", encoding="utf-8")
+        (home / "docs").mkdir()
+        (home / "docs" / "note.md").write_text("a doc\n", encoding="utf-8")
+        (home / ".obsidian").mkdir()
+        (home / ".obsidian" / "app.json").write_text("{}\n", encoding="utf-8")
+        (home / "CLAUDE.md").write_text("You are Spud.\n", encoding="utf-8")
+        self.home.write_settings({"model": "claude-fable-5-1"})
+        self.setup_launchd()
+        self.home.init(project=False)
+        self.cli("settings", "sync", actor="spud")
+        git(home, "init", "-q", "-b", "main")
+        git(home, "add", "-A")
+        git(home, "commit", "-q", "-m", "home and tool")
+        self.cli("render", actor="spud")
+        self.cli("schedule", "install", actor="spud")
+        self.target = self.scratch_dir("new-home-")
+
+    def move(self, *extra, check=False, actor="spud"):
+        return self.cli("home", "move", "--to", self.target, *extra, actor=actor, check=check)
+
+    def new_env(self):
+        return {"SPUD_HOME": str(self.target)}
+
+    def test_dry_run_says_nothing_to_claim(self):
+        self.assertEqual(self.home.rows("SELECT * FROM projects"), [])
+        out = self.cli_json("home", "move", "--to", self.target, "--dry-run", actor="spud")
+        self.assertEqual((out["dry_run"], len(out["steps"])), (True, 9))
+        self.assertIn("no project registered, so nothing to claim", out["steps"][4])
+        self.assertNotIn("project spud", out["steps"][4])
+        self.assertEqual(list(self.target.iterdir()), [])
+
+    def test_the_move_completes_with_a_truthful_step_5a(self):
+        old = self.home.path
+        proc = self.move(check=True)
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIn("5a. no project registered; nothing to claim", proc.stdout)
+        # the old home: state renamed, as a completed move leaves it -- nothing crashed mid-procedure
+        self.assertFalse((old / ".spud").exists())
+        self.assertTrue((old / ".spud-moved" / "ledger.db").is_file())
+        # the new home: still no project registered, and it answers through SPUD_HOME with the move's own report entry
+        self.assertEqual(json.loads(self.cli("--json", "project", "list", env=self.new_env()).stdout)["projects"], [])
+        out = json.loads(self.cli("--json", "events", "--kind", "report.entry", env=self.new_env()).stdout)
+        entry = out["events"][-1]
+        self.assertEqual(entry["data"]["title"], "Home moved from %s to %s" % (old, self.target))
+        self.assertIn("no project registered", entry["body"])
+
+
 if __name__ == "__main__":
     unittest.main()
