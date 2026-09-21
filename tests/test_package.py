@@ -29,7 +29,8 @@ DISPATCH = "hooks.dispatch"
 # shell.downloads for the files a line names past SPD-121's table (SPD-126), shell.stdin_text for the commands a line
 # feeds a shell on standard input (SPD-143), shell.script_text for the files a sed script or an awk program writes and the
 # commands it runs (SPD-139), shell.inline_programs for the program an interpreter run spells rather than reads from a
-# file (SPD-150).
+# file (SPD-150), shell.interpreter_words for the words such a run is read with -- one the line cannot settle where an
+# option may stand, and one an xargs reads from its input (SPD-152).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
@@ -37,8 +38,8 @@ HOOK_PATH = {
     "hooks.dispatch", "hooks.gitrepos", "hooks.hookio", "hooks.pathrule", "hooks.pretool", "hooks.recording", "hooks.sessionhooks",
     "hooks.snapshots", "hooks.stophook", "hooks.subagent_stop", "hooks.worktrees",
     "shell.analyse", "shell.arg_writes", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
-    "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.globbing", "shell.inline_programs", "shell.prepare",
-    "shell.redirect_globs", "shell.spud_calls",
+    "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.globbing", "shell.inline_programs",
+    "shell.interpreter_words", "shell.prepare", "shell.redirect_globs", "shell.spud_calls",
     "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
     "shell.walk", "shell.zsh",
 }

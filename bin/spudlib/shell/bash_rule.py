@@ -84,6 +84,13 @@ INLINE_PROGRAM_REASON = (
     " proposal if the work really needs a program of its own")
 INLINE_PROGRAM_STDIN = ("it reads on standard input (a here-document, a here-string, a pipe or a `<` file), having none"
                         " of its own")
+# SPD-043's reason for a word the hook cannot resolve where a command is read by name, which SPD-152 reads in two places:
+# where the word stands on the line ("var-word", among the findings as spelled) and where an xargs reads it from an input
+# the line does not spell ("inline-word", read last with the inline program it may carry, shell/interpreter_words).
+VAR_WORD_REASON = ("the word %s holds a parameter expansion, arithmetic or a substitution the hook cannot resolve, or is an operand the"
+                   " line does not spell at all, where the command is read by name (a wrapper's options, git's options, verb and the"
+                   " arguments it checks, a shell's or an interpreter's options and program, a spud call's words, the options of a command"
+                   " that writes by argument); spell the words out")
 
 
 def inline_program_reason(detail):
@@ -303,9 +310,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         elif kind == "var":
             return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
         elif kind == "var-word":
-            return ("the word %s holds a parameter expansion, arithmetic or a substitution the hook cannot resolve, where the command is"
-                    " read by name (a wrapper's options, git's options, verb and the arguments it checks, a shell's or python's options and"
-                    " script, a spud call's words, the options of a command that writes by argument); spell the words out" % detail), analysis
+            return VAR_WORD_REASON % detail, analysis
         elif kind == "var-doubt":
             return ("the variable %s may not hold the value this line assigned it (the assignment may not run or does not persist: a"
                     " condition, a compound command, a loop or function body, a pipeline, a background job, a subshell or substitution,"
@@ -444,4 +449,10 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         for kind, detail in analysis.findings:
             if kind == "inline":
                 return inline_program_reason(detail), analysis
+            if kind == "inline-word":
+                # SPD-152: an interpreter's option position the hook cannot read at all, because an xargs reads it from an
+                # input the line does not spell (`cat f | xargs node`, where an `-e` may stand).  Read here rather than
+                # among the findings as spelled, for the same reason an inline program is: what the same input writes
+                # (SPD-126's `xargs perl -pi -e s/a/b/ < list`) keeps its own reason.
+                return VAR_WORD_REASON % detail, analysis
     return None, analysis
