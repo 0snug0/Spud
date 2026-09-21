@@ -1,0 +1,445 @@
+"""The files the tool ships for a home, share/** (SPW-001, the `spud init` design section 4.4).
+
+Nothing caught the `Board.base` that shipped a first view declaring `type: bases` -- which is not a view type -- and a
+half-created trailing view; both were fixed by hand on the machine that hit them.  This module is the guard.  It reads
+every shipped `.base` with a deliberately restricted block-YAML reader written here, its only user: the subset is block
+mappings and sequences, `key:`, `key: value`, `- value`, `- key: value`, plain scalars to the end of the line, quoted
+scalars and integers, and the reader *raises* on a tab, a flow collection, an anchor, an alias, a tag, a block scalar,
+a document marker, a comment, a duplicate key and any line it cannot place.  A shipped file that reaches for a YAML
+feature the reader does not know therefore fails instead of passing unchecked, which is the property the broken file
+needed and a permissive parser would not have given.
+
+It also holds the shipped set as a whole: every `{{mark}}` under share/ is one core/shipped names and every mark it
+names is used; no shipped file spells a machine's path or a person's address, rendered or not; the rendered config is
+one `config_problems` passes; the couplings nothing else checks -- the `Fleet.base` view `render/teamcard` embeds in
+every ticket note, the `ledger/Spud.md` that `render/notefiles` links as every root member's parent, and the folders
+`render/notefiles.render_targets` writes into -- hold.
+"""
+
+import ast
+import fnmatch
+import json
+import re
+import unittest
+from pathlib import Path
+
+import helpers
+from helpers import REPO, load_spud_module
+
+spud = load_spud_module()
+
+SHARE = REPO / "share"
+NOTEFILES = REPO / "bin" / "spudlib" / "render" / "notefiles.py"
+# The Obsidian Bases view types the shipped files actually use.  Adding a view of another type is a reviewed edit that
+# widens this set, as HOOK_PATH is widened: the full list of Bases view types is not something this repository knows,
+# and a guessed list that happened to include `bases` would have passed the bug this module exists for.
+VIEW_TYPES = {"table"}
+MARK_RE = re.compile(r"\{\{([^{}]*)\}\}")
+# A person's address, which no shipped file may name (design 4.3: the two values init must not put in anybody's mouth).
+# Not a bare `@`: the CLI's own spelling for a brief on stdin or from a file, `--brief @-` and `--brief @file`, is in the
+# shipped protocol and in the shipped ticket template, and has to stay.
+ADDRESS_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]*[A-Za-z]")
+KEY_RE = re.compile(r"([A-Za-z_][\w.]*):(?: (.*))?$")
+FLOW = {"[": "a flow sequence", "{": "a flow mapping", "&": "an anchor", "*": "an alias", "!": "a tag",
+        "|": "a block scalar", ">": "a folded block scalar", "%": "a directive"}
+
+
+class YamlRefusal(Exception):
+    """The restricted reader met something the shipped subset leaves out.  Raised, never tolerated: a reader that
+    accepted everything would have accepted `type: bases`."""
+
+
+def base_lines(text):
+    """[(indent, content, line number)] for every line that carries anything, refusing what the subset leaves out."""
+    rows = []
+    for number, raw in enumerate(text.split("\n"), start=1):
+        if "\t" in raw:
+            raise YamlRefusal("line %d: a tab" % number)
+        content = raw.strip()
+        if not content:
+            continue
+        if content.startswith("#"):
+            raise YamlRefusal("line %d: a comment" % number)
+        if content.startswith("---") or content.startswith("..."):
+            raise YamlRefusal("line %d: a document marker" % number)
+        if raw[:1] == "%":
+            raise YamlRefusal("line %d: a directive" % number)
+        rows.append((len(raw) - len(raw.lstrip(" ")), content, number))
+    if not rows:
+        raise YamlRefusal("nothing to read")
+    if rows[0][0] != 0:
+        raise YamlRefusal("line %d: the first line is indented" % rows[0][2])
+    return rows
+
+
+def read_scalar(content, number):
+    """A plain scalar to the end of the line, a single- or double-quoted scalar, or an integer."""
+    if content[:1] in FLOW:
+        raise YamlRefusal("line %d: %s" % (number, FLOW[content[0]]))
+    if content[0] in "'\"":
+        quote = content[0]
+        if len(content) < 2 or content[-1] != quote or content.count(quote) != 2:
+            raise YamlRefusal("line %d: a quoted scalar the reader cannot read whole" % number)
+        return content[1:-1]
+    if re.fullmatch(r"-?\d+", content):
+        return int(content)
+    return content
+
+
+def split_key(content, number):
+    """(key, value) for `key:` -- value the empty string -- or `key: value`.  Refuses every other shape of line."""
+    match = KEY_RE.fullmatch(content)
+    if match is None:
+        raise YamlRefusal("line %d: %r is not `key:` or `key: value`" % (number, content))
+    return match.group(1), (match.group(2) or "").strip()
+
+
+def read_block(rows, at, indent):
+    """(value, the next row) for the block that starts at rows[at] and is indented `indent`."""
+    return read_sequence(rows, at, indent) if rows[at][1].startswith("-") else read_mapping(rows, at, indent)
+
+
+def read_mapping(rows, at, indent):
+    out = {}
+    while at < len(rows) and rows[at][0] == indent:
+        _, content, number = rows[at]
+        key, value = split_key(content, number)
+        if key in out:
+            raise YamlRefusal("line %d: %s twice in one mapping" % (number, key))
+        at += 1
+        if value == "":
+            if at < len(rows) and rows[at][0] > indent:
+                out[key], at = read_block(rows, at, rows[at][0])
+            else:
+                out[key] = None
+        else:
+            out[key] = read_scalar(value, number)
+            if at < len(rows) and rows[at][0] > indent:
+                raise YamlRefusal("line %d: indented under a key that already has a value" % rows[at][2])
+    if at < len(rows) and rows[at][0] > indent:
+        raise YamlRefusal("line %d: indented past the mapping it is in" % rows[at][2])
+    return out, at
+
+
+def read_sequence(rows, at, indent):
+    out = []
+    while at < len(rows) and rows[at][0] == indent and rows[at][1].startswith("-"):
+        _, content, number = rows[at]
+        if not content.startswith("- "):
+            raise YamlRefusal("line %d: %r is not `- value`" % (number, content))
+        rest = content[2:].strip()
+        at += 1
+        if KEY_RE.fullmatch(rest) is None:  # `- value`
+            out.append(read_scalar(rest, number))
+            if at < len(rows) and rows[at][0] > indent:
+                raise YamlRefusal("line %d: indented under a sequence entry that already has a value" % rows[at][2])
+            continue
+        key, value = split_key(rest, number)  # `- key:` or `- key: value`, the first key of a mapping entry
+        entry = {}
+        if value == "":
+            if at < len(rows) and rows[at][0] > indent + 2:
+                entry[key], at = read_block(rows, at, rows[at][0])
+            elif at < len(rows) and rows[at][0] == indent + 2 and rows[at][1].startswith("- "):
+                raise YamlRefusal("line %d: a sequence at the entry's own key column reads either way" % rows[at][2])
+            else:
+                entry[key] = None
+        else:
+            entry[key] = read_scalar(value, number)
+        if at < len(rows) and rows[at][0] == indent + 2:  # the entry's remaining keys
+            rest_of_entry, at = read_mapping(rows, at, indent + 2)
+            for name, held in rest_of_entry.items():
+                if name in entry:
+                    raise YamlRefusal("line %d: %s twice in one sequence entry" % (number, name))
+                entry[name] = held
+        out.append(entry)
+    if at < len(rows) and rows[at][0] >= indent and not rows[at][1].startswith("-"):
+        raise YamlRefusal("line %d: %r is in a sequence and is not an entry" % (rows[at][2], rows[at][1]))
+    return out, at
+
+
+def read_base(text):
+    """The parsed file, or YamlRefusal.  Every line is placed: a line left over is a line the reader cannot read."""
+    rows = base_lines(text)
+    value, at = read_block(rows, 0, 0)
+    if at != len(rows):
+        raise YamlRefusal("line %d: left unread" % rows[at][2])
+    return value
+
+
+def view_problems(data):
+    """What is wrong with a parsed `.base` file's views, as a list of sentences; [] when there is nothing.
+
+    `views` is a non-empty list and every view is a mapping with a non-empty `name` and a `type` in VIEW_TYPES -- the
+    whole of the incident this module guards: a view of a type that is not one (`bases`), and a half-created view at the
+    end with neither of the two keys every one of its siblings carries."""
+    problems = []
+    views = data.get("views") if isinstance(data, dict) else None
+    if not isinstance(views, list) or not views:
+        return ["views is not a non-empty list (%r)" % (views,)]
+    for n, view in enumerate(views):
+        where = "view %d" % (n + 1)
+        if not isinstance(view, dict):
+            problems.append("%s is not a mapping (%r)" % (where, view))
+            continue
+        for key in ("type", "name"):
+            if not isinstance(view.get(key), str) or not view[key].strip():
+                problems.append("%s has no %s (%r)" % (where, key, view.get(key)))
+        if isinstance(view.get("type"), str) and view["type"] not in VIEW_TYPES:
+            problems.append("%s has type %r, which is not one of %s" % (where, view["type"], ", ".join(sorted(VIEW_TYPES))))
+    names = [v.get("name") for v in views if isinstance(v, dict)]
+    for name in sorted({n for n in names if isinstance(n, str) and names.count(n) > 1}):
+        problems.append("two views are called %r" % name)
+    return problems
+
+
+def shipped():
+    """[(the path under share/, the file's text)] for every shipped file."""
+    return [(path.relative_to(SHARE).as_posix(), path.read_text(encoding="utf-8"))
+            for path in sorted(SHARE.rglob("*")) if path.is_file()]
+
+
+def render_target_paths():
+    """The relative paths render/notefiles.render_targets writes, read from that module's own string literals.
+
+    The folders are hard-coded in the renderer, not read from `config.ledger` (no module reads that block: proposal 3 of
+    the design), so the renderer is what a shipped `file.inFolder(…)` is checked against."""
+    tree = ast.parse(NOTEFILES.read_text(encoding="utf-8"), str(NOTEFILES))
+    found = {node.value for node in ast.walk(tree)
+             if isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.endswith(".md") and "/" in node.value}
+    assert len(found) > 2, "the renderer's target paths were not found; these checks would pass vacuously"
+    return sorted(found)
+
+
+def render_target_folders():
+    """The folders those paths put a file in: ledger, ledger/tickets, ledger/teams, reports."""
+    folders = set()
+    for path in render_target_paths():
+        parts = path.split("/")[:-1]
+        while parts and "%s" in parts[-1]:
+            parts.pop()
+        folders.add("/".join(parts))
+    return folders
+
+
+class RestrictedReaderTest(unittest.TestCase):
+    """The reader itself: it reads the subset, and it refuses -- a guard that accepted everything would pass everything."""
+
+    def test_it_reads_the_forms_the_subset_allows(self):
+        text = ("filters:\n  and:\n    - file.hasTag(\"spudagent\")\n    - not:\n        - file.inFolder(\"ledger/_templates\")\n"
+                "views:\n  - type: table\n    name: Team\n    order:\n      - id\n    columnSize:\n      note.ticket: 154\n"
+                "    empty:\n")
+        self.assertEqual(read_base(text), {
+            "filters": {"and": ["file.hasTag(\"spudagent\")", {"not": ["file.inFolder(\"ledger/_templates\")"]}]},
+            "views": [{"type": "table", "name": "Team", "order": ["id"], "columnSize": {"note.ticket": 154}, "empty": None}],
+        })
+
+    def test_it_reads_a_quoted_scalar_and_an_integer(self):
+        self.assertEqual(read_base("a: '!status.containsAny(\"done\", \"declined\")'\nb: \"\"\nc: 12\nd: x y z\n"),
+                         {"a": "!status.containsAny(\"done\", \"declined\")", "b": "", "c": 12, "d": "x y z"})
+
+    def test_it_refuses_what_the_subset_leaves_out(self):
+        for what, text in (("a tab", "views:\n\t- type: table\n"),
+                           ("a flow sequence", "order: [id, name]\n"),
+                           ("a flow mapping", "columnNames: {}\n"),
+                           ("an anchor", "views: &v\n"),
+                           ("an alias", "views: *v\n"),
+                           ("a tag", "views: !seq\n"),
+                           ("a block scalar", "name: |\n  text\n"),
+                           ("a folded scalar", "name: >\n  text\n"),
+                           ("a document marker", "---\nviews:\n  - type: table\n"),
+                           ("a comment", "# a note\nviews:\n"),
+                           ("a line that is no key", "views\n"),
+                           ("a key with no space after the colon", "type:table\n"),
+                           ("a duplicate key", "type: table\ntype: table\n"),
+                           ("a sequence entry that is not one", "views:\n  - type: table\n  name: Team\n"),
+                           ("an indented line under a value", "type: table\n  name: Team\n"),
+                           ("an ambiguous sequence", "views:\n  - not:\n    - a\n"),
+                           ("an empty file", "\n\n")):
+            with self.assertRaises(YamlRefusal, msg=what):
+                read_base(text)
+
+
+class ShippedBaseTest(unittest.TestCase):
+    """Every shipped .base file, read and checked."""
+
+    def bases(self):
+        found = sorted(SHARE.rglob("*.base"))
+        self.assertTrue(found, "no shipped .base file was found; these checks would pass vacuously")
+        return found
+
+    def test_every_shipped_base_file_reads_in_the_subset(self):
+        for path in self.bases():
+            try:
+                read_base(path.read_text(encoding="utf-8"))
+            except YamlRefusal as refusal:
+                self.fail("%s: %s" % (path.relative_to(REPO), refusal))
+
+    def test_every_view_of_every_shipped_base_file_is_a_whole_view_of_a_type_they_use(self):
+        for path in self.bases():
+            self.assertEqual(view_problems(read_base(path.read_text(encoding="utf-8"))), [], path.relative_to(REPO))
+
+    def test_a_planted_view_type_and_a_truncated_view_both_fail(self):
+        # The incident, in both halves, against the file as it ships: this is what the check would have caught.
+        text = (SHARE / "ledger" / "Board.base").read_text(encoding="utf-8")
+        planted = text.replace("- type: table\n    name: By project\n", "- type: bases\n    name: By project\n", 1)
+        self.assertNotEqual(planted, text)
+        self.assertTrue(any("bases" in problem for problem in view_problems(read_base(planted))), view_problems(read_base(planted)))
+        truncated = text.rstrip("\n") + "\n  - type: table\n"
+        self.assertTrue(any("no name" in problem for problem in view_problems(read_base(truncated))), view_problems(read_base(truncated)))
+
+    def test_fleet_base_carries_the_view_every_ticket_note_embeds(self):
+        # render/teamcard.TEAM_VIEW_EMBED is written into the ## Team section of every rendered ticket note, so a shipped
+        # Fleet.base without that view would give every ticket in every new home a broken embed.
+        embed = re.fullmatch(r"!\[\[(?P<file>[^#\]]+)#(?P<view>[^\]]+)\]\]", spud.TEAM_VIEW_EMBED)
+        self.assertIsNotNone(embed, spud.TEAM_VIEW_EMBED)
+        path = SHARE / "ledger" / embed.group("file")
+        self.assertTrue(path.is_file(), "%s embeds %s, which the tool does not ship" % (spud.TEAM_VIEW_EMBED, path.relative_to(REPO)))
+        views = read_base(path.read_text(encoding="utf-8"))["views"]
+        self.assertIn(embed.group("view"), [view.get("name") for view in views], spud.TEAM_VIEW_EMBED)
+
+    def test_every_folder_a_shipped_base_file_filters_on_is_one_the_renderer_writes(self):
+        allowed = render_target_folders() | {"ledger/_templates"}  # where the renderer writes, and the templates it skips
+        for path in self.bases():
+            for folder in re.findall(r"file\.inFolder\(\"([^\"]*)\"\)", path.read_text(encoding="utf-8")):
+                self.assertIn(folder, allowed, path.relative_to(REPO))
+
+
+class ShippedMarkTest(unittest.TestCase):
+    """The marks: core/shipped names every one the files use, the files use every one it names, and a rendered file
+    keeps none of them and names no machine."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.home = helpers.Home()
+        cls.ctx = spud.Ctx(cls.home.path, "SPUD_HOME", False, tool=REPO)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.home.cleanup()
+
+    def values(self):
+        """This home's marks, with every path and the project replaced by ones that name no machine, so the rendered text
+        can be read for a machine's absolute path wherever the suite runs."""
+        marks = spud.marks(self.ctx, project={"key": "myrepo", "root_path": "/nowhere/myrepo"})
+        marks.update(home="/nowhere/SpudHome", tool="/nowhere/Spud", launcher="/nowhere/Spud/bin/spud",
+                     memory_dir="~/.claude/projects/-nowhere-SpudHome/memory")
+        return marks
+
+    def test_marks_answers_every_mark_and_nothing_else(self):
+        self.assertEqual(set(spud.marks(self.ctx)), set(spud.MARKS))
+        empty = spud.marks(self.ctx)
+        self.assertEqual([empty[key] for key in ("project_key", "project_root", "project_remote")], ["", "", "-"])
+        filled = spud.marks(self.ctx, project={"key": "myrepo", "root_path": "/nowhere/myrepo"})
+        self.assertEqual([filled[key] for key in ("project_key", "project_root", "project_remote")],
+                         ["myrepo", "/nowhere/myrepo", "-"])
+        self.assertEqual(filled["launcher"], str(REPO / "bin" / "spud"))
+        self.assertEqual(filled["memory_dir"],
+                         "~/.claude/projects/" + str(self.home.path).replace("/", "-").replace(".", "-") + "/memory")
+
+    def test_every_mark_the_shipped_files_carry_is_one_core_shipped_names(self):
+        used = set()
+        for rel, text in shipped():
+            for mark in MARK_RE.findall(text):
+                self.assertIn(mark, spud.MARKS, "%s carries {{%s}}, which core/shipped does not name" % (rel, mark))
+                used.add(mark)
+        self.assertEqual(set(spud.MARKS) - used, set(), "a mark core/shipped names is used by no shipped file")
+
+    def test_the_launcher_mark_install_renders_is_the_mark_table_s(self):
+        self.assertEqual(spud.LAUNCHER_MARK, spud.MARK % "launcher")
+
+    def test_a_rendered_shipped_file_keeps_no_mark_and_names_no_machine_and_nobody(self):
+        values = self.values()
+        for rel, text in shipped():
+            rendered = spud.render(text, values)
+            self.assertNotIn("{{", rendered, rel)
+            self.assertNotIn("/Users/", rendered, rel)
+            self.assertEqual(ADDRESS_RE.findall(rendered), [], rel)
+
+    def test_a_shipped_file_names_no_machine_unrendered_either(self):
+        for rel, text in shipped():
+            self.assertNotIn("/Users/", text, rel)
+            self.assertEqual(ADDRESS_RE.findall(text), [], rel)
+
+    def test_render_leaves_the_runtime_placeholders_of_the_shipped_claude_md_alone(self):
+        # <agent_id>, <lineage>, <slug> and twenty more are what Spud fills per child when he writes a brief, not marks.
+        rendered = spud.render((SHARE / "CLAUDE.md").read_text(encoding="utf-8"), self.values())
+        for placeholder in ("<agent_id>", "<lineage>", "<persona>", "<Name>", "<child_fan_out>", "<depth remaining>"):
+            self.assertIn(placeholder, rendered)
+
+    def test_no_shipped_file_sits_where_the_renderer_writes(self):
+        # A shipped path that a render also produces would be overwritten, or would be read as a hand edit of a rendered
+        # file: ledger/Projects.md is the near miss, and it is not shipped.
+        patterns = [path.replace("%s", "*") for path in render_target_paths()]
+        for rel, _ in shipped():
+            for pattern in patterns:
+                self.assertFalse(fnmatch.fnmatchcase(rel, pattern), "%s is also what the renderer writes (%s)" % (rel, pattern))
+
+    def test_the_root_note_is_the_file_the_renderer_links_as_every_root_member_s_parent(self):
+        # render/notefiles hard-codes "[[Spud]]" for a member with no parent, so the shipped root note is Spud.md and
+        # links itself that way whatever identity.name says.  The same coupling as the Fleet.base Team view.
+        source = NOTEFILES.read_text(encoding="utf-8")
+        link = re.search(r"\"\[\[(\w+)\]\]\"", source)
+        self.assertIsNotNone(link, "render/notefiles no longer hard-codes a root member's parent link")
+        path = SHARE / "ledger" / (link.group(1) + ".md")
+        self.assertTrue(path.is_file(), "the renderer links [[%s]]; the tool ships no %s" % (link.group(1), path.relative_to(REPO)))
+        self.assertIn("[[%s]]" % link.group(1), path.read_text(encoding="utf-8"))
+
+
+class ShippedConfigTest(unittest.TestCase):
+    """The shipped config: rendered it is a config doctor is green on, and it is the one the suite builds every home from."""
+
+    def test_the_rendered_config_is_one_config_problems_passes(self):
+        text = (SHARE / "spud.config.json").read_text(encoding="utf-8")
+        config = json.loads(spud.render(text, {"identity_name": "Tuber", "pronoun_subject": "they", "pronoun_object": "them",
+                                               "pronoun_possessive": "their", "ticket_prefix": "ZZZ", "team_prefix": "ZZZS"}))
+        self.assertEqual(spud.config_problems(config), [])
+        self.assertIn(config["identity"]["model"], config["pricing"]["models"])  # or cost renders as NO_TABLE
+        self.assertEqual((config["identity"]["name"], config["tickets"]["prefix"]), ("Tuber", "ZZZ"))
+
+    def test_the_unrendered_template_is_json_and_is_not_a_config(self):
+        # Deliberate (design 3.2): "{{ticket_prefix}}" is valid JSON and an invalid prefix, so every check above runs
+        # against the rendered text and never against the file's bytes.
+        problems = spud.config_problems(json.loads((SHARE / "spud.config.json").read_text(encoding="utf-8")))
+        self.assertTrue(any("prefix" in problem for problem in problems), problems)
+
+    def test_the_suite_builds_every_home_from_the_shipped_template(self):
+        self.assertEqual(helpers.CONFIG, SHARE / "spud.config.json")  # no second copy of the config exists to drift from it
+        self.assertFalse((REPO / "tests" / "fixtures" / "spud.config.json").exists())
+        self.assertNotIn("{{", helpers.config_text())
+        config = helpers.real_config()
+        self.assertEqual((config["tickets"]["prefix"], config["teams"]["prefix"]), ("SPD", "SPUD"))
+        self.assertEqual((config["identity"]["name"], config["identity"]["pronouns"]["object"]), ("Spud", "him"))
+        self.assertEqual(spud.config_problems(config), [])
+
+
+class ShippedSetTest(unittest.TestCase):
+    """What the tool ships for a home, as a set: the eight files of the design's section 4, and nothing that is state."""
+
+    def test_the_shipped_set_is_the_files_a_home_needs(self):
+        self.assertEqual([rel for rel, _ in shipped()], [
+            "CLAUDE.md",
+            "ledger/Board.base",
+            "ledger/Fleet.base",
+            "ledger/Home.md",
+            "ledger/Spud.md",
+            "ledger/_templates/spudagent.md",
+            "ledger/_templates/ticket.md",
+            "spud.config.json",
+        ])
+
+    def test_read_gives_a_shipped_file_and_refuses_one_that_is_gone(self):
+        home = helpers.Home()
+        try:
+            ctx = spud.Ctx(home.path, "SPUD_HOME", False, tool=REPO)
+            self.assertEqual(spud.read(ctx, "ledger/Spud.md"), (SHARE / "ledger" / "Spud.md").read_text(encoding="utf-8"))
+            self.assertEqual(spud.share_dir(ctx), SHARE)
+            with self.assertRaises(spud.SpudError) as caught:
+                spud.read(ctx, "ledger/Nothing.md")
+            self.assertEqual(caught.exception.code, helpers.EXIT_ERROR)
+            self.assertIn("ledger/Nothing.md", str(caught.exception))
+        finally:
+            home.cleanup()
+
+
+if __name__ == "__main__":
+    unittest.main()

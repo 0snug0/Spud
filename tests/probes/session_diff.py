@@ -2,7 +2,7 @@
 
   python3.14 -I -S tests/probes/session_diff.py LAUNCHER_A LAUNCHER_B
 
-Each launcher gets its own scratch SPUD_HOME (a copy of the suite's tests/fixtures/spud.config.json), so nothing is
+Each launcher gets its own scratch SPUD_HOME (the shipped share/spud.config.json, rendered), so nothing is
 written into any ledger.  The same 44 steps run against each: commands from init to member finish, every hook event with a real payload, and two
 malformed payloads.  Each step's exit code, stdout and stderr are compared after masking the scratch home, the
 launcher's checkout, timestamps, dates, clock times and durations.  Prints how many steps are identical and a diff of
@@ -20,10 +20,24 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.join(os.path.dirname(HERE), "fixtures", "spud.config.json")  # the suite's fixture: the tool keeps no home config (SPD-097)
+# The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
+# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
+CONFIG = os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "spud.config.json")
+CONFIG_MARKS = os.path.join(os.path.dirname(HERE), "fixtures", "config_marks.json")
 PY = sys.executable
 AGENT = "a0123456789abcdef"
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
+
+
+def write_config(home):
+    """Render the shipped config template into `home`/spud.config.json."""
+    with open(CONFIG, encoding="utf-8") as f:
+        text = f.read()
+    with open(CONFIG_MARKS, encoding="utf-8") as f:
+        for mark, value in json.load(f).items():
+            text = text.replace(mark, value)
+    with open(os.path.join(home, "spud.config.json"), "w", encoding="utf-8") as f:
+        f.write(text)
 
 
 def script(home):
@@ -64,7 +78,7 @@ def script(home):
 
 def run(launcher):
     home = tempfile.mkdtemp(prefix="spud-session-")
-    shutil.copy(CONFIG, home)
+    write_config(home)
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR", "SPUD_HOME")}
     env.update(SPUD_HOME=home, SPUD_USER_CLAUDE_DIR=home + "/.user-claude", SPUD_CONFIG_DIR=home + "/.user-config")
     out = []

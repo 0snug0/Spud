@@ -1,20 +1,26 @@
 """projects/agentdef: the spudagent definition project install writes, rendered from Ctx (SPW-002)."""
 
-from ..core import kernel
+from ..core import kernel, shipped
 
 
-LAUNCHER_MARK = "{{launcher}}"  # SPW-002: the one machine-specific value the shipped definition leaves to install
+# The one machine-specific value the shipped definition leaves to install (SPW-002).  Spelled out rather than read from
+# core/shipped at import time; tests/test_share.py holds it equal to `shipped.MARK % "launcher"`, whose mark table owns
+# the syntax and the name.
+LAUNCHER_MARK = "{{launcher}}"
 NO_SOURCE = "no %s to install at user scope: the tool repository's spudagent definition is the source"
 
 
 def agent_source(ctx):
-    """The tool repository's `.claude/agents/spudagent.md`: the template install renders and doctor reads (SPD-097)."""
+    """The tool repository's `.claude/agents/spudagent.md`: the template install renders and doctor reads (SPD-097).
+
+    Not under share/ with the files of SPW-001: it is a live agent definition for this repository's own sessions where it
+    sits, and the install template second (section 3.1 of the `spud init` design)."""
     return ctx.tool / ".claude" / "agents" / "spudagent.md"
 
 
 def render_launcher(text, launcher):
-    """The template with every {{launcher}} replaced by that launcher's path."""
-    return text.replace(LAUNCHER_MARK, str(launcher))
+    """The template with every {{launcher}} replaced by that launcher's path, through core/shipped's one substitution."""
+    return shipped.render(text, {"launcher": launcher})
 
 
 def agent_markdown(ctx):

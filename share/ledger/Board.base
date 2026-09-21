@@ -1,0 +1,189 @@
+formulas:
+  status_rank: if(status == "active", 1, if(status == "queued", 2, if(status == "parked", 3, if(status == "done", 4, 5))))
+properties:
+  file.name:
+    displayName: Ticket
+  project:
+    displayName: Project
+  status:
+    displayName: Status
+  priority:
+    displayName: P
+  parked_until:
+    displayName: Until
+  parked_reason:
+    displayName: Why
+  title:
+    displayName: Title
+  lead:
+    displayName: Lead
+  origin:
+    displayName: Origin
+  proposed_by:
+    displayName: Proposed by
+  created:
+    displayName: Created
+  file.mtime:
+    displayName: Updated
+views:
+  - type: table
+    name: By project
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+        - file.inFolder("ledger/tickets")
+        - '!status.containsAny("done", "declined")'
+    groupBy:
+      property: project
+      direction: ASC
+    order:
+      - file.name
+      - status
+      - priority
+      - title
+      - lead
+      - proposed_by
+      - origin
+      - created
+      - tags
+    sort:
+      - property: status
+        direction: ASC
+      - property: priority
+        direction: ASC
+      - property: file.name
+        direction: ASC
+      - property: formula.status_rank
+        direction: ASC
+    columnSize:
+      note.project: 103
+      note.status: 76
+      note.priority: 66
+      note.title: 493
+      note.lead: 140
+      note.proposed_by: 146
+    pillProperties:
+      - status
+      - priority
+    verticalLines: true
+    pinnedColors:
+      - parked=red
+      - queued=yellow
+      - active=green
+      - P1=red
+      - P2=orange
+      - P3=yellow
+  - type: table
+    name: Board
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+        - file.inFolder("ledger/tickets")
+        - status != "done"
+        - status != "parked"
+    groupBy:
+      property: status
+      direction: ASC
+    order:
+      - file.name
+      - project
+      - status
+      - priority
+      - title
+      - lead
+      - origin
+      - proposed_by
+      - created
+    sort:
+      - property: priority
+        direction: ASC
+      - property: status
+        direction: DESC
+      - property: file.name
+        direction: ASC
+      - property: formula.status_rank
+        direction: ASC
+    columnSize:
+      note.title: 673
+      note.lead: 193
+      note.proposed_by: 146
+  - type: table
+    name: Parked
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+        - file.inFolder("ledger/tickets")
+        - status == "parked"
+    groupBy:
+      property: project
+      direction: ASC
+    order:
+      - file.name
+      - project
+      - priority
+      - title
+      - parked_until
+      - parked_reason
+      - lead
+      - created
+    sort:
+      - property: priority
+        direction: ASC
+      - property: parked_until
+        direction: ASC
+      - property: file.name
+        direction: ASC
+    columnSize:
+      note.title: 420
+      note.parked_reason: 360
+      note.lead: 140
+  - type: table
+    name: Reports
+    filters:
+      and:
+        - file.inFolder("reports")
+    order:
+      - file.name
+      - file.mtime
+    sort:
+      - property: file.name
+        direction: DESC
+  - type: table
+    name: Closed
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+        - file.inFolder("ledger/tickets")
+        - status == "done"
+    groupBy:
+      property: status
+      direction: ASC
+    order:
+      - file.name
+      - project
+      - status
+      - priority
+      - title
+      - lead
+      - origin
+      - proposed_by
+      - created
+      - file.mtime
+    sort:
+      - property: file.mtime
+        direction: DESC
+      - property: priority
+        direction: ASC
+      - property: status
+        direction: DESC
+      - property: file.name
+        direction: ASC
+      - property: formula.status_rank
+        direction: ASC
+    columnSize:
+      note.lead: 167
+      note.proposed_by: 146

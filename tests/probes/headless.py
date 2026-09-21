@@ -1,7 +1,7 @@
 #!/opt/homebrew/bin/python3.14
 """Headless probes for the ledger hooks (real `claude -p` sessions, real API usage).
 
-Each scenario builds a scratch SPUD_HOME (a copy of bin/spud and tests/fixtures/spud.config.json, `spud init`,
+Each scenario builds a scratch SPUD_HOME (a copy of bin/spud, the shipped share/spud.config.json rendered, `spud init`,
 a ticket, the planned members it needs), generates a settings file with `spud settings sync`
 on top of a capture hook that appends every raw payload, stamped with the capture time, to
 hooks.jsonl, then runs one `claude -p` session in that home with `--settings` and an `--agents`
@@ -35,7 +35,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SPUD = REPO / "bin" / "spud"
-CONFIG = REPO / "tests" / "fixtures" / "spud.config.json"  # the suite's fixture: the tool keeps no home config (SPD-097)
+# The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
+# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
+CONFIG = REPO / "share" / "spud.config.json"
+CONFIG_MARKS = REPO / "tests" / "fixtures" / "config_marks.json"
 PYTHON = sys.executable
 
 HOOK_TABLE = (
@@ -227,13 +230,21 @@ def spud(env, home, *args):
     return run([PYTHON, "-I", "-S", str(home / "bin" / "spud"), *args], env)
 
 
+def write_config(home):
+    """Render the shipped config template into `home`/spud.config.json."""
+    text = CONFIG.read_text(encoding="utf-8")
+    for mark, value in json.loads(CONFIG_MARKS.read_text(encoding="utf-8")).items():
+        text = text.replace(mark, value)
+    (home / "spud.config.json").write_text(text, encoding="utf-8")
+
+
 def build_home(root, scenario):
     home = root / "home"
     (home / "bin").mkdir(parents=True)
     shutil.copy2(SPUD, home / "bin" / "spud")
     shutil.copy2(SPUD.parent / "spud_ledger.py", home / "bin" / "spud_ledger.py")
     shutil.copytree(SPUD.parent / "spudlib", home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
-    shutil.copy2(CONFIG, home / "spud.config.json")
+    write_config(home)
     for d in ("tests", "docs", ".claude"):
         (home / d).mkdir()
     env = dict(os.environ)
