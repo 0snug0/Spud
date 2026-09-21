@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, prepare, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, prepare, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -417,6 +417,13 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             return
         a.kinds.append("other")
         arg_writes.read_writes(prepare.deglob(cmd), base, words + unspelled, a)
+        if base in syntax.SCRIPT_COMMANDS:  # SPD-139: sed's own script, beside the files its -i names
+            script_text.read_script(prepare.deglob(cmd), base, words + unspelled, a, depth)
+    elif base in syntax.SCRIPT_COMMANDS:
+        # SPD-139: awk, whose program names the files it writes and the commands it hands /bin/sh; each file is held to
+        # the path rule where tee's operand is, and each command read where an `sh -c` string is
+        a.kinds.append("other")
+        script_text.read_script(prepare.deglob(cmd), base, words + unspelled, a, depth)
     elif base in syntax.TREE_WRITE_COMMANDS:
         # SPD-126: a command whose files the line does not spell -- what find deletes and runs, an archive extracted, a
         # patch applied, a download the server names, a tree synced -- read where tee is, a whole-subtree write each, with

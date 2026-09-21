@@ -9692,6 +9692,276 @@ class SpelledWriteTest(TreeWriteCase):
         self.assertNotIn(GIT_DIR_WORDING, r.reason)  # SPD-066's rule is a caller's with an agent_id
 
 
+# SPD-139: one line per shape a sed script or an awk program writes a file the line itself never spells, `{}` that file.
+SCRIPT_WRITERS = (
+    ("sed w", "sed -n 'w {}' a.tar"),
+    ("sed address w", "sed -n '/a/w {}' a.tar"),
+    ("sed s///w", "sed -n 's/a/b/w {}' a.tar"),
+    ("sed s///gw", "sed -n 's/a/b/gw {}' a.tar"),
+    ("sed -e w", "sed -n -e 'w {}' -e p a.tar"),
+    ("sed -e { w }", "sed -n -e '/a/{' -e 'w {}' -e '}' a.tar"),
+    ("awk print >", "awk '{print > \"{}\"}' a.tar"),
+    ("awk print >>", "awk '{print >> \"{}\"}' a.tar"),
+    ("awk printf >", "awk '{printf \"%s\", $0 > \"{}\"}' a.tar"),
+    ("awk BEGIN print >", "awk 'BEGIN{print \"x\" > \"{}\"}'"),
+    ("awk print > in a function", "awk 'function w(){print \"x\" > \"{}\"} BEGIN{w()}'"),
+)
+
+
+class ScriptTextTest(TreeWriteCase):
+    """SPD-139: the Bash hook reads a command's words, and a sed script or an awk program is one quoted word, so what the
+    script itself names was never read.  On main (08c344e), with cwd /Users/x/repo, each of these gave findings=[] and no
+    write: `awk 'BEGIN{system(\"git push\")}'` and `awk 'BEGIN{print \"x\" | \"git push\"}'` (a VCS write past Law 7),
+    `awk '{print > \"ledger/tickets/SPD-001.md\"}' f` and `sed -n 'w ledger/tickets/SPD-001.md' f` (a write to a rendered
+    note past Law 5).
+
+    Spud's decision: what a script names is read as the line's own words are.  A file it writes is held to the path rule
+    as a redirection target is (shell/script_text records it where shell/spelled_writes records dd's `of=`), and a command
+    it runs is read as an `sh -c` string is (analyse_new_shell), so its git verbs meet Law 7 and its `spud --as spud`
+    Law 6.  What the hook cannot resolve there is refused a member as an unresolvable target is, never silently allowed.
+
+    Probed on this Mac, whose sed is BSD's and whose awk is the one true awk, version 20200816 (no gsed or gawk is
+    installed; SPD-140 owns the g-names):
+    - sed's `w file` and the `w file` flag of `s///` take the rest of the line as the name: `w out2.txt;p` made a file
+      called `out2.txt;p`, and `w out.txt   ` one with the blanks (sed warns and keeps them).  Blanks after the letter are
+      skipped, and `wout.txt` needs none.  Each -e is its own line, so a name ends where its fragment does, and a brace
+      may open in one and close in another.  `b`, `t` and `:` take the rest of the line as a label (`b;w f` failed with
+      "undefined label ;w f"), `a`, `i` and `c` need a backslash-newline and their text is not commands, `#` comments to
+      the end of the line, `r` only reads, and BSD has no `W`.  -f reads the script from a file, and its `w` writes.
+    - awk reads only the first letter after a dash (main.c: `switch (argv[1][1])`), so there is no getopt cluster and
+      `-safe` is `s`; -f, -F and -v take the rest of their word or the next word; an unknown option is ignored with a
+      warning and the program is still the next operand; `--` ends the options; -f may repeat, and the files concatenate.
+      `print`, `printf` and their `>`, `>>` and `|` write and run; `system(...)` and `"cmd" | getline` run.  A `>` inside
+      parentheses is the comparison (`print (1 > 2)` printed 0), and a target may also be a variable, a parenthesised
+      expression or a bare concatenation (`> \"out\" \"6.txt\"` made out6.txt), none of which the hook can name.
+
+    TreeWriteCase's members: AGENT_G out/**, bin/* and docs/*.md; AGENT_H bin/** and vendor/**; AGENT_A tests/** and
+    bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.home.env["HOME"] = "/Users/nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
+        (self.home.path / "out" / "p.sed").write_text("w docs/from-sed.txt\n", encoding="utf-8")
+        (self.home.path / "out" / "p.awk").write_text('BEGIN{print "x" > "docs/from-awk.txt"}\n', encoding="utf-8")
+        (self.home.path / "out" / "clean.awk").write_text('{n++} END{print n}\n', encoding="utf-8")
+
+    def writes(self, command, cwd=None):
+        """(the file, the kind) of each write by argument the line records, the masking taken off the word."""
+        return [(self.module.deglob(w[1]), w[6]) for w in self.analysis(command, cwd).arg_writes if w[4] != "walk"]
+
+    def verbs(self, command):
+        """The git verbs the analysis finds on this line, in the order it finds them."""
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "git"]
+
+    def test_the_analysis_records_what_a_sed_script_writes(self):
+        m = self.module
+        for command, writes in (
+            ("sed -n 'w out/f' a.tar", [("out/f", None)]),
+            ("sed -n 'wout/f' a.tar", [("out/f", None)]),  # the blank after the letter is optional
+            ("sed -n 'w   out/f' a.tar", [("out/f", None)]),  # and any number of them are skipped
+            ("sed -n 'w out/f;p' a.tar", [("out/f;p", None)]),  # the rest of the line is the name, `;` and all
+            ("sed -n '/a/w out/f' a.tar", [("out/f", None)]),
+            ("sed -n '$w out/f' a.tar", [("out/f", None)]),
+            ("sed -n '1,$w out/f' a.tar", [("out/f", None)]),
+            ("sed -n '1,+1w out/f' a.tar", [("out/f", None)]),
+            ("sed -n '/a/,/b/w out/f' a.tar", [("out/f", None)]),
+            ("sed -n '/a/Iw out/f' a.tar", [("out/f", None)]),
+            ("sed -n '/a/!w out/f' a.tar", [("out/f", None)]),
+            ("sed -n '\\%a%w out/f' a.tar", [("out/f", None)]),  # a delimiter of the script's own choosing
+            ("sed -n 's/a/b/w out/f' a.tar", [("out/f", None)]),
+            ("sed -n 's/a/b/gw out/f' a.tar", [("out/f", None)]),
+            ("sed -n 's/a/b/2w out/f' a.tar", [("out/f", None)]),
+            ("sed -n 's/a/b/Iw out/f' a.tar", [("out/f", None)]),
+            ("sed -n 's|a|b|w out/f' a.tar", [("out/f", None)]),
+            ("sed -n 's/a/b\\/c/w out/f' a.tar", [("out/f", None)]),  # the delimiter escaped inside the replacement
+            ("sed -n 's/a/b/wout/f' a.tar", [("out/f", None)]),
+            ("sed -n 's/a/b/;w out/f' a.tar", [("out/f", None)]),
+            # a bracket expression holds the delimiter whole in an address and in the regular expression, and in neither
+            # the replacement nor y's strings (sed's compile_delimited and compile_ccl, probed)
+            ("sed -n '/[/]/w out/f' a.tar", [("out/f", None)]),
+            ("sed -n 's/[a/b]/X/w out/f' a.tar", [("out/f", None)]),
+            ("sed -n 's/[]/]/X/w out/f' a.tar", [("out/f", None)]),
+            ("sed -n 's/[^/]*/X/w out/f' a.tar", [("out/f", None)]),
+            ("sed -n 's/[[:alpha:]/]/X/w out/f' a.tar", [("out/f", None)]),
+            ("sed -n 'y/a[/b]/;w out/f' a.tar", [("out/f", None)]),
+            ("sed 's/.*github.com[:/]//;s/\\.git$//' a.tar", []),  # the differential's own line
+            ("sed -n -e 'w out/f' -e p a.tar", [("out/f", None)]),  # each -e is its own line: the name ends with it
+            ("sed -n -e '/a/{' -e 'w out/f' -e '}' a.tar", [("out/f", None)]),
+            ("sed -n '/a/{\nw out/f\n}' a.tar", [("out/f", None)]),
+            ("sed -n 'w out/f\np' a.tar", [("out/f", None)]),
+            ("sed -n 'w out/f\nw out/g' a.tar", [("out/f", None), ("out/g", None)]),
+            ("sed -i '' -e 'w out/f' a.tar", [("a.tar", None), ("out/f", None)]),  # in place, and what the script writes
+            ("sed -i.bak 'w out/f' a.tar", [("a.tar", None), ("out/f", None)]),
+            # what writes nothing
+            ("sed -n p a.tar", []), ("sed -n '1,50p' a.tar", []), ("sed 's/a/b/' a.tar", []),
+            ("sed -n 'r out/f' a.tar", []),  # r reads its file
+            ("sed -n 's/w out\\/f/X/p' a.tar", []),  # a `w` inside the regular expression
+            ("sed -n '/w out\\/f/p' a.tar", []),  # and inside an address
+            ("sed -n 'y/ab/AB/' a.tar", []), ("sed -n '#w out/f' a.tar", []),
+            ("sed -n 'b end;w out/f\n:end' a.tar", []),  # b takes the rest of the line: the label is `end;w out/f`
+            ("sed -n '1a\\\nw out/f' a.tar", []),  # a's text is text, not commands
+            ("sed -n -e p 'w out/f' a.tar", []),  # with -e given, the first operand is a file sed reads
+            # a script this Mac's sed refuses, which the hook cannot read either: fail closed.  Each shape below is the
+            # differential's, from the 19 lines of 12059 it newly refuses, and sed refuses every one of them too
+            ("sed -n 'W out/f' a.tar", [(m.ANY_PATH, "tree")]),  # BSD sed has no W
+            ("sed -n 'Z' a.tar", [(m.ANY_PATH, "tree")]),
+            ("sed -n '700,900' a.tar", [(m.ANY_PATH, "tree")]),  # an address with no command
+            ("sed -n '790,960]' a.tar", [(m.ANY_PATH, "tree")]),
+            ("sed -n '200,290z' a.tar", [(m.ANY_PATH, "tree")]),
+            ("sed -n '3490,3520,3600,3745p' a.tar", [(m.ANY_PATH, "tree")]),  # three addresses
+            ("sed -i '' 's#a#b (PR #367)#' a.tar", [("a.tar", None), (m.ANY_PATH, "tree")]),  # the delimiter in the replacement
+            ("sed -i '' \"s|a|b || c|\" a.tar", [("a.tar", None), (m.ANY_PATH, "tree")]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+
+    def test_the_analysis_records_what_an_awk_program_writes(self):
+        m = self.module
+        for command, writes in (
+            ("awk '{print > \"out/f\"}' a.tar", [("out/f", None)]),
+            ("awk '{print >> \"out/f\"}' a.tar", [("out/f", None)]),
+            ("awk '{print>\"out/f\"}' a.tar", [("out/f", None)]),
+            ("awk '{printf \"%s\", $0 > \"out/f\"}' a.tar", [("out/f", None)]),
+            ("awk '{printf(\"%s\", $0) > \"out/f\"}' a.tar", [("out/f", None)]),
+            ("awk 'BEGIN{print \"x\" > \"out/f\"; print \"y\" > \"out/g\"}'", [("out/f", None), ("out/g", None)]),
+            ("awk '$1 > 2 {print > \"out/f\"}' a.tar", [("out/f", None)]),  # the pattern's `>` is the comparison
+            ("awk -F: '{print > \"out/f\"}' a.tar", [("out/f", None)]), ("awk -F : '{print > \"out/f\"}' a.tar", [("out/f", None)]),
+            ("awk -v x=1 '{print > \"out/f\"}' a.tar", [("out/f", None)]),
+            ("awk -vx=1 '{print > \"out/f\"}' a.tar", [("out/f", None)]),
+            ("awk -q '{print > \"out/f\"}' a.tar", [("out/f", None)]),  # an unknown option awk ignores
+            ("awk -safe '{print > \"out/f\"}' a.tar", [("out/f", None)]),  # only the first letter after the dash is read
+            ("awk -- '{print > \"out/f\"}' a.tar", [("out/f", None)]),
+            ("awk 'function w(){print \"x\" > \"out/f\"} BEGIN{w()}'", [("out/f", None)]),
+            # what writes nothing
+            ("awk '{n++} END{print n}' a.tar", []), ("awk '$1 > 2' a.tar", []), ("awk 'BEGIN{print (1 > 2)}'", []),
+            ("awk 'BEGIN{if (2 > 1) print \"x\"}'", []), ("awk '{print $1, $2}' a.tar", []),
+            ("awk '/a>b/{n++}' a.tar", []),  # a regular expression holding the operator
+            ("awk 'BEGIN{s = \"a > b\"; print s}'", []),  # and a string holding it
+            ("awk 'BEGIN{print \"x\"} # print > \"out/f\"'", []),  # a comment
+            ("awk 'BEGIN{while ((getline l < \"out/f\") > 0) n++; print n}'", []),  # getline reads
+            ("awk '{print}' a.tar", []), ("awk 'NR==1' a.tar", []),
+            # the target the hook cannot name: a member is refused as for an unresolvable redirection target
+            ("awk '{print > f}' a.tar", [(m.ANY_PATH, "tree")]),
+            ("awk '{print > \"out\" \"/f\"}' a.tar", [(m.ANY_PATH, "tree")]),  # a bare concatenation
+            ("awk '{print > (\"out/f\")}' a.tar", [(m.ANY_PATH, "tree")]),  # a parenthesised expression
+            ("awk '{print > FILENAME}' a.tar", [(m.ANY_PATH, "tree")]),
+            ("awk '{print \"x\" | c}' a.tar", [(m.ANY_PATH, "tree")]),  # and the command it cannot read
+            ("awk 'BEGIN{system(c)}'", [(m.ANY_PATH, "tree")]),
+            ("awk 'BEGIN{system(\"echo \" x)}'", [(m.ANY_PATH, "tree")]),
+            ("awk 'BEGIN{c | getline v}'", [(m.ANY_PATH, "tree")]),
+            # a program this awk refuses, which the hook cannot read either (the differential's own line: a `\\\"` inside
+            # single quotes is a backslash and a quote awk has no use for, and the string never closes)
+            ("ls -la | awk '{printf \\\"%s\\\", $9}'", [(m.ANY_PATH, "tree")]),
+            ("awk 'BEGIN{print \"x}'", [(m.ANY_PATH, "tree")]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+
+    def test_a_command_an_awk_program_runs_is_read_as_a_shell_string(self):
+        for command, verbs in (("awk 'BEGIN{system(\"git push\")}'", ["push"]),
+                               ("awk 'BEGIN{print \"x\" | \"git push\"}'", ["push"]),
+                               ("awk 'BEGIN{\"git push\" | getline v}'", ["push"]),
+                               ("awk '{print | \"git commit -m x\"}' a.tar", ["commit"]),
+                               ("awk 'BEGIN{system(\"git status\")}'", ["status"]),
+                               ("awk 'BEGIN{system(\"echo hi\")}'", []),
+                               ("awk 'BEGIN{print \"x\" > \"out/f\"}'", [])):
+            with self.subTest(command):
+                self.assertEqual(self.verbs(command), verbs)
+        self.assertEqual(self.writes("awk 'BEGIN{system(\"echo x > docs/y.txt\")}'"), [])  # its redirection, not a write by argument
+        self.assertRefused("awk 'BEGIN{system(\"echo x > docs/y.txt\")}'", "deliverables", agent_id=AGENT_G)
+
+    def test_the_tickets_four_lines(self):
+        """The evidence of the ticket: each was read with findings=[] and no write on main."""
+        self.assertRefused("awk 'BEGIN{system(\"git push\")}'", "Law 7", agent_id=AGENT_G)
+        self.assertRefused("awk 'BEGIN{print \"x\" | \"git push\"}'", "Law 7", agent_id=AGENT_G)
+        r = self.assertRefused("awk '{print > \"ledger/tickets/SPD-001.md\"}' a.tar", "generated", agent_id=AGENT_G)
+        self.assertIn(ARG_WORDING, r.reason)
+        r = self.assertRefused("sed -n 'w ledger/tickets/SPD-001.md' a.tar", "generated", agent_id=AGENT_G)
+        self.assertIn(ARG_WORDING, r.reason)
+
+    def test_every_script_write_is_held_to_the_path_rule(self):
+        for label, form in SCRIPT_WRITERS:
+            for target, needle in (("ledger/tickets/SPD-001.md", "generated"), ("tests/fake/.git/hooks/pre-commit", GIT_DIR_WORDING),
+                                   ("/Users/nobody/x", OUTSIDE), ("docs/new.txt", "deliverables")):
+                command = form.replace("{}", target)
+                with self.subTest(command=command):
+                    r = self.assertRefused(command, needle, agent_id=AGENT_G)
+                    self.assertIn(ARG_WORDING, r.reason)
+                    self.assertIn(target, r.reason)
+
+    def test_every_script_write_is_silent_into_the_members_own_files(self):
+        for label, form in SCRIPT_WRITERS:
+            for target in ("out/new", "docs/new.md", "/tmp/spd-139-y"):
+                command = form.replace("{}", target)
+                with self.subTest(command=command):
+                    self.assertSilent(command, agent_id=AGENT_G)
+
+    def test_a_target_the_script_does_not_spell_whole(self):
+        """A `$var` the shell expands inside a double-quoted script is a hidden part of the name, and the line's own
+        settled value is put in it where there is one (SPD-127), exactly as for a redirection target."""
+        for command, writes in (('D=out; sed -n "w $D/f" a.tar', [("out/f", None)]),
+                                ('D=out; awk "{print > \\"$D/f\\"}" a.tar', [("out/f", None)]),
+                                ('sed -n "w $D/f" a.tar', [("$D/f", None)]),
+                                ('awk "{print > \\"$D/f\\"}" a.tar', [("$D/f", None)])):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+        for command in ('sed -n "w $D/f" a.tar', 'awk "{print > \\"$D/f\\"}" a.tar',
+                        'sed -n "w $(cat list)" a.tar'):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING, agent_id=AGENT_G)
+                self.assertSilent(command, agent_id=None)  # Spud's own unresolvable target, as for a redirection
+        r = self.assertRefused('D=docs; sed -n "w $D/f" a.tar', "deliverables", agent_id=AGENT_G)
+        self.assertIn("docs/f", r.reason)
+
+    def test_a_script_the_hook_cannot_spell_stays_unread(self):
+        """A script word the hook cannot spell is the class of `sh script.sh`: unread for every caller, as on main.  A
+        member's `sed -n \"${n},$((n+3))p\" f`, which writes nothing, is silent as SPD-121 left it."""
+        for command in ('sed -n "$SCRIPT" a.tar', 'awk "$PROG" a.tar', 'sed -n "${n},$((n+3))p" a.tar',
+                        'sed -n "$(cat out/p.sed)" a.tar', 'awk -f "$PROG" a.tar', 'sed -n -f "$S" a.tar'):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), [])
+                self.assertSilent(command, agent_id=AGENT_G)
+
+    def test_a_script_file_the_line_spells_is_read(self):
+        for command, writes in (("sed -n -f out/p.sed a.tar", [("docs/from-sed.txt", None)]),
+                                ("awk -f out/p.awk a.tar", [("docs/from-awk.txt", None)]),
+                                ("awk -fout/p.awk a.tar", [("docs/from-awk.txt", None)]),
+                                ("awk -f out/clean.awk a.tar", []),
+                                ("sed -n -f out/missing.sed a.tar", []),  # a file the hook cannot read stays unread
+                                ("awk -f out/p.awk -f out/clean.awk a.tar", [("docs/from-awk.txt", None)])):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), writes)
+        r = self.assertRefused("sed -n -f out/p.sed a.tar", "deliverables", agent_id=AGENT_G)
+        self.assertIn("docs/from-sed.txt", r.reason)
+        self.assertRefused("awk -f out/p.awk a.tar", "deliverables", agent_id=AGENT_G)
+
+    def test_a_word_the_line_cannot_settle_where_an_option_may_stand(self):
+        """The hook cannot then say which operand is the script, and reads none of them: the same silence a script the
+        line does not spell keeps.  Reading each operand as a script instead put a `w eb/app.js` in the file operand of a
+        member's `sed -n "$(grep -n x app.js | cut -d: -f1),+12p" web/app.js`, one of 27 the differential found."""
+        for command in ("awk $(echo -f) out/p.awk a.tar", "X=$(echo -v); awk $X '{print > \"docs/y.txt\"}' a.tar",
+                        "sed -n \"$(grep -n x a.tar | cut -d: -f1),+12p\" docs/x.md",
+                        "for n in 1 2; do sed -n \"${n}p\" docs/x.md; done"):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), [])
+                self.assertSilent(command, agent_id=AGENT_G)
+
+    def test_spuds_answers(self):
+        """Spud is held to Law 1 in a project and is free in his own files, as for a redirection; Law 7 binds members."""
+        for label, form in SCRIPT_WRITERS:
+            with self.subTest(label):
+                r = self.assertRefused(form.replace("{}", "docs/x.md"), "Law 1", agent_id=None)
+                self.assertIn(ARG_WORDING, r.reason)
+                self.assertRefused(form.replace("{}", "ledger/tickets/SPD-001.md"), "generated", agent_id=None)
+                self.assertSilent(form.replace("{}", "/Users/nobody/x"), agent_id=None)
+                self.assertSilent(form.replace("{}", ".claude/x"), agent_id=None)  # his own .claude/**
+        for command in ("awk 'BEGIN{system(\"git push\")}'", "awk 'BEGIN{print \"x\" | \"git push\"}'",
+                        "awk '{print > f}' a.tar", "sed -n 'W out/f' a.tar"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)
+        self.assertRefused("awk 'BEGIN{system(\"%s --as %s member log hi\")}'" % (self.spud_cli, AGENT_A), "Law 5", agent_id=None)
+
+
 PROBE = "/tmp/spd-127-probe"  # the scratch directory D of Spud's probe of zsh 5.9 -f and bash 3.2, 2026-09-18
 NOBODY = "/Users/nobody"  # a directory outside every registered project and every temp root, as OutsideProjectTest's
 
