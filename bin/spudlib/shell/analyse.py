@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, prepare, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, inline_programs, prepare, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -89,23 +89,27 @@ def analyse_new_shell(a, command, depth):
         a.alias_scope, a.aliases, a.alias_unknown = state
 
 
-def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, piped=None):
+def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, piped=None, piped_fed=False):
     """A simple command: its output targets, then its words.  SPD-127: a target is resolved here, before analyse_words reads
     the command's own prefix assignments, because those reach neither the redirection nor the arguments in either shell
     (probed 2026-09-18: `S=$D/a; S=$D/b echo hi > $S.f` made a.f, and `S=$D/a echo hi > $S.f` with S unset made `.f`).
     SPD-143: `piped` is the text the pipeline element before this one printed, which with the command's own redirections
     makes the standard input a shell here would run (stdin_text.command_input); a.stdin holds it while the words are read
-    and is put back after, so a body read in its own process reads its own input and not this one."""
+    and is put back after, so a body read in its own process reads its own input and not this one.
+    SPD-150: `piped_fed` says a pipe feeds this element at all, which with the same redirections says whether anything
+    stands on that input (stdin_text.input_fed), text the hook can spell or not; a.stdin_fed carries it the same way,
+    for an interpreter that runs the program it reads there (shell/inline_programs)."""
     words, targets = directories.separate_redirects(tokens)
     cwds = a.cwds if redirect_cwds is syntax._CURRENT else redirect_cwds
     settled = [arg_writes.resolved(t, a) for t in targets]
     for target in settled:
         a.redirects.append((target, cwds))
     outer_stdin, a.stdin = a.stdin, stdin_text.command_input(tokens, bodies, piped)
+    outer_fed, a.stdin_fed = a.stdin_fed, stdin_text.input_fed(tokens, bodies, piped_fed)
     try:
         analyse_words(words, bodies, a, depth, [globbing.GLOB_READING_BUDGET], "shell", False)
     finally:
-        a.stdin = outer_stdin
+        a.stdin, a.stdin_fed = outer_stdin, outer_fed
     if targets and words and all(assignment_words.assignment_word(w) for w in words):
         # An assignment-only command's own redirection is where the shells part: zsh opens it with the value the line had
         # before the command, bash with the one the command assigns (probed: `S=$D/a; S=$D/b > $S.f` made a.f in zsh and
@@ -167,8 +171,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     coproc, command_position = False, True
     input_appended = False  # SPD-126: an xargs this command runs under appends what it reads to the words (find_xargs)
     # SPD-143: the standard input the line gives this command, which a shell here runs as its commands, and the command
-    # string an xargs makes of that input for the shell it runs (`echo 'git push' | xargs -0 sh -c`)
-    stdin, input_string = a.stdin, None
+    # string an xargs makes of that input for the shell it runs (`echo 'git push' | xargs -0 sh -c`).  SPD-150: `fed`,
+    # whether anything stands on that input at all, for an interpreter that runs the program it reads there.
+    stdin, input_string, fed = a.stdin, None, a.stdin_fed
     while words:
         w = words[0]
         # SPD-085: `name[subscript]=value` too, read before any glob reading of its brackets
@@ -226,7 +231,8 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 input_appended = input_appended or appended
                 # SPD-143: xargs reads that input itself, so the command it runs does not; where the line spells it, it
                 # is the command string a shell run with a `-c` and no string is handed
-                input_string, stdin = stdin_text.xargs_string(words, consumed, appended, stdin), None
+                # ... and xargs gives the command it runs no standard input of its own (SPD-150: never an inline program)
+                input_string, stdin, fed = stdin_text.xargs_string(words, consumed, appended, stdin), None, False
             if chdir is not None:
                 # SPD-128: everything the wrapper runs -- its words, a string it hands a shell, a nested wrapper -- starts in the
                 # directory it moved to, once its own words are read (a glob or an expansion there leaves it unknown)
@@ -388,13 +394,17 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             call["vouched"] = spud_calls.vouched_spud_call(a, cmd, words[1 : len(words) - len(script_args) - 1], script, prefixed)
             a.findings.append(("spud", call))
         else:
+            # SPD-150: after the database and the launcher, which keep their reasons: a program the line spells rather
+            # than reads from a file (`-c`, or standard input under `-` or no script) is one the hook cannot read at all
             a.kinds.append("other")
+            inline_programs.read_inline(cmd, base, words, a, fed)
     elif base in syntax.JS_RUNTIMES:
         if any("sqlite" in w.lower() for w in words[1:]) or any("sqlite" in b.lower() for b in bodies):
             a.kinds.append("db")
             a.findings.append(("db", cmd))
         else:
             a.kinds.append("other")
+            inline_programs.read_inline(cmd, base, words, a, fed)  # SPD-150: -e, --eval, -p, --print, or standard input
     elif base == "spud":
         if not read_points(lambda ws, start: expansions.option_point(expansions.first_read_index(ws, start))):
             return
@@ -440,6 +450,12 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # split's pieces, perl -i -- read where tee is, each held to the path rule as a redirection target
         a.kinds.append("other")
         spelled_writes.read_spelled_writes(prepare.deglob(cmd), base, words + unspelled, a, depth)
+        # SPD-150: perl's -e and -E, and the program it reads on standard input; dd, sort, mktemp and split run none
+        inline_programs.read_inline(cmd, base, words, a, fed)
+    elif inline_programs.RUBY_RE.match(base):
+        # SPD-150: the one interpreter of the table with no reading of its own here -- ruby -e, and its standard input
+        a.kinds.append("other")
+        inline_programs.read_inline(cmd, base, words, a, fed)
     elif cmd in ("alias", "unalias") and directories.builtin_runs(effect):
         # SPD-059: the builtin, spelled exactly, stores text the shell runs wherever it next parses this name in command
         # position -- which on one line means `eval`.  Never a spud call, so an aliasing line is not allowed on its own.

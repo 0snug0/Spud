@@ -1651,9 +1651,14 @@ class SpudAllowIdentityTest(BashHookCase):
                 spelled = "python3.14 %s %s {tail}" % (opts, launcher)
                 self.assertSilentForBoth(spelled)
                 self.assertStillRefused(spelled)
-        self.assertSilentForBoth("python3.14 -I -S -c 'import runpy' %s {tail}" % launcher)
         self.assertSilentForBoth("python3.14 -I -S -m spud_ledger {tail}")
-        self.assertSilentForBoth("python3.14 -I -S - %s {tail} < %s" % (launcher, launcher))
+        # -c and - run code of the line's own, which SPD-150 refuses a member outright; neither is an allowed spud call
+        # for anyone, which is what this test is about.
+        for spelled in ("python3.14 -I -S -c 'import runpy' %s {tail}" % launcher,
+                        "python3.14 -I -S - %s {tail} < %s" % (launcher, launcher)):
+            with self.subTest(spelled=spelled):
+                self.assertSilent(spelled.format(tail="--as spud board"), None)
+                self.assertRefused(spelled.format(tail=self.log), INLINE_WORDING)
 
     def test_the_launcher_alone_runs_without_dash_I_or_dash_S(self):
         """The #! line runs /opt/homebrew/bin/python3.14 with no flags, so the environment's PYTHONPATH and the site .pth files
@@ -4247,7 +4252,7 @@ class ParameterExpansionCommandWordTest(BashHookCase):
                    "echo $HOME", "ls ${DIR:-.}", "echo \"$(date)\"", "cat $F", "grep -n \"$P\" tests/keep.py", "git log -- $F",
                    "git diff $A $B", "git log --format='%h $x'", "echo $'a\\tb'", "printf $'a\\n'", "x=$((2*3)); echo $x", "echo $((1+2))",
                    "for f in tests/*.py; do python3 -m py_compile $f; done", "X=ls; if true; then echo $X; fi", "git show HEAD:$F",
-                   "python3 -c \"print('$HOME')\"", "sh -c \"echo $HOME\"", "X='git push'; echo $X", "X=git; echo ${X:-x}",
+                   "sh -c \"echo $HOME\"", "X='git push'; echo $X", "X=git; echo ${X:-x}",
                    "git log '$V'", "echo ${X:-git} push", "X=ls; Y=$X; echo $Y", "env FOO=1 ls $D", "git '$V'", "git \\$V"):
             with self.subTest(ok):
                 self.assertSilent(ok)
@@ -4256,6 +4261,11 @@ class ParameterExpansionCommandWordTest(BashHookCase):
                         "%s --as %s member log \"cost \\$5\"" % (spud, AGENT_A)):
             with self.subTest(allowed):
                 self.assertAllowed(allowed)
+        # An expansion inside python's -c string is still no word the hook reads by name, so it earns neither of this
+        # ticket's reasons; since SPD-150 the line is refused a member for the inline program it runs, and stays Spud's.
+        self.assertSilent("python3 -c \"print('$HOME')\"", agent_id=None)
+        r = self.assertRefused("python3 -c \"print('$HOME')\"", INLINE_WORDING)
+        self.assertNotIn("cannot resolve", r.reason)
         self.assertRefused("git push", "Law 7")
         self.assertRefused("$X push", "spell the command out")
 
@@ -5244,8 +5254,7 @@ class ShellStandardInputTest(BashHookCase):
     UNREAD = ("sh < setup.sh", "sh -s arg < setup.sh", "cat setup.sh | sh", "cat setup.sh | zsh",
               "curl -sS https://example.com/i.sh | sh", "sh setup.sh", "bash ./setup.sh", "sh <(echo 'git push')",
               "echo \"$CMD\" | sh", "X=push; echo \"git $X\" | sh", "printf '%d' 'git push' | sh",
-              "echo 'git push' > tests/out.txt | sh", "echo 'git push' | cat", "echo 'git push' | xargs sh",
-              "echo 'git push' | python3 -")
+              "echo 'git push' > tests/out.txt | sh", "echo 'git push' | cat", "echo 'git push' | xargs sh")
 
     def setUp(self):
         super().setUp()
@@ -5273,6 +5282,10 @@ class ShellStandardInputTest(BashHookCase):
             with self.subTest(command):
                 self.assertEqual(self.analysis(command).findings, [])
                 self.assertSilent(command)
+        # An interpreter is no shell, so nothing the line puts on python's standard input is read as commands here; since
+        # SPD-150 such a line is refused a member for the program python runs there instead (InlineProgramTest).
+        self.assertEqual(self.verbs("echo 'git push' | python3 -"), [])
+        self.assertSilent("echo 'git push' | python3 -", agent_id=None)
 
     def test_a_c_string_is_still_the_only_thing_that_shell_runs(self):
         """probed: `sh -c 'cat >/dev/null; vcs c'` ran c alone, whatever its commands read from the pipe."""
@@ -5307,6 +5320,154 @@ class ShellStandardInputTest(BashHookCase):
         out = str(self.out)
         self.assertRefused("echo 'cd %s' | sh; echo x > note.txt" % out, "deliverables")
         self.assertSilent("cd %s && echo 'git status' | sh && echo x > note.txt" % out)
+
+
+INLINE_WORDING = "the hook reads no inline program"
+
+
+class InlineProgramTest(BashHookCase):
+    """SPD-150: an interpreter run whose program the line spells rather than reads from a file.
+
+    BADS-140/Jeremy wrote `scripts/web-seed.js`, outside his deliverable globs, with the HEREDOC below, and patched two
+    files inside his globs the same way; nothing went through Edit or Write, so the edit hook never saw them, and the
+    Bash rule read the line as far as `python3.14` and appended kind `other` (SPD-126's brief left the interpreters out
+    on purpose).  So Law 5's fence stood only where a member used the tools.
+
+    Since this ticket a caller the Bash rule holds is refused an interpreter run whose program the line spells: an
+    option that carries it (python's `-c`, node's `-e`/`--eval`/`-p`/`--print` with bun's and deno's spellings, perl's
+    `-e`/`-E`, ruby's `-e`) or standard input, where the line feeds it and the interpreter has no program of its own.
+    A program from a file, python's `-m module` and an interpreter left to read a terminal are unchanged, whatever they
+    write -- whether a member may run a script file it wrote itself is SPD-145's question -- and Spud keeps his inline
+    programs, Law 1 binding him where the hook cannot see.
+
+    The refusal is read last of all (bash_rule), so every reason a line has already earned it keeps: a git verb, a
+    database call, a spud call, and each write the path rule refuses, which is how SPD-126's readings of perl's `-i`
+    still answer."""
+
+    HEREDOC = ("python3.14 - <<'PY'\nimport pathlib\np = pathlib.Path('scripts/web-seed.js')\ns = p.read_text()\n"
+               "p.write_text(s.replace('a', 'b'))\nPY")
+    # Each line runs a program the line spells: an option carries it, or the interpreter reads it on standard input.
+    SPELLED = (
+        HEREDOC,
+        "python3.14 -c 'import pathlib'", "python3 -c'print(1)'", "python3 -Ic 'print(1)'", "python3 -I -S -c 'print(1)'",
+        "python3 -W ignore -c 'print(1)'", "python3 -c 'print(1)' > /dev/null",
+        "echo 'print(1)' | python3", "echo 'print(1)' | python3 -", "python3 <<< 'print(1)'", "python3 < tests/x.py",
+        "python3 - < tests/x.py", "cat tests/x.py | python3", "python3 /dev/stdin <<< 'print(1)'",
+        "python3 - <<'PY'\nprint(1)\nPY", "env python3 -c 'print(1)'", "cd tests && python3 -c 'print(1)'",
+        "node -e 'console.log(1)'", "node -p 'process.cwd()'", "node --eval 'console.log(1)'", "node --eval='x'",
+        "node --print 'x'", "node -pe 'x'", "node --require ./r.js -e 'x'", "nodejs -e 'x'", "bun -e 'x'", "deno -e 'x'",
+        "node - <<'JS'\nconsole.log(1)\nJS", "cat tests/x.js | node", "echo 'console.log(1)' | node",
+        "perl -e 'print 1'", "perl -E 'say 1'", "perl -pe 's/a/b/' tests/x.txt", "perl -0pe 'print' tests/x.txt",
+        "perl -ne 'print if /x/' tests/x.txt", "perl -I lib -e 'print 1'", "cat tests/x.pl | perl",
+        "ruby -e 'puts 1'", "ruby -ne 'puts 1'", "ruby -I lib -e 'puts 1'", "echo 'puts 1' | ruby",
+    )
+    # ... and each of these runs a program from a file, a module, or none at all: unchanged, for every caller.
+    READS_A_FILE = (
+        "python3.14 -I -S tests/suite.py", "python3.14 -I -S tests/suite.py test_hooks", "python3 tests/x.py",
+        "python3.14 -m unittest discover -s tests -t tests", "python3 -m json.tool tests/x.json", "python3 -mjson.tool",
+        "python3", "python3 -i", "python3 -", "python3 --version", "python3 -- tests/x.py",
+        "python3 --check-hash-based-pycs always tests/x.py", "python3 -X importtime tests/x.py",
+        "node scripts/x.js", "node --require ./r.js scripts/x.js", "node", "node --version", "node -c scripts/x.js",
+        "npm test", "npx tsc --noEmit", "deno run scripts/x.ts",
+        # perl's -i writes, and the two here write in the temp root, which is open to Spud and to a member alike
+        "perl tests/x.pl", "perl -i tests/x.pl /tmp/y.txt", "perl -pie s/a/b/ /tmp/x.txt", "perl -v",
+        "ruby tests/x.rb", "ruby -I lib tests/x.rb", "ruby -v",
+    )
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "tests").mkdir(exist_ok=True)
+        (self.home.path / "tests" / "x.py").write_text("print(1)\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def inline(self, command):
+        """The inline-program findings this line records, in the order the analysis finds them."""
+        return [detail for kind, detail in self.analysis(command).findings if kind == "inline"]
+
+    def test_the_bads_140_heredoc_is_refused_and_recorded(self):
+        r = self.assertRefused(self.HEREDOC, "Law 1")
+        self.assertIn(INLINE_WORDING, r.reason)
+        self.assertIn("python3.14", r.reason)
+        self.assertIn("standard input", r.reason)
+        self.assertIn("Edit or Write", r.reason)
+        events = self.denied()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["data"]["tool_name"], "Bash")
+        self.assertIn(INLINE_WORDING, events[0]["data"]["reason"])
+
+    def test_the_analysis_finds_the_program_the_line_spells(self):
+        for command in self.SPELLED:
+            with self.subTest(command):
+                self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
+        for command in self.READS_A_FILE:
+            with self.subTest(command):
+                self.assertEqual(self.inline(command), [])
+
+    def test_the_option_that_carries_the_program_is_the_one_the_reason_names(self):
+        for command, option in (("python3 -c 'print(1)'", "-c"), ("python3 -Ic 'print(1)'", "-c"),
+                                ("node -e 'x'", "-e"), ("node -p 'x'", "-p"), ("node -pe 'x'", "-p"),
+                                ("node --eval 'x'", "--eval"), ("node --eval='x'", "--eval"), ("node --print 'x'", "--print"),
+                                ("perl -e 'print 1'", "-e"), ("perl -E 'say 1'", "-E"), ("perl -pe 's/a/b/' f", "-e"),
+                                ("ruby -e 'puts 1'", "-e")):
+            with self.subTest(command):
+                self.assertEqual(self.inline(command), [(command.split()[0], option)])
+        for command in ("echo 'print(1)' | python3", self.HEREDOC, "cat tests/x.js | node"):
+            with self.subTest(command):  # standard input: no option carries it
+                self.assertEqual(self.inline(command)[0][1], None)
+
+    def test_a_member_is_refused_and_spud_keeps_his_inline_programs(self):
+        for command in self.SPELLED:
+            with self.subTest(command):
+                self.assertRefused(command, INLINE_WORDING)
+                self.assertRefused(command, "Law 1")
+                self.assertSilent(command, agent_id=None)  # Law 1 binds Spud where the hook cannot see; his are probes
+
+    def test_a_program_from_a_file_a_module_and_a_terminal_are_unchanged(self):
+        for command in self.READS_A_FILE:
+            with self.subTest(command):
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=None)
+
+    def test_the_database_and_the_launcher_keep_their_reasons(self):
+        """The two findings the interpreter branches already made: a sqlite mention, and a spud call the hook vouches for."""
+        for command in ("python3 -c 'import sqlite3; sqlite3.connect(\"/x/ledger.db\")'", "python3.14 -m sqlite3 x.db",
+                        "python3 - <<EOF\nimport sqlite3\nEOF", "node -e 'require(\"node:sqlite\")'"):
+            with self.subTest(command):
+                for agent_id in (AGENT_A, None):
+                    r = self.assertRefused(command, "spud sql --readonly", agent_id=agent_id)
+                    self.assertNotIn(INLINE_WORDING, r.reason)
+        self.assertAllowed("%s --as %s member log hi" % (self.spud_cli, AGENT_A))
+        self.assertAllowed("%s board" % self.spud_cli)
+        self.assertRefused("%s ticket new --title x" % self.spud_cli, "Law 6")
+        self.assertSilent("python3.14 -I -S %s/bin/spud board | head" % self.home.path)
+
+    def test_a_refusal_the_line_already_earns_keeps_its_own_reason(self):
+        for command, needle in (("python3 -c 'print(1)' && git commit -m x", "Law 7"),
+                                ("node -e 'x' > docs/x.md", "deliverables"),
+                                ("perl -pi.bak -e s/a/b/ bin/spud", "deliverables"),
+                                ("perl -pi -e s/a/b/ ledger/tickets/SPD-001.md", "generated"),
+                                ("ruby -e 'puts 1' | tee CLAUDE.md", "deliverables"),
+                                ("python3 -c 'import sqlite3'", "spud sql --readonly")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle)
+                self.assertNotIn(INLINE_WORDING, r.reason)
+
+    def test_the_input_a_pipeline_and_a_group_give_an_interpreter(self):
+        """The reading is SPD-143's: what the line puts on a command's standard input, whether or not the hook can spell
+        the text -- a file, another program's output and an unreadable printer all feed a program it cannot read."""
+        for command in ("{ python3; }", "(python3)", "python3 3< tests/x.py", "python3 2>&1", "if true; then python3; fi"):
+            with self.subTest(command):  # nothing on standard input: the REPL, whatever stands around it
+                self.assertSilent(command)
+        for command in ("echo 'print(1)' | { python3; }", "echo 'print(1)' | (python3)",
+                        "date | python3", "python3 <&3", "echo x | tee /dev/null | python3",
+                        "for f in tests/*.py; do python3 < $f; done"):
+            with self.subTest(command):
+                self.assertRefused(command, INLINE_WORDING)
+        self.assertSilent("echo 'print(1)' | xargs node")  # xargs reads the input; its command gets none of it
+        self.assertRefused("echo 'print(1)' | xargs node -e", INLINE_WORDING)  # ... but the -e is still an -e
 
 
 # A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
@@ -5436,8 +5597,12 @@ class ShellSnapshotTest(ShellSnapshotCase):
             self.silent_for_everyone(cmd)
 
     def test_an_alias_that_shadows_a_program_stays_silent(self):
-        for cmd in ("ls", "ls -la", "ll", "python -c pass", "grep -rn x .", "awky", "echo hi", "cat f"):
+        for cmd in ("ls", "ls -la", "ll", "python --version", "grep -rn x .", "awky", "echo hi", "cat f"):
             self.silent_for_everyone(cmd)
+        # SPD-150: the alias (python=python3) still shadows the program; the words after it are the member's own, so an
+        # inline program behind one is refused exactly as it is spelled out, and stays Spud's.
+        self.refused_for_members("python -c pass", INLINE_WORDING)
+        self.assertSilent("python -c pass", agent_id=None)
 
     def test_a_recursive_alias_terminates(self):
         """`alias ls='ls -G'` and `ll='ls -lh'`: zsh does not expand a name again inside its own expansion."""
@@ -5572,7 +5737,7 @@ class ShellSnapshotTest(ShellSnapshotCase):
                 self.assertSilent(cmd, AGENT_B)
                 self.assertRefused(cmd, "Law 1", agent_id=None)
         self.refused_for_members("md scratchdir", "scratchdir")  # outside every deliverable of theirs
-        for cmd in ("grep -rn x .", "find . -name x", "shadowed x", "ls", "python -c pass"):
+        for cmd in ("grep -rn x .", "find . -name x", "shadowed x", "ls", "python --version"):
             self.silent_for_everyone(cmd)
 
     def test_a_member_cannot_plant_a_snapshot(self):
@@ -5664,11 +5829,13 @@ class RealShellSnapshotTest(BashHookCase):
         self.assertIn("Law 7", r.reason)
 
     def test_the_commands_members_run_all_day_stay_silent(self):
-        for cmd in ("ls", "ls -la", "grep -rn spud .", "python3 -c pass", "cat /etc/hosts", "echo hi", "git status",
+        for cmd in ("ls", "ls -la", "grep -rn spud .", "python3 --version", "cat /etc/hosts", "echo hi", "git status",
                     "find . -name x", "diff /etc/hosts /etc/hosts"):
             with self.subTest(cmd):
                 r = self.real_bash(cmd)
                 self.assertNotEqual(r.decision, "deny", (cmd, r.reason))
+        # ... and one a member ran all day until SPD-150, refused now whatever this Mac's profile says (InlineProgramTest)
+        self.assertIn(INLINE_WORDING, self.real_bash("python3 -c pass").reason)
 
 
 class NamedCoprocTest(BashHookCase):
@@ -9396,8 +9563,10 @@ SPELLED_WRITERS = (
     ("curl --alt-svc", "curl --alt-svc {} https://example.com/x"),
     ("curl -w %output", "curl -o /dev/null -w '%output{{}}%{http_code}' https://example.com/x"),
     ("mkfifo", "mkfifo -m 600 {}"),
-    ("perl -i", "perl -i -pe s/a/b/ {}"),
-    ("perl -0pi", "perl -0pi -e s/a/b/ {}"),
+    # SPD-150 refuses a member perl's -e as the inline program it is, before ever reaching its -i, so these two name
+    # perl's other program, a file (InlineProgramTest); `perl -i script.pl f` writes f exactly as `-i -pe` does.
+    ("perl -i", "perl -i script.pl {}"),
+    ("perl -0pi", "perl -0pi script.pl {}"),
     ("tar -c", "tar -czf {} docs"),
     ("tar c bundle", "tar cf {} docs"),
     ("tar -r", "tar -rf {} docs"),
@@ -9584,12 +9753,21 @@ class SpelledWriteTest(TreeWriteCase):
         self.assertRefused("split -a 3 a.tar out/x", "deliverables", agent_id=AGENT_I)
 
     def test_perl_in_place_and_its_backup(self):
-        for command in ("perl -pi -e s/a/b/ bin/spud", "perl -0pi -e s/a/b/ tests/x.txt", "perl -pi.bak -e s/a/b/ tests/x.txt",
-                        "perl -pe s/a/b/ docs/x.md", "perl -ne 'print if /x/' docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'",
-                        "sleep_ms() { perl -e 'select undef, undef, undef, $ARGV[0]' \"$1\"; }; sleep_ms 20",  # the differential's
-                        "find tests/out -exec perl -pi -e s/a/b/ {} +"):
+        # SPD-150: perl's -e and -E are inline programs, refused a member before its files are reached, so the silent
+        # lines here name perl's other program, a file; each of them was silent for the same reason before that ticket.
+        for command in ("perl -pi script.pl bin/spud", "perl -0pi script.pl tests/x.txt", "perl -pi.bak script.pl tests/x.txt",
+                        "perl script.pl docs/x.md", "perl -p script.pl docs/x.md", "perl -Ilib script.pl docs/x.md",
+                        "find tests/out -exec perl -pi script.pl {} +"):
             with self.subTest(command):
                 self.assertSilent(command, agent_id=AGENT_A)
+        for command in ("perl -pi -e s/a/b/ bin/spud", "perl -0pi -e s/a/b/ tests/x.txt", "perl -pe s/a/b/ docs/x.md",
+                        "perl -ne 'print if /x/' docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'",
+                        "sleep_ms() { perl -e 'select undef, undef, undef, $ARGV[0]' \"$1\"; }; sleep_ms 20"):  # the differential's
+            with self.subTest(command):
+                self.assertRefused(command, INLINE_WORDING, agent_id=AGENT_A)  # SPD-150, whatever the files it edits
+        for command in ("perl -pe s/a/b/ docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'"):  # Spud keeps his
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)
         for command, needle, shown in (("perl -pi.bak -e s/a/b/ bin/spud", "deliverables", "bin/spud.bak"),
                                        ("perl -pi'orig_*' -e s/a/b/ bin/spud", "deliverables", "orig_bin/spud"),
                                        ("perl -pie s/a/b/ bin/spud", "deliverables", "bin/spude"),  # -pie: extension "e"

@@ -71,6 +71,26 @@ ARG_WRITE_MESSAGES = {
                  " directory it cannot list), so it cannot tell whether a git directory or config file lands with it, which"
                  " no spudagent writes (SPD-066); copy or search a smaller tree, or exclude .git"),
 }
+# SPD-150: an interpreter run whose program the line spells rather than reads from a file (shell/inline_programs), which
+# is how BADS-140/Jeremy wrote `scripts/web-seed.js` past his deliverable globs: `python3.14 - <<'PY' ... p.write_text(s)`.
+# Law 1's number, because the fence it passes is the one the edit hook puts on every path -- Spud's own files and a
+# member's deliverables -- and the way through that fence is the Edit or Write tool, which the hook checks.
+INLINE_PROGRAM_REASON = (
+    "Law 1: `%s` runs a program %s, and the hook reads no inline program: it cannot tell which files that program"
+    " writes, so a write from there passes the fence every other channel is held to (the Edit and Write hook, a"
+    " redirection, a write by argument, a sed or awk script). Edit a deliverable with the Edit or Write tool, which the"
+    " edit hook checks against your globs; run a program from a file (`python3.14 -I -S tests/suite.py`,"
+    " `node scripts/build-web.js`) or a module (`python3 -m json.tool`), both of which are unchanged; and file a"
+    " proposal if the work really needs a program of its own")
+INLINE_PROGRAM_STDIN = ("it reads on standard input (a here-document, a here-string, a pipe or a `<` file), having none"
+                        " of its own")
+
+
+def inline_program_reason(detail):
+    """The refusal an interpreter run earns a member for a program the line spells: (the command word as spelled, the
+    option that carries the program, or None where the interpreter reads it on standard input)."""
+    cmd, option = detail
+    return INLINE_PROGRAM_REASON % (cmd, ("`%s` carries" % option) if option else INLINE_PROGRAM_STDIN)
 
 
 def path_directories(kind, path):
@@ -416,4 +436,12 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         return ARG_WRITE_MESSAGES["capped"] % (capped, syntax.GLOB_MATCH_CAP), analysis
     if strict and unwalked:  # a tree whose walk for a git directory stopped short
         return ARG_WRITE_MESSAGES["unwalked"] % (unwalked, syntax.GLOB_SCAN_CAP), analysis
+    if strict:
+        # SPD-150: last of all, where the findings FINDING_LAST holds back stand: an inline program says only that the
+        # hook cannot read what runs, so every refusal the line has already earned keeps its own reason -- a git verb, a
+        # database call, a spud call, a program git would run, and each write the path rule refuses above, which is
+        # what SPD-126's readings of perl and sed still answer with.
+        for kind, detail in analysis.findings:
+            if kind == "inline":
+                return inline_program_reason(detail), analysis
     return None, analysis

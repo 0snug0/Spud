@@ -19,7 +19,7 @@ bin/
     commands/  reportentry · admincmds · doctor · schedule · settings_sync · publish · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind
     projects/  sessions · registry · install
     hooks/     hookio · worktrees · pathrule · gitrepos · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
-    shell/     syntax · prepare · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · walk · analyse · redirect_globs · bash_rule
+    shell/     syntax · prepare · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · walk · analyse · redirect_globs · inline_programs · bash_rule
     cli/       helptexts · cliparser
 ```
 

@@ -31,7 +31,8 @@ not read either, and Law 7 has that hole for every caller; Spud has filed it as 
 member refused for it here.
 
 Kept whole past 250 lines (SPD-065's rule): it answers one question -- what text stands on a command's standard input
-and standard output -- and the two halves are the same reading from either end.  What the printers decode is the table
+and standard output -- and the two halves are the same reading from either end.  SPD-150 added `input_fed`, whether the
+line puts anything there at all, which is the same reading of the same redirections.  What the printers decode is the table
 `analyse` and `walk` reach it for; splitting the escapes off would leave a module no caller names.
 """
 
@@ -92,6 +93,32 @@ def command_input(tokens, bodies, piped):
             continue
         i += 2 if t in syntax.OUT_REDIRECTS else 1
     return text
+
+
+def input_fed(tokens, bodies, piped):
+    """Whether the line puts anything on this simple command's standard input at all (SPD-150), which is not whether
+    command_input can say what it is: that answers None both for input the line does not spell and for none at all, and
+    an interpreter with no program of its own runs whatever stands there (shell/inline_programs), so the two must be
+    told apart -- `cat x | node` and `python3 < f` run a program, `python3` on its own is the REPL.
+
+    Anything: a here-document body (`bodies`, which ShellWalk.consume has taken out of the words), a here-string, a
+    `<` file, a `<&` descriptor, a `<>` opened read-write (bash's default descriptor for it is 0), or a pipeline element
+    before this one (`piped`).  A redirection with a descriptor of its own before it feeds that descriptor, not
+    standard input."""
+    if bodies or piped:
+        return True
+    i = 0
+    while i < len(tokens):
+        t, fd = tokens[i], None
+        if _FD_RE.fullmatch(t) and i + 1 < len(tokens) and tokens[i + 1] in (syntax.OUT_REDIRECTS | syntax.IN_REDIRECTS):
+            fd, i, t = t, i + 1, tokens[i + 1]
+        if t in syntax.IN_REDIRECTS or t == "<>":
+            if fd in (None, "0"):
+                return True
+            i += 2
+            continue
+        i += 2 if t in syntax.OUT_REDIRECTS else 1
+    return False
 
 
 def reads_commands(words):
