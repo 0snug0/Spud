@@ -56,7 +56,8 @@ class ShellFrame:
         # list inside this compound starts from -- all of it put back by ShellWalk.pop.  `prints`: what the commands in
         # it print reaches the enclosing element's own output -- not so for a function body, which prints when it is
         # called, nor for a process substitution, whose output goes to the file it stands for.
-        self.printed, self.earlier, self.stdin, self.prints = "", "", (None, None), kind != "func"
+        # `stdin` carries SPD-150's two flags beside those two texts: whether anything at all stands on that input.
+        self.printed, self.earlier, self.stdin, self.prints = "", "", (None, None, False, False), kind != "func"
 
 
 class ShellWalk:
@@ -98,6 +99,9 @@ class ShellWalk:
         # standard input -- and the input the compound command itself was given.  None is text the line does not spell,
         # which absorbs (stdin_text.joined).
         self.printed, self.frame_printed, self.piped_text, self.frame_stdin = "", "", None, None
+        # SPD-150: whether a pipe feeds the element being read at all, and whether one fed the compound command around
+        # it, which the texts above cannot say (None is both "nothing" and "text the line does not spell").
+        self.piped_fed, self.frame_stdin_fed = False, False
         self.start_list()
 
     # -- lists and pipelines ------------------------------------------------------------
@@ -113,10 +117,10 @@ class ShellWalk:
         `&&`, a `||` or a `&` ends an element without ending the compound command around it, and the text a shell after
         a later `|` runs is the one element before it, never the list before that (`echo x; echo 'git push' | sh`)."""
         if into_pipe:
-            self.piped_text = self.printed
+            self.piped_text, self.piped_fed = self.printed, True
         else:
             self.frame_printed = stdin_text.joined(self.frame_printed, self.printed)
-            self.piped_text = self.frame_stdin
+            self.piped_text, self.piped_fed = self.frame_stdin, self.frame_stdin_fed
         self.printed = ""
 
     def end_pipeline(self):
@@ -139,8 +143,10 @@ class ShellWalk:
         frame = ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned), funcs)
         # SPD-143: what the element around it printed so far is kept for after the compound command, and the standard
         # input that element was given is the input every list inside it starts from
-        frame.printed, frame.earlier, frame.stdin = self.printed, self.frame_printed, (self.piped_text, self.frame_stdin)
-        self.printed, self.frame_printed, self.frame_stdin = "", "", self.piped_text
+        frame.printed, frame.earlier = self.printed, self.frame_printed
+        frame.stdin = (self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed)
+        self.printed, self.frame_printed = "", ""
+        self.frame_stdin, self.frame_stdin_fed = self.piped_text, self.piped_fed
         self.stack.append(frame)
         if kind in ("loop", "func"):
             self.a.loop_depth += 1
@@ -154,7 +160,7 @@ class ShellWalk:
         # SPD-143: the compound command's own output stands where it opened, in the element that holds it
         self.printed = stdin_text.joined(frame.printed, self.frame_printed) if frame.prints else frame.printed
         self.frame_printed = frame.earlier
-        self.piped_text, self.frame_stdin = frame.stdin
+        self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed = frame.stdin
         if frame.kind == "sub":
             self.a.functions = frame.funcs  # SPD-084: a function defined in a subshell does not reach a call after it
         if frame.kind in ("loop", "func"):
@@ -365,11 +371,11 @@ class ShellWalk:
         if self.function_next:  # zsh's `name () command`: a body that runs when called, perhaps more than once
             self.function_next = False
             a.loop_depth += 1
-            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, self.piped_text)
+            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, self.piped_text, self.piped_fed)
             a.loop_depth -= 1
             a.cwds = directories.union_dirs(before, a.cwds)
         else:
-            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, self.piped_text)
+            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, self.piped_text, self.piped_fed)
             # SPD-143: what this command adds to the text its pipeline element prints, which a shell after a `|` runs
             self.printed = stdin_text.joined(self.printed, stdin_text.printed_text(cleaned, bodies, self.piped_text))
         a.unsure -= unsure

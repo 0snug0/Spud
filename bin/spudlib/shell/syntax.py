@@ -457,6 +457,10 @@ class ShellAnalysis:
         # it.  A shell that runs what it reads there runs that text (shell/stdin_text).  analyse_segment sets it for
         # each command and puts back what it found, so a body read in its own process reads its own input, not this one.
         self.stdin = None
+        # SPD-150: whether the line puts anything on that standard input at all (stdin_text.input_fed), which `stdin`
+        # cannot say, being None both for text the line does not spell and for no input at all.  An interpreter with no
+        # program of its own runs whatever stands there, and reads a terminal where nothing does (shell/inline_programs).
+        self.stdin_fed = False
         self.cwds = frozenset([cwd]) if cwd else None
         self.unparseable = False
         self.loop_depth = 0  # inside a loop or a function body, where a relative cd may repeat
