@@ -17,7 +17,7 @@ bin/
     render/    prices · teamcard · workedon · sectiontext · notefiles
     imports/   noteimport · bulkimport · accept
     commands/  reportentry · admincmds · doctor · schedule · settings_sync · publish · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind
-    projects/  sessions · registry · install
+    projects/  sessions · registry · install · agentdef
     hooks/     hookio · worktrees · pathrule · gitrepos · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
     shell/     syntax · prepare · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · walk · analyse · redirect_globs · inline_programs · interpreter_words · bash_rule
     cli/       helptexts · cliparser
@@ -86,7 +86,8 @@ Every Bash, Edit and Agent call in every session runs `spud hook PreToolUse`, an
 **What Eric's decision 2 (SPD-065) keeps off the path, permanently:** the parser, every `commands/*` module, `imports/*`, `projects/install`, `projects/registry`, `commands/schedule`, `commands/doctor`, and `render/*`. The one exception, on the record: `render/prices` is on the path because `core/homeconf` reads it for `Ctx.pricing`.
 
 ```bash
-python3.14 -I -S tests/probes/hook_timing.py 30 /Users/ericlugo/Personal/Spud/bin/spud "$PWD/bin/spud"
+main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")   # the main checkout, wherever this machine keeps it
+python3.14 -I -S tests/probes/hook_timing.py 30 "$main/bin/spud" "$PWD/bin/spud"
 ```
 
 Main's launcher first, your branch's second; each gets its own scratch home, so no ledger is touched. **The pass: every hook case's median within 1 ms of main's in the same run.** A command case (`board`) may move more.
@@ -160,5 +161,5 @@ Its reach has known gaps (SPD-079): it does not see an alias shadowed by a neste
 1. `python3.14 -I -S tests/suite.py` — the whole suite on every core, about 80 seconds; run the modules you touched by name while you work (`tests/suite.py test_package test_hooks`) and the whole suite once at the end, and put its final line, with the tree's digest, in your result. The serial fallback, `python3.14 -I -S -m unittest discover -s tests -t tests`, takes about eleven minutes, prints no digest, and wants the checkout to itself.
 2. `find bin tests -name '*.pyc' -o -name __pycache__` prints nothing.
 3. If you touched the hook path: `HOOK_PATH` updated, and `tests/probes/hook_timing.py` within 1 ms of main.
-4. If you changed how the program is loaded or how a hook answers: `python3.14 -I -S tests/probes/session_diff.py /Users/ericlugo/Personal/Spud/bin/spud "$PWD/bin/spud"` — scripted CLI and hook calls against both launchers, every step identical after masking.
+4. If you changed how the program is loaded or how a hook answers: `python3.14 -I -S tests/probes/session_diff.py "$main/bin/spud" "$PWD/bin/spud"` — main's launcher (`$main` as in §3) and this worktree's, scripted CLI and hook calls against both, every step identical after masking.
 5. If you added a module or grew one: `tests/probes/module_sizes.py`, and the reason written down.

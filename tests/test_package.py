@@ -12,8 +12,9 @@ import json
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
-from helpers import REPO, SPUD, SpudTestCase
+from helpers import REPO, SPUD, SpudTestCase, load_spud_module
 
 PACKAGE = REPO / "bin" / "spudlib"
 ENTRY = REPO / "bin" / "spud_ledger.py"
@@ -198,6 +199,42 @@ class PackageShapeTest(unittest.TestCase):
         graph = dict(self.graph)
         graph[DISPATCH] = graph[DISPATCH] | {"hooks." + module for module, _ in self.handlers.values()}
         self.assertEqual(set(self.modules) - reach(graph, starts), set())
+
+
+class ShippedPathsTest(unittest.TestCase):
+    """SPW-002: no file this repository ships names a machine's home directory -- the installed spudagent definition is
+    rendered from Ctx at install (projects/agentdef), the way the /spud skill's text is, and every command in the prose
+    finds the launcher from git instead of spelling one machine's path.  The two files below hold recorded test data, a
+    spudagent's return text and a Bash hook payload, and keep the paths they recorded."""
+
+    RECORDED = {"tests/fixtures/team_card.json", "tests/test_hooks.py"}
+    SKIP = (".git", ".claude/worktrees")  # git's own store, and a linked worktree checked out inside the main one
+
+    def shipped(self):
+        """[(path, bytes)] for every file this repository ships: the tree, less what git ignores -- the rule
+        tests/suite.py's snapshot copies by, and the one that leaves out a session's own runtime state (.omc/,
+        .claude/settings.local.json), which is nobody's deliverable and names this machine freely."""
+        rels = [p.relative_to(REPO).as_posix() for p in sorted(REPO.rglob("*")) if p.is_file()]
+        rels = [r for r in rels if r not in self.RECORDED and not any(r == s or r.startswith(s + "/") for s in self.SKIP)]
+        proc = subprocess.run(["git", "-C", str(REPO), "check-ignore", "-z", "--stdin"], input="\0".join(rels), capture_output=True, text=True)
+        ignored = {r for r in proc.stdout.split("\0") if r} if proc.returncode in (0, 1) else set()
+        return [(rel, (REPO / rel).read_bytes()) for rel in rels if rel not in ignored]
+
+    def test_no_shipped_file_names_a_machines_home_directory(self):
+        # This machine's home, whichever machine runs the suite, and the one path SPW-002 took out of six shipped files.
+        needles = sorted({str(Path.home()), "/Users/" + "ericlug" + "o"})
+        shipped = self.shipped()
+        self.assertGreater(len(shipped), 50, "the shipped files were not found; this guard would pass vacuously")
+        self.assertEqual([(rel, needle) for rel, data in shipped for needle in needles if needle.encode("utf-8") in data], [])
+
+    def test_the_spudagent_definition_is_a_template_install_renders(self):
+        text = (REPO / ".claude" / "agents" / "spudagent.md").read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("---\nname: spudagent\n"), text[:64])  # still a Claude Code agent definition here
+        spud = load_spud_module()
+        self.assertIn(spud.LAUNCHER_MARK, text)
+        rendered = spud.render_launcher(text, "/somewhere/Spud/bin/spud")
+        self.assertIn("python3.14 -I -S /somewhere/Spud/bin/spud", rendered)
+        self.assertNotIn(spud.LAUNCHER_MARK, rendered)
 
 
 class PatchTargetTest(unittest.TestCase):

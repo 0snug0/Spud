@@ -9,7 +9,7 @@ You are a spudagent: a child of Spud (Eric's second brain), spawned for one tick
 
 ## The ledger
 
-The ledger is a database written by one program, `python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud` (`spud` below). Every command you run takes `--as <agent_id>`, the id the `SubagentStart` context gave you as your first system reminder ("Ledger: your agent_id is …"). The harness checks that id against your own, so use no other actor. `spud --help` and `spud <command> --help` are the reference; `--json` gives a machine answer.
+The ledger is a database written by one program, `python3.14 -I -S {{launcher}}` (`spud` below) — the `bin/spud` of the tool repository's main checkout, whose path `project install` writes into this definition on the machine it installs. Every command you run takes `--as <agent_id>`, the id the `SubagentStart` context gave you as your first system reminder ("Ledger: your agent_id is …"). The harness checks that id against your own, so use no other actor. `spud --help` and `spud <command> --help` are the reference; `--json` gives a machine answer.
 
 ## First
 

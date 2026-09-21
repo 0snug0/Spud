@@ -102,8 +102,14 @@ class SeparateToolTest(RepoMixin, SpudTestCase):
         skill = (self.home.path / ".user-claude" / "skills" / "spud" / "SKILL.md").read_text(encoding="utf-8")
         self.assertIn("python3.14 -I -S %s --as spud session claim" % self.launcher, skill)
         self.assertIn("Read %s/CLAUDE.md in full" % self.home.path, skill)
+        # SPW-002: the tool repository's definition is a template, and this tool checkout is at a path no shipped file
+        # names, so the installed copy is the shipped one with this run's launcher filled in, placeholder and all gone.
         agent = (self.home.path / ".user-claude" / "agents" / "spudagent.md").read_text(encoding="utf-8")
-        self.assertEqual(agent, (self.tool / ".claude" / "agents" / "spudagent.md").read_text(encoding="utf-8"))
+        source = (self.tool / ".claude" / "agents" / "spudagent.md").read_text(encoding="utf-8")
+        self.assertIn("{{launcher}}", source)
+        self.assertNotIn("{{launcher}}", agent)
+        self.assertIn("python3.14 -I -S %s" % self.launcher, agent)
+        self.assertEqual(agent, source.replace("{{launcher}}", self.launcher))
         self.assertEqual(self.home.run("doctor").returncode, 0)
 
     def test_the_bash_hook_vouches_for_the_tools_launcher_not_the_homes(self):
