@@ -22,6 +22,14 @@ RENDER_BEHIND = VAULT_BEHIND + " by %s, the oldest %s (a render lands within sec
 RENDER_BEHIND_STUCK = RENDER_BEHIND + ", and `spud --as spud schedule install` reloads the watcher that is running and not rendering"
 # doctor's render line for each of the four states core/launchagents reports; the lag phrase follows it.
 WATCHER_TEXT = {"absent": "not installed", "down": "installed, not running", "current": "running", "behind": "running"}
+# SPW-001: a home with an empty registry is a working home -- the schema allows it and `spud init --no-project` makes one
+# -- but it can hold no ticket, since tickets.project_id references a project.  So it is a note, not a problem, and the
+# note names the command that ends it.  The first project registered gets id 1 and is the project the config names.
+NO_PROJECT = ("no project is registered, so this home can hold no ticket:"
+              " `spud --as spud project add <path> --key <key> --ticket-prefix %s --team-prefix %s --landing merge` registers project 1")
+# A projects table with rows but no id 1: reachable by nothing the CLI does (`project remove` refuses id 1, archiving
+# keeps the row), and cheap to report.  `config sync` no longer creates the row, so nothing names a fix.
+NO_PROJECT_ONE = "no project 1 among the %d project(s) registered, so spud.config.json's prefixes (%s / %s) name no project"
 
 
 def cmd_doctor(ctx, args):
@@ -34,6 +42,7 @@ def cmd_doctor(ctx, args):
 def doctor_report(ctx):
     """(report, problems, lines): what cmd_doctor prints and raises on; home move reads it too (SPD-097)."""
     problems = []
+    no_project = False  # SPW-001: an empty registry, reported as a note below, where the notes are made
     report = {
         "interpreter": {"path": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3], "flags": {"isolated": bool(sys.flags.isolated), "no_site": bool(sys.flags.no_site)}},
         "sqlite": {"library": sqlite3.sqlite_version, "module": sqlite3.version if hasattr(sqlite3, "version") else None},
@@ -74,11 +83,18 @@ def doctor_report(ctx):
             if db["journal_mode"] != "wal":
                 problems.append("journal_mode is %s, not wal" % db["journal_mode"])
             if db["user_version"] >= 1 and config is not None:
-                home = con.execute("SELECT ticket_prefix, team_prefix FROM projects WHERE id = 1").fetchone()
-                if home is None:
-                    problems.append("no home project row; run `spud config sync`")
-                elif (home["ticket_prefix"], home["team_prefix"]) != (config.get("tickets", {}).get("prefix"), config.get("teams", {}).get("prefix")):
-                    problems.append("home project prefixes differ from spud.config.json; run `spud config sync`")
+                # SPW-001: the comparison is project 1's, and it is made only when the home has a project 1.
+                one = con.execute("SELECT key, ticket_prefix, team_prefix FROM projects WHERE id = 1").fetchone()
+                config_prefixes = (config.get("tickets", {}).get("prefix"), config.get("teams", {}).get("prefix"))
+                if one is not None:
+                    if (one["ticket_prefix"], one["team_prefix"]) != config_prefixes:
+                        problems.append("project %s is project 1 and its prefixes differ from spud.config.json; run `spud config sync`" % one["key"])
+                else:
+                    registered = con.execute("SELECT count(*) FROM projects").fetchone()[0]
+                    if registered:
+                        problems.append(NO_PROJECT_ONE % (registered, *config_prefixes))
+                    else:
+                        no_project = True
                 db["live_members"] = con.execute("SELECT live FROM v_live").fetchone()[0]
                 db["tickets"] = con.execute("SELECT count(*) FROM tickets").fetchone()[0]
                 db["events"] = con.execute("SELECT count(*) FROM events").fetchone()[0]
@@ -98,6 +114,8 @@ def doctor_report(ctx):
     notes = []
     if report["tool"]["checkout"] == "worktree":
         notes.append("the running bin/spud is in a linked worktree: hook lines written from here name it")
+    if no_project:
+        notes.append(NO_PROJECT % (config.get("tickets", {}).get("prefix"), config.get("teams", {}).get("prefix")))
     report["projects"] = doctor_projects(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else []
     report["repositories"] = doctor_repositories(ctx, problems) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["render"] = doctor_render(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION and config is not None else None

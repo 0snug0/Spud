@@ -12,10 +12,12 @@ no-change pass, recorded on SPD-097.
 import json
 import os
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
@@ -34,7 +36,7 @@ def run(launcher, env, *args):
 
 
 def write_config(home):
-    """Render the shipped config template into `home`/spud.config.json."""
+    """Render the shipped config template into `home`/spud.config.json; returns it parsed."""
     with open(CONFIG, encoding="utf-8") as f:
         text = f.read()
     with open(CONFIG_MARKS, encoding="utf-8") as f:
@@ -42,6 +44,24 @@ def write_config(home):
             text = text.replace(mark, value)
     with open(os.path.join(home, "spud.config.json"), "w", encoding="utf-8") as f:
         f.write(text)
+    return json.loads(text)
+
+
+def seed_project_one(home, config):
+    """Project 1 as `spud init` inserted it before SPW-001: key `spud`, rooted at the home (this probe's SPUD_TOOL_DIR),
+    the config's prefixes.  Init registers no project now (docs/design/2026-09-21-spud-init.md section 1.4) and the
+    synthetic tickets below need one."""
+    con = sqlite3.connect(os.path.join(home, ".spud", "ledger.db"), timeout=5)
+    try:
+        with con:
+            con.execute(
+                "INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at)"
+                " VALUES (1, 'spud', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (config["identity"]["name"], home, config["tickets"]["prefix"], config["teams"]["prefix"],
+                 datetime.now().astimezone().isoformat(timespec="seconds")),
+            )
+    finally:
+        con.close()
 
 
 def main():
@@ -50,11 +70,12 @@ def main():
     per_ticket = int(args.pop(0)) if args and args[0].isdigit() else 3
     launcher = os.path.abspath(args[0]) if args else os.path.join(ROOT, "bin", "spud")
     home = tempfile.mkdtemp(prefix="spud-render-timing-")
-    write_config(home)
+    config = write_config(home)
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR")}
     env.update(SPUD_HOME=home, SPUD_TOOL_DIR=home, SPUD_USER_CLAUDE_DIR=os.path.join(home, ".user-claude"), SPUD_CONFIG_DIR=os.path.join(home, ".user-config"))
     try:
         run(launcher, env, "init")
+        seed_project_one(home, config)
         for n in range(tickets):
             t = run(launcher, env, "--as", "spud", "ticket", "new", "--title", "Ticket %d" % n, "--status", "active", "--brief", "b", "--sizing", "s")["ticket"]
             for _ in range(per_ticket):

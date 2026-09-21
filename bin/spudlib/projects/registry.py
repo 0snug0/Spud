@@ -15,8 +15,10 @@ from ..state import actors, ledgerdb, lookup
 # Projects and sessions (SPD-014)
 # ----------------------------------------------------------------------------
 #
-# docs/design/2026-09-14-cross-repository-projects.md.  A project is a registered repository; project 1 is the tool
-# repository, `spud`; the home is no project (SPD-097).
+# docs/design/2026-09-14-cross-repository-projects.md.  A project is a registered repository; the home is no project
+# (SPD-097).  Project 1 is the project whose name and prefixes `spud.config.json` names -- not the tool repository, which
+# it was presumed to be until SPW-001 (docs/design/2026-09-21-spud-init.md section 1), and not a row that must exist: a
+# home may hold no project, and then it holds no ticket either.  The first project registered gets id 1.
 # A session launched in another project is Spud only after `/spud` claims it (projects.sessions = 'claim', the default
 # for `project add`, Eric 2026-09-14), or when its project is 'always', as project spud is until `home move`; a session
 # launched in the home is always Spud's.
@@ -38,17 +40,20 @@ def identity_chain(path):
         cur = parent
 
 
-def validate_project_root(ctx, con, path, exclude_id=None):
-    """The rules 1 to 3 of `project add` (design section 1.2): an existing directory, the root of a git repository's main
-    checkout, not the home, not inside an active project's root and not containing one.  Returns the resolved root."""
+def project_root_shape(ctx, path):
+    """Rules 1 and 2 of `project add` (design section 1.2), the ones a candidate root answers on its own: an existing
+    directory, not the home, the root of a git repository's main checkout.  Returns the resolved root.
+
+    Its own function since SPW-001: `spud init` has to check the root it was given before it creates the database, so
+    there is no connection to pass, and the registry scan validate_project_root adds to this is vacuous anyway on the
+    empty registry init starts from."""
     try:
         root = Path(os.path.expanduser(str(path))).resolve(strict=True)
     except (OSError, RuntimeError):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is not an existing directory" % path)
     if not root.is_dir():
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is not a directory" % root)
-    ident = worktrees.file_identity(root)
-    if ident == worktrees.file_identity(ctx.home):  # SPD-097: asked before git, since the home is no git repository
+    if worktrees.file_identity(root) == worktrees.file_identity(ctx.home):  # SPD-097: asked before git, since the home is no git repository
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is Spud's home, which is not a project (SPD-097); register the tool repository or another checkout" % root)
     proc = homeconf.run_git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", timeout=30)
     lines = proc.stdout.strip().split("\n") if proc.returncode == 0 else []
@@ -59,6 +64,14 @@ def validate_project_root(ctx, con, path, exclude_id=None):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is inside the repository %s, not its root; register the root" % (root, toplevel))
     if worktrees.file_identity(common) != worktrees.file_identity(os.path.join(toplevel, ".git")):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is a linked worktree; register the main checkout, %s" % (root, os.path.dirname(common.rstrip("/"))))
+    return str(root)
+
+
+def validate_project_root(ctx, con, path, exclude_id=None):
+    """The rules 1 to 3 of `project add` (design section 1.2): the shape above, and then not inside an active project's
+    root and not containing one.  Returns the resolved root."""
+    root = project_root_shape(ctx, path)
+    ident = worktrees.file_identity(root)
     chain = identity_chain(root)
     for other in con.execute("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall():
         if other["id"] == exclude_id:
@@ -71,7 +84,7 @@ def validate_project_root(ctx, con, path, exclude_id=None):
             raise kernel.SpudError(kernel.EXIT_ERROR, "%s is inside project %s's root %s; nested roots would make the nearest root ambiguous" % (root, other["key"], other_root))
         if ident in identity_chain(other_root):
             raise kernel.SpudError(kernel.EXIT_ERROR, "%s contains project %s's root %s; nested roots would make the nearest root ambiguous" % (root, other["key"], other_root))
-    return str(root)
+    return root
 
 
 def check_project_key(con, key):
@@ -200,11 +213,11 @@ def cmd_project_edit(ctx, args):
         at = kernel.now()
         with ledgerdb.write_txn(con):
             p = lookup.get_project(con, args.key)
-            tool_project = p["id"] == 1  # SPD-097: project spud, whose name and prefixes are spud.config.json's
+            project_one = p["id"] == 1  # SPW-001: whatever project 1 is, its name and prefixes are spud.config.json's
             updates = {}
             if args.name is not None:
-                if tool_project:
-                    raise kernel.SpudError(kernel.EXIT_ERROR, "project spud's name comes from spud.config.json (identity.name)")
+                if project_one:
+                    raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is project 1, whose name comes from spud.config.json (identity.name)" % p["key"])
                 updates["name"] = args.name
             if args.landing is not None:
                 updates["landing"] = args.landing
@@ -219,8 +232,9 @@ def cmd_project_edit(ctx, args):
                     raise kernel.SpudError(kernel.EXIT_ERROR, "%s is already the root of project %s" % (root, clash["key"]))
                 updates["root_path"] = root
             if args.ticket_prefix is not None or args.team_prefix is not None:
-                if tool_project:
-                    raise kernel.SpudError(kernel.EXIT_ERROR, "project spud's prefixes come from spud.config.json (`spud config sync`)")
+                if project_one:
+                    raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is project 1, whose prefixes come from spud.config.json"
+                                    " (edit tickets.prefix and teams.prefix there, then `spud config sync`)" % p["key"])
                 if con.execute("SELECT 1 FROM tickets WHERE project_id = ? LIMIT 1", (p["id"],)).fetchone():
                     raise kernel.SpudError(kernel.EXIT_ERROR, "project %s has tickets, so its prefixes are fixed: they are in rendered file names and wikilinks" % p["key"])
                 tp, tm = args.ticket_prefix or p["ticket_prefix"], args.team_prefix or p["team_prefix"]

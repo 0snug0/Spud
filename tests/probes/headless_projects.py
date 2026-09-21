@@ -42,11 +42,29 @@ IDENTITY = {"GIT_AUTHOR_NAME": "Spud probe", "GIT_AUTHOR_EMAIL": "probe@example.
 
 
 def write_config(home):
-    """Render the shipped config template into `home`/spud.config.json."""
+    """Render the shipped config template into `home`/spud.config.json; returns it parsed."""
     text = CONFIG.read_text(encoding="utf-8")
     for mark, value in json.loads(CONFIG_MARKS.read_text(encoding="utf-8")).items():
         text = text.replace(mark, value)
     (home / "spud.config.json").write_text(text, encoding="utf-8")
+    return json.loads(text)
+
+
+def seed_project_one(home, config):
+    """Project 1 as `spud init` inserted it before SPW-001: key `spud`, rooted at the home, whose bin/spud this probe's
+    launcher is.  Init registers no project now (docs/design/2026-09-21-spud-init.md section 1.4), and without this the
+    `project add` below would take id 1 -- so the probe's badtakes, not spud, would be the project the config names."""
+    con = sqlite3.connect(home / ".spud" / "ledger.db", timeout=5)
+    try:
+        with con:
+            con.execute(
+                "INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at)"
+                " VALUES (1, 'spud', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (config["identity"]["name"], str(home), config["tickets"]["prefix"], config["teams"]["prefix"],
+                 datetime.now().astimezone().isoformat(timespec="seconds")),
+            )
+    finally:
+        con.close()
 
 
 def git_env():
@@ -89,7 +107,7 @@ class Scratch:
         (self.home / "bin").mkdir()
         for rel in ("bin/spud", "bin/spud_ledger.py"):
             shutil.copyfile(REPO / rel, self.home / rel)
-        write_config(self.home)
+        config = write_config(self.home)
         shutil.copytree(REPO / "bin" / "spudlib", self.home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
         os.chmod(self.home / "bin" / "spud", 0o755)
         (self.home / ".claude" / "agents").mkdir(parents=True)
@@ -104,6 +122,7 @@ class Scratch:
         git(self.home, "remote", "add", "origin", self.home_origin)
         git(self.home, "push", "-q", "-u", "origin", "main")
         self.spud("init")
+        seed_project_one(self.home, config)
         self.other.mkdir()
         (self.other / "README.md").write_text("# BadTakes stand-in\n", encoding="utf-8")
         (self.other / "src").mkdir()

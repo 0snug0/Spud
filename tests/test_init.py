@@ -11,9 +11,12 @@ from helpers import (
     EXIT_ERROR,
     EXIT_USAGE,
     Home,
+    RepoMixin,
     SpudTestCase,
     real_config,
 )
+
+SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
 
 TABLES = {
     "projects",
@@ -76,7 +79,10 @@ class InitTest(SpudTestCase):
         triggers = {r["name"] for r in self.home.rows("SELECT name FROM sqlite_master WHERE type = 'trigger'")}
         self.assertEqual(triggers, {"events_no_update", "events_no_delete"})
 
-    def test_home_project_row_comes_from_config(self):
+    def test_project_1_carries_the_configs_prefixes(self):
+        # SPW-001: the row is the suite's seed (helpers.Home.init), not init's -- init registers no project since phase 2
+        # of docs/design/2026-09-21-spud-init.md, and EmptyRegistryTest below is the home it leaves.  What this asserts is
+        # the meaning of project 1 that survived: whatever project it is, its prefixes are spud.config.json's.
         row = self.home.rows("SELECT id, key, ticket_prefix, team_prefix, root_path FROM projects")
         self.assertEqual(
             row,
@@ -107,11 +113,14 @@ class InitTest(SpudTestCase):
             json.dump(cfg, f)
         out = self.home.json("config", "sync")
         self.assertTrue(out["ok"])
+        # SPW-001: the line names project 1 by its key, since project 1 is no longer presumed to be `spud`
+        self.assertEqual(out["project"], {"key": "spud", "ticket_prefix": "TKT", "team_prefix": "TEAM"})
         self.assertEqual(self.home.scalar("SELECT active FROM name_pool WHERE name = 'Russet'"), 0)
         self.assertEqual(self.home.scalar("SELECT active FROM name_pool WHERE name = 'Tuber'"), 1)
         self.assertEqual(self.home.scalar("SELECT ticket_prefix FROM projects WHERE id = 1"), "TKT")
         self.assertEqual(self.home.scalar("SELECT team_prefix FROM projects WHERE id = 1"), "TEAM")
         self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'config.synced'"), 1)
+        self.assertIn("project spud's prefixes TKT / TEAM", self.home.run("config", "sync").stdout)  # a second sync: the line
 
     def test_backup_writes_a_vacuumed_copy(self):
         out = self.home.json("backup")
@@ -190,6 +199,99 @@ class InitTest(SpudTestCase):
         self.assertIn("bound to its", text)
         self.assertIn("spud hook", text)
         self.assertNotIn("SPD-008", text)
+
+
+class EmptyRegistryTest(RepoMixin, SpudTestCase):
+    """SPW-001, phase 2 of docs/design/2026-09-21-spud-init.md: project 1 is the project spud.config.json names, not the
+    tool repository, and `spud init` inserts none -- so this is the home every `spud init` now leaves, and the home
+    `spud init --no-project` will leave.  It is safe (section 1.2) and not usable: doctor is green with a note, and
+    `ticket new` refuses, because tickets.project_id references a project.  The first project registered gets id 1 and is
+    project 1, whatever its key: its name and prefixes are the config's from then on."""
+
+    seed_project = False  # the whole point: `spud init` and nothing else
+
+    def test_init_registers_no_project(self):
+        self.assertEqual(self.home.rows("SELECT * FROM projects"), [])
+        self.assertEqual(self.cli_json("project", "list")["projects"], [])
+        self.assertEqual(self.home.init(project=False)["applied"], [])  # a second init still registers none
+        self.assertEqual(self.home.rows("SELECT * FROM projects"), [])
+
+    def test_doctor_is_green_with_a_note_naming_project_add(self):
+        out = self.cli_json("doctor")  # exit 0: check=True would have raised on a problem
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["problems"], [])
+        self.assertEqual(out["projects"], [])
+        note = next((n for n in out["notes"] if "no project is registered" in n), None)
+        self.assertIsNotNone(note, out["notes"])
+        self.assertIn("spud --as spud project add", note)
+        self.assertIn("--ticket-prefix SPD --team-prefix SPUD", note)
+        text = self.cli("doctor").stdout
+        self.assertIn("note        no project is registered", text)
+        self.assertIn("problems    none", text)
+
+    def test_ticket_new_refuses_and_names_the_fix(self):
+        proc = self.cli("ticket", "new", "--title", "Nowhere", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc)  # a SpudError, not the TypeError of subscripting None
+        self.assertNotIn("Traceback", proc.stderr)
+        self.assertIn("no project is registered", proc.stderr)
+        self.assertIn("spud --as spud project add", proc.stderr)
+        self.assertIn("--project", proc.stderr)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM tickets"), 0)
+
+    def test_the_home_itself_still_works_and_the_path_rule_still_holds(self):
+        """Section 1.2: an empty registry is safe.  `projects/sessions.session_mode` short-circuits to Spud when no
+        project claims sessions, which is right, because the only sessions carrying ledger hooks are sessions in the
+        home -- and a session in the home is Spud's either way."""
+        self.assertEqual(self.cli("board").stdout.strip(), "(none)")
+        self.assertEqual(self.cli_json("render", actor="spud")["written"], ["ledger/Projects.md"])
+        self.assertIn("project   none:", self.cli("session", "show").stdout)
+        base = {"session_id": SESSION, "transcript_path": "/tmp/x.jsonl", "cwd": str(self.home.path), "permission_mode": "default"}
+        start = self.home.hook("SessionStart", dict(base, hook_event_name="SessionStart", source="startup"))
+        self.assertEqual(start.code, 0)
+        self.assertIn("Ledger board", start.context)
+        write = self.home.hook("PreToolUse", dict(base, hook_event_name="PreToolUse", tool_name="Write", tool_use_id="t1",
+                                                  tool_input={"file_path": str(self.home.path / "ledger" / "x.md"), "content": "x"}))
+        self.assertEqual(write.decision, "deny")
+        self.assertIn("Law 5", write.reason)
+
+    def test_config_sync_says_no_project_is_registered(self):
+        out = self.cli_json("config", "sync")
+        self.assertIsNone(out["project"])
+        self.assertEqual(out["pool"], len(real_config()["naming"]["pool"]))
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM name_pool WHERE active = 1"), out["pool"])
+        text = self.cli("config", "sync").stdout
+        self.assertIn("no project is registered", text)
+        self.assertIn("spud --as spud project add", text)
+        self.assertIn("SPD / SPUD", text)
+
+    def test_the_first_project_added_is_project_1(self):
+        repo = self.make_repo("mine-")
+        added = self.add_project(repo, "mine", "SPD", "SPUD", "merge")  # the config's own prefixes: what init will write
+        self.assertEqual(added.returncode, 0, added.stderr)
+        self.assertEqual(self.home.rows("SELECT id, key FROM projects"), [{"id": 1, "key": "mine"}])
+        self.assertEqual([n for n in self.cli_json("doctor")["notes"] if "project" in n], [])  # the note is gone
+        self.assertEqual(self.cli_json("config", "sync")["project"], {"key": "mine", "ticket_prefix": "SPD", "team_prefix": "SPUD"})
+        # project 1's name and prefixes are the config's, and it is never removed -- because it is project 1
+        for args, needle in ((["--name", "X"], "project mine is project 1"), (["--ticket-prefix", "ZZ"], "spud.config.json")):
+            proc = self.cli("project", "edit", "mine", *args, actor="spud", check=False)
+            self.assertEqual(proc.returncode, EXIT_ERROR, proc)
+            self.assertIn(needle, proc.stderr)
+        proc = self.cli("project", "remove", "mine", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("never removed", proc.stderr)
+        # and an unqualified `ticket new` lands in it, with the config's prefixes and no project key on the line
+        line = self.cli("ticket", "new", "--title", "The first", actor="spud").stdout
+        self.assertTrue(line.startswith("SPD-001 (SPUD-001) created: The first [queued]"), line)
+
+    def test_config_sync_takes_project_1s_prefixes_over(self):
+        repo = self.make_repo("mine-")
+        self.add_project(repo, "mine", "ZZZ", "ZZZS", "merge")
+        proc = self.cli("doctor", check=False)  # the config names SPD / SPUD, which project 1 does not carry
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("project mine is project 1 and its prefixes differ from spud.config.json", proc.stderr)
+        self.cli("config", "sync")
+        self.assertEqual(self.home.rows("SELECT ticket_prefix, team_prefix FROM projects"), [{"ticket_prefix": "SPD", "team_prefix": "SPUD"}])
+        self.assertEqual(self.cli_json("doctor")["problems"], [])
 
 
 class WithoutDatabaseTest(unittest.TestCase):

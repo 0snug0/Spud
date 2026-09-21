@@ -6,7 +6,9 @@ import json
 import unittest
 from pathlib import Path
 
-from helpers import EXIT_ERROR, EXIT_OK, EXIT_USAGE, Home, RepoMixin, SpudTestCase, git
+from helpers import EXIT_ERROR, EXIT_OK, EXIT_USAGE, Home, RepoMixin, SpudTestCase, git, load_spud_module
+
+spud = load_spud_module()
 
 
 class ProjectAddTest(RepoMixin, SpudTestCase):
@@ -73,6 +75,18 @@ class ProjectAddTest(RepoMixin, SpudTestCase):
         self.add_project(child, "child", "CHD", "CHDS")
         self.refused("project", "add", outer, "--key", "outer", "--ticket-prefix", "OUT", "--team-prefix", "OUTS", "--landing", "pr", actor="spud",
                      needle="contains project child's root")
+
+    def test_project_root_shape_answers_the_first_refusals_with_no_connection(self):
+        """SPW-001: the seam of rules 1 and 2, which `spud init` will check a candidate root with before it has created
+        the database -- so it takes no connection, and the registry scan validate_project_root adds needs one."""
+        ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+        self.assertEqual(spud.project_root_shape(ctx, self.other), str(self.other))
+        for path, needle in ((self.other / "nope", "not an existing directory"), (self.home.path, "Spud's home"),
+                             (self.scratch_dir("plain-"), "not a git repository")):
+            with self.subTest(path=path):
+                with self.assertRaises(spud.SpudError) as caught:
+                    spud.project_root_shape(ctx, path)
+                self.assertIn(needle, caught.exception.message)
 
     def test_rule_4_the_key(self):
         for key, needle in (("Bad", "lower-case"), ("1bad", "lower-case"), ("spud", "exists already"), ("home", "reserved"), ("b" * 33, "lower-case")):

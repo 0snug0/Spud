@@ -12,11 +12,13 @@ hook path: every hook case within 1 ms of main's median in the same run.
 import json
 import os
 import shutil
+import sqlite3
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
@@ -41,7 +43,7 @@ def cases(home):
 
 
 def write_config(home):
-    """Render the shipped config template into `home`/spud.config.json."""
+    """Render the shipped config template into `home`/spud.config.json; returns it parsed."""
     with open(CONFIG, encoding="utf-8") as f:
         text = f.read()
     with open(CONFIG_MARKS, encoding="utf-8") as f:
@@ -49,14 +51,34 @@ def write_config(home):
             text = text.replace(mark, value)
     with open(os.path.join(home, "spud.config.json"), "w", encoding="utf-8") as f:
         f.write(text)
+    return json.loads(text)
+
+
+def seed_project_one(home, config, checkout):
+    """Project 1 as `spud init` inserted it before SPW-001: key `spud`, rooted at the launcher's own checkout, the
+    config's prefixes.  Init registers no project now (docs/design/2026-09-21-spud-init.md section 1.4), and a home with
+    no project is a home whose hooks read one row fewer -- so every launcher's home is seeded here, and each measures the
+    same work as the one before it."""
+    con = sqlite3.connect(os.path.join(home, ".spud", "ledger.db"), timeout=5)
+    try:
+        with con:
+            con.execute(
+                "INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at)"
+                " VALUES (1, 'spud', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (config["identity"]["name"], checkout, config["tickets"]["prefix"], config["teams"]["prefix"],
+                 datetime.now().astimezone().isoformat(timespec="seconds")),
+            )
+    finally:
+        con.close()
 
 
 def setup(launcher):
     home = tempfile.mkdtemp(prefix="spud-hook-timing-")
-    write_config(home)
+    config = write_config(home)
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR")}
     env.update(SPUD_HOME=home, SPUD_USER_CLAUDE_DIR=os.path.join(home, ".user-claude"), SPUD_CONFIG_DIR=os.path.join(home, ".user-config"))
     subprocess.run([PY, "-I", "-S", launcher, "init"], env=env, check=True, capture_output=True)
+    seed_project_one(home, config, os.path.dirname(os.path.dirname(launcher)))
     return home, env
 
 

@@ -171,6 +171,8 @@ class MigrateProjectsTest(unittest.TestCase):
         self.addCleanup(other.cleanup)
         out = other.init()
         self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests"], 5, []))
+        # SPW-001: the row is the suite's seed (helpers.Home.init), which is what init inserted before phase 2; the
+        # columns asserted are migration 0002_projects', which is what this test is about.
         self.assertEqual(other.rows("SELECT key, landing, sessions FROM projects"), [{"key": "spud", "landing": "merge", "sessions": "always"}])
 
 
