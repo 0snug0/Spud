@@ -13,7 +13,7 @@ tests/fixtures/spud.config.json, with a bare origin, `spud init`) and a scratch 
 (key badtakes, prefixes BAD / BADS, Eric 2026-09-14), with a commit and a bare origin.  It runs `project add` and `project install` with SPUD_USER_CLAUDE_DIR and SPUD_CONFIG_DIR in the
 scratch directory, then launches `claude -p --model haiku --setting-sources project,local` in the other repository, so the
 installed local settings are the settings that load.  `spudagent` is passed with --agents, since a headless run cannot
-redirect user scope.  Nothing touches Spud's or BadTakes' repositories.  The stream of each run, the scratch ledger's
+redirect user scope; its text is the definition `project install` rendered at user scope, not the repository's template (SPW-002).  Nothing touches Spud's or BadTakes' repositories.  The stream of each run, the scratch ledger's
 events and a JSON summary of what was observed are left in the scratch directory, whose path is printed; the summary is
 printed too.  Not collected by the unit test suite (the file name matches no test pattern).
 """
@@ -109,7 +109,9 @@ class Scratch:
         return self
 
     def agents_json(self):
-        text = (self.home / ".claude" / "agents" / "spudagent.md").read_text(encoding="utf-8")
+        # SPW-002: the copy `project install` wrote at user scope, with this scratch home's launcher filled in; the source
+        # under the home is the template and still carries {{launcher}}, so a run built from it would name no program.
+        text = (self.user / "agents" / "spudagent.md").read_text(encoding="utf-8")
         m = re.match(r"---\n(.*?)\n---\n(.*)\Z", text, re.S)
         front, body = (m.group(1), m.group(2)) if m else ("", text)
         desc = re.search(r"^description:\s*(.*)$", front, re.M)

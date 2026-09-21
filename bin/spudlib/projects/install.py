@@ -5,7 +5,7 @@ import json
 import os
 from pathlib import Path
 
-from . import registry, sessions
+from . import agentdef, registry, sessions
 from ..commands import reportentry, settings_sync
 from ..core import homeconf, kernel
 from ..hooks import worktrees
@@ -24,7 +24,7 @@ def install_files(ctx, p):
         "agent": user / "agents" / "spudagent.md",
         "skill": user / "skills" / "spud" / "SKILL.md",
         "pointer": homeconf.spud_config_dir() / "home",
-        "source_agent": ctx.tool / ".claude" / "agents" / "spudagent.md",  # SPD-097: the source lives in the tool repository
+        "source_agent": agentdef.agent_source(ctx),  # SPD-097: the source lives in the tool repository, as a template (SPW-002)
     }
 
 
@@ -86,9 +86,9 @@ def remove_exclude_block(root, key):
 def install_project(ctx, con, p):
     """Write what project install writes (design section 2.1), each file only when its content changes: the ledger hooks,
     the CLI allow rules and the home as an additional directory in the project's untracked local settings; the exclude
-    line when git does not already ignore that file; the spudagent copy and the /spud skill at user scope; the home
-    pointer when absent.  Returns (the install record for projects.installed, the paths written, whether the user
-    agents directory held no agent before)."""
+    line when git does not already ignore that file; the spudagent definition rendered for this machine (SPW-002) and the
+    /spud skill at user scope; the home pointer when absent.  Returns (the install record for projects.installed, the
+    paths written, whether the user agents directory held no agent before)."""
     root = Path(worktrees.project_root(ctx, p))
     if not root.is_dir():
         raise kernel.SpudError(kernel.EXIT_ERROR, "project %s's root %s is not a directory; `spud --as spud project edit %s --root <path>`" % (p["key"], root, p["key"]))
@@ -96,8 +96,7 @@ def install_project(ctx, con, p):
         raise kernel.SpudError(kernel.EXIT_ERROR, "project %s's root is the home %s; the home's hooks are `spud --as spud settings sync`'s until"
                                " `spud --as spud home move` separates the two (SPD-097)" % (p["key"], root))
     files = install_files(ctx, p)
-    if not files["source_agent"].is_file():
-        raise kernel.SpudError(kernel.EXIT_ERROR, "no %s to install at user scope: the tool repository's spudagent definition is the source" % files["source_agent"])
+    agent_text = agentdef.agent_markdown(ctx)  # SPW-002: rendered from Ctx before anything is written; it refuses when the source is gone
     if homeconf.run_git(root, "ls-files", "--error-unmatch", "--", SETTINGS_LOCAL, timeout=30).returncode == 0:
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is tracked in %s's git; install writes nothing in the tracked tree" % (SETTINGS_LOCAL, p["key"]))
     previous = json.loads(p["installed"]) if p["installed"] else {}
@@ -115,7 +114,6 @@ def install_project(ctx, con, p):
         written.append(str(git_common_dir(root) / "info" / "exclude"))
     agents = files["agent"].parent
     first_agent = not (agents.is_dir() and any(agents.glob("*.md")))
-    agent_text = files["source_agent"].read_text(encoding="utf-8")
     skill_text = sessions.skill_markdown(ctx)
     for path, text in ((files["agent"], agent_text), (files["skill"], skill_text)):
         if not path.is_file() or path.read_text(encoding="utf-8") != text:

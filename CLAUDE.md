@@ -1,10 +1,10 @@
 # CLAUDE.md
 
-This file guides Claude Code when developing `spud`, the ledger CLI, in this repository. Spud's identity, his laws, the spudagent protocol, and the ledger itself live in his home's own `CLAUDE.md`, `/Users/ericlugo/Personal/SpudHome/CLAUDE.md`; that file is the reference for all of it and nothing here restates it.
+This file guides Claude Code when developing `spud`, the ledger CLI, in this repository. Spud's identity, his laws, the spudagent protocol, and the ledger itself live in his home's own `CLAUDE.md` — the home is the directory `spud session show` prints as `home`, and it is this machine's, named in no file of this repository. That file is the reference for all of it and nothing here restates it.
 
 ## What this repository is
 
-The source of `spud`: `bin/spud` (the launcher), `bin/spud_ledger.py` (the entry), `bin/spudlib/` (the package), its tests and probes under `tests/`, `.claude/agents/spudagent.md` (the source `project sync --all` copies to `~/.claude/`), and the project skill `spudlib-modules`. It is registered as project `spud` — tickets `SPD-nnn`, teams `SPUD-nnn`, sessions `claim`, landing `merge` on `main` — and it is not Spud's home: it holds no `ledger/`, `reports/`, `docs/` or `spud.config.json` (removed on SPD-097; history keeps them). The test suite keeps its own config fixture, `tests/fixtures/spud.config.json`, byte for byte what the repository's config held before the split; every scratch home a test or a probe builds starts from that copy, never from the real one.
+The source of `spud`: `bin/spud` (the launcher), `bin/spud_ledger.py` (the entry), `bin/spudlib/` (the package), its tests and probes under `tests/`, `.claude/agents/spudagent.md` (the template `project install` and `project sync --all` render into `~/.claude/`, filling `{{launcher}}` with the launcher that runs on the machine they install on — SPW-002; `bin/spudlib/projects/agentdef.py` does the rendering), and the project skill `spudlib-modules`. It is registered as project `spud` — tickets `SPD-nnn`, teams `SPUD-nnn`, sessions `claim`, landing `merge` on `main` — and it is not Spud's home: it holds no `ledger/`, `reports/`, `docs/` or `spud.config.json` (removed on SPD-097; history keeps them). The test suite keeps its own config fixture, `tests/fixtures/spud.config.json`, byte for byte what the repository's config held before the split; every scratch home a test or a probe builds starts from that copy, never from the real one.
 
 ## Sessions here
 
@@ -12,7 +12,7 @@ A session launched in this checkout is plain until claimed — by `/spud`, or by
 
 ## The main checkout is the running copy
 
-Every ledger hook line, in every registered project, and both LaunchAgents (`local.spud.backup`, `local.spud.render`) run `/Users/ericlugo/Personal/Spud/bin/spud`. A merge into this repository's `main` is a deploy: it changes the CLI and every hook for every session at once, so the full suite passes on the branch before every merge, without exception. An edit of `bin/` on `main` itself deploys the same way, at once, whatever session makes it — a plain one included — so `bin/` is never edited there. Code is built in a worktree, `.claude/worktrees/spd-nnn-<slug>` on branch `worktree-spd-nnn-<slug>`, and `spud` is always run from the main checkout's launcher, never a worktree's own copy.
+Every ledger hook line, in every registered project, and both LaunchAgents (`local.spud.backup`, `local.spud.render`) run the main checkout's `bin/spud`. That absolute path is this machine's, so no file here names it (SPW-002): `spud doctor` prints it as `tool`, the home's own `CLAUDE.md` spells it out, and the derivation below finds it from any checkout of this repository. A merge into this repository's `main` is a deploy: it changes the CLI and every hook for every session at once, so the full suite passes on the branch before every merge, without exception. An edit of `bin/` on `main` itself deploys the same way, at once, whatever session makes it — a plain one included — so `bin/` is never edited there. Code is built in a worktree, `.claude/worktrees/spd-nnn-<slug>` on branch `worktree-spd-nnn-<slug>`, and `spud` is always run from the main checkout's launcher, never a worktree's own copy.
 
 ## Before writing code under bin/
 
@@ -80,7 +80,8 @@ python3.14 -I -S tests/probes/module_sizes.py   # application-code sizes, banded
 ```
 
 ```bash
-python3.14 -I -S /Users/ericlugo/Personal/Spud/bin/spud session show   # the home, this checkout's project, the checkout, and whether this session is claimed
+main=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")   # the main checkout, from it or from any of its worktrees
+python3.14 -I -S "$main/bin/spud" session show   # the home, this checkout's project, the checkout, and whether this session is claimed
 ```
 
 ```bash

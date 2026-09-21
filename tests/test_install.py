@@ -14,7 +14,9 @@ from helpers import EXIT_ERROR, EXIT_OK, RepoMixin, SpudTestCase, git
 # BadTakes' .claude/settings.local.json as it stands (design section 2.2), in a style json.dumps(indent=2) does not write.
 BADTAKES_LOCAL = ('{\n    "permissions": {"allow": ["Bash(node -e \' *)"]},\n    "outputStyle": "Concise",\n'
                   '    "disabledMcpjsonServers": ["Blender", "openscad"]\n}\n')
-AGENT = "---\nname: spudagent\ndescription: A spudagent (test fixture).\n---\nYou are a spudagent.\n"
+# The spudagent source is a template project install renders for the machine it installs on (SPW-002), so the fixture
+# carries the placeholder the shipped definition carries, and what install writes is `rendered()` of it, never its bytes.
+AGENT = "---\nname: spudagent\ndescription: A spudagent (test fixture).\n---\nYou are a spudagent, run `python3.14 -I -S {{launcher}}`.\n"
 EVENTS = {"PreToolUse": 3, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop": 1, "SessionStart": 1, "Stop": 1, "UserPromptSubmit": 1}
 
 
@@ -34,6 +36,11 @@ class InstallTest(RepoMixin, SpudTestCase):
 
     def install(self, key="badtakes", check=True):
         return self.cli("project", "install", key, actor="spud", check=check)
+
+    def rendered(self, text=AGENT, tool=None):
+        """What install writes from that source text: SPW-002's placeholder filled with the launcher of the tool checkout
+        this run names (SPUD_TOOL_DIR is the scratch home itself unless a test moves it)."""
+        return text.replace("{{launcher}}", str((tool or self.home.path) / "bin" / "spud"))
 
     def settings(self):
         return json.loads(self.local.read_text(encoding="utf-8"))
@@ -84,7 +91,7 @@ class InstallTest(RepoMixin, SpudTestCase):
 
     def test_the_user_scope_files_and_the_home_pointer(self):
         self.install()
-        self.assertEqual((self.user / "agents" / "spudagent.md").read_text(encoding="utf-8"), AGENT)
+        self.assertEqual((self.user / "agents" / "spudagent.md").read_text(encoding="utf-8"), self.rendered())
         skill = (self.user / "skills" / "spud" / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(skill.startswith("---\nname: spud\n"), skill)
         self.assertIn("\ndisable-model-invocation: true\n", skill)
@@ -145,7 +152,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         agent = self.user / "agents" / "spudagent.md"
         self.cli("project", "uninstall", "badtakes", actor="spud")
         self.assertTrue(agent.is_file())
-        agent.write_text(AGENT + "Eric's own line.\n", encoding="utf-8")
+        agent.write_text(self.rendered() + "Eric's own line.\n", encoding="utf-8")
         out = self.cli_json("project", "uninstall", "second", actor="spud")
         self.assertTrue(agent.is_file())
         self.assertFalse((self.user / "skills" / "spud" / "SKILL.md").exists())
@@ -192,13 +199,62 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertIn("project sync --all", proc.stdout)
         out = self.cli_json("project", "sync", "--all", actor="spud")
         self.assertEqual([(r["project"], len(r["written"])) for r in out["projects"]], [("badtakes", 1)])
-        self.assertEqual((self.user / "agents" / "spudagent.md").read_text(encoding="utf-8"), AGENT + "A new rule.\n")
+        self.assertEqual((self.user / "agents" / "spudagent.md").read_text(encoding="utf-8"), self.rendered(AGENT + "A new rule.\n"))
         self.assertEqual(self.cli("doctor").returncode, EXIT_OK)
         (self.user / "skills" / "spud" / "SKILL.md").unlink()
         proc = self.cli("--json", "doctor", check=False)
         self.assertIn("no /spud skill", proc.stdout)
         self.assertEqual(self.cli("project", "sync", "nope", actor="spud", check=False).returncode, EXIT_ERROR)
         self.assertEqual(self.cli("project", "sync", actor="spud", check=False).returncode, 2)
+
+    def test_install_renders_the_launcher_into_the_installed_definition(self):
+        """SPW-002: the repository ships a template, so the installed definition names the launcher that actually runs here
+        and the source keeps its placeholder -- no machine's absolute path is shipped."""
+        self.install()
+        agent = (self.user / "agents" / "spudagent.md").read_text(encoding="utf-8")
+        self.assertIn("python3.14 -I -S %s/bin/spud" % self.home.path, agent)
+        self.assertNotIn("{{launcher}}", agent)
+        self.assertEqual(agent, self.rendered())
+        self.assertIn("{{launcher}}", (self.home.path / ".claude" / "agents" / "spudagent.md").read_text(encoding="utf-8"))
+        self.assertEqual(self.cli_json("doctor")["problems"], [])
+
+    def test_doctor_reads_the_installed_definition_against_what_this_home_renders(self):
+        """SPW-002: doctor compares the installed copy with the definition install renders now, not with the source's bytes:
+        a hand-edited copy is a problem `project sync` settles, an untouched one is not, a missing copy says so, and with
+        the source gone it names the source."""
+        self.install()
+        agent = self.user / "agents" / "spudagent.md"
+        self.assertEqual(self.cli_json("doctor")["problems"], [])
+        agent.write_text(self.rendered() + "Eric's own line.\n", encoding="utf-8")
+        proc = self.cli("--json", "doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("is not the spudagent definition this home installs from", proc.stdout)
+        self.assertIn("project sync --all", proc.stdout)
+        self.cli_json("project", "sync", "--all", actor="spud")
+        self.assertEqual(agent.read_text(encoding="utf-8"), self.rendered())
+        self.assertEqual(self.cli_json("doctor")["problems"], [])
+        agent.unlink()
+        self.assertIn("no spudagent definition at %s" % agent, self.cli("--json", "doctor", check=False).stdout)
+        (self.home.path / ".claude" / "agents" / "spudagent.md").unlink()
+        self.assertIn("spudagent definition is the source", self.cli("--json", "doctor", check=False).stdout)
+
+    def test_sync_rewrites_the_definition_when_the_tool_checkout_moves(self):
+        """SPW-002's point: the same source under a checkout at another path renders another launcher.  doctor names the
+        stale installed copy and `project sync` writes the new one -- which is what a machine other than this one gets."""
+        self.install()
+        moved = self.make_repo("moved-tool-")
+        (moved / ".claude" / "agents").mkdir(parents=True)
+        (moved / ".claude" / "agents" / "spudagent.md").write_text(AGENT, encoding="utf-8")
+        env = {"SPUD_TOOL_DIR": str(moved)}
+        proc = self.cli("--json", "doctor", check=False, env=env)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("is not the spudagent definition this home installs from", proc.stdout)
+        agent = self.user / "agents" / "spudagent.md"
+        out = self.cli_json("project", "sync", "badtakes", actor="spud", env=env)
+        self.assertIn(str(agent), out["projects"][0]["written"])
+        self.assertEqual(agent.read_text(encoding="utf-8"), self.rendered(tool=moved))
+        self.assertIn("python3.14 -I -S %s/bin/spud" % moved, agent.read_text(encoding="utf-8"))
+        self.assertEqual(self.cli("doctor", env=env).returncode, EXIT_OK)
 
     def test_sync_writes_the_prompt_hook_into_an_installation_made_before_it(self):
         """SPD-057: an installation from before the UserPromptSubmit hook lacks its line; doctor names the gap and `project sync`
@@ -232,7 +288,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         record = json.loads(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))
         self.assertEqual({k: record[k] for k in ("path", "created_file", "original", "added_additional_dir", "added_exclude", "wrote_pointer")},
                          {"path": str(self.local), "created_file": False, "original": BADTAKES_LOCAL, "added_additional_dir": True, "added_exclude": True, "wrote_pointer": True})
-        self.assertEqual(record["agent_sha256"], hashlib.sha256(AGENT.encode("utf-8")).hexdigest())
+        self.assertEqual(record["agent_sha256"], hashlib.sha256(self.rendered().encode("utf-8")).hexdigest())
         shown = self.cli_json("project", "show", "badtakes")["project"]
         self.assertNotIn("original", shown["install_record"])
 

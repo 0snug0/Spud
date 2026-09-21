@@ -7,7 +7,7 @@ import sys
 from . import ghread, prcmds, publish, settings_sync
 from ..core import homeconf, kernel, launchagents
 from ..hooks import gitrepos, hookio, snapshots, worktrees
-from ..projects import install
+from ..projects import agentdef, install
 from ..render import prices
 from ..state import backup, ledgerdb, lookup, schema
 
@@ -172,18 +172,31 @@ def doctor_pull_requests(ctx, problems, notes):
             "reader": reader if ghread.enabled() else "off", "failed_checks": failed}
 
 
+SYNC_ALL = "run `spud --as spud project sync --all`"
+AGENT_ABSENT = "no spudagent definition at %s; " + SYNC_ALL
+# SPW-002: a hand edit of the installed copy and a home whose launcher moved read the same way -- the copy is not what
+# install renders from the tool repository's template now -- and one sync settles both.
+AGENT_DIFFERS = "%s is not the spudagent definition this home installs from %s; " + SYNC_ALL
+
+
 def doctor_projects(ctx, problems, notes):
     """doctor's projects section (SPD-014): each active project, its root a main checkout (or the home itself, before
     `home move`), and when it is installed its local settings carrying this home's hooks, the file ignored, the
-    user-scope agent matching the tool's and the /spud skill present.  The home pointer and the superseded worktree
-    cache are notes, never problems."""
+    user-scope agent being what this home installs now and the /spud skill present.  The home pointer and the superseded
+    worktree cache are notes, never problems."""
     out = []
     con = ledgerdb.open_connection(ctx.db_path)
     try:
         rows = con.execute("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall()
     finally:
         con.close()
-    source_agent = ctx.tool / ".claude" / "agents" / "spudagent.md"  # SPD-097: the tool repository's copy is the source
+    # SPD-097: the tool repository's copy is the source, and since SPW-002 a template: the installed copy is compared with
+    # what this home renders from it now, never with the source's bytes, which name no machine's launcher.
+    source_agent = agentdef.agent_source(ctx)
+    try:
+        expected_agent, agent_gone = agentdef.agent_markdown(ctx), None
+    except kernel.SpudError as e:
+        expected_agent, agent_gone = None, e.message
     for p in rows:
         root, checks, bad = p["root_path"], [], []
         if not os.path.isdir(root):
@@ -210,10 +223,14 @@ def doctor_projects(ctx, problems, notes):
                 checks.append("ignored")
             else:
                 bad.append("%s is not ignored by git in %s" % (install.SETTINGS_LOCAL, root))
-            if files["agent"].is_file() and source_agent.is_file() and kernel.sha256_bytes(files["agent"].read_bytes()) == kernel.sha256_bytes(source_agent.read_bytes()):
+            if agent_gone is not None:
+                bad.append(agent_gone)
+            elif not files["agent"].is_file():
+                bad.append(AGENT_ABSENT % files["agent"])
+            elif files["agent"].read_bytes() == expected_agent.encode("utf-8"):
                 checks.append("agent")
             else:
-                bad.append("%s differs from %s; run `spud --as spud project sync --all`" % (files["agent"], source_agent))
+                bad.append(AGENT_DIFFERS % (files["agent"], source_agent))
             if files["skill"].is_file():
                 checks.append("skill")
             else:
