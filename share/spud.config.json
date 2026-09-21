@@ -1,10 +1,10 @@
 {
   "identity": {
-    "name": "Spud",
+    "name": "{{identity_name}}",
     "pronouns": {
-      "subject": "he",
-      "object": "him",
-      "possessive": "his"
+      "subject": "{{pronoun_subject}}",
+      "object": "{{pronoun_object}}",
+      "possessive": "{{pronoun_possessive}}"
     },
     "model": "claude-fable-5-1"
   },
@@ -110,7 +110,7 @@
     "max_concurrent_total": 9
   },
   "tickets": {
-    "prefix": "SPD",
+    "prefix": "{{ticket_prefix}}",
     "priorities": [
       "P0",
       "P1",
@@ -119,7 +119,7 @@
     ]
   },
   "teams": {
-    "prefix": "SPUD"
+    "prefix": "{{team_prefix}}"
   },
   "ledger": {
     "format": "markdown-v0",

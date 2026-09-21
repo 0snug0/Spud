@@ -9,7 +9,7 @@ scenarios, but it was taken, so they live beside it.)
 
 Each scenario builds a scratch directory under the system temp directory: a scratch home (a git repository holding a copy of
 this checkout's bin/spud, bin/spud_ledger.py and .claude/agents/spudagent.md and of the suite's
-tests/fixtures/spud.config.json, with a bare origin, `spud init`) and a scratch "other" repository standing in for BadTakes
+shipped share/spud.config.json rendered, with a bare origin, `spud init`) and a scratch "other" repository standing in for BadTakes
 (key badtakes, prefixes BAD / BADS, Eric 2026-09-14), with a commit and a bare origin.  It runs `project add` and `project install` with SPUD_USER_CLAUDE_DIR and SPUD_CONFIG_DIR in the
 scratch directory, then launches `claude -p --model haiku --setting-sources project,local` in the other repository, so the
 installed local settings are the settings that load.  `spudagent` is passed with --agents, since a headless run cannot
@@ -32,10 +32,21 @@ from pathlib import Path
 
 sys.dont_write_bytecode = True
 REPO = Path(__file__).resolve().parents[2]
-CONFIG = REPO / "tests" / "fixtures" / "spud.config.json"  # the suite's fixture: the tool keeps no home config (SPD-097)
+# The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
+# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
+CONFIG = REPO / "share" / "spud.config.json"
+CONFIG_MARKS = REPO / "tests" / "fixtures" / "config_marks.json"
 PY = sys.executable
 MODEL = "haiku"
 IDENTITY = {"GIT_AUTHOR_NAME": "Spud probe", "GIT_AUTHOR_EMAIL": "probe@example.invalid", "GIT_COMMITTER_NAME": "Spud probe", "GIT_COMMITTER_EMAIL": "probe@example.invalid"}
+
+
+def write_config(home):
+    """Render the shipped config template into `home`/spud.config.json."""
+    text = CONFIG.read_text(encoding="utf-8")
+    for mark, value in json.loads(CONFIG_MARKS.read_text(encoding="utf-8")).items():
+        text = text.replace(mark, value)
+    (home / "spud.config.json").write_text(text, encoding="utf-8")
 
 
 def git_env():
@@ -78,7 +89,7 @@ class Scratch:
         (self.home / "bin").mkdir()
         for rel in ("bin/spud", "bin/spud_ledger.py"):
             shutil.copyfile(REPO / rel, self.home / rel)
-        shutil.copyfile(CONFIG, self.home / "spud.config.json")
+        write_config(self.home)
         shutil.copytree(REPO / "bin" / "spudlib", self.home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
         os.chmod(self.home / "bin" / "spud", 0o755)
         (self.home / ".claude" / "agents").mkdir(parents=True)

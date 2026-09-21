@@ -2,7 +2,7 @@
 
   python3.14 -I -S tests/probes/hook_timing.py [ROUNDS] LAUNCHER [LAUNCHER ...]
 
-Each launcher gets its own scratch SPUD_HOME (a copy of the suite's tests/fixtures/spud.config.json and `spud init`), so
+Each launcher gets its own scratch SPUD_HOME (the shipped share/spud.config.json, rendered, and `spud init`), so
 nothing is written into any ledger.  Three warm-up rounds fill each home's bytecode and git-command caches; then every round runs every case
 once per launcher, in turn, so a machine slowing down slows every launcher alike.  Prints, per case, each launcher's
 median, min and max in ms, and the difference of each median from the first launcher's.  The pass for a change to the
@@ -19,7 +19,10 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CONFIG = os.path.join(os.path.dirname(HERE), "fixtures", "spud.config.json")  # the suite's fixture: the tool keeps no home config (SPD-097)
+# The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
+# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
+CONFIG = os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "spud.config.json")
+CONFIG_MARKS = os.path.join(os.path.dirname(HERE), "fixtures", "config_marks.json")
 PY = sys.executable
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
 
@@ -37,9 +40,20 @@ def cases(home):
     ]
 
 
+def write_config(home):
+    """Render the shipped config template into `home`/spud.config.json."""
+    with open(CONFIG, encoding="utf-8") as f:
+        text = f.read()
+    with open(CONFIG_MARKS, encoding="utf-8") as f:
+        for mark, value in json.load(f).items():
+            text = text.replace(mark, value)
+    with open(os.path.join(home, "spud.config.json"), "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def setup(launcher):
     home = tempfile.mkdtemp(prefix="spud-hook-timing-")
-    shutil.copy(CONFIG, home)
+    write_config(home)
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR")}
     env.update(SPUD_HOME=home, SPUD_USER_CLAUDE_DIR=os.path.join(home, ".user-claude"), SPUD_CONFIG_DIR=os.path.join(home, ".user-config"))
     subprocess.run([PY, "-I", "-S", launcher, "init"], env=env, check=True, capture_output=True)

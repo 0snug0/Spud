@@ -19,7 +19,10 @@ import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-CONFIG = os.path.join(ROOT, "tests", "fixtures", "spud.config.json")  # the suite's fixture: the tool keeps no home config
+# The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
+# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
+CONFIG = os.path.join(ROOT, "share", "spud.config.json")
+CONFIG_MARKS = os.path.join(ROOT, "tests", "fixtures", "config_marks.json")
 PY = sys.executable
 
 
@@ -30,13 +33,24 @@ def run(launcher, env, *args):
     return json.loads(proc.stdout)
 
 
+def write_config(home):
+    """Render the shipped config template into `home`/spud.config.json."""
+    with open(CONFIG, encoding="utf-8") as f:
+        text = f.read()
+    with open(CONFIG_MARKS, encoding="utf-8") as f:
+        for mark, value in json.load(f).items():
+            text = text.replace(mark, value)
+    with open(os.path.join(home, "spud.config.json"), "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def main():
     args = sys.argv[1:]
     tickets = int(args.pop(0)) if args and args[0].isdigit() else 60
     per_ticket = int(args.pop(0)) if args and args[0].isdigit() else 3
     launcher = os.path.abspath(args[0]) if args else os.path.join(ROOT, "bin", "spud")
     home = tempfile.mkdtemp(prefix="spud-render-timing-")
-    shutil.copy(CONFIG, home)
+    write_config(home)
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR")}
     env.update(SPUD_HOME=home, SPUD_TOOL_DIR=home, SPUD_USER_CLAUDE_DIR=os.path.join(home, ".user-claude"), SPUD_CONFIG_DIR=os.path.join(home, ".user-config"))
     try:

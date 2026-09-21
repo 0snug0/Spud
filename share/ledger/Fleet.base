@@ -1,0 +1,109 @@
+filters:
+  and:
+    - file.hasTag("spudagent")
+    - not:
+        - file.inFolder("ledger/_templates")
+formulas:
+  persona_on: if(persona == "contractor", persona + " on " + agent_type, persona)
+  minutes: if(duration_ms, (duration_ms / 60000).round())
+properties:
+  file.name:
+    displayName: Name
+  id:
+    displayName: ID
+  persona:
+    displayName: Persona
+  model:
+    displayName: Model
+  status:
+    displayName: Status
+  parent:
+    displayName: Parent
+  ticket:
+    displayName: Ticket
+  project:
+    displayName: Project
+  spawned:
+    displayName: Spawned
+  finished:
+    displayName: Finished
+  formula.persona_on:
+    displayName: Persona
+  formula.minutes:
+    displayName: Minutes
+  tokens_out:
+    displayName: Out
+  tokens_in:
+    displayName: In
+  tokens_cached:
+    displayName: Cached
+  tool_uses:
+    displayName: Tools
+  cost_usd:
+    displayName: Cost (list)
+views:
+  - type: table
+    name: Active
+    filters:
+      and:
+        - status == "active"
+    order:
+      - ticket
+      - id
+      - file.name
+      - persona
+      - model
+      - parent
+      - spawned
+    sort:
+      - property: ticket
+        direction: ASC
+      - property: id
+        direction: ASC
+  - type: table
+    name: All
+    order:
+      - ticket
+      - project
+      - id
+      - file.name
+      - persona
+      - model
+      - status
+      - parent
+      - spawned
+      - finished
+    sort:
+      - property: ticket
+        direction: DESC
+      - property: id
+        direction: ASC
+    columnSize:
+      note.ticket: 154
+  - type: table
+    name: Team
+    filters:
+      and:
+        - ticket == this
+    order:
+      - file.name
+      - id
+      - formula.persona_on
+      - model
+      - status
+      - formula.minutes
+      - tokens_out
+      - tokens_in
+      - tokens_cached
+      - cost_usd
+      - tool_uses
+    sort:
+      - property: id
+        direction: ASC
+    summaries:
+      formula.minutes: Sum
+      tokens_out: Sum
+      tokens_in: Sum
+      tokens_cached: Sum
+      cost_usd: Sum
+      tool_uses: Sum
