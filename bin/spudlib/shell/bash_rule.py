@@ -21,9 +21,11 @@ _ANYWHERE = (" places files where the line cannot say -- an archive tar extracts
              " from a -T list, unzip's -: (it keeps `../`), a config file curl reads (-K, or a CURL_HOME, XDG_CONFIG_HOME or"
              " HOME the line sets), a -w format curl reads from a file, a {{variable}} an --expand- option of curl's holds,"
              " an -o name holding #N under curl's URL globbing, a wgetrc wget reads or runs (-e, --config, or a WGETRC or HOME"
-             " the line sets), rsync's daemon, or options a substitution or a variable the line cannot settle may hold (sort's"
-             " -o, perl's -i and kin among them) -- so they may lie anywhere; name the files, and extract or download into a"
-             " directory the line names")
+             " the line sets), rsync's daemon, a file or a command a sed script or an awk program names as anything but one"
+             " string literal standing alone (a variable, a parenthesised expression, a concatenation) or a script this Mac's"
+             " sed or awk would itself refuse, or options a substitution or a variable the line cannot settle may hold (sort's"
+             " -o, perl's -i and kin among them) -- so they may lie anywhere; name the files, spell a script's own file and"
+             " command out as one literal, and extract or download into a directory the line names")
 REDIRECT_MESSAGES = {
     "input": "the redirection target %s" + _INPUT,
     "anywhere": "the redirection target %s" + _ANYWHERE,

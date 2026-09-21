@@ -380,6 +380,11 @@ DOWNLOAD_COMMANDS = frozenset({"curl", "wget"})
 # PERL_RE, which takes its versioned names too.
 SPELLED_WRITE_COMMANDS = frozenset({"dd", "sort", "mktemp", "split"})
 PERL_RE = re.compile(r"^perl(?:\d+(?:\.\d+)*)?$")
+# SPD-139: the two commands whose script is one word of the line and names files and commands of its own, which
+# shell/script_text reads -- sed's `w` command and `s///w` flag, awk's `print`/`printf` redirections and pipes, its
+# `system(...)` and its `"cmd" | getline`.  sed is also in ARG_WRITE_COMMANDS, which reads its -i; awk writes nothing by
+# argument.  The g-prefixed GNU names are SPD-140's, and no interpreter is read at all (SPD-126's brief).
+SCRIPT_COMMANDS = frozenset({"sed", "awk"})
 BRANCH_READ_FLAGS = {"-a", "-r", "-v", "-vv", "--list", "-l", "--show-current", "--all", "--remotes", "--verbose", "--color",
                      "--no-color", "--column", "--no-column", "-i", "--ignore-case", "--no-abbrev"}
 BRANCH_READ_VALUE_FLAGS = {"--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--abbrev"}
