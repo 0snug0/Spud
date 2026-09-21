@@ -31,12 +31,16 @@ def cmd_ticket_new(ctx, args):
             project = con.execute("SELECT * FROM projects WHERE key = ?", (args.project,)).fetchone()
             if project is None:
                 raise kernel.SpudError(kernel.EXIT_ERROR, "no project %r" % args.project)
-        else:  # SPD-014: the project of the working directory, else project spud (the home is none, SPD-097)
+        else:  # SPD-014: the project of the working directory, else project 1 (the home is none, SPD-097)
             try:
                 mapped = worktrees.cli_project_of(ctx, con, os.getcwd())
             except OSError:
                 mapped = None
             project = mapped[0] if mapped and not worktrees.is_home(mapped[0]) else con.execute("SELECT * FROM projects WHERE id = 1").fetchone()
+            if project is None:  # SPW-001: a home may hold no project, and then it can hold no ticket either
+                raise kernel.SpudError(kernel.EXIT_ERROR, "no project is registered; `spud --as spud project add <path> --key <key>"
+                                " --ticket-prefix %s --team-prefix %s --landing merge` registers one, or give --project"
+                                % (ctx.config.get("tickets", {}).get("prefix", "SPD"), ctx.config.get("teams", {}).get("prefix", "SPUD")))
         if project["archived_at"]:
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is archived (%s); no ticket is created in it" % (project["key"], kernel.fm_date(project["archived_at"])))
         for field in ("brief", "sizing", "outcome"):
@@ -53,7 +57,8 @@ def cmd_ticket_new(ctx, args):
         d = lookup.ticket_dict(con, t)
     finally:
         con.close()
-    keys = "%s, %s" % (d["team_key"], d["project"]) if d["project"] != "spud" else d["team_key"]
+    # SPW-001: project 1 is the project every unqualified `ticket new` lands in, so its key adds nothing to the line.
+    keys = d["team_key"] if project["id"] == 1 else "%s, %s" % (d["team_key"], d["project"])
     return reportentry.with_report_entry({"ticket": d}, "%s (%s) created: %s [%s]" % (d["key"], keys, d["title"], d["status"]), entry)
 
 

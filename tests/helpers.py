@@ -232,8 +232,40 @@ class Home:
         except json.JSONDecodeError as e:
             raise AssertionError("not JSON: %r (stderr %r)" % (proc.stdout, proc.stderr)) from e
 
-    def init(self):
-        return self.json("init")
+    def init(self, project=True):
+        """`spud init`, and then project 1 unless `project` is false.
+
+        SPW-001: init creates no project.  Project 1 is the project spud.config.json names, no longer presumed to be the
+        tool repository, and registering the first one is `spud init`'s own step (phase 3 of the design) or nobody's,
+        since a home may hold none.  Until that step exists the suite seeds the row the dropped `sync_config_rows`
+        INSERT left behind, so every home here keeps the shape it had; a test of the empty registry passes False.
+        """
+        out = self.json("init")
+        if project:
+            self.seed_project_one()
+        return out
+
+    def seed_project_one(self):
+        """Project 1 as `spud init` inserted it before SPW-001: key `spud`, the identity's name, rooted at this home's
+        SPUD_TOOL_DIR, the config's two prefixes, `remote` from that checkout's origin when it has one, and every other
+        column the schema's default.  Idempotent, so a second `init()` is still a no-op."""
+        tool = os.path.abspath(os.path.expanduser(self.env["SPUD_TOOL_DIR"]))  # core/homeconf.tool_root reads it the same way
+        remote = None
+        if os.path.lexists(os.path.join(tool, ".git")):
+            proc = subprocess.run(["git", "-C", tool, "remote", "get-url", "origin"], capture_output=True, text=True, env=isolated_git_env())
+            remote = (proc.stdout.strip() or None) if proc.returncode == 0 else None
+        con = self.connect()
+        try:
+            with con:
+                con.execute(
+                    "INSERT INTO projects (id, key, name, root_path, remote, ticket_prefix, team_prefix, created_at)"
+                    " VALUES (1, 'spud', ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                    (self.config.get("identity", {}).get("name", "Spud"), tool, remote,
+                     self.config.get("tickets", {}).get("prefix", "SPD"), self.config.get("teams", {}).get("prefix", "SPUD"),
+                     datetime.now().astimezone().isoformat(timespec="seconds")),
+                )
+        finally:
+            con.close()
 
     def connect(self):
         con = sqlite3.connect(self.db, timeout=5)
@@ -437,16 +469,18 @@ class HookResult:
 
 class SpudTestCase(unittest.TestCase):
     """A test case with a fresh initialised Home per test, its bytecode cache warm (SPD-102) unless the class sets warm_cache
-    False, as the classes do that assert what the launcher caches or what init or a backup leaves in .spud/."""
+    False, as the classes do that assert what the launcher caches or what init or a backup leaves in .spud/.  Its registry
+    holds project 1, `spud`, seeded by Home.init (SPW-001) unless the class sets seed_project False."""
 
     config = None
     home_name = None
     warm_cache = True
+    seed_project = True  # SPW-001: project 1 seeded as init recorded it before phase 2; False for an empty registry
 
     def setUp(self):
         self.home = Home(config=self.config, name=self.home_name, warm=self.warm_cache)
         self.addCleanup(self.home.cleanup)
-        self.home.init()
+        self.home.init(project=self.seed_project)
 
     # Small builders used across files.
     def new_ticket(self, title="A ticket", **kw):

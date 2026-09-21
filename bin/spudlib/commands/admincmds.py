@@ -17,9 +17,8 @@ def cmd_init(ctx, args):
         if created:
             con.execute("PRAGMA journal_mode = WAL")
         applied, backups = ledgerdb.apply_migrations(ctx, con, created)
-        at = kernel.now()
         with ledgerdb.write_txn(con):
-            ledgerdb.sync_config_rows(ctx, con, at)
+            ledgerdb.sync_config_rows(ctx, con)
         version = con.execute("PRAGMA user_version").fetchone()[0]
     finally:
         con.close()
@@ -46,17 +45,28 @@ def cmd_migrate(ctx, args):
     return kernel.Result({"database": str(ctx.db_path), "user_version": version, "applied": applied, "backups": backups}, text)
 
 
+NO_PROJECT_SYNCED = ("name_pool: %d names; no project is registered, so the config's prefixes (%s / %s) name none:"
+                     " `spud --as spud project add <path> --key <key> --ticket-prefix %s --team-prefix %s` registers project 1")
+
+
 def cmd_config_sync(ctx, args):
     con = ledgerdb.connect(ctx)
     try:
         at = kernel.now()
         with ledgerdb.write_txn(con):
-            synced = ledgerdb.sync_config_rows(ctx, con, at)
+            synced = ledgerdb.sync_config_rows(ctx, con)
             ledgerdb.write_event(con, at, "spud", "config.synced", "config synced", data=synced)
     finally:
         con.close()
-    return kernel.Result({"project": {"ticket_prefix": synced["ticket_prefix"], "team_prefix": synced["team_prefix"]}, "pool": synced["pool"]},
-                  "name_pool: %d names; home project prefixes %s / %s" % (synced["pool"], synced["ticket_prefix"], synced["team_prefix"]))
+    prefixes = (synced["ticket_prefix"], synced["team_prefix"])
+    # SPW-001: the prefixes are project 1's, whichever project that is; with no row 1 they are nobody's, and the line
+    # says so and names what registers one.  (`home project` was a leftover from before SPD-097 either way.)
+    if synced["project"] is None:
+        project, text = None, NO_PROJECT_SYNCED % (synced["pool"], *prefixes, *prefixes)
+    else:
+        project = {"key": synced["project"], "ticket_prefix": synced["ticket_prefix"], "team_prefix": synced["team_prefix"]}
+        text = "name_pool: %d names; project %s's prefixes %s / %s" % (synced["pool"], synced["project"], *prefixes)
+    return kernel.Result({"project": project, "pool": synced["pool"]}, text)
 
 
 READ_ONLY_FIRST_WORDS = ("SELECT", "WITH", "VALUES", "EXPLAIN", "PRAGMA")

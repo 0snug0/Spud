@@ -27,6 +27,7 @@ import json
 import os
 import shlex
 import shutil
+import sqlite3
 import subprocess
 import sys
 import time
@@ -231,11 +232,29 @@ def spud(env, home, *args):
 
 
 def write_config(home):
-    """Render the shipped config template into `home`/spud.config.json."""
+    """Render the shipped config template into `home`/spud.config.json; returns it parsed."""
     text = CONFIG.read_text(encoding="utf-8")
     for mark, value in json.loads(CONFIG_MARKS.read_text(encoding="utf-8")).items():
         text = text.replace(mark, value)
     (home / "spud.config.json").write_text(text, encoding="utf-8")
+    return json.loads(text)
+
+
+def seed_project_one(home, config):
+    """Project 1 as `spud init` inserted it before SPW-001: key `spud`, rooted at the home, whose bin/spud this probe's
+    launcher is.  Init registers no project now (docs/design/2026-09-21-spud-init.md section 1.4) and the ticket below
+    needs one."""
+    con = sqlite3.connect(home / ".spud" / "ledger.db", timeout=5)
+    try:
+        with con:
+            con.execute(
+                "INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at)"
+                " VALUES (1, 'spud', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (config["identity"]["name"], str(home), config["tickets"]["prefix"], config["teams"]["prefix"],
+                 datetime.now().astimezone().isoformat(timespec="seconds")),
+            )
+    finally:
+        con.close()
 
 
 def build_home(root, scenario):
@@ -244,7 +263,7 @@ def build_home(root, scenario):
     shutil.copy2(SPUD, home / "bin" / "spud")
     shutil.copy2(SPUD.parent / "spud_ledger.py", home / "bin" / "spud_ledger.py")
     shutil.copytree(SPUD.parent / "spudlib", home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
-    write_config(home)
+    config = write_config(home)
     for d in ("tests", "docs", ".claude"):
         (home / d).mkdir()
     env = dict(os.environ)
@@ -254,6 +273,7 @@ def build_home(root, scenario):
     env.pop("CLAUDE_CODE_SESSION_ID", None)
     env["SPUD_HOME"] = str(home)
     spud(env, home, "init")
+    seed_project_one(home, config)
     spud(env, home, "--as", "spud", "ticket", "new", "--title", "Probe %s" % scenario, "--status", "active")
     for name, persona, model in SCENARIOS[scenario]["members"]:
         spud(env, home, "--as", "spud", "member", "new", "--ticket", "SPD-001", "--persona", persona, "--model", model,

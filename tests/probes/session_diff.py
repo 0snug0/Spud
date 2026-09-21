@@ -15,9 +15,11 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
+from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
@@ -30,7 +32,7 @@ SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
 
 
 def write_config(home):
-    """Render the shipped config template into `home`/spud.config.json."""
+    """Render the shipped config template into `home`/spud.config.json; returns it parsed."""
     with open(CONFIG, encoding="utf-8") as f:
         text = f.read()
     with open(CONFIG_MARKS, encoding="utf-8") as f:
@@ -38,6 +40,29 @@ def write_config(home):
             text = text.replace(mark, value)
     with open(os.path.join(home, "spud.config.json"), "w", encoding="utf-8") as f:
         f.write(text)
+    return json.loads(text)
+
+
+def seed_project_one(home, config, checkout):
+    """Project 1 as `spud init` inserted it before SPW-001: key `spud`, the identity's name, rooted at the launcher's own
+    checkout, the config's two prefixes, `remote` from that checkout's origin.
+
+    Run right after the script's `init` step, because init registers no project now (docs/design/2026-09-21-spud-init.md
+    section 1.4) and every step below it needs one -- and because a home *with* a row 1 is the shape of the two homes
+    that exist, which is what this probe is evidence about: their `config sync`, `doctor`, `project edit` and
+    `project remove` must answer exactly as main's launcher answers."""
+    proc = subprocess.run(["git", "-C", checkout, "remote", "get-url", "origin"], capture_output=True, text=True)
+    con = sqlite3.connect(os.path.join(home, ".spud", "ledger.db"), timeout=5)
+    try:
+        with con:
+            con.execute(
+                "INSERT INTO projects (id, key, name, root_path, remote, ticket_prefix, team_prefix, created_at)"
+                " VALUES (1, 'spud', ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
+                (config["identity"]["name"], checkout, (proc.stdout.strip() or None) if proc.returncode == 0 else None,
+                 config["tickets"]["prefix"], config["teams"]["prefix"], datetime.now().astimezone().isoformat(timespec="seconds")),
+            )
+    finally:
+        con.close()
 
 
 def script(home):
@@ -78,7 +103,8 @@ def script(home):
 
 def run(launcher):
     home = tempfile.mkdtemp(prefix="spud-session-")
-    write_config(home)
+    config = write_config(home)
+    checkout = os.path.dirname(os.path.dirname(launcher))
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR", "SPUD_HOME")}
     env.update(SPUD_HOME=home, SPUD_USER_CLAUDE_DIR=home + "/.user-claude", SPUD_CONFIG_DIR=home + "/.user-config")
     out = []
@@ -87,9 +113,11 @@ def run(launcher):
             text = stdin if isinstance(stdin, str) else (json.dumps(stdin) if stdin is not None else None)
             # cwd is the scratch home, so a command that reads the working directory answers alike wherever this runs
             p = subprocess.run([PY, "-I", "-S", launcher, *argv], input=text, capture_output=True, text=True, env=env, cwd=home)
+            if argv == ["init"]:
+                seed_project_one(home, config, checkout)
             blob = "$ %s\nexit %d\n%s\n--stderr--\n%s" % (" ".join(argv[:4]), p.returncode, p.stdout, p.stderr)
             blob = blob.replace(home, "<HOME>").replace(os.path.realpath(home), "<HOME>")
-            blob = blob.replace(os.path.dirname(os.path.dirname(launcher)), "<CHECKOUT>")
+            blob = blob.replace(checkout, "<CHECKOUT>")
             blob = re.sub(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[-+]\d{2}:\d{2}", "<T>", blob)
             blob = re.sub(r"\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?", "<D>", blob)
             blob = re.sub(r"\b\d{2}:\d{2}\b", "<HM>", blob)

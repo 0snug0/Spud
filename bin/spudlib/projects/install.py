@@ -319,7 +319,10 @@ def cmd_project_remove(ctx, args):
         reportentry.check_next(con, actor, args)
         p = lookup.get_project(con, args.key)
         if p["id"] == 1:
-            raise kernel.SpudError(kernel.EXIT_ERROR, "project spud is the tool repository, project 1, and is never removed")
+            # SPW-001: because it is project 1, not because it is the tool repository.  Removing it would leave
+            # spud.config.json's prefixes naming no project, which doctor then reports for as long as the home lives.
+            raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is project 1, whose name and prefixes spud.config.json names, and is never removed:"
+                            " removing it would leave the config naming prefixes no project has" % p["key"])
         # a parked ticket is open (SPD-096): it is not-now, not over, so project remove waits for it too
         open_tickets = [r["key"] for r in con.execute("SELECT key FROM tickets WHERE project_id = ? AND status IN ('queued','active','parked') ORDER BY id", (p["id"],)).fetchall()]
         if open_tickets:
