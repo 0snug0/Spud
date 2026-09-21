@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, inline_programs, prepare, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, inline_programs, interpreter_words, prepare, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -174,6 +174,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     # string an xargs makes of that input for the shell it runs (`echo 'git push' | xargs -0 sh -c`).  SPD-150: `fed`,
     # whether anything stands on that input at all, for an interpreter that runs the program it reads there.
     stdin, input_string, fed = a.stdin, None, a.stdin_fed
+    # SPD-152: (that command string, whether xargs appends its input, the words it appends) for an xargs that runs this
+    # command, which a tabled interpreter reads as its own options; None where no xargs runs it (interpreter_words)
+    xargs_input = None
     while words:
         w = words[0]
         # SPD-085: `name[subscript]=value` too, read before any glob reading of its brackets
@@ -232,7 +235,10 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 # SPD-143: xargs reads that input itself, so the command it runs does not; where the line spells it, it
                 # is the command string a shell run with a `-c` and no string is handed
                 # ... and xargs gives the command it runs no standard input of its own (SPD-150: never an inline program)
-                input_string, stdin, fed = stdin_text.xargs_string(words, consumed, appended, stdin), None, False
+                # SPD-152: an interpreter it runs is handed every word of that input instead of one string
+                xargs_input = (stdin_text.xargs_string(words, consumed, appended, stdin), appended,
+                               stdin_text.xargs_words(words, consumed, stdin))
+                input_string, stdin, fed = xargs_input[0], None, False
             if chdir is not None:
                 # SPD-128: everything the wrapper runs -- its words, a string it hands a shell, a nested wrapper -- starts in the
                 # directory it moved to, once its own words are read (a glob or an expansion there leaves it unknown)
@@ -397,14 +403,18 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             # SPD-150: after the database and the launcher, which keep their reasons: a program the line spells rather
             # than reads from a file (`-c`, or standard input under `-` or no script) is one the hook cannot read at all
             a.kinds.append("other")
-            inline_programs.read_inline(cmd, base, words, a, fed)
+            interpreter_words.read_run(cmd, base, words, a, fed, xargs_input)
     elif base in syntax.JS_RUNTIMES:
+        # SPD-152: its options and its program read by name first, as python's are above (interpreter_words.read_point)
+        if not read_points(lambda ws, start: interpreter_words.read_point(base, ws, start)):
+            return
         if any("sqlite" in w.lower() for w in words[1:]) or any("sqlite" in b.lower() for b in bodies):
             a.kinds.append("db")
             a.findings.append(("db", cmd))
         else:
             a.kinds.append("other")
-            inline_programs.read_inline(cmd, base, words, a, fed)  # SPD-150: -e, --eval, -p, --print, or standard input
+            # SPD-150: -e, --eval, -p, --print, or standard input; SPD-152: `deno eval`, and an option out of xargs's input
+            interpreter_words.read_run(cmd, base, words, a, fed, xargs_input)
     elif base == "spud":
         if not read_points(lambda ws, start: expansions.option_point(expansions.first_read_index(ws, start))):
             return
@@ -448,14 +458,22 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     elif base in syntax.SPELLED_WRITE_COMMANDS or syntax.PERL_RE.match(base):
         # SPD-126: a command that writes a file it names past SPD-121's table -- dd's of=, sort's -o, mktemp's templates,
         # split's pieces, perl -i -- read where tee is, each held to the path rule as a redirection target
+        # SPD-152: perl's own options and program read by name (read_point finds nothing for dd, sort, mktemp and split,
+        # which the table does not name)
+        if not read_points(lambda ws, start: interpreter_words.read_point(base, ws, start)):
+            return
         a.kinds.append("other")
         spelled_writes.read_spelled_writes(prepare.deglob(cmd), base, words + unspelled, a, depth)
         # SPD-150: perl's -e and -E, and the program it reads on standard input; dd, sort, mktemp and split run none
-        inline_programs.read_inline(cmd, base, words, a, fed)
-    elif inline_programs.RUBY_RE.match(base):
-        # SPD-150: the one interpreter of the table with no reading of its own here -- ruby -e, and its standard input
+        interpreter_words.read_run(cmd, base, words, a, fed, xargs_input)
+    elif inline_programs.interpreter(base) is not None:
+        # SPD-150: ruby -e and its standard input, the one tabled interpreter with no reading of its own here.
+        # SPD-152: and the families the table gained, none of which the analysis reads anywhere else -- osascript (whose
+        # `do shell script` is any shell command at all), php, lua, Rscript, swift, tsx and ts-node.
+        if not read_points(lambda ws, start: interpreter_words.read_point(base, ws, start)):
+            return
         a.kinds.append("other")
-        inline_programs.read_inline(cmd, base, words, a, fed)
+        interpreter_words.read_run(cmd, base, words, a, fed, xargs_input)
     elif cmd in ("alias", "unalias") and directories.builtin_runs(effect):
         # SPD-059: the builtin, spelled exactly, stores text the shell runs wherever it next parses this name in command
         # position -- which on one line means `eval`.  Never a spud call, so an aliasing line is not allowed on its own.

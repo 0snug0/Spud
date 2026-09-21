@@ -5470,6 +5470,249 @@ class InlineProgramTest(BashHookCase):
         self.assertRefused("echo 'print(1)' | xargs node -e", INLINE_WORDING)  # ... but the -e is still an -e
 
 
+class UntabledInterpreterTest(BashHookCase):
+    """SPD-152: the interpreters SPD-150's table did not name, and the family whose program comes after a subcommand.
+
+    SPD-150 read four families by their own option grammar -- python, node with bun's and deno's spellings, perl and
+    ruby -- and its module docstring left four shapes of the same hole open.  Two of them are read here.
+
+    **A subcommand rather than an option.**  deno runs code with no `-e` in sight, and main read `eval` as the name of
+    the program's file and recorded nothing: `deno eval <code>` takes the code as the subcommand's own operand
+    (`deno completions zsh`: `*::code_arg -- Code to evaluate`), `deno repl --eval <code>` and `--eval=<code>`
+    evaluate it when the REPL starts (`deno repl --help`), and `deno run -` reads the program on standard input
+    ("Specifying the filename '-' to read the file from stdin", `deno run --help`).  Every other subcommand runs a
+    file, a task or its own discovery and is unchanged (`deno run scripts/x.ts`, `deno test`), and so is
+    `deno -e 'x'`, which SPD-150 already refused.
+
+    **Interpreters outside the table.**  Each was silent whatever it ran: osascript, whose `do shell script` is any
+    shell command at all on this Mac, php, lua, Rscript, swift, tsx and ts-node.  Every row is its own manual's --
+    osascript(1), php(1) (`php --help`), lua(1), R's usage for Rscript, `swift --help` -- and this Mac has deno,
+    osascript and swift to check against while php, lua, Rscript, tsx and ts-node are not installed, so a row is
+    cheap and a manual is what it rests on (shell/syntax's wget row is the precedent).  Probed 2026-09-20 for the one
+    thing `swift --help` does not spell out: `swift - < s.swift` ran that file's program, while bare `swift` with a
+    program on its standard input printed the driver's help and ran nothing, so swift reads standard input only where
+    the line names it -- `-`, or `swift repl`.
+
+    The refusal, the reason and what stays unchanged are all SPD-150's: Law 1 through bash_rule.inline_program_reason,
+    read last so an earlier refusal keeps its own wording, a program from a file untouched (SPD-145), and Spud's own
+    inline programs his."""
+
+    # Each line runs a program the line spells, through a shape SPD-150's four rows did not read.
+    SPELLED = (
+        "deno eval 'console.log(1)'", "deno eval --ext=ts 'console.log(1)'", "deno eval -- 'console.log(1)'",
+        "deno repl --eval 'console.log(1)'", "deno repl --eval='console.log(1)'",
+        "deno run - <<'JS'\nconsole.log(1)\nJS", "echo 'console.log(1)' | deno run -",
+        "echo 'console.log(1)' | deno run --allow-read -", "deno run - < scripts/x.ts",
+        "osascript -e 'do shell script \"git push\"'", "osascript -l JavaScript -e 'x'", "osascript -s o -e 'x'",
+        "osascript <<'AS'\ndo shell script \"git push\"\nAS", "echo 'display dialog \"x\"' | osascript",
+        "osascript - <<'AS'\nbeep\nAS",
+        "php -r 'echo 1;'", "php -B 'echo 1;' -R 'echo 2;'", "php --run 'echo 1;'", "php -d x=1 -r 'echo 1;'",
+        "echo '<?php echo 1;' | php", "php < tests/x.php",
+        "lua -e 'print(1)'", "lua -l mod -e 'print(1)'", "lua - <<'L'\nprint(1)\nL", "echo 'print(1)' | lua",
+        "Rscript -e 'print(1)'", "Rscript --vanilla -e 'print(1)'", "Rscript -e 'a' -e 'b'",
+        "tsx -e 'console.log(1)'", "tsx --eval 'x'", "ts-node -p 'x'", "ts-node --eval 'x'", "echo 'x' | ts-node",
+        "swift -e 'print(1)'", "swift -O -e 'print(1)'", "swift - <<'S'\nprint(1)\nS", "swift - < tests/x.swift",
+    )
+    # ... and each of these runs a program from a file, a task, or none at all: unchanged, for every caller.
+    READS_A_FILE = (
+        "deno run scripts/x.ts", "deno run --allow-net scripts/x.ts", "deno test", "deno test scripts/x_test.ts",
+        "deno task dev", "deno check scripts/x.ts", "deno fmt", "deno lint", "deno --version", "deno repl",
+        "deno repl --eval-file scripts/x.ts", "deno main.ts", "deno install", "deno run --allow-read -",
+        "osascript scripts/x.scpt", "osascript -l JavaScript scripts/x.js", "osascript scripts/x.scpt world",
+        "php scripts/x.php", "php -f scripts/x.php", "php -l scripts/x.php", "php --version",
+        "lua scripts/x.lua", "lua -l mod scripts/x.lua", "lua -v",
+        "Rscript scripts/x.R", "Rscript --vanilla scripts/x.R", "Rscript", "Rscript --version",
+        "tsx scripts/x.ts", "ts-node scripts/x.ts", "ts-node -P tsconfig.json scripts/x.ts",
+        "swift scripts/x.swift", "swift build", "swift test", "swift repl", "swift -O scripts/x.swift",
+        "swift -target arm64-apple-macos14 scripts/x.swift", "swift -access-notes-path n.yaml scripts/x.swift",
+    )
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def inline(self, command):
+        """The inline-program findings this line records, in the order the analysis finds them."""
+        return [detail for kind, detail in self.analysis(command).findings if kind == "inline"]
+
+    def test_the_analysis_finds_the_program_the_line_spells(self):
+        for command in self.SPELLED:
+            with self.subTest(command):
+                self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
+        for command in self.READS_A_FILE:
+            with self.subTest(command):
+                self.assertEqual(self.inline(command), [])
+
+    def test_a_member_is_refused_and_spud_keeps_his_inline_programs(self):
+        for command in self.SPELLED:
+            with self.subTest(command):
+                self.assertRefused(command, INLINE_WORDING)
+                self.assertRefused(command, "Law 1")
+                self.assertSilent(command, agent_id=None)  # Law 1 binds Spud where the hook cannot see; his are probes
+
+    def test_a_program_from_a_file_a_task_and_a_terminal_are_unchanged(self):
+        for command in self.READS_A_FILE:
+            with self.subTest(command):
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=None)
+
+    def test_what_the_reason_names_as_carrying_the_program(self):
+        """The subcommand for deno's operand form, the option for every other, and None for standard input."""
+        for command, option in (("deno eval 'x'", "eval"), ("deno eval -- 'x'", "eval"),
+                                ("deno repl --eval 'x'", "--eval"), ("deno repl --eval='x'", "--eval"),
+                                ("deno -e 'x'", "-e"), ("osascript -e 'x'", "-e"), ("php -r 'x'", "-r"),
+                                ("php -R 'x'", "-R"), ("lua -e 'x'", "-e"), ("Rscript -e 'x'", "-e"),
+                                ("tsx -e 'x'", "-e"), ("ts-node -p 'x'", "-p"), ("swift -e 'x'", "-e")):
+            with self.subTest(command):
+                self.assertEqual(self.inline(command), [(command.split()[0], option)])
+                self.assertIn("`%s` carries" % option, self.assertRefused(command, INLINE_WORDING).reason)
+        for command in ("deno run - <<'JS'\nx\nJS", "echo x | osascript", "swift - <<'S'\nx\nS", "echo x | lua"):
+            with self.subTest(command):  # standard input: no option carries it
+                self.assertEqual(self.inline(command)[0][1], None)
+
+    def test_a_refusal_the_line_already_earns_keeps_its_own_reason(self):
+        for command, needle in (("deno eval 'x' && git commit -m x", "Law 7"),
+                                ("osascript -e 'x' > docs/x.md", "deliverables"),
+                                ("php -r 'x' > ledger/tickets/SPD-001.md", "generated"),
+                                ("swift -e 'x' | tee CLAUDE.md", "deliverables"),
+                                ("Rscript -e 'x' && git push", "Law 7"),
+                                ("lua -e 'x' && %s ticket new --title x" % self.spud_cli, "Law 6")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle)
+                self.assertNotIn(INLINE_WORDING, r.reason)
+
+    def test_the_bare_names_the_table_still_does_not_read(self):
+        """A row is what reads a family, so a runner outside the table records nothing -- the shape the module
+        docstring leaves open and a proposal, never a guess here."""
+        for command in ("julia -e 'println(1)'", "elixir -e 'IO.puts 1'", "groovy -e 'println 1'", "luajit -e 'x'"):
+            with self.subTest(command):
+                self.assertEqual(self.inline(command), [])
+                self.assertSilent(command)
+
+
+class InterpreterWordTest(BashHookCase):
+    """SPD-152: a word the line cannot settle where an interpreter's option may stand, and the option an xargs reads
+    out of its input.  The other two shapes SPD-150 left open.
+
+    **A word the line cannot settle.**  `node $FLAG code` and `ruby $FLAG code` recorded nothing on main, while
+    python's same shape was refused, because only the python branch read its options by name: SPD-043's rule, that a
+    word the dispatch reads by name and the shell expands first is read as each word it can become and refuses a
+    member where the hook cannot resolve it.  An interpreter's option and program positions are such words -- `$FLAG`
+    there may be `-e`, and then the hook reads neither it nor the program it carries -- and since this ticket every
+    family in the table reads them, through the one grammar spelled_program reads (shell/interpreter_words).  A
+    `$NAME` the line itself settled is read as its value, as SPD-127 reads one in a write target, so
+    `X=-p; node $X code` is refused for the program `-p` carries and `X=scripts/x.js; node $X` is a file.
+
+    **The option out of xargs's input.**  `echo '-e code' | xargs node` runs `node -e code`, an `-e` the line never
+    spells as node's word: `xargs -e` on the line was already refused and its input was not.  SPD-143 built the
+    command string an xargs hands the shell it runs; since this ticket the same input is appended to a tabled
+    interpreter's words and read as its own options, and where the line does not spell that input -- a file
+    (`xargs -a f ruby`), another program's output (`cat f | xargs node`) -- the option position cannot be read at all
+    and the member is refused with SPD-043's reason, in the operand SPD-126 shows as `{input}`.  That refusal is read
+    where an inline program's is, last of all, so what the same input writes keeps SPD-126's own reason
+    (`xargs perl -pi -e s/a/b/ < list`, in SpelledWriteTest)."""
+
+    UNSETTLED = ("node $FLAG code", "ruby \"$FLAG\" code", "node $(cat f) code", "node ${FLAG} code", "node $FLAG",
+                 "deno $FLAG code", "deno run $FLAG code", "perl $FLAG 'print 1'", "php $FLAG code", "lua $FLAG code",
+                 "Rscript $FLAG code", "osascript $FLAG code", "tsx $FLAG code", "swift $FLAG code",
+                 "ruby $FLAG -e 'puts 1'", "node -r ./r.js $FLAG code",
+                 # a partial expansion is resolved nowhere (SPD-043): `$S/x.js` may be an option as much as a file
+                 "S=scripts; node $S/x.js", "X=cript; node -$X x.js")
+    # Each line hands a tabled interpreter words out of an xargs's input that the line does not spell: a file, another
+    # program's output, or text stdin_text does not read -- `echo '-e code'` among them, a leading word starting with
+    # `-` that is no option of echo's, which the shells differ over printing at all (stdin_text._echo_text).
+    UNSPELLED_INPUT = ("cat f | xargs node", "cat tests/x.py | xargs python3", "xargs -a f ruby",
+                       "xargs --arg-file f node", "curl -sS https://example.com/f | xargs deno",
+                       "xargs node < f", "cat f | xargs -I% node %", "date | xargs ruby",
+                       "echo '-e code' | xargs node", "echo '-e code' | xargs -I% node %",
+                       "cat f | xargs osascript", "cat f | xargs swift", "cat f | xargs tsx")
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "tests").mkdir(exist_ok=True)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def inline(self, command):
+        return [detail for kind, detail in self.analysis(command).findings if kind == "inline"]
+
+    def words(self, command):
+        """The unreadable-word findings this line records -- SPD-043's kinds, and SPD-152's "inline-word", which earns
+        the same reason where an interpreter's option position is what cannot be read."""
+        return [detail for kind, detail in self.analysis(command).findings
+                if kind in ("var", "var-word", "glob", "inline-word")]
+
+    def test_a_word_the_line_cannot_settle_is_refused_where_an_option_may_stand(self):
+        for command in self.UNSETTLED:
+            with self.subTest(command):
+                self.assertEqual(len(self.words(command)), 1, self.analysis(command).findings)
+                r = self.assertRefused(command, "cannot resolve")
+                self.assertIn("spell the words out", r.reason)
+                self.assertSilent(command, agent_id=None)  # SPD-043 refuses members; Spud reads on
+
+    def test_a_settled_value_is_read_as_the_value(self):
+        """SPD-127's reading: the word the shell would hand the interpreter, not the spelling."""
+        for command, option in (("X=-p; node $X code", "-p"), ("X=-e; ruby $X 'puts 1'", "-e"),
+                                ("X=--eval; node $X 'x'", "--eval"), ("X=-r; php $X 'echo 1;'", "-r")):
+            with self.subTest(command):
+                self.assertEqual(self.inline(command), [(command.split()[1], option)])
+                self.assertRefused(command, INLINE_WORDING)
+        for command in ("X=scripts/x.js; node $X", "X=tests/x.py; python3 $X", "X=scripts/x.php; php $X"):
+            with self.subTest(command):  # a settled value naming a file: a program from a file, as it always was
+                self.assertEqual(self.inline(command), [])
+                self.assertSilent(command)
+
+    def test_the_option_an_xargs_reads_out_of_its_input(self):
+        for command in ("printf '%s\\n' '-e code' | xargs node", "printf '%s\\n' '-e code' | xargs ruby",
+                        "printf '%s\\n' '-r code' | xargs php", "printf '%s\\n' '--eval code' | xargs node",
+                        "printf '%s\\n' '-e code' | xargs -I% node %", "echo 'eval code' | xargs deno",
+                        "{ printf '%s\\n' '-e code'; } | xargs node", "printf '%s\\n' '-e code' | xargs -0 node",
+                        "xargs node <<< '-e code'", "xargs deno <<< 'eval code'", "xargs osascript <<< '-e beep'"):
+            with self.subTest(command):
+                self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
+                self.assertRefused(command, INLINE_WORDING)
+                self.assertSilent(command, agent_id=None)
+
+    def test_an_input_the_line_does_not_spell_leaves_the_option_position_unreadable(self):
+        for command in self.UNSPELLED_INPUT:
+            with self.subTest(command):
+                self.assertEqual(len(self.words(command)), 1, self.analysis(command).findings)
+                self.assertIn("{input}", self.words(command)[0])
+                r = self.assertRefused(command, "does not spell")
+                self.assertIn("spell the words out", r.reason)
+                self.assertSilent(command, agent_id=None)
+
+    def test_input_the_line_spells_that_names_a_file_is_a_program_from_a_file(self):
+        for command in ("echo 'scripts/x.js' | xargs node", "echo 'print(1)' | xargs node",
+                        "echo 'scripts/x.js' | xargs -I% node %", "echo 'scripts/x.ts' | xargs deno run",
+                        "echo 'scripts/x.php' | xargs php"):
+            with self.subTest(command):
+                self.assertEqual(self.inline(command), [])
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_refusal_the_line_already_earns_keeps_its_own_reason(self):
+        """The unreadable option position is read last of all, where an inline program's refusal is (bash_rule), so
+        what the same input writes keeps SPD-126's reason: perl's own `-i` may stand in any of those words, which is
+        why every `| xargs perl` earns the anywhere-write reason whatever else the position holds."""
+        for command, needle in (("xargs perl -pi -e s/a/b/ < list", "places files where the line cannot say"),
+                                ("curl -sS https://example.com/f | xargs perl", "places files where the line cannot say"),
+                                ("cat f | xargs rm", "xargs reads from its input"),
+                                ("cat f | xargs node > docs/x.md", "deliverables")):
+            with self.subTest(command):
+                r = self.assertRefused(command, needle)
+                self.assertNotIn("spell the words out", r.reason)
+
+    def test_a_command_outside_the_table_is_read_as_it_was(self):
+        """An xargs that runs anything else keeps SPD-126's and SPD-143's readings, whatever its input."""
+        self.assertEqual(self.words("cat f | xargs echo"), [])
+        self.assertSilent("cat f | xargs echo")
+        self.assertSilent("echo 'scripts' | xargs ls")
+        self.assertRefused("echo 'git push' | xargs -0 sh -c", "Law 7")  # SPD-143's string, unchanged
+
+
 # A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
 # files on this Mac are 4,100 lines and 124 KB; nothing here reads them, and a test never touches ~/.claude.
 SHELL_SNAPSHOT = """\

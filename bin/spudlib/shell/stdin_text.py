@@ -190,6 +190,18 @@ def xargs_string(words, consumed, appended, text):
     return first[0] if first else None
 
 
+def xargs_words(words, consumed, text):
+    """The words an xargs call hands the command it runs, from the standard input `text` the line spells, or None where
+    the line does not spell it (SPD-152).
+
+    The whole input as one word where xargs reads whole records (-0 or -d), and its blank-separated words otherwise --
+    every one of them, where xargs_string above takes the first: a shell's `-c` string is one operand, while an
+    interpreter is handed them all as words of its own (`echo '-e code' | xargs node` runs `node -e code`)."""
+    if text is None:
+        return None
+    return [text] if _whole_input(words, consumed) else text.split()
+
+
 def _whole_input(words, consumed):
     """Whether this xargs call reads its input as whole records rather than blank-separated words (xargs(1): -0, --null,
     -d, --delimiter)."""
