@@ -149,3 +149,26 @@ uncommitted for the removal commit), project spud installed and every installed 
 reinstalled; a render and spud doctor in the new home; the old .spud renamed .spud-moved.  Ends by printing what is
 left by hand and how to roll back until the removal commit.  --dry-run checks the preconditions and prints the steps.
 """
+
+VAULT_DESCRIPTION = """\
+The home's Obsidian vault, which the tool ships and the tool captures (SPD-156, the portable-home design section 3).
+`vault install` writes <home>/.obsidian/ from <tool>/share/obsidian/ and downloads every plugin and theme
+<tool>/share/obsidian.lock.json pins, checking each file's SHA-256 before it is renamed into place: a release replaced
+upstream refuses that one plugin by name and the rest still install, and a refused download is a line in the output,
+never a failed command.  A tool-owned file the home has changed is replaced, with a copy kept under a vault-install
+folder of the home's backups directory and named in the output; --force rewrites what matched anyway.  A file the home
+has that the tool does not ship is never touched.  The shipped .base views are the tool's and an install refreshes them:
+copy a view to a new name before changing it, and your copy survives.  `spud init` runs this as its step 4b, and
+`spud init --no-vault` leaves the vault out.
+
+`vault capture --into <worktree>` is the other direction, and a member's: it writes share/obsidian/,
+share/obsidian.lock.json and share/ledger/*.base in a linked worktree of this repository from what this home's vault
+holds now.  Only what is turned on is captured -- the plugins community-plugins.json enables, the theme and the snippets
+appearance.json names -- and never a note, never workspace.json.  Each plugin's and theme's GitHub repository comes from
+Obsidian's own community lists, and a file is pinned only when the download is byte for byte what is installed, so a
+plugin changed by hand or installed from outside the store is refused by name.  The main checkout, another repository,
+and any path outside the member's deliverables are all refused before anything is written.
+
+`spud doctor` names, as notes, each shipped settings file, .base file, or plugin and theme version the home has and has
+changed since the last capture.  SPUD_VAULT_DOWNLOADS=off refuses every download (the suite sets it on every home).
+"""

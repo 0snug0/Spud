@@ -269,6 +269,11 @@ class Home:
         # reconciler would make, `spud board`'s own run included, so no test can reach GitHub by forgetting something; a
         # test that wants a read points this at a fake gh of its own (GhMixin below).
         self.env["SPUD_GH"] = "off"
+        # SPD-156: and the same rule for the vault's downloads, which `spud init` now makes on its own (step 4b).  `off`
+        # refuses every one of them, so no test reaches GitHub by forgetting something and every init here writes the
+        # settings and the views and reports the plugins as refused -- which is the design's own no-network path.  A
+        # test that wants a download points this at a directory of its own (VaultMixin, tests/test_vault.py).
+        self.env["SPUD_VAULT_DOWNLOADS"] = "off"
         # SPD-097: the tool, the checkout whose bin/spud the hook lines, allow rules, LaunchAgents and the /spud skill name
         # and where the spudagent source is read, is this scratch home unless a test names another.  So the assertions the
         # suite made before the split keep their `<home>/bin/spud` shape; a test of the split builds a separate tool with

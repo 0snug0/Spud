@@ -20,6 +20,8 @@ from ..commands import (
     schedule,
     settings_sync,
     ticketcmds,
+    vaultcapture,
+    vaultinstall,
     views,
 )
 from ..core import kernel, launchagents, lazy
@@ -79,6 +81,8 @@ def build_parser():
     p.add_argument("--no-schedule", action="store_true",
                    help="install neither LaunchAgent (%s, the daily backup, and %s, the render watcher): `spud schedule install` does it later, and doctor reports a watcher never installed as a note, not a problem"
                         % (launchagents.SCHEDULE_LABEL, launchagents.RENDER_LABEL))
+    p.add_argument("--no-vault", action="store_true",
+                   help="install no Obsidian vault: step 4 writes the scaffolding and stops, and `spud --as spud vault install` sets one up later (SPD-156)")
     p.add_argument("--repoint", action="store_true", help="~/.config/spud/home names another home: point this machine here instead (that home is left untouched)")
     p.add_argument("--yes", action="store_true", help="never prompt: every value not given takes its default, and one with no default is refused")
     p.add_argument("--dry-run", action="store_true", help="check the preconditions and print the steps; write nothing")
@@ -191,6 +195,17 @@ def build_parser():
     q.add_argument("--dry-run", action="store_true", help="check the preconditions and print the steps; move nothing")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry the move writes")
     q.set_defaults(func=homemove.cmd_home_move)
+
+    p = sub.add_parser("vault", help="the home's Obsidian vault: install it from the tool's share/, or capture this one back into a ticket's worktree (SPD-156)",
+                       description=helptexts.VAULT_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
+    ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
+    ps.required = True
+    q = ps.add_parser("install", help="write the home's .obsidian/ from share/obsidian/ and download every plugin and theme the lock pins, checking each SHA-256 (Spud's)")
+    q.add_argument("--force", action="store_true", help="rewrite a tool-owned file that already holds the shipped text, and download a pinned file the home already has")
+    q.set_defaults(func=vaultinstall.cmd_vault_install)
+    q = ps.add_parser("capture", help="write share/obsidian/, share/obsidian.lock.json and share/ledger/*.base in a linked worktree from this home's vault (a member's, on a ticket)")
+    q.add_argument("--into", required=True, metavar="WORKTREE", help="a linked worktree of this repository; the main checkout and every other repository are refused")
+    q.set_defaults(func=vaultcapture.cmd_vault_capture)
 
     p = sub.add_parser("sql", help="run one read-only statement against the database (any actor; the inspection path)")
     p.add_argument("statement", help="SELECT, WITH, VALUES, EXPLAIN or a read-only PRAGMA")

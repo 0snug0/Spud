@@ -1,0 +1,11 @@
+{
+  "bases": true,
+  "bookmarks": true,
+  "editor": true,
+  "file-explorer": true,
+  "graph": true,
+  "outline": true,
+  "properties": true,
+  "search": true,
+  "tab-header": true
+}
