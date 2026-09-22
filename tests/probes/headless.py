@@ -366,8 +366,8 @@ def build_init_clone(root):
     shutil.copytree(SPUD.parent / "spudlib", clone / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
     shutil.copytree(REPO / "share", clone / "share")
     shutil.copytree(REPO / ".claude" / "skills" / "spud-init", clone / ".claude" / "skills" / "spud-init")
-    (clone / ".claude" / "agents").mkdir(parents=True)
-    shutil.copy2(REPO / ".claude" / "agents" / "spudagent.md", clone / ".claude" / "agents" / "spudagent.md")
+    # The spudagent template comes with share/ since SPW-004; nothing copies it on its own, and nothing puts one at
+    # project scope, where Claude Code would read it in preference to the copy `project install` renders.
     shutil.copy2(REPO / "README.md", clone / "README.md")
     shutil.copy2(REPO / "CLAUDE.md", clone / "CLAUDE.md")
     run(["git", "init", "--quiet", str(clone)], dict(os.environ))

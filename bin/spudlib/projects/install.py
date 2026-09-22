@@ -24,7 +24,7 @@ def install_files(ctx, p):
         "agent": user / "agents" / "spudagent.md",
         "skill": user / "skills" / "spud" / "SKILL.md",
         "pointer": homeconf.spud_config_dir() / "home",
-        "source_agent": agentdef.agent_source(ctx),  # SPD-097: the source lives in the tool repository, as a template (SPW-002)
+        "source_agent": agentdef.agent_source(ctx),  # SPD-097: in the tool repository, a template (SPW-002), under share/ (SPW-004)
     }
 
 

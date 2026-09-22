@@ -128,9 +128,7 @@ class SessionHooksTest(RepoMixin, SpudTestCase):
 
     def setUp(self):
         super().setUp()
-        agents = self.home.path / ".claude" / "agents"
-        agents.mkdir(parents=True, exist_ok=True)
-        (agents / "spudagent.md").write_text(AGENT, encoding="utf-8")  # what `project install` renders the user copy from
+        self.home.agent_source(AGENT)  # SPW-004: share/agents/spudagent.md, what `project install` renders the user copy from
         self.other = self.make_repo("badtakes-")
         self.add_project(self.other)
         self.wt = self.add_worktree(self.other, "bad-001")

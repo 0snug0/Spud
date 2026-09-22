@@ -429,11 +429,13 @@ class ShippedConfigTest(unittest.TestCase):
 
 
 class ShippedSetTest(unittest.TestCase):
-    """What the tool ships for a home, as a set: the eight files of the design's section 4, and nothing that is state."""
+    """What the tool ships, as a set: the eight files of the design's section 4, the spudagent definition SPW-004 moved
+    in beside them, and nothing that is state."""
 
     def test_the_shipped_set_is_the_files_a_home_needs(self):
         self.assertEqual([rel for rel, _ in shipped()], [
             "CLAUDE.md",
+            "agents/spudagent.md",  # SPW-004: shipped, but rendered to user scope by install, never into a home
             "ledger/Board.base",
             "ledger/Fleet.base",
             "ledger/Home.md",
@@ -442,6 +444,22 @@ class ShippedSetTest(unittest.TestCase):
             "ledger/_templates/ticket.md",
             "spud.config.json",
         ])
+
+    def test_the_spudagent_source_is_the_shipped_file_and_no_home_gets_a_copy(self):
+        """SPW-004: `projects/agentdef.agent_source` reads share/agents/spudagent.md through core/shipped.share_dir, so
+        share/ has one owner; and it is the one shipped file `spud init` does not write into the home, because it belongs
+        at user scope, where Claude Code reads an agent definition from."""
+        home = helpers.Home()
+        try:
+            ctx = spud.Ctx(home.path, "SPUD_HOME", False, tool=REPO)
+            self.assertEqual(spud.agent_source(ctx), SHARE / "agents" / "spudagent.md")
+            self.assertTrue(spud.agent_source(ctx).is_file())
+            self.assertNotIn("agents/spudagent.md", spud.SCAFFOLDING)
+            shipped_paths = [rel for rel, _ in shipped()]
+            self.assertEqual(sorted(set(shipped_paths) - set(spud.SCAFFOLDING) - {"spud.config.json"}),
+                             ["agents/spudagent.md"])
+        finally:
+            home.cleanup()
 
     def test_read_gives_a_shipped_file_and_refuses_one_that_is_gone(self):
         home = helpers.Home()

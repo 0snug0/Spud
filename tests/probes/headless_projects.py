@@ -8,8 +8,8 @@ Run one scenario at a time, from any directory:
 scenarios, but it was taken, so they live beside it.)
 
 Each scenario builds a scratch directory under the system temp directory: a scratch home (a git repository holding a copy of
-this checkout's bin/spud, bin/spud_ledger.py and .claude/agents/spudagent.md and of the suite's
-shipped share/spud.config.json rendered, with a bare origin, `spud init`) and a scratch "other" repository standing in for BadTakes
+this checkout's bin/spud, bin/spud_ledger.py and share/ -- the spudagent template share/agents/spudagent.md included
+since SPW-004 -- and of the suite's shipped share/spud.config.json rendered, with a bare origin, `spud init`) and a scratch "other" repository standing in for BadTakes
 (key badtakes, prefixes BAD / BADS, Eric 2026-09-14), with a commit and a bare origin.  It runs `project add` and `project install` with SPUD_USER_CLAUDE_DIR and SPUD_CONFIG_DIR in the
 scratch directory, then launches `claude -p --model haiku --setting-sources project,local` in the other repository, so the
 installed local settings are the settings that load.  `spudagent` is passed with --agents, since a headless run cannot
@@ -110,8 +110,9 @@ class Scratch:
         config = write_config(self.home)
         shutil.copytree(REPO / "bin" / "spudlib", self.home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
         os.chmod(self.home / "bin" / "spud", 0o755)
-        (self.home / ".claude" / "agents").mkdir(parents=True)
-        shutil.copyfile(REPO / ".claude" / "agents" / "spudagent.md", self.home / ".claude" / "agents" / "spudagent.md")
+        # SPW-004: the spudagent template is share/agents/spudagent.md, so this home-as-tool ships share/ whole -- which
+        # is also what `spud init` writes its scaffolding from (SPW-001).
+        shutil.copytree(REPO / "share", self.home / "share")
         (self.home / "CLAUDE.md").write_text("# Spud (scratch home for a headless probe)\n\nYou are Spud in this probe. Follow the prompt's steps exactly.\n", encoding="utf-8")
         (self.home / ".gitignore").write_text(".spud/\n", encoding="utf-8")
         git(self.home, "init", "-q", "-b", "main")
