@@ -183,9 +183,9 @@ The home's Obsidian vault, which the tool ships and the tool captures (SPD-156, 
 upstream refuses that one plugin by name and the rest still install, and a refused download is a line in the output,
 never a failed command.  A tool-owned file the home has changed is replaced, with a copy kept under a vault-install
 folder of the home's backups directory and named in the output; --force rewrites what matched anyway.  A file the home
-has that the tool does not ship is never touched.  The shipped .base views are the tool's and an install refreshes them:
-copy a view to a new name before changing it, and your copy survives.  `spud init` runs this as its step 4b, and
-`spud init --no-vault` leaves the vault out.
+has that the tool does not ship is never touched.  The shipped .base views are the tool's, but install leaves them
+alone -- `spud home sync` refreshes them, keeping a copy of what it replaces, while a .base file of your own survives.
+`spud init` runs this as its step 4b, and `spud init --no-vault` leaves the vault out.
 
 `vault capture --into <worktree>` is the other direction, and a member's: it writes share/obsidian/,
 share/obsidian.lock.json and share/ledger/*.base in a linked worktree of this repository from what this home's vault
