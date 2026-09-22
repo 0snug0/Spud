@@ -5,14 +5,19 @@ other key preserved. Always against a temp file.
 HookEvidenceTest is SPW-003: the one reading of a settings file, which `settings sync`
 writes, doctor asks per project and `session show` asks of the files its own session
 loads -- and the two hand-rolled pieces that reading rests on, pinned against the
-standard library and against the table sync installs."""
+standard library and against the table sync installs.
+
+DoctorHomeSettingsTest is SPW-006: the same reading turned on the home's own
+.claude/settings.json, which is the file this command writes by default and the whole
+of what makes a session launched in the home Spud -- and which no check of doctor's
+read until then, so a home that had never been synced passed a green doctor."""
 
 import json
 import shlex
 import sys
 import unittest
 
-from helpers import SpudTestCase, load_spud_module
+from helpers import EXIT_ERROR, EXIT_OK, SpudTestCase, load_spud_module
 
 FIXTURE = {
     "model": "claude-fable-5-1",
@@ -283,10 +288,174 @@ class HookEvidenceTest(SpudTestCase):
 
     def test_the_hook_table_installs_exactly_the_events_the_program_handles(self):
         """Why `missing` may be measured against hookio.HOOK_EVENTS (SPW-003): the events settings sync installs are the
-        events a hook run can be dispatched to, so an event in one list and not the other would be a gap either way."""
+        events a hook run can be dispatched to, so an event in one list and not the other would be a gap either way.
+        TABLE_EVENTS is the table's own order (SPW-006), which is what a `settings` line's missing events are named in."""
         spud = load_spud_module()
         self.assertEqual({e for e, _ in spud.HOOK_TABLE}, set(spud.HOOK_EVENTS))
         self.assertEqual(set(spud.HOOK_HANDLERS), set(spud.HOOK_EVENTS))
+        self.assertEqual(spud.TABLE_EVENTS, tuple(spud.HOOK_EVENTS))
+
+    def test_the_missing_events_are_the_table_minus_what_the_file_carries(self):
+        """settings_missing_hooks (SPW-006): settings_hold_hooks is it being empty, so the two cannot drift, and the
+        list is what doctor's `settings` line and its partial problem name."""
+        spud = load_spud_module()
+        ctx = self.ctx()
+        path = self.home.path / "elsewhere" / "settings.json"
+        self.assertEqual(spud.settings_missing_hooks(ctx, path), list(spud.TABLE_EVENTS))  # absent: every event
+        self.home.json("settings", "sync", "--path", path)
+        self.assertEqual(spud.settings_missing_hooks(ctx, path), [])
+        self.assertTrue(spud.settings_hold_hooks(ctx, path))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        del data["hooks"]["SessionStart"]
+        data["hooks"]["Stop"] = []
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        # the table's order, not the file's and not sorted: SessionStart before Stop
+        self.assertEqual(spud.settings_missing_hooks(ctx, path), ["SessionStart", "Stop"])
+        self.assertFalse(spud.settings_hold_hooks(ctx, path))
+        # a project's key still decides whose lines count, as it does for the whole-table answer
+        self.home.json("settings", "sync", "--path", path)
+        self.assertEqual(spud.settings_missing_hooks(ctx, path, "badtakes"), list(spud.TABLE_EVENTS))
+
+
+class DoctorHomeSettingsTest(SpudTestCase):
+    """doctor's `settings` line (SPW-006): the home's own .claude/settings.json read for a ledger hook line of this home
+    for every event of HOOK_TABLE.
+
+    Every home here is one `spud init` built, so the green case is the state a working home is really in and each wrong
+    state is reached by editing that file, which is the only way to reach it once init's step 6 has run.  A problem in
+    every wrong state, never a note: what is broken is this home's own installation, `spud --as spud settings sync`
+    fixes it, and doctor's non-zero exit is what makes `init`'s step 10 and `home move`'s 7b refuse until it is run.
+    """
+
+    def settings(self):
+        return self.home.path / ".claude" / "settings.json"
+
+    def doctor(self):
+        """(proc, report): the report either way -- a red doctor raises with it attached, and prints no lines at all."""
+        proc = self.home.run("--json", "doctor", check=False)
+        return proc, json.loads(proc.stdout)
+
+    def write(self, data):
+        self.settings().write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    def test_a_home_init_built_reports_every_event_on_its_own_line_beside_the_config(self):
+        proc, report = self.doctor()
+        self.assertEqual(proc.returncode, EXIT_OK, proc.stderr)
+        self.assertEqual(report["problems"], [])
+        events = list(load_spud_module().TABLE_EVENTS)
+        self.assertEqual(report["settings"], {"path": str(self.settings()), "exists": True, "unreadable": None,
+                                             "missing": [], "events": events,
+                                             "line": "%s: this home's ledger hooks, all 7 events" % self.settings()})
+        lines = self.home.run("doctor").stdout.splitlines()
+        labels = [line.split("  ")[0] for line in lines]
+        self.assertIn("settings    %s" % report["settings"]["line"], lines)
+        # where a reader will find it: under the config line, the home's own other state, and not among the project
+        # lines or SPW-003's `hooks` line -- which is in the same report, under a label sharing no word with this one.
+        self.assertEqual(labels[labels.index("config") + 1], "settings")
+        self.assertEqual((labels.count("settings"), labels.count("hooks")), (1, 1))
+
+    def test_a_home_that_was_never_synced_is_a_problem_naming_the_command_that_fixes_it(self):
+        self.settings().unlink()
+        proc, report = self.doctor()
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stdout)
+        s = report["settings"]
+        self.assertEqual((s["exists"], s["missing"], s["events"]), (False, list(load_spud_module().TABLE_EVENTS), []))
+        self.assertEqual(s["line"], "%s (missing): none of this home's ledger hooks (see problems)" % self.settings())
+        self.assertEqual(report["problems"], ["there is no %s, the settings file every session launched in the home"
+                                              " reads, so a session launched in the home records and guards nothing --"
+                                              " no SessionStart board, no path rule, no Agent guard and no Bash guard:"
+                                              " run `spud --as spud settings sync`" % self.settings()])
+        self.assertIn("settings sync", self.home.run("doctor", check=False).stderr)  # and in the text run's refusal
+        self.home.json("settings", "sync")  # the named command, and nothing else, ends it
+        self.assertEqual(self.doctor()[1]["problems"], [])
+
+    def test_a_file_with_other_keys_and_none_of_the_hooks_is_the_same_problem_said_of_a_file_that_is_there(self):
+        self.write({"model": "claude-fable-5-1", "hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "echo hi"}]}]}})
+        proc, report = self.doctor()
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stdout)
+        self.assertTrue(report["settings"]["exists"])
+        self.assertEqual(report["settings"]["line"], "%s: none of this home's ledger hooks (see problems)" % self.settings())
+        self.assertEqual(report["problems"], ["%s carries none of this home's ledger hook lines, so a session launched"
+                                              " in the home records and guards nothing -- no SessionStart board, no path"
+                                              " rule, no Agent guard and no Bash guard: run `spud --as spud settings"
+                                              " sync`" % self.settings()])
+
+    def test_a_file_one_event_short_is_a_problem_that_names_the_events(self):
+        """The partial case: an event short is an event whose hook never runs, so it is a problem too -- and it says
+        which events, in the table's order, because the file is otherwise Eric's to diff."""
+        data = json.loads(self.settings().read_text(encoding="utf-8"))
+        del data["hooks"]["SubagentStart"]
+        data["hooks"]["UserPromptSubmit"] = []
+        self.write(data)
+        proc, report = self.doctor()
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stdout)
+        s = report["settings"]
+        self.assertEqual((s["exists"], s["missing"]), (True, ["SubagentStart", "UserPromptSubmit"]))
+        self.assertEqual(s["events"], ["PreToolUse", "PostToolUse", "SubagentStop", "SessionStart", "Stop"])
+        self.assertEqual(s["line"], "%s: no ledger hook line for SubagentStart, UserPromptSubmit (see problems)" % self.settings())
+        self.assertEqual(report["problems"], ["%s carries no ledger hook line of this home for SubagentStart,"
+                                              " UserPromptSubmit, so those events record and guard nothing in a session"
+                                              " launched in the home: run `spud --as spud settings sync`" % self.settings()])
+        self.home.json("settings", "sync")
+        self.assertEqual(self.doctor()[1]["problems"], [])
+        # one event short is the likeliest shape of this, and the plural would read wrong of it
+        data = json.loads(self.settings().read_text(encoding="utf-8"))
+        del data["hooks"]["Stop"]
+        self.write(data)
+        _proc, report = self.doctor()
+        self.assertEqual(report["problems"], ["%s carries no ledger hook line of this home for Stop, so that event"
+                                              " records and guards nothing in a session launched in the home:"
+                                              " run `spud --as spud settings sync`" % self.settings()])
+
+    def test_a_file_that_is_not_a_readable_json_object_says_so_and_puts_the_hand_edit_first(self):
+        """The fourth state, and the one where naming the command alone would be a lie: `settings sync` refuses a file
+        it cannot read rather than dropping whatever a hand put there, so the message asks for the hand edit first."""
+        for junk in ("{not json", "[]", ""):
+            with self.subTest(junk=junk):
+                self.settings().write_text(junk, encoding="utf-8")
+                proc, report = self.doctor()
+                self.assertEqual(proc.returncode, EXIT_ERROR, proc.stdout)
+                s = report["settings"]
+                self.assertEqual((s["exists"], s["missing"]), (True, list(load_spud_module().TABLE_EVENTS)))
+                self.assertEqual(s["line"], "%s: not a readable JSON object, so no ledger hook of this home (see problems)" % self.settings())
+                self.assertEqual(len(report["problems"]), 1, report["problems"])
+                problem = report["problems"][0]
+                self.assertIn(str(self.settings()), problem)
+                self.assertIn("is not a %s" % ("JSON object" if junk == "[]" else "readable JSON file"), problem)
+                self.assertIn("`spud --as spud settings sync` refuses it as it stands", problem)
+                self.assertIn("make it a JSON object, or remove it, and then run that", problem)
+                self.assertEqual(self.home.run("settings", "sync", check=False).returncode, EXIT_ERROR)  # as the problem says
+
+
+class QuotedPathHomeTest(SpudTestCase):
+    """A home whose path shlex.quote quotes: a space, and SPD-029's non-ASCII character (`\\w` under re.ASCII).  Every
+    hook line this home installs then reads `SPUD_HOME='<home>' <python> -I -S '<home>/bin/spud' hook <event>`, in
+    which projects/sessions.HOOK_MARK, `bin/spud hook`, is not a substring -- so the marked reading finds nothing in a
+    file `settings sync` wrote itself, and SPW-006's check would have called every such home broken.  Which is why
+    settings_missing_hooks reads the generated line too (settings_exact_hooks); the mark's own blindness is a defect of
+    its own, filed as a proposal, and it costs more than this check: `merge_hooks` cannot see its own previous entries
+    either, so every `settings sync` in such a home appends a second copy of all nine lines.
+    """
+
+    home_name = "Sp üd"
+
+    def test_a_home_whose_path_needs_quoting_reads_as_installed_and_doctor_is_green(self):
+        spud = load_spud_module()
+        ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+        settings = self.home.path / ".claude" / "settings.json"
+        command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["Stop"][0]["hooks"][0]["command"]
+        # the premise: the line is this home's own, and the mark cannot see it
+        self.assertEqual(command, spud.hook_command(ctx, "Stop"))
+        self.assertIn("'%s/bin/spud' hook Stop" % self.home.path, command)
+        self.assertNotIn(spud.HOOK_MARK, command)
+        self.assertEqual(spud.settings_hook_events(ctx, settings), set())
+        # and the whole-table answer, and so doctor, read it anyway
+        self.assertEqual(spud.settings_exact_hooks(ctx, settings), set(spud.TABLE_EVENTS))
+        self.assertEqual(spud.settings_missing_hooks(ctx, settings), [])
+        self.assertTrue(spud.settings_hold_hooks(ctx, settings))
+        proc = self.home.run("doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_OK, proc.stderr)
+        self.assertIn("settings    %s: this home's ledger hooks, all 7 events" % settings, proc.stdout.splitlines())
 
 
 if __name__ == "__main__":

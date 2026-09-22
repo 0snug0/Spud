@@ -30,6 +30,24 @@ NO_PROJECT = ("no project is registered, so this home can hold no ticket:"
 # A projects table with rows but no id 1: reachable by nothing the CLI does (`project remove` refuses id 1, archiving
 # keeps the row), and cheap to report.  `config sync` no longer creates the row, so nothing names a fix.
 NO_PROJECT_ONE = "no project 1 among the %d project(s) registered, so spud.config.json's prefixes (%s / %s) name no project"
+# SPW-006: the home's own .claude/settings.json, which `settings sync` writes and `init` writes at its step 6.  Its hook
+# lines are the whole of what makes a session launched in the home Spud -- the SessionStart board, the path rule, the
+# Agent and Bash guards -- and a home missing them loses every one of them in every home session, silently.
+SETTINGS_SYNC = "`spud --as spud settings sync`"
+# The consequence, and it is the same in every wrong state below: the lines are not there, so neither is anything they do.
+UNHOOKED_HOME = (", so a session launched in the home records and guards nothing -- no SessionStart board, no path rule,"
+                 " no Agent guard and no Bash guard")
+HOME_HOOKS_ABSENT = "there is no %s, the settings file every session launched in the home reads" + UNHOOKED_HOME + ": run " + SETTINGS_SYNC
+HOME_HOOKS_NONE = "%s carries none of this home's ledger hook lines" + UNHOOKED_HOME + ": run " + SETTINGS_SYNC
+# A file one event short reads differently from one with nothing in it -- a hand edit, or a table an older sync wrote --
+# so the events are named rather than the fact that something is wrong; the command is the same one either way.  One
+# event short is the likeliest shape of this and the one whose grammar the plural would get wrong, hence the clause.
+HOME_HOOKS_PARTIAL = "%s carries no ledger hook line of this home for %s, so %s nothing in a session launched in the home: run " + SETTINGS_SYNC
+HOME_HOOKS_ONE_SHORT, HOME_HOOKS_MANY_SHORT = "that event records and guards", "those events record and guard"
+# The fourth state, and the one where naming the command alone would be a lie: `settings sync` refuses a file it cannot
+# read (it would otherwise drop a hand's whole settings), so the hand edit comes first and the command after it.
+HOME_HOOKS_UNREADABLE = ("%s, so it carries no ledger hook line of this home" + UNHOOKED_HOME + ", and " + SETTINGS_SYNC
+                         + " refuses it as it stands: make it a JSON object, or remove it, and then run that")
 
 
 def cmd_doctor(ctx, args):
@@ -66,6 +84,7 @@ def doctor_report(ctx):
         cfg_problems = homeconf.config_problems(config)
         problems.extend("config: " + p for p in cfg_problems)
         report["config"] = {"problems": cfg_problems, "limits": config.get("limits"), "pool": len(config.get("naming", {}).get("pool", []))}
+    report["settings"] = doctor_home_settings(ctx, problems)  # SPW-006: the home's own hook lines, beside the config's line
     pricing = prices.price_table(config)[0] if config is not None else None  # SPD-013: the price table, and below what it cannot price
     report["pricing"] = None if pricing is None else {"as_of": pricing["as_of"], "source": pricing["source"], "currency": "USD",
                                                       "models": sorted(pricing["models"]), "not_priced": []}
@@ -130,6 +149,7 @@ def doctor_report(ctx):
         "SPUD_HOME   %s (via %s)" % (report["spud_home"]["path"], report["spud_home"]["resolved_by"]),
         "tool        %s (bin/spud; %s)" % (ctx.tool, {"main": "main checkout", "worktree": "linked worktree", "none": "no git checkout"}[report["tool"]["checkout"]]),
         "config      %s%s" % (report["spud_home"]["config"], "" if report["spud_home"]["config_exists"] else " (missing)"),
+        "settings    %s" % report["settings"]["line"],
         "database    %s%s" % (db["path"], "" if db["exists"] else " (missing)"),
     ]
     if db["exists"]:
@@ -172,6 +192,50 @@ def doctor_report(ctx):
     lines.extend("note        %s" % n for n in notes)
     lines.append("problems    %s" % (("\n            ".join(problems)) if problems else "none"))
     return report, problems, lines
+
+
+def doctor_home_settings(ctx, problems):
+    """doctor's settings line (SPW-006): whether the home's own `.claude/settings.json` -- what `spud settings sync`
+    writes, and `init` at its step 6 -- carries a ledger hook line of this home for every event of HOOK_TABLE.  Nothing
+    else in the report asks.  The project lines read each installed project's `.claude/settings.local.json`, a different
+    file for a different directory; SPW-003's `hooks` line reads the files the session doctor itself runs in loads, which
+    for a session launched anywhere but the home are not this file at all -- so both could pass with this file absent,
+    and did, which is how a green doctor came to mean less than SPW-001 made it mean.
+
+    A problem in every wrong state, and that is the point of the check rather than an oversight in it.  SPW-003's line
+    is deliberately a note because what is wrong there is where the session was launched and nothing in the home is
+    broken; here this home's own installation is broken, one command fixes it, and `init`'s step 10 and `home move`'s
+    7b -- which refuse on this report's problems -- are right to refuse until it is run.  An event short is an event
+    whose hook never runs, so `partial` is a problem too, and it names the events rather than leaving Eric to diff.
+
+    The granularity is the event, not the matcher: one hook line is one event to every reader of such a file, so a file
+    carrying only the PreToolUse(Agent) line of that event's three rows reads as complete here.  That is the reading
+    `settings_hold_hooks` has always made for the project lines, not a choice of this line's, and it is a proposal of
+    its own.
+
+    The rendered line is in the report, as SPW-003's are, so `--json` says as much as the text does."""
+    path = ctx.home / ".claude" / "settings.json"
+    exists, unreadable = path.is_file(), None
+    if exists:
+        try:
+            install.read_json_object(path)  # the read `settings sync` itself makes, and the message it would give
+        except kernel.SpudError as e:
+            unreadable = e.message
+    missing = settings_sync.settings_missing_hooks(ctx, path)
+    if unreadable is not None:
+        problems.append(HOME_HOOKS_UNREADABLE % unreadable)
+        line = "%s: not a readable JSON object, so no ledger hook of this home (see problems)" % path
+    elif not missing:
+        line = "%s: this home's ledger hooks, all %d events" % (path, len(settings_sync.TABLE_EVENTS))
+    elif len(missing) == len(settings_sync.TABLE_EVENTS):
+        problems.append((HOME_HOOKS_NONE if exists else HOME_HOOKS_ABSENT) % path)
+        line = "%s%s: none of this home's ledger hooks (see problems)" % (path, "" if exists else " (missing)")
+    else:
+        problems.append(HOME_HOOKS_PARTIAL % (path, ", ".join(missing),
+                                              HOME_HOOKS_ONE_SHORT if len(missing) == 1 else HOME_HOOKS_MANY_SHORT))
+        line = "%s: no ledger hook line for %s (see problems)" % (path, ", ".join(missing))
+    return {"path": str(path), "exists": exists, "unreadable": unreadable, "missing": missing,
+            "events": [e for e in settings_sync.TABLE_EVENTS if e not in missing], "line": line}
 
 
 PR_CHECK_FAILED = ("the last read of %s (%s) failed: %s; until it succeeds the ledger cannot see whether that landing happened"
