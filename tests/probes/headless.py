@@ -49,10 +49,12 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent.parent
 SPUD = REPO / "bin" / "spud"
-# The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
-# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
+# The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks and
+# its own name pool -- the set tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the
+# config; SPD-157, which left the pool to the home and gave the suite its own).
 CONFIG = REPO / "share" / "spud.config.json"
 CONFIG_MARKS = REPO / "tests" / "fixtures" / "config_marks.json"
+NAME_POOL = REPO / "tests" / "fixtures" / "name_pool.json"
 PYTHON = sys.executable
 
 HOOK_TABLE = (
@@ -245,12 +247,17 @@ def spud(env, home, *args):
 
 
 def write_config(home):
-    """Render the shipped config template into `home`/spud.config.json; returns it parsed."""
+    """Render the shipped config template into `home`/spud.config.json; returns it parsed.
+
+    With the suite's own `naming.pool` (SPD-157), as tests/helpers.py renders it: the names the scenarios below spell
+    are the suite's, not the shipped pool's, which is a home's own to replace."""
     text = CONFIG.read_text(encoding="utf-8")
     for mark, value in json.loads(CONFIG_MARKS.read_text(encoding="utf-8")).items():
         text = text.replace(mark, value)
-    (home / "spud.config.json").write_text(text, encoding="utf-8")
-    return json.loads(text)
+    config = json.loads(text)
+    config["naming"]["pool"] = json.loads(NAME_POOL.read_text(encoding="utf-8"))
+    (home / "spud.config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return config
 
 
 def seed_project_one(home, config):

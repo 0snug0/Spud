@@ -26,6 +26,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
 CONFIG = os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "spud.config.json")
 CONFIG_MARKS = os.path.join(os.path.dirname(HERE), "fixtures", "config_marks.json")
+NAME_POOL = os.path.join(os.path.dirname(HERE), "fixtures", "name_pool.json")  # SPD-157: the suite's own pool
 PY = sys.executable
 AGENT = "a0123456789abcdef"
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
@@ -38,9 +39,12 @@ def write_config(home):
     with open(CONFIG_MARKS, encoding="utf-8") as f:
         for mark, value in json.load(f).items():
             text = text.replace(mark, value)
+    config = json.loads(text)
+    with open(NAME_POOL, encoding="utf-8") as f:
+        config["naming"]["pool"] = json.load(f)
     with open(os.path.join(home, "spud.config.json"), "w", encoding="utf-8") as f:
-        f.write(text)
-    return json.loads(text)
+        f.write(json.dumps(config, indent=2) + "\n")
+    return config
 
 
 def seed_project_one(home, config, checkout):

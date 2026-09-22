@@ -5,6 +5,12 @@ from . import homeconf, kernel
 
 MARK = "{{%s}}"  # SPW-002's syntax, established by projects/agentdef's {{launcher}}: no {{ appears in any shipped file's prose
 NO_SHIPPED = "no shipped %s: the tool repository's share/ is the source"
+# What the four owner marks read as in a home whose config carries no `owner` block, or one whose values are empty
+# (SPD-157).  A person's name cannot be guessed, so `spud init` refuses to write a config without one -- but a config
+# that predates the block, or one edited by hand, must still render every shipped file rather than put `{{owner_name}}`
+# or, worse, nothing at all into somebody's CLAUDE.md: a mark that renders empty is a file nobody can fix by hand once
+# it is generated.  So the fallback is a placeholder that reads as one, and `commands/doctor` says what to set.
+DEFAULT_OWNER = {"name": "the owner", "subject": "they", "object": "them", "possessive": "their"}
 # Every mark a shipped file may carry, and where its value comes from.  The set is complete: a {{…}} under share/ that is
 # not here is a typo that would ship unrendered into someone's home, and a mark here that no file uses is one left behind
 # -- tests/test_share.py fails on either.  They stay distinct from the <…> forms in the shipped CLAUDE.md (<agent_id>,
@@ -24,6 +30,13 @@ MARKS = {
     "pronoun_subject": "identity.pronouns.subject",
     "pronoun_object": "identity.pronouns.object",
     "pronoun_possessive": "identity.pronouns.possessive",
+    # The person the home works for, beside the identity of the one working (SPD-157).  Four marks rather than a name
+    # and a pronoun triple in one, because the shipped prose spells all four separately -- "<name> is the person you
+    # work for", "take <possessive> commands", "tell <object>" -- and each falls back to DEFAULT_OWNER on its own.
+    "owner_name": "owner.name in the config, else DEFAULT_OWNER",
+    "owner_subject": "owner.pronouns.subject, else DEFAULT_OWNER",
+    "owner_object": "owner.pronouns.object, else DEFAULT_OWNER",
+    "owner_possessive": "owner.pronouns.possessive, else DEFAULT_OWNER",
     "memory_dir": "the harness's memory directory for this home",
 }
 
@@ -44,6 +57,8 @@ def marks(ctx, project=None):
     config = ctx.config
     identity = config.get("identity", {})
     pronouns = identity.get("pronouns", {})
+    owner = config.get("owner") or {}
+    owner_pronouns = owner.get("pronouns") or {}
     root = str(project["root_path"]) if project is not None else ""
     # Claude Code's own name for the memory directory of a project: ~/.claude/projects/, then the absolute path with every
     # slash and every dot written as a hyphen (this machine's home and this worktree both confirm the dot), then /memory.
@@ -63,6 +78,12 @@ def marks(ctx, project=None):
         "pronoun_subject": pronouns.get("subject", ""),
         "pronoun_object": pronouns.get("object", ""),
         "pronoun_possessive": pronouns.get("possessive", ""),
+        # `or` rather than a default argument: a key present and empty is the same absence to a reader of the rendered
+        # file, and neither may reach one as nothing at all.
+        "owner_name": owner.get("name") or DEFAULT_OWNER["name"],
+        "owner_subject": owner_pronouns.get("subject") or DEFAULT_OWNER["subject"],
+        "owner_object": owner_pronouns.get("object") or DEFAULT_OWNER["object"],
+        "owner_possessive": owner_pronouns.get("possessive") or DEFAULT_OWNER["possessive"],
         "memory_dir": memory,
     }
 

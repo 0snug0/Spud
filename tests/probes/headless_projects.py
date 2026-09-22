@@ -36,6 +36,7 @@ REPO = Path(__file__).resolve().parents[2]
 # the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
 CONFIG = REPO / "share" / "spud.config.json"
 CONFIG_MARKS = REPO / "tests" / "fixtures" / "config_marks.json"
+NAME_POOL = REPO / "tests" / "fixtures" / "name_pool.json"  # SPD-157: the suite's own pool, as tests/helpers.py renders it
 PY = sys.executable
 MODEL = "haiku"
 IDENTITY = {"GIT_AUTHOR_NAME": "Spud probe", "GIT_AUTHOR_EMAIL": "probe@example.invalid", "GIT_COMMITTER_NAME": "Spud probe", "GIT_COMMITTER_EMAIL": "probe@example.invalid"}
@@ -46,8 +47,10 @@ def write_config(home):
     text = CONFIG.read_text(encoding="utf-8")
     for mark, value in json.loads(CONFIG_MARKS.read_text(encoding="utf-8")).items():
         text = text.replace(mark, value)
-    (home / "spud.config.json").write_text(text, encoding="utf-8")
-    return json.loads(text)
+    config = json.loads(text)
+    config["naming"]["pool"] = json.loads(NAME_POOL.read_text(encoding="utf-8"))
+    (home / "spud.config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+    return config
 
 
 def seed_project_one(home, config):

@@ -3,6 +3,10 @@
   "{{pronoun_subject}}": "he",
   "{{pronoun_object}}": "him",
   "{{pronoun_possessive}}": "his",
+  "{{owner_name}}": "Pat",
+  "{{owner_subject}}": "they",
+  "{{owner_object}}": "them",
+  "{{owner_possessive}}": "their",
   "{{ticket_prefix}}": "SPD",
   "{{team_prefix}}": "SPUD"
 }

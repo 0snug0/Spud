@@ -4,8 +4,8 @@ import os
 import sqlite3
 import sys
 
-from . import ghread, prcmds, publish, settings_sync, vaultlock
-from ..core import homeconf, kernel, launchagents
+from . import ghread, homesync, prcmds, publish, settings_sync, vaultlock
+from ..core import homeconf, kernel, launchagents, shipped
 from ..hooks import gitrepos, hookio, snapshots, worktrees
 from ..projects import agentdef, install, sessions
 from ..render import prices
@@ -30,6 +30,13 @@ NO_PROJECT = ("no project is registered, so this home can hold no ticket:"
 # A projects table with rows but no id 1: reachable by nothing the CLI does (`project remove` refuses id 1, archiving
 # keeps the row), and cheap to report.  `config sync` no longer creates the row, so nothing names a fix.
 NO_PROJECT_ONE = "no project 1 among the %d project(s) registered, so spud.config.json's prefixes (%s / %s) name no project"
+# SPD-157: a config with no `owner.name`.  A note and never a problem: the home works, every shipped file renders, and
+# what is missing is a name -- so the rendered CLAUDE.md, the brief template and the root note all say `the owner`
+# where they would say a person's, which is exactly the shape of a config written before the block existed.  A problem
+# here would fail `spud init`'s own step 10 on every such home and stop a command that has nothing left to do.
+NO_CONFIG_OWNER = ("%s names no owner, so every file the tool generates for this home calls the person it works for %r:"
+                   " add an \"owner\" block beside \"identity\" ({\"name\": \"…\", \"pronouns\": {\"subject\": \"…\","
+                   " \"object\": \"…\", \"possessive\": \"…\"}}), then `%s --as spud home sync` writes the files again")
 # SPW-006: the home's own .claude/settings.json, which `settings sync` writes and `init` writes at its step 6.  Its hook
 # lines are the whole of what makes a session launched in the home Spud -- the SessionStart board, the path rule, the
 # Agent and Bash guards -- and a home missing them loses every one of them in every home session, silently.
@@ -135,11 +142,14 @@ def doctor_report(ctx):
         notes.append("the running bin/spud is in a linked worktree: hook lines written from here name it")
     if no_project:
         notes.append(NO_PROJECT % (config.get("tickets", {}).get("prefix"), config.get("teams", {}).get("prefix")))
+    if config is not None and not (config.get("owner") or {}).get("name"):
+        notes.append(NO_CONFIG_OWNER % (ctx.config_path, shipped.DEFAULT_OWNER["name"], ctx.launcher))
     report["projects"] = doctor_projects(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else []
     report["hooks"] = doctor_session_hooks(ctx, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["repositories"] = doctor_repositories(ctx, problems) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["render"] = doctor_render(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION and config is not None else None
     report["pull_requests"] = doctor_pull_requests(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
+    report["shipped"] = doctor_shipped(ctx, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["vault"] = doctor_vault(ctx, notes)
     report["notes"] = notes
     report["problems"] = problems
@@ -184,6 +194,11 @@ def doctor_report(ctx):
         p = report["pull_requests"]
         lines.append("pull reqs   %d recorded, %d open, %d settled; reader %s" % (p["recorded"], p["open"], p["settled"], p["reader"]))
         lines.extend("            last read failed: %s %s: %s" % (x["ticket"], x["url"], x["check_error"]) for x in p["failed_checks"])
+    if report["shipped"] is not None:
+        s = report["shipped"]
+        lines.append("shipped     %d tool-owned file(s) from %s; %s"
+                     % (s["files"], s["share"],
+                        "%d not what it ships" % len(s["differences"]) if s["differences"] else "every one is what it ships"))
     v = report["vault"]
     lines.append("vault       %s" % ("no .obsidian/ in the home" if not v["vault"] else
                                      "%d shipped file(s) and %d pinned plugin(s) and theme(s); %s"
@@ -378,6 +393,26 @@ def doctor_session_hooks(ctx, notes):
     if hooks["state"] in ("absent", "partial"):
         notes.append(hooks["lines"][0])  # the state; the fix is on the hooks line itself, and in the report
     return hooks
+
+
+def doctor_shipped(ctx, notes):
+    """doctor's tool-owned-files section (SPD-157): every file `commands/homesync` says the tool owns in a home --
+    CLAUDE.md, the two ledger notes, the templates, the `.base` views and every shipped skill -- that this home either
+    does not have or has and has changed, each a note naming `home sync`.
+
+    Notes, not problems, for `doctor_vault`'s own reason and one more of this section's.  These files are Spud's to edit
+    between syncs (`hooks/hookio.SPUD_PATHS` keeps a member out of them and lets him in), so a home somebody works in
+    drifts from the template as a matter of course; nothing is broken while it does, and one command settles it.  A
+    problem would also fail every later `spud init`, which stops on each one (`commands/homeinit.verify`) -- including
+    the init that is a rerun over a home whose CLAUDE.md its owner has since edited.
+
+    Read only with a database, because the prose is rendered against project 1's row: with no database there is no row
+    to render from, and a home with no database has a problem of its own on the line above.
+    """
+    findings = homesync.home_findings(ctx)
+    notes.extend(sentence for _what, sentence in findings)
+    return {"share": str(shipped.share_dir(ctx)), "files": len(homesync.tool_owned(ctx)),
+            "differences": [what for what, _sentence in findings]}
 
 
 def doctor_vault(ctx, notes):

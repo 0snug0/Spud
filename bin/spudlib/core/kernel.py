@@ -177,6 +177,21 @@ def write_whole(path, content):
         raise
 
 
+def write_bytes(path, data):
+    """`write_whole` for bytes: a temporary file in the same directory, renamed into place, so a reader -- and Obsidian
+    is a reader -- never sees half a plugin.  Moved here from `commands/vaultlock` on SPD-157, when `state/backup` came
+    to need it for the copy every command keeps before it overwrites a tool-owned file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.parent / (".spud-" + path.name + ".tmp")
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    except BaseException:
+        if tmp.exists():
+            tmp.unlink()
+        raise
+
+
 # ----------------------------------------------------------------------------
 # Commands
 # ----------------------------------------------------------------------------
