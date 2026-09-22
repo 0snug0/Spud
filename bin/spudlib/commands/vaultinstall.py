@@ -14,7 +14,9 @@ Three rules an edit here must keep:
   `spud home sync` is what refreshes them, keeping a copy of what it replaces, while a `.base` file of the reader's own
   survives.  `--force` is for re-writing what matched anyway.
 - **A refused download is never fatal.**  `install_vault` collects them, names each, and returns; `spud init` turns the
-  list into a note and a line telling the person to run `spud vault install` later (design section 3).
+  list into a note and a line telling the person to run `spud vault install` later (design section 3).  When the plugin
+  it refused provides a view a shipped `.base` uses, the line also names what that costs (SPD-159): the view(s) that
+  will not render until the plugin is installed -- `commands/doctor` is what keeps saying so afterward.
 """
 
 from . import vaultlock
@@ -26,6 +28,10 @@ NO_SHIPPED_VAULT = ("no %s: the tool repository's share/ is the source of the va
 VIEWS_ARE_THE_TOOL_S = ("this command does not touch the shipped `.base` views in %s -- `spud home sync` refreshes"
                         " them, keeping a copy of what it replaces, while a `.base` file of your own survives")
 HASH_MISMATCH = "%s: its SHA-256 is not the one the lock pins (the release was replaced upstream)"
+# SPD-159: what a refused plugin download costs, named beside the refusal itself -- the views a shipped `.base` file
+# uses that only this plugin provides, and that Obsidian therefore cannot render until the plugin is installed.  Only a
+# plugin whose lock entry names a view carries this clause; most plugins name none, and a theme never does.
+WONT_RENDER = ", so its %s view%s will not render"
 
 
 def kept(ctx, stamp, rel, data, check_only):
@@ -98,7 +104,8 @@ def install_locked(ctx, stamp, force, record, lock, check_only=False):
                 break
             wanted.append((path, f["name"], have, data, False))
         if why is not None:
-            record["refused"].append({"kind": kind, "name": name, "version": entry["version"], "why": why})
+            record["refused"].append({"kind": kind, "name": name, "version": entry["version"], "why": why,
+                                      "views": list(entry.get("views") or [])})
             continue
         if not wanted:
             record["unchanged"].append("%s %s" % (kind, name))
@@ -153,7 +160,10 @@ def install_lines(ctx, record):
     lines.extend("  %s %s (the copy it %s %s)"
                  % ("would replace" if check else "replaced", r["path"],
                     "holds would be kept at" if check else "held is", r["backup"]) for r in record["replaced"])
-    lines.extend("  refused %s %s %s: %s" % (r["kind"], r["name"], r["version"], r["why"]) for r in record["refused"])
+    lines.extend("  refused %s %s %s: %s%s" % (r["kind"], r["name"], r["version"], r["why"],
+                (WONT_RENDER % (", ".join(sorted(r["views"])), "" if len(r["views"]) == 1 else "s"))
+                if r.get("views") else "")
+                for r in record["refused"])
     lines.append(VIEWS_ARE_THE_TOOL_S % (ctx.home / vaultlock.VAULT_BASES))
     return lines
 

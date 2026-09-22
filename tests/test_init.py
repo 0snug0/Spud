@@ -390,7 +390,10 @@ class EmptyRegistryTest(RepoMixin, SpudTestCase):
         added = self.add_project(repo, "mine", "SPD", "SPUD", "merge")  # the config's own prefixes: what init will write
         self.assertEqual(added.returncode, 0, added.stderr)
         self.assertEqual(self.home.rows("SELECT id, key FROM projects"), [{"id": 1, "key": "mine"}])
-        self.assertEqual([n for n in self.cli_json("doctor")["notes"] if "project" in n], [])  # the note is gone
+        # narrowed to the note's own words (SPD-159): a home's shipped `.base` views can add a note of their own
+        # naming a view called "By project" when its plugin's download is off in every test home, and that note is
+        # not what this line is checking for.
+        self.assertEqual([n for n in self.cli_json("doctor")["notes"] if "no project is registered" in n], [])
         self.assertEqual(self.cli_json("config", "sync")["project"], {"key": "mine", "ticket_prefix": "SPD", "team_prefix": "SPUD"})
         # project 1's name and prefixes are the config's, and it is never removed -- because it is project 1
         for args, needle in ((["--name", "X"], "project mine is project 1"), (["--ticket-prefix", "ZZ"], "spud.config.json")):
