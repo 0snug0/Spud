@@ -1,13 +1,23 @@
-"""The files the tool ships for a home, share/** (SPW-001, the `spud init` design section 4.4).
+"""The files the tool ships for a home, share/** (SPW-001, the `spud init` design section 4.4; SPD-156 for the vault).
 
-Nothing caught the `Board.base` that shipped a first view declaring `type: bases` -- which is not a view type -- and a
-half-created trailing view; both were fixed by hand on the machine that hit them.  This module is the guard.  It reads
-every shipped `.base` with a deliberately restricted block-YAML reader written here, its only user: the subset is block
-mappings and sequences, `key:`, `key: value`, `- value`, `- key: value`, plain scalars to the end of the line, quoted
-scalars and integers, and the reader *raises* on a tab, a flow collection, an anchor, an alias, a tag, a block scalar,
-a document marker, a comment, a duplicate key and any line it cannot place.  A shipped file that reaches for a YAML
-feature the reader does not know therefore fails instead of passing unchecked, which is the property the broken file
-needed and a permissive parser would not have given.
+Nothing caught the `Board.base` that shipped a first view declaring `type: bases` -- which was not a view type in that
+vault -- and a half-created trailing view; both were fixed by hand on the machine that hit them.  This module is the
+guard.  It reads every shipped `.base` with a deliberately restricted block-YAML reader written here, its only user: the
+subset is block mappings and sequences, `key:`, `key: value`, `- value`, `- key: value`, plain scalars to the end of the
+line, quoted scalars, integers and an *empty* flow collection, and the reader *raises* on a tab, a flow collection with
+anything in it, an anchor, an alias, a tag, a block scalar, a document marker, a comment, a duplicate key and any line
+it cannot place.  A shipped file that reaches for a YAML feature the reader does not know therefore fails instead of
+passing unchecked, which is the property the broken file needed and a permissive parser would not have given.  (`{}` and
+`[]` joined the subset with SPD-156: Obsidian writes `columnNames: {}` into a view it has never renamed a column in, so
+the shipped files carry it, and an empty collection cannot hide a view the reader would otherwise have read.)
+
+**A shipped view's type is the lock's question, not this module's** (SPD-156).  `table` is Obsidian's own, and every
+other type comes from a plugin -- `bases`, `notion-board` and `notion-list` are registered by extended-base, which is
+why the plugin-free copy of `Board.base` broke on a vault that did not have it.  So the allowed set is `table` plus the
+`views` each plugin in `share/obsidian.lock.json` names beside itself, and a bare set here would have to be kept in step
+with the lock by hand.  Tied to the lock, the incident this module exists for stays caught in both directions: a view of
+a type no locked plugin provides still fails, and a view whose plugin is dropped from the lock starts failing the moment
+it is.
 
 It also holds the shipped set as a whole: every `{{mark}}` under share/ is one core/shipped names and every mark it
 names is used; no shipped file spells a machine's path or a person's address, rendered or not; the rendered config is
@@ -30,10 +40,20 @@ spud = load_spud_module()
 
 SHARE = REPO / "share"
 NOTEFILES = REPO / "bin" / "spudlib" / "render" / "notefiles.py"
-# The Obsidian Bases view types the shipped files actually use.  Adding a view of another type is a reviewed edit that
-# widens this set, as HOOK_PATH is widened: the full list of Bases view types is not something this repository knows,
-# and a guessed list that happened to include `bases` would have passed the bug this module exists for.
-VIEW_TYPES = {"table"}
+LOCK = SHARE / "obsidian.lock.json"
+# Obsidian's own view type, the one no plugin provides.  Every other allowed type comes from the lock (the docstring).
+BUILT_IN_VIEW_TYPE = "table"
+
+
+def shipped_lock():
+    """The lock the tool ships, parsed."""
+    return json.loads(LOCK.read_text(encoding="utf-8"))
+
+
+def view_types(lock=None):
+    """The view types a shipped `.base` may use: `table`, and each locked plugin's own, named beside it in the lock.
+    Adding a view of a type no locked plugin provides is the reviewed edit that writes that type into the lock."""
+    return spud.view_types(shipped_lock() if lock is None else lock)
 MARK_RE = re.compile(r"\{\{([^{}]*)\}\}")
 # A person's address, which no shipped file may name (design 4.3: the two values init must not put in anybody's mouth).
 # Not a bare `@`: the CLI's own spelling for a brief on stdin or from a file, `--brief @-` and `--brief @file`, is in the
@@ -106,7 +126,10 @@ def base_lines(text):
 
 
 def read_scalar(content, number):
-    """A plain scalar to the end of the line, a single- or double-quoted scalar, or an integer."""
+    """A plain scalar to the end of the line, a single- or double-quoted scalar, an integer, or an empty flow
+    collection -- `columnNames: {}`, which Obsidian writes into a view whose columns it has never renamed."""
+    if content in ("{}", "[]"):
+        return {} if content == "{}" else []
     if content[:1] in FLOW:
         raise YamlRefusal("line %d: %s" % (number, FLOW[content[0]]))
     if content[0] in "'\"":
@@ -199,12 +222,13 @@ def read_base(text):
     return value
 
 
-def view_problems(data):
+def view_problems(data, types=None):
     """What is wrong with a parsed `.base` file's views, as a list of sentences; [] when there is nothing.
 
-    `views` is a non-empty list and every view is a mapping with a non-empty `name` and a `type` in VIEW_TYPES -- the
-    whole of the incident this module guards: a view of a type that is not one (`bases`), and a half-created view at the
-    end with neither of the two keys every one of its siblings carries."""
+    `views` is a non-empty list and every view is a mapping with a non-empty `name` and a `type` the lock allows -- the
+    whole of the incident this module guards: a view of a type no plugin in the vault provides, and a half-created view
+    at the end with neither of the two keys every one of its siblings carries."""
+    allowed = view_types() if types is None else types
     problems = []
     views = data.get("views") if isinstance(data, dict) else None
     if not isinstance(views, list) or not views:
@@ -217,8 +241,8 @@ def view_problems(data):
         for key in ("type", "name"):
             if not isinstance(view.get(key), str) or not view[key].strip():
                 problems.append("%s has no %s (%r)" % (where, key, view.get(key)))
-        if isinstance(view.get("type"), str) and view["type"] not in VIEW_TYPES:
-            problems.append("%s has type %r, which is not one of %s" % (where, view["type"], ", ".join(sorted(VIEW_TYPES))))
+        if isinstance(view.get("type"), str) and view["type"] not in allowed:
+            problems.append("%s has type %r, which is not one of %s" % (where, view["type"], ", ".join(sorted(allowed))))
     names = [v.get("name") for v in views if isinstance(v, dict)]
     for name in sorted({n for n in names if isinstance(n, str) and names.count(n) > 1}):
         problems.append("two views are called %r" % name)
@@ -270,10 +294,18 @@ class RestrictedReaderTest(unittest.TestCase):
         self.assertEqual(read_base("a: '!status.containsAny(\"done\", \"declined\")'\nb: \"\"\nc: 12\nd: x y z\n"),
                          {"a": "!status.containsAny(\"done\", \"declined\")", "b": "", "c": 12, "d": "x y z"})
 
+    def test_it_reads_an_empty_flow_collection_and_still_refuses_one_with_anything_in_it(self):
+        # SPD-156: `columnNames: {}` is what Obsidian writes into a view whose columns it has never renamed, so the
+        # shipped files carry it; an empty collection hides nothing the reader would otherwise have had to read.
+        self.assertEqual(read_base("columnNames: {}\norder: []\n"), {"columnNames": {}, "order": []})
+        for text in ("columnNames: {a: 1}\n", "order: [id]\n", "order: [ ]\n"):
+            with self.assertRaises(YamlRefusal, msg=text):
+                read_base(text)
+
     def test_it_refuses_what_the_subset_leaves_out(self):
         for what, text in (("a tab", "views:\n\t- type: table\n"),
                            ("a flow sequence", "order: [id, name]\n"),
-                           ("a flow mapping", "columnNames: {}\n"),
+                           ("a flow mapping", "columnNames: {note.title: 386}\n"),
                            ("an anchor", "views: &v\n"),
                            ("an alias", "views: *v\n"),
                            ("a tag", "views: !seq\n"),
@@ -314,11 +346,31 @@ class ShippedBaseTest(unittest.TestCase):
     def test_a_planted_view_type_and_a_truncated_view_both_fail(self):
         # The incident, in both halves, against the file as it ships: this is what the check would have caught.
         text = (SHARE / "ledger" / "Board.base").read_text(encoding="utf-8")
-        planted = text.replace("- type: table\n    name: By project\n", "- type: bases\n    name: By project\n", 1)
+        planted = text.replace("- type: table\n    name: Board\n", "- type: kanban\n    name: Board\n", 1)
         self.assertNotEqual(planted, text)
-        self.assertTrue(any("bases" in problem for problem in view_problems(read_base(planted))), view_problems(read_base(planted)))
+        self.assertTrue(any("kanban" in problem for problem in view_problems(read_base(planted))), view_problems(read_base(planted)))
         truncated = text.rstrip("\n") + "\n  - type: table\n"
         self.assertTrue(any("no name" in problem for problem in view_problems(read_base(truncated))), view_problems(read_base(truncated)))
+
+    def test_the_view_type_rule_is_the_lock_s_in_both_directions(self):
+        # SPD-156: what makes a type allowed is that a locked plugin names it, and nothing else.  Drop extended-base's
+        # own list from the lock and the shipped Board.base fails exactly as it did before the plugin was in the vault.
+        lock = shipped_lock()
+        self.assertEqual(view_types(lock) - {BUILT_IN_VIEW_TYPE}, {"bases", "notion-board", "notion-list"})
+        data = read_base((SHARE / "ledger" / "Board.base").read_text(encoding="utf-8"))
+        self.assertEqual(view_problems(data, view_types(lock)), [])
+        for entry in lock["plugins"]:
+            entry["views"] = []
+        problems = view_problems(data, view_types(lock))
+        self.assertTrue(any("'bases'" in p for p in problems), problems)
+        self.assertTrue(any("'notion-board'" in p for p in problems), problems)
+
+    def test_every_view_type_the_lock_names_is_used_by_a_shipped_base_file_or_is_a_sibling_of_one(self):
+        # A type in the lock that no shipped view uses is not wrong -- extended-base registers three and the files use
+        # two -- but a type must come from a plugin that is actually pinned, never from a hand-written set.
+        used = {view["type"] for path in self.bases() for view in read_base(path.read_text(encoding="utf-8"))["views"]}
+        self.assertTrue(used - {BUILT_IN_VIEW_TYPE}, "no shipped view uses a plugin's type; this check passes vacuously")
+        self.assertLessEqual(used, view_types())
 
     def test_fleet_base_carries_the_view_every_ticket_note_embeds(self):
         # render/teamcard.TEAM_VIEW_EMBED is written into the ## Team section of every rendered ticket note, so a shipped
@@ -456,8 +508,9 @@ class ShippedConfigTest(unittest.TestCase):
 
 
 class ShippedSetTest(unittest.TestCase):
-    """What the tool ships, as a set: the eight files of the design's section 4, the spudagent definition SPW-004 moved
-    in beside them, and nothing that is state."""
+    """What the tool ships, as a set: the eight files of the `spud init` design's section 4, the spudagent definition
+    SPW-004 moved in beside them, and since SPD-156 the Obsidian vault -- the settings, each turned-on plugin's own
+    data, and the lock.  Nothing that is state, and nothing a person's window layout or a plugin's code."""
 
     def test_the_shipped_set_is_the_files_a_home_needs(self):
         self.assertEqual([rel for rel, _ in shipped()], [
@@ -469,13 +522,24 @@ class ShippedSetTest(unittest.TestCase):
             "ledger/Spud.md",
             "ledger/_templates/spudagent.md",
             "ledger/_templates/ticket.md",
+            "obsidian/app.json",
+            "obsidian/appearance.json",
+            "obsidian/community-plugins.json",
+            "obsidian/core-plugins.json",
+            "obsidian/graph.json",
+            "obsidian/page-preview.json",
+            "obsidian/plugins/pretty-properties/data.json",
+            "obsidian/types.json",
+            "obsidian.lock.json",
             "spud.config.json",
         ])
 
     def test_the_spudagent_source_is_the_shipped_file_and_no_home_gets_a_copy(self):
         """SPW-004: `projects/agentdef.agent_source` reads share/agents/spudagent.md through core/shipped.share_dir, so
         share/ has one owner; and it is the one shipped file `spud init` does not write into the home, because it belongs
-        at user scope, where Claude Code reads an agent definition from."""
+        at user scope, where Claude Code reads an agent definition from.  The vault SPD-156 ships is subtracted below
+        rather than counted against that: init's step 4b does write it into the home, under `.obsidian/` instead of at
+        its own share-relative path, and the lock beside it is what that install reads."""
         home = helpers.Home()
         try:
             ctx = spud.Ctx(home.path, "SPUD_HOME", False, tool=REPO)
@@ -483,10 +547,57 @@ class ShippedSetTest(unittest.TestCase):
             self.assertTrue(spud.agent_source(ctx).is_file())
             self.assertNotIn("agents/spudagent.md", spud.SCAFFOLDING)
             shipped_paths = [rel for rel, _ in shipped()]
-            self.assertEqual(sorted(set(shipped_paths) - set(spud.SCAFFOLDING) - {"spud.config.json"}),
+            vault = {rel for rel in shipped_paths if rel == LOCK.name or rel.startswith("obsidian/")}
+            self.assertEqual(sorted(set(shipped_paths) - set(spud.SCAFFOLDING) - vault - {"spud.config.json"}),
                              ["agents/spudagent.md"])
         finally:
             home.cleanup()
+
+    def test_the_shipped_vault_holds_no_layout_no_plugin_code_and_no_note(self):
+        # Design section 1: `workspace.json` and `workspace-mobile.json` are one person's window layout, `.DS_Store` is
+        # the Finder's, and a plugin's or a theme's code comes from the lock, never from this repository.
+        shipped_names = {rel for rel, _ in shipped()}
+        for never in spud.NEVER:
+            self.assertNotIn("obsidian/" + never, shipped_names)
+        for rel in shipped_names:
+            self.assertFalse(rel.endswith((".js", ".css")) and "/plugins/" in rel, rel)
+            self.assertFalse(rel.startswith("obsidian/themes/"), rel)
+
+    def test_the_shipped_core_plugins_turn_sync_off(self):
+        # Design section 1: Sync is tied to one person's Obsidian account, and every other core-plugin setting is the
+        # captured one.  `core-plugins.json` is the one file `vaultlock.canonical` rewrites a value in.
+        core = json.loads((SHARE / "obsidian" / spud.CORE_PLUGINS).read_text(encoding="utf-8"))
+        self.assertIs(core[spud.SYNC], False)
+        self.assertTrue(core.get("bases"), "the shipped .base views need the Bases core plugin on")
+
+    def test_the_lock_is_one_every_command_can_read(self):
+        lock = shipped_lock()
+        self.assertEqual(spud.lock_problems(lock), [])
+        self.assertTrue(lock["plugins"] and lock["themes"], "the lock pins no plugin or no theme")
+        for _kind, name, entry in spud.locked(lock):
+            self.assertTrue(name, entry)
+            for f in entry["files"]:
+                self.assertRegex(f["sha256"], r"^[0-9a-f]{64}$")
+                self.assertTrue(f["url"].startswith("https://"), f["url"])
+
+    def test_every_enabled_plugin_and_the_theme_the_settings_name_are_the_ones_the_lock_pins(self):
+        # The two halves of the vault have to agree: `community-plugins.json` turns a plugin on and the lock is what
+        # puts its files in the vault, so a plugin enabled and not pinned is a vault that opens without it.
+        lock = shipped_lock()
+        enabled = json.loads((SHARE / "obsidian" / "community-plugins.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(enabled), sorted(e["id"] for e in lock["plugins"]))
+        appearance = json.loads((SHARE / "obsidian" / "appearance.json").read_text(encoding="utf-8"))
+        self.assertEqual([appearance["cssTheme"]] if appearance.get("cssTheme") else [],
+                         [e["name"] for e in lock["themes"]])
+        self.assertEqual(appearance.get("enabledCssSnippets") or [],
+                         [rel.split("/")[-1][:-len(".css")] for rel, _ in shipped() if rel.startswith("obsidian/snippets/")])
+
+    def test_every_shipped_plugin_data_file_belongs_to_a_locked_plugin(self):
+        ids = {e["id"] for e in shipped_lock()["plugins"]}
+        for rel, _ in shipped():
+            if rel.startswith("obsidian/plugins/"):
+                self.assertIn(rel.split("/")[2], ids, rel)
+                self.assertTrue(rel.endswith("/" + spud.PLUGIN_DATA), rel)
 
     def test_read_gives_a_shipped_file_and_refuses_one_that_is_gone(self):
         home = helpers.Home()

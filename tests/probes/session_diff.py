@@ -112,6 +112,10 @@ def run(launcher):
     # worktree (design section 6, refusal 6), and the second launcher this probe is run with is exactly that; and it
     # writes the vault scaffolding from the tool's share/, so the scratch tool must ship it.  Both launchers alike.
     env["SPUD_TOOL_DIR"] = home
+    # SPD-156: and its step 4b installs the vault, which downloads every plugin and theme the lock pins.  Off, so this
+    # probe answers the same offline as online and two runs cannot differ because a release moved: what the real lock
+    # really downloads is tests/probes/vault_download.py's question, asked once before each landing that changes it.
+    env["SPUD_VAULT_DOWNLOADS"] = "off"
     os.symlink(os.path.join(os.path.dirname(os.path.dirname(HERE)), "share"), os.path.join(home, "share"), target_is_directory=True)
     out = []
     try:

@@ -1,0 +1,100 @@
+{
+  "plugins": [
+    {
+      "files": [
+        {
+          "name": "manifest.json",
+          "sha256": "cc993a7a5919bafebc614d01777f7d4479d422d9c54e05415b3b54e9e31e6e39",
+          "url": "https://github.com/jiwooroh/extended-base/releases/download/1.0.6/manifest.json"
+        },
+        {
+          "name": "main.js",
+          "sha256": "94a016ec3bcdcad4a49dbdc252c9c811a57dda37f8fdbf391235d4d349a6ece7",
+          "url": "https://github.com/jiwooroh/extended-base/releases/download/1.0.6/main.js"
+        },
+        {
+          "name": "styles.css",
+          "sha256": "3155f493235b5e52e7b29748c03c79cc6d08a17851f948a6d438b708fe64ed51",
+          "url": "https://github.com/jiwooroh/extended-base/releases/download/1.0.6/styles.css"
+        }
+      ],
+      "id": "extended-base",
+      "name": "Extended Base",
+      "repo": "jiwooroh/extended-base",
+      "version": "1.0.6",
+      "views": [
+        "bases",
+        "notion-board",
+        "notion-list"
+      ]
+    },
+    {
+      "files": [
+        {
+          "name": "manifest.json",
+          "sha256": "5e7e20085c952d10a10d373ca5718516997f52b2dfeae1627cafc9c70f8df29c",
+          "url": "https://github.com/mirnovov/obsidian-homepage/releases/download/4.5.0/manifest.json"
+        },
+        {
+          "name": "main.js",
+          "sha256": "567b14e6e7913301b46d9b61fd36a4081fa7de1818f1926c1fcb586792aab201",
+          "url": "https://github.com/mirnovov/obsidian-homepage/releases/download/4.5.0/main.js"
+        },
+        {
+          "name": "styles.css",
+          "sha256": "bf346def46e6626446c54983f7e6ce4775b84b01159cd046301e9be5c3407589",
+          "url": "https://github.com/mirnovov/obsidian-homepage/releases/download/4.5.0/styles.css"
+        }
+      ],
+      "id": "homepage",
+      "name": "Homepage",
+      "repo": "mirnovov/obsidian-homepage",
+      "version": "4.5.0",
+      "views": []
+    },
+    {
+      "files": [
+        {
+          "name": "manifest.json",
+          "sha256": "f054a7d8ca5fb0fbe89d7e4c81434777d2ed0c43b6cab9b7b7a09ea206518a87",
+          "url": "https://github.com/anareaty/pretty-properties/releases/download/2.0.11/manifest.json"
+        },
+        {
+          "name": "main.js",
+          "sha256": "7cbdad6b83ba3ac67b0cd25c8b6402157d9d41b066a63d595d52c5f9756ccb41",
+          "url": "https://github.com/anareaty/pretty-properties/releases/download/2.0.11/main.js"
+        },
+        {
+          "name": "styles.css",
+          "sha256": "16bfe11add2624f89047bca3c8d062730db8d3ec31fd06665055002a78474d84",
+          "url": "https://github.com/anareaty/pretty-properties/releases/download/2.0.11/styles.css"
+        }
+      ],
+      "id": "pretty-properties",
+      "name": "Pretty Properties",
+      "repo": "anareaty/pretty-properties",
+      "version": "2.0.11",
+      "views": []
+    }
+  ],
+  "themes": [
+    {
+      "commit": "82d207c646904e7af371ced499f682fbdfad1012",
+      "files": [
+        {
+          "name": "manifest.json",
+          "sha256": "5bcaf964520de9aaa128a66873951498913e6c254f162698cdafcb2bb732a5ba",
+          "url": "https://raw.githubusercontent.com/anubisnekhet/AnuPpuccin/82d207c646904e7af371ced499f682fbdfad1012/manifest.json"
+        },
+        {
+          "name": "theme.css",
+          "sha256": "83ba4f6646f79bdc38920fd074c6734d7e6833f97184c0cb001f4eebef3231d7",
+          "url": "https://raw.githubusercontent.com/anubisnekhet/AnuPpuccin/82d207c646904e7af371ced499f682fbdfad1012/theme.css"
+        }
+      ],
+      "name": "AnuPpuccin",
+      "repo": "anubisnekhet/AnuPpuccin",
+      "version": "1.5.0"
+    }
+  ]
+}

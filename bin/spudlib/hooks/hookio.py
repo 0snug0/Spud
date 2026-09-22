@@ -34,12 +34,16 @@ GENERATED_ROOTS = ("ledger", "reports")
 DESCRIPTION = re.compile(r"^\s*(?P<team>[A-Z][A-Z0-9]*-\d+)/(?P<name>[A-Za-z][\w-]*)\s*\(\s*(?P<lineage>\d+(?:\.\d+)*)\s*,\s*(?P<persona>[a-z]+)\s*\)\s*$")
 AGENT_ID_RE = re.compile(r"^[0-9a-f]{17}$")
 SPUD_COMMANDS = ("init", "migrate", "backup", "schedule", "doctor", "config", "settings", "import", "render", "ticket", "member",
-                 "proposal", "handoff", "report", "board", "fleet", "card", "events", "sql", "hook", "project", "session", "home", "pr")
+                 "proposal", "handoff", "report", "board", "fleet", "card", "events", "sql", "hook", "project", "session", "home", "pr",
+                 "vault")  # SPD-156: the home's Obsidian vault, installed from the tool's share/ and captured back into it
 SPUD_ONLY_COMMANDS = ("init", "migrate", "import", "render", "backup", "schedule")
 SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"), ("member", "resum"),
                          ("project", "add"), ("project", "edit"), ("project", "install"), ("project", "uninstall"), ("project", "sync"),
                          ("project", "remove"), ("session", "claim"), ("session", "release"), ("home", "move"),
-                         ("pr", "record"))  # SPD-077: opening a pull request is part of landing, which is Spud's (Law 10)
+                         ("pr", "record"),  # SPD-077: opening a pull request is part of landing, which is Spud's (Law 10)
+                         # SPD-156: installing the vault writes the home's own .obsidian/, which is Spud's directory; the
+                         # other half, `vault capture`, is a member's and writes only into that member's deliverables.
+                         ("vault", "install"))
 # The spud calls a plain session in another project may run with `--as spud` (SPD-014): the ones that write nothing an
 # actor owns.  `board` stays here since SPD-077, when the full board began reconciling recorded pull requests: that write
 # names the actor `reconcile` and no judgment, and board takes no `--as` of its own, so Law 6 has nothing to refuse.

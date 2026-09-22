@@ -1,5 +1,14 @@
 formulas:
   status_rank: if(status == "active", 1, if(status == "queued", 2, if(status == "parked", 3, if(status == "done", 4, 5))))
+  Untitled: ""
+  card_title: title
+  card_priority: priority
+  card_project: project
+  card_lead: lead
+  lane_sort: if(status == "done", "", priority)
+  lane: if(status == "queued", "1 Queued", if(status == "active", "2 Active", if(status == "parked", "3 Parked", "4 Done")))
+  lane_created: if(status == "queued", created, if(status == "parked", created, ""))
+  lane_recent: if(status == "queued", "", if(status == "parked", "", file.mtime))
 properties:
   file.name:
     displayName: Ticket
@@ -13,6 +22,8 @@ properties:
     displayName: Until
   parked_reason:
     displayName: Why
+  pr_state:
+    displayName: Landing
   title:
     displayName: Title
   lead:
@@ -25,8 +36,61 @@ properties:
     displayName: Created
   file.mtime:
     displayName: Updated
+  formula.card_title:
+    displayName: Title
+  formula.card_priority:
+    displayName: P
+  formula.card_project:
+    displayName: Project
+  formula.card_lead:
+    displayName: Lead
 views:
-  - type: table
+  - type: notion-board
+    name: Kanban
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+            - not:
+                - status != "done"
+                - file.mtime >= today()
+        - file.inFolder("ledger/tickets")
+        - status != "declined"
+    groupBy:
+      property: formula.lane
+      direction: ASC
+    order:
+      - file.name
+      - formula.card_title
+      - formula.card_priority
+      - formula.card_project
+      - formula.card_lead
+    sort:
+      - property: formula.lane_sort
+        direction: ASC
+      - property: formula.lane_created
+        direction: ASC
+      - property: formula.lane_recent
+        direction: DESC
+      - property: file.name
+        direction: ASC
+    openMode: tab
+    pillProperties:
+      - card_priority
+      - card_project
+      - project
+    pinnedColors:
+      - 1 Queued=yellow
+      - 2 Active=green
+      - 3 Parked=red
+      - 4 Done=gray
+      - P0=purple
+      - P1=red
+      - P2=orange
+      - P3=yellow
+      - badtakes=blue
+      - spud=purple
+  - type: bases
     name: By project
     filters:
       and:
@@ -74,6 +138,9 @@ views:
       - P1=red
       - P2=orange
       - P3=yellow
+    columnWidths:
+      note.title: 386.0078125
+    columnNames: {}
   - type: table
     name: Board
     filters:
@@ -90,6 +157,7 @@ views:
       - file.name
       - project
       - status
+      - pr_state
       - priority
       - title
       - lead
@@ -109,6 +177,13 @@ views:
       note.title: 673
       note.lead: 193
       note.proposed_by: 146
+      note.pr_state: 90
+    pillProperties:
+      - pr_state
+    pinnedColors:
+      - merged=red
+      - open=yellow
+      - closed=gray
   - type: table
     name: Parked
     filters:

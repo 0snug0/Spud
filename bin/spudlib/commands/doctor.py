@@ -4,7 +4,7 @@ import os
 import sqlite3
 import sys
 
-from . import ghread, prcmds, publish, settings_sync
+from . import ghread, prcmds, publish, settings_sync, vaultlock
 from ..core import homeconf, kernel, launchagents
 from ..hooks import gitrepos, hookio, snapshots, worktrees
 from ..projects import agentdef, install, sessions
@@ -140,6 +140,7 @@ def doctor_report(ctx):
     report["repositories"] = doctor_repositories(ctx, problems) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["render"] = doctor_render(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION and config is not None else None
     report["pull_requests"] = doctor_pull_requests(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
+    report["vault"] = doctor_vault(ctx, notes)
     report["notes"] = notes
     report["problems"] = problems
     lines = [
@@ -183,6 +184,11 @@ def doctor_report(ctx):
         p = report["pull_requests"]
         lines.append("pull reqs   %d recorded, %d open, %d settled; reader %s" % (p["recorded"], p["open"], p["settled"], p["reader"]))
         lines.extend("            last read failed: %s %s: %s" % (x["ticket"], x["url"], x["check_error"]) for x in p["failed_checks"])
+    v = report["vault"]
+    lines.append("vault       %s" % ("no .obsidian/ in the home" if not v["vault"] else
+                                     "%d shipped file(s) and %d pinned plugin(s) and theme(s); %s"
+                                     % (v["shipped"], v["pinned"],
+                                        "%d changed here" % len(v["differences"]) if v["differences"] else "nothing changed here")))
     lines.extend("note        %s" % n for n in notes)
     lines.append("problems    %s" % (("\n            ".join(problems)) if problems else "none"))
     return report, problems, lines
@@ -372,6 +378,28 @@ def doctor_session_hooks(ctx, notes):
     if hooks["state"] in ("absent", "partial"):
         notes.append(hooks["lines"][0])  # the state; the fix is on the hooks line itself, and in the report
     return hooks
+
+
+def doctor_vault(ctx, notes):
+    """doctor's vault section (SPD-156): every shipped settings file, `.base` file, plugin and theme this home has *and*
+    has changed since it was captured, each a note naming the command that settles it.
+
+    Notes, not problems, and on purpose: Obsidian rewrites `graph.json` when Eric pans the graph and `Board.base` when
+    he drags a column, so drift here is the normal state of a vault someone works in -- nothing is broken, the shipped
+    copy is simply behind, and only a ticket can settle it, because `vault capture` writes into a worktree.  A problem
+    would also fail every later `spud init`, which stops on each one (`commands/homeinit.verify`).  What the home does
+    not have at all is no finding: `vault install` is the command for that, and init already says so when a download was
+    refused.
+    """
+    findings = vaultlock.vault_findings(ctx)
+    notes.extend(sentence for _what, sentence in findings)
+    try:
+        pinned = len(vaultlock.locked(vaultlock.read_lock(ctx)))
+    except kernel.SpudError:
+        pinned = 0
+    return {"vault": (ctx.home / vaultlock.OBSIDIAN).is_dir() and str(ctx.home / vaultlock.OBSIDIAN),
+            "shipped": len(vaultlock.shipped_settings(ctx)), "pinned": pinned,
+            "differences": [what for what, _sentence in findings]}
 
 
 def doctor_repositories(ctx, problems):

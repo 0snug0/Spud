@@ -11,6 +11,8 @@ Start here. [[Spud]] is the root of the tree. Every ticket is a note under `ledg
 - `reports/` holds one note per day, newest at the bottom of the file
 - [[Projects]] for every repository {{identity_name}} works in: its ticket and team prefixes, root, landing and sessions
 
+The views in [[Board.base|Board]] and [[Fleet.base|Fleet]] are the tool's, and `spud vault install` refreshes them: copy a view to a new name before changing it, and your copy survives.
+
 ## How to read a name
 `Kestrel (01, writer, opus)` is name, ID, persona, model tier. A ticket key's prefix names its project: `{{ticket_prefix}}-nnn` (team `{{team_prefix}}-nnn`) is project `{{project_key}}`; every note also carries a `project` property.
 - The **name** is unique within one ticket's team and may appear again on another ticket, which is why links are written `[[{{team_prefix}}-001/Kestrel|Kestrel]]`.
