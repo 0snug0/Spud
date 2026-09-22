@@ -14,6 +14,7 @@ from helpers import (
     EXIT_ERROR,
     EXIT_OWNERSHIP,
     EXIT_USAGE,
+    GUARD_LAUNCHCTL,
     Home,
     RepoMixin,
     SpudTestCase,
@@ -357,8 +358,11 @@ class MachineMixin(RepoMixin):
         # A launchctl of this machine's own, because step 8 is init's: SPUD_LAUNCH_AGENTS_DIR moves the plist, and only
         # this moves the job -- `local.spud.backup` and `local.spud.render` are labels in the real user domain, and a
         # `bootout` of one is this Mac's watcher gone.  init_argv passes --no-schedule besides, so the tests that are
-        # not about step 8 never call it at all; ScheduleStepTest is the one that does.
+        # not about step 8 never call it at all; ScheduleStepTest is the one that does.  SPW-011: what this replaces is
+        # helpers' refusing stub, which isolated_git_env() carried in from os.environ, never /bin/launchctl.
+        self.assertEqual(env["SPUD_LAUNCHCTL"], str(GUARD_LAUNCHCTL))
         self.launchctl, self.launchctl_state = fake_launchctl(scratch, env)
+        self.assertEqual(env["SPUD_LAUNCHCTL"], str(self.launchctl))
         self.env = env
         return scratch
 
@@ -863,6 +867,16 @@ class ScheduleStepTest(MachineMixin, unittest.TestCase):
     def setUp(self):
         self.machine()
         self.repo = self.make_repo("mine-", origin=True, name=self.REPO_DIR)
+
+    def test_the_fake_launchctl_replaced_helpers_refusing_stub_not_bin_launchctl(self):
+        """SPW-011: the default every fixture inherits is helpers' refusing stub, so a class that reaches step 8 without
+        `fake_launchctl` fails on a refusal instead of booting out this Mac's two jobs.  This is the class that replaces
+        it, and what it replaced was never /bin/launchctl."""
+        self.assertEqual(self.env["SPUD_LAUNCHCTL"], str(self.launchctl))
+        self.assertNotEqual(str(self.launchctl), str(GUARD_LAUNCHCTL))
+        self.assertNotEqual(self.env["SPUD_LAUNCHCTL"], "/bin/launchctl")
+        self.assertTrue(self.launchctl.is_file())
+        self.assertEqual(self.launchctl_calls(), [])
 
     @unittest.skipUnless(sys.platform == "darwin", "step 8 installs LaunchAgents only where launchctl lives")
     def test_init_installs_and_loads_both_launch_agents(self):
