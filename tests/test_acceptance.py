@@ -159,6 +159,10 @@ class RoundTripMixin:
         want = (self.src / rel).read_text(encoding="utf-8")
         if rel.parts[0] == "ledger" and want.startswith("---\n") and not re.search(r"^project: ", want.split("\n---\n", 1)[0], re.M):
             got = re.sub(r"\A(---\n(?:[^\n]*\n)*?)project: [^\n]*\n", r"\1", got, count=1)
+        # SPD-160: a corpus committed before migration 0006_owner_origin says `origin: eric`, which imports and renders as
+        # `origin: owner`; the rendered line is read back in the committed spelling
+        if rel.parts[0] == "ledger" and re.search(r"^origin: eric$", want.split("\n---\n", 1)[0], re.M):
+            got = re.sub(r"\A(---\n(?:[^\n]*\n)*?)origin: owner\n", r"\1origin: eric\n", got, count=1)
         return got
 
     def sources(self):

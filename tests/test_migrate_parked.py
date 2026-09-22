@@ -103,8 +103,8 @@ class MigrateParkedTest(unittest.TestCase):
     def test_migrate_writes_the_pre_migration_backup_and_keeps_every_row_and_id(self):
         before = self.home.rows("SELECT * FROM tickets ORDER BY id")
         out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0003_parked", "0004_ticket_worktree", "0005_pull_requests"], 5))
-        self.assertEqual(len(out["backups"]), 3)
+        self.assertEqual((out["applied"], out["user_version"]), (["0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin"], 6))
+        self.assertEqual(len(out["backups"]), 4)
         self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0003_parked\.db$")
         backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
         try:
@@ -113,7 +113,7 @@ class MigrateParkedTest(unittest.TestCase):
         finally:
             backup.close()
         after = self.home.rows("SELECT * FROM tickets ORDER BY id")
-        self.assertEqual([{k: v for k, v in r.items() if k not in ("parked_until", "parked_reason", "worktree")} for r in after], before)
+        self.assertEqual([{k: v for k, v in r.items() if k not in ("parked_until", "parked_reason", "worktree")} for r in after], [dict(r, origin="owner") if r["origin"] == "eric" else r for r in before])
         self.assertTrue(all(r["parked_until"] is None and r["parked_reason"] is None for r in after))
         self.assertEqual(self.home.rows("PRAGMA foreign_key_check"), [])
         self.assertEqual(self.home.scalar("SELECT count(*) FROM handoffs"), 1)
@@ -195,7 +195,7 @@ class MigrateParkedTest(unittest.TestCase):
         other = Home()
         self.addCleanup(other.cleanup)
         out = other.init()
-        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests"], 5, []))
+        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin"], 6, []))
         self.assertEqual(other.scalar("SELECT count(*) FROM pragma_table_info('tickets') WHERE name IN ('parked_until','parked_reason')"), 2)
 
 

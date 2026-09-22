@@ -100,7 +100,7 @@ CREATE TABLE spawn_requests (                     -- one row per PreToolUse(Agen
 CREATE TABLE events (                             -- append-only; the memory that outlives every session
   id        INTEGER PRIMARY KEY,
   at        TEXT    NOT NULL,
-  actor     TEXT    NOT NULL,                     -- 'spud' | 'member:<id>' | 'agent:<agent_id>' | 'hook:<event>' | 'eric' | 'import'
+  actor     TEXT    NOT NULL,                     -- 'spud' | 'member:<id>' | 'agent:<agent_id>' | 'hook:<event>' | 'owner' | 'import'
   ticket_id INTEGER REFERENCES tickets(id),
   member_id INTEGER REFERENCES members(id),
   agent_id  TEXT,
@@ -415,6 +415,52 @@ CREATE INDEX events_agent  ON events(agent_id, id);
 CREATE INDEX events_kind   ON events(kind, id);
 """
 
+# The owner's origin (SPD-160): a ticket the home's owner filed directly carried origin 'eric', one person's name in the
+# schema of a tool any home runs, and it becomes 'owner'.  SQLite cannot alter a CHECK, so tickets is rebuilt as
+# 0003_parked rebuilt it, with the worktree column 0004_ticket_worktree added kept last, every row copied with its id and
+# 'eric' written as 'owner' on the way; the views are dropped first, since the rename re-parses every one of them, and
+# VIEWS_AND_TRIGGERS re-creates them after.  Events keep the actor they were written with, since the log is append-only:
+# an accepted hand edit recorded before this migration still reads 'eric', and every one after it 'owner'.
+DDL_0006 = """
+DROP VIEW IF EXISTS v_board;
+DROP VIEW IF EXISTS v_fleet;
+CREATE TABLE tickets_new (
+  id          INTEGER PRIMARY KEY,                -- surrogate; the number lives in `number`
+  project_id  INTEGER NOT NULL REFERENCES projects(id),
+  number      INTEGER NOT NULL,                   -- per-project counter: max(number) + 1 in the insert transaction
+  key         TEXT    NOT NULL UNIQUE,            -- ticket_prefix || '-' || printf('%03d', number)
+  team_key    TEXT    NOT NULL UNIQUE,            -- team_prefix   || '-' || printf('%03d', number)
+  title       TEXT    NOT NULL,
+  heading     TEXT,                               -- the H1 tail when the file shortens it against title
+  priority    TEXT    NOT NULL CHECK (priority IN ('P0','P1','P2','P3')),
+  status      TEXT    NOT NULL CHECK (status IN ('queued','active','parked','done','declined')),
+  origin      TEXT    NOT NULL CHECK (origin IN ('owner','proposal')),  -- 'owner': the home's owner filed it directly
+  proposal_id INTEGER REFERENCES proposals(id),   -- set when origin = 'proposal'; renders as proposed_by
+  lead_id     INTEGER REFERENCES members(id),     -- the first member; NULL until one is planned
+  brief       TEXT    NOT NULL DEFAULT '',
+  sizing      TEXT    NOT NULL DEFAULT '',        -- "Size, persona and model decision"
+  outcome     TEXT    NOT NULL DEFAULT '',
+  tags        TEXT    NOT NULL DEFAULT '[]' CHECK (json_valid(tags)),
+  layout      TEXT    CHECK (layout IS NULL OR json_valid(layout)),  -- imported file's key and section order; NULL = template
+  created_at  TEXT    NOT NULL,
+  updated_at  TEXT    NOT NULL,
+  closed_at   TEXT,
+  parked_until  TEXT  CHECK (parked_until IS NULL OR (status = 'parked' AND parked_until GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]')),
+                                                  -- YYYY-MM-DD from which the brief board shows the ticket as due back; NULL = until moved
+  parked_reason TEXT  CHECK ((parked_reason IS NOT NULL) = (status = 'parked')),   -- why it is parked; NULL unless parked
+  worktree    TEXT,                               -- the bound linked worktree's real path; NULL while unbound
+  UNIQUE (project_id, number)
+) STRICT;
+INSERT INTO tickets_new (id, project_id, number, key, team_key, title, heading, priority, status, origin, proposal_id, lead_id,
+                         brief, sizing, outcome, tags, layout, created_at, updated_at, closed_at, parked_until, parked_reason, worktree)
+  SELECT id, project_id, number, key, team_key, title, heading, priority, status,
+         CASE origin WHEN 'eric' THEN 'owner' ELSE origin END, proposal_id, lead_id,
+         brief, sizing, outcome, tags, layout, created_at, updated_at, closed_at, parked_until, parked_reason, worktree FROM tickets;
+DROP TABLE tickets;
+ALTER TABLE tickets_new RENAME TO tickets;
+CREATE INDEX tickets_board ON tickets(status, priority);
+"""
+
 MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003), ("0004_ticket_worktree", DDL_0004),
-              ("0005_pull_requests", DDL_0005)]
+              ("0005_pull_requests", DDL_0005), ("0006_owner_origin", DDL_0006)]
 SCHEMA_VERSION = len(MIGRATIONS)
