@@ -536,7 +536,7 @@ class LandingNoteTest(LandingCase):
             "status: active",
             "pr: 361",
             "pr_state: open",
-            "origin: eric",
+            "origin: owner",
             "project: spud",
             'proposed_by: ""',
             'lead: ""',

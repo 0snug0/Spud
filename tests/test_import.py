@@ -11,7 +11,7 @@ id: SPD-001
 title: "Synthetic"
 priority: P2
 status: active
-origin: eric
+origin: owner
 project: spud
 lead: "[[SPUD-001/Russet]]"
 created: 2026-09-01
@@ -73,7 +73,7 @@ priority: P2
 status: parked
 parked_until: 2026-10-16
 parked_reason: "App Store approval of iOS 1.0"
-origin: eric
+origin: owner
 project: spud
 proposed_by: ""
 lead: ""
@@ -158,6 +158,22 @@ class SyntheticImportTest(SpudTestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("CHECK", proc.stderr)
         self.assertIsNone(self.home.scalar("SELECT id FROM tickets WHERE key = 'SPD-003'"))
+
+    def test_a_note_rendered_before_0006_imports_its_origin_as_owner(self):
+        # SPD-160: an export from before migration 0006_owner_origin says origin eric; it lands as owner and renders so
+        root = self.write_tree()
+        (root / "ledger" / "tickets" / "SPD-001.md").write_text(TICKET.replace("origin: owner", "origin: eric"), encoding="utf-8")
+        self.home.json("import", root)
+        self.assertEqual(self.home.scalar("SELECT origin FROM tickets WHERE key = 'SPD-001'"), "owner")
+        out = self.home.path / "out"
+        self.home.json("render", "--out", out)
+        self.assertIn("\norigin: owner\n", (out / "ledger" / "tickets" / "SPD-001.md").read_text(encoding="utf-8"))
+        bad = self.home.path / "corpus-bad"
+        (bad / "ledger" / "tickets").mkdir(parents=True)
+        (bad / "ledger" / "tickets" / "SPD-003.md").write_text(TICKET.replace("SPD-001", "SPD-003").replace("origin: owner", "origin: human"), encoding="utf-8")
+        proc = self.home.run("import", bad, check=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("origin outside the schema's values", proc.stderr)
 
 
 if __name__ == "__main__":

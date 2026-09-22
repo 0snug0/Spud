@@ -73,6 +73,11 @@ def require_keys(fm, keys, path):
             raise kernel.SpudError(kernel.EXIT_ERROR, "%s: frontmatter lacks %s" % (path, key))
 
 
+# SPD-160: migration 0006_owner_origin renamed the origin of a ticket the owner filed from 'eric' to 'owner'; a note
+# rendered before it still says 'eric', and imports as 'owner'.
+ORIGIN_READ = {"eric": "owner"}
+
+
 def import_ticket_file(ctx, con, at, path, rel):
     doc = markdown.split_document(path.read_text(encoding="utf-8"), kernel.TICKET_SECTIONS)
     fm = doc["frontmatter"]
@@ -88,7 +93,7 @@ def import_ticket_file(ctx, con, at, path, rel):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s: project %r, but the prefix %s is project %s's" % (rel, fm["project"], m.group(1), project["key"]))
     if con.execute("SELECT 1 FROM tickets WHERE key = ?", (key,)).fetchone():
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is already in the ledger (imported before); `spud import --file` accepts edits to a rendered file" % key)
-    if fm["priority"] not in kernel.PRIORITIES or fm["status"] not in kernel.TICKET_STATUSES or fm["origin"] not in ("eric", "proposal"):
+    if fm["priority"] not in kernel.PRIORITIES or fm["status"] not in kernel.TICKET_STATUSES or fm["origin"] not in ("owner", "proposal", "eric"):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s: priority, status or origin outside the schema's values" % rel)
     heading = None
     if doc["heading"]:
@@ -110,7 +115,7 @@ def import_ticket_file(ctx, con, at, path, rel):
     names = [n for n in names if n != kernel.LANDING_SECTION]
     tags = fm["tags"] if isinstance(fm["tags"], list) else [fm["tags"]]
     t = ops.insert_ticket(
-        con, at, "import", project, fm["title"], fm["priority"], fm["status"], origin=fm["origin"],
+        con, at, "import", project, fm["title"], fm["priority"], fm["status"], origin=ORIGIN_READ.get(fm["origin"], fm["origin"]),
         brief=sections.get("Brief", ""), sizing=sections.get("Size, persona and model decision", ""),
         outcome=sections.get("Outcome", ""), tags=tags, heading=heading, created_at=fm["created"],
         number=int(m.group(2)), layout=ticket_layout(fm_keys, names, fm["status"] == "parked"),

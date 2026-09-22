@@ -51,7 +51,7 @@ def cmd_ticket_new(ctx, args):
             t = ops.insert_ticket(con, at, actor.label, project, args.title, args.priority, args.status,
                               brief=args.brief or "", sizing=args.sizing or "", outcome=args.outcome or "", tags=tags, heading=args.heading)
             ledgerdb.write_event(con, at, actor.label, "ticket.created", "%s created: %s" % (t["key"], t["title"]), ticket_id=t["id"],
-                        data={"origin": "eric", "priority": t["priority"], "status": t["status"]})
+                        data={"origin": "owner", "priority": t["priority"], "status": t["status"]})
             entry = reportentry.write_report_entry(con, at, "%s created (%s, %s): %s" % (t["key"], t["status"], t["priority"], t["title"]),
                                        "ticket new", t["id"], next_line=args.next)
         d = lookup.ticket_dict(con, t)

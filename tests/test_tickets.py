@@ -19,7 +19,7 @@ class TicketTest(SpudTestCase):
         self.assertEqual((t2["key"], t2["team_key"], t2["number"]), ("SPD-002", "SPUD-002", 2))
         self.assertEqual(t1["status"], "queued")
         self.assertEqual(t1["priority"], "P2")
-        self.assertEqual(t1["origin"], "eric")
+        self.assertEqual(t1["origin"], "owner")
         self.assertEqual(t1["tags"], ["ticket"])
         self.assertEqual(t1["lead"], None)
         self.assertRegex(t1["created_at"], ISO_WITH_OFFSET)

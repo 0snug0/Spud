@@ -36,7 +36,7 @@ class RenderShapeTest(SpudTestCase):
                 'title: "Shape"',
                 "priority: P2",
                 "status: queued",
-                "origin: eric",
+                "origin: owner",
                 "project: spud",  # SPD-014
                 'proposed_by: ""',
                 'lead: "[[SPUD-001/Russet]]"',
@@ -94,7 +94,7 @@ class RenderShapeTest(SpudTestCase):
             "status: parked",
             "parked_until: 2026-10-16",
             'parked_reason: "App Store approval of iOS 1.0"',
-            "origin: eric",
+            "origin: owner",
             "project: spud",
             'proposed_by: ""',
             'lead: ""',
@@ -540,7 +540,7 @@ class HandEditAllowlistTest(SpudTestCase):
         self.assertEqual(out["changed"], ["priority"])
         # the same event the CLI writes, so the log never misses a priority change
         events = self.home.json("events", "--ticket", self.t["key"], "--kind", "ticket.priority")["events"]
-        self.assertEqual([(e["actor"], e["data"]) for e in events], [("eric", {"from": "P2", "to": "P1"})])
+        self.assertEqual([(e["actor"], e["data"]) for e in events], [("owner", {"from": "P2", "to": "P1"})])
 
     def test_ticket_status_goes_through_the_state_machine(self):
         # queued -> done is illegal: the whole file is refused, the priority edit in it too
@@ -615,7 +615,7 @@ class HandEditAllowlistTest(SpudTestCase):
     def test_refused_ticket_properties(self):
         cases = [
             ("id: SPD-001", "id: SPD-901", "id"),
-            ("origin: eric", "origin: proposal", "origin"),
+            ("origin: owner", "origin: proposal", "origin"),
             ('proposed_by: ""', 'proposed_by: "[[SPUD-001/Russet]]"', "proposed_by"),
             ('lead: "[[SPUD-001/Russet]]"', 'lead: "[[SPUD-001/Yukon]]"', "lead"),
             ("created: ", "created: 1999-01-01\ncreated_was: ", "created"),

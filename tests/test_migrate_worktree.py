@@ -98,8 +98,8 @@ class MigrateTicketWorktreeTest(unittest.TestCase):
         tickets = self.home.rows("SELECT * FROM tickets ORDER BY id")
         events = self.home.rows("SELECT * FROM events ORDER BY id")
         out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0004_ticket_worktree", "0005_pull_requests"], 5))
-        self.assertEqual(len(out["backups"]), 2)
+        self.assertEqual((out["applied"], out["user_version"]), (["0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin"], 6))
+        self.assertEqual(len(out["backups"]), 3)
         self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0004_ticket_worktree\.db$")
         backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
         try:
@@ -107,7 +107,7 @@ class MigrateTicketWorktreeTest(unittest.TestCase):
         finally:
             backup.close()
         after = self.home.rows("SELECT * FROM tickets ORDER BY id")
-        self.assertEqual([{k: v for k, v in r.items() if k != "worktree"} for r in after], tickets)
+        self.assertEqual([{k: v for k, v in r.items() if k != "worktree"} for r in after], [dict(r, origin="owner") if r["origin"] == "eric" else r for r in tickets])
         self.assertEqual([r["worktree"] for r in after], [None, None, None])
         self.assertEqual(self.home.rows("SELECT * FROM events ORDER BY id"), events)
         self.assertEqual(self.home.rows("PRAGMA foreign_key_check"), [])
@@ -155,7 +155,7 @@ class MigrateTicketWorktreeTest(unittest.TestCase):
         other = Home()
         self.addCleanup(other.cleanup)
         out = other.init()
-        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests"], 5, []))
+        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin"], 6, []))
         self.assertEqual(other.scalar("SELECT count(*) FROM pragma_table_info('tickets') WHERE name = 'worktree'"), 1)
 
 

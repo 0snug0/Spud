@@ -255,7 +255,7 @@ class ProjectRenderTest(RepoMixin, SpudTestCase):
         self.assertIn("ledger/teams/BADS-001/Russet.md", out["written"])
         self.assertIn("ledger/Projects.md", out["written"])
         ticket = (self.home.path / "ledger" / "tickets" / "BAD-001.md").read_text(encoding="utf-8")
-        self.assertIn("\nstatus: active\norigin: eric\nproject: badtakes\nproposed_by: \"\"\n", ticket)
+        self.assertIn("\nstatus: active\norigin: owner\nproject: badtakes\nproposed_by: \"\"\n", ticket)
         self.assertIn("\nproject: spud\n", (self.home.path / "ledger" / "tickets" / "SPD-001.md").read_text(encoding="utf-8"))
         member = (self.home.path / "ledger" / "teams" / "BADS-001" / "Russet.md").read_text(encoding="utf-8")
         self.assertIn('\nticket: "[[BAD-001]]"\nproject: badtakes\nstatus: planned\n', member)

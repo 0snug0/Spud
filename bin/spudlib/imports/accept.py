@@ -145,12 +145,12 @@ def accept_ticket_edit(ctx, con, at, t, base, doc, rel):
         updates["updated_at"] = at
         con.execute("UPDATE tickets SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), t["id"]))
     if "priority" in updates:
-        ledgerdb.write_event(con, at, "eric", "ticket.priority", "%s %s -> %s (hand edit)" % (t["key"], t["priority"], updates["priority"]),
+        ledgerdb.write_event(con, at, "owner", "ticket.priority", "%s %s -> %s (hand edit)" % (t["key"], t["priority"], updates["priority"]),
                     ticket_id=t["id"], data={"from": t["priority"], "to": updates["priority"]})
     if status_change:
-        ledgerdb.write_event(con, at, "eric", "ticket.status", "%s %s -> %s (hand edit)" % (t["key"], status_change[0], status_change[1]),
+        ledgerdb.write_event(con, at, "owner", "ticket.status", "%s %s -> %s (hand edit)" % (t["key"], status_change[0], status_change[1]),
                     ticket_id=t["id"], data={"from": status_change[0], "to": status_change[1]})
-    ledgerdb.write_event(con, at, "eric", "import", "accepted hand edit of %s" % rel, ticket_id=t["id"], data={"source": rel, "accepted": True, "changed": changed})
+    ledgerdb.write_event(con, at, "owner", "import", "accepted hand edit of %s" % rel, ticket_id=t["id"], data={"source": rel, "accepted": True, "changed": changed})
     return changed
 
 
@@ -200,11 +200,11 @@ def accept_member_edit(ctx, con, at, m, ticket, base, doc, rel):
     if "status" in keys:
         if fm.get("status") not in kernel.MEMBER_STATUSES:
             refuse(rel, "status %r is not one of %s" % (fm.get("status"), ", ".join(kernel.MEMBER_STATUSES)))
-        ops.member_status_change(con, at, "eric", m, fm["status"], updates)
+        ops.member_status_change(con, at, "owner", m, fm["status"], updates)
         changed.append("status")
     elif updates:
         con.execute("UPDATE members SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), m["id"]))
-    ledgerdb.write_event(con, at, "eric", "import", "accepted hand edit of %s" % rel, ticket_id=ticket["id"], member_id=m["id"], data={"source": rel, "accepted": True, "changed": changed})
+    ledgerdb.write_event(con, at, "owner", "import", "accepted hand edit of %s" % rel, ticket_id=ticket["id"], member_id=m["id"], data={"source": rel, "accepted": True, "changed": changed})
     return changed
 
 
@@ -227,12 +227,12 @@ def accept_report_edit(con, at, day, text, rel):
     for time, title, body in entries:
         bodies = have.get((time, title))
         if bodies is None:
-            ledgerdb.write_event(con, "%sT%s" % (day, time), "eric", "report.entry", body, data={"title": title, "source": rel})
+            ledgerdb.write_event(con, "%sT%s" % (day, time), "owner", "report.entry", body, data={"title": title, "source": rel})
             added += 1
         elif markdown.normalize_markdown(body) not in bodies:
             refuse(rel, "the entry '%s — %s' changed; report entries are append-only events" % (time, title))
     changed = ["entries:%d" % added]
-    ledgerdb.write_event(con, at, "eric", "import", "accepted hand edit of %s" % rel, data={"source": rel, "accepted": True, "changed": changed})
+    ledgerdb.write_event(con, at, "owner", "import", "accepted hand edit of %s" % rel, data={"source": rel, "accepted": True, "changed": changed})
     return changed
 
 

@@ -608,7 +608,7 @@ id: SPD-001
 title: "Imported card"
 priority: P2
 status: done
-origin: eric
+origin: owner
 lead: "[[SPUD-001/Russet]]"
 created: 2026-09-01
 tags: [ticket]
@@ -648,7 +648,7 @@ id: SPD-002
 title: "Another team"
 priority: P3
 status: done
-origin: eric
+origin: owner
 lead: "[[SPUD-002/Kennebec]]"
 created: 2026-09-01
 tags: [ticket]

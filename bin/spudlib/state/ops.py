@@ -40,7 +40,7 @@ def ticket_key(prefix, number):
     return "%s-%03d" % (prefix, number)
 
 
-def insert_ticket(con, at, actor_label, project, title, priority, status, origin="eric", proposal_id=None,
+def insert_ticket(con, at, actor_label, project, title, priority, status, origin="owner", proposal_id=None,
                   brief="", sizing="", outcome="", tags=None, heading=None, created_at=None, number=None, layout=None,
                   parked_until=None, parked_reason=None):
     if number is None:

@@ -83,8 +83,8 @@ class MigrateProjectsTest(unittest.TestCase):
     def test_migrate_writes_the_pre_migration_backup_and_keeps_every_row(self):
         events_before = self.home.rows("SELECT * FROM events ORDER BY id")
         out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests"], 5))
-        self.assertEqual(len(out["backups"]), 4)
+        self.assertEqual((out["applied"], out["user_version"]), (["0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin"], 6))
+        self.assertEqual(len(out["backups"]), 5)
         self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0002_projects\.db$")
         backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
         try:
@@ -162,7 +162,7 @@ class MigrateProjectsTest(unittest.TestCase):
         out = self.home.json("render", actor="spud")
         self.assertIn("ledger/Projects.md", out["written"])
         ticket = (self.home.path / "ledger" / "tickets" / "SPD-001.md").read_text(encoding="utf-8")
-        self.assertIn("\norigin: eric\nproject: spud\n", ticket)
+        self.assertIn("\norigin: owner\nproject: spud\n", ticket)
         member = (self.home.path / "ledger" / "teams" / "SPUD-001" / "Russet.md").read_text(encoding="utf-8")
         self.assertIn('\nticket: "[[SPD-001]]"\nproject: spud\n', member)
 
@@ -170,7 +170,7 @@ class MigrateProjectsTest(unittest.TestCase):
         other = Home()
         self.addCleanup(other.cleanup)
         out = other.init()
-        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests"], 5, []))
+        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin"], 6, []))
         # SPW-001: the row is the suite's seed (helpers.Home.init), which is what init inserted before phase 2; the
         # columns asserted are migration 0002_projects', which is what this test is about.
         self.assertEqual(other.rows("SELECT key, landing, sessions FROM projects"), [{"key": "spud", "landing": "merge", "sessions": "always"}])

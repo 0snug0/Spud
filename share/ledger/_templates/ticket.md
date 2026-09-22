@@ -3,7 +3,7 @@ id: {{ticket_prefix}}-nnn
 title: ""
 priority: P2
 status: queued
-origin: eric
+origin: owner
 proposed_by: ""
 lead: ""
 created: YYYY-MM-DD
