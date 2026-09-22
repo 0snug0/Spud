@@ -123,6 +123,23 @@ class ProjectAddTest(RepoMixin, SpudTestCase):
         self.assertIn("installed       no", text)
         self.assertEqual(self.cli("project", "show", "nope", check=False).returncode, EXIT_ERROR)
 
+    def test_show_reads_installed_from_the_settings_file_itself(self):
+        """`installed` is settings_hold_hooks over the project's local settings, whose reading SPW-003 moved into
+        projects/sessions so that `session show` could ask the same question: it still takes the whole hook table, so a
+        file one event short reads as not installed, here as in doctor."""
+        agents = self.home.path / ".claude" / "agents"
+        agents.mkdir(parents=True, exist_ok=True)
+        (agents / "spudagent.md").write_text("---\nname: spudagent\n---\nRun `{{launcher}}`.\n", encoding="utf-8")
+        self.add_project(self.other)
+        self.cli("project", "install", "badtakes", actor="spud")
+        self.assertTrue(self.cli_json("project", "show", "badtakes")["project"]["installed"])
+        self.assertIn("installed       yes", self.cli("project", "show", "badtakes").stdout)
+        settings = self.other / ".claude" / "settings.local.json"
+        data = json.loads(settings.read_text(encoding="utf-8"))
+        del data["hooks"]["SubagentStart"]
+        settings.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        self.assertFalse(self.cli_json("project", "show", "badtakes")["project"]["installed"])
+
 
 class ProjectEditRemoveTest(RepoMixin, SpudTestCase):
     def setUp(self):

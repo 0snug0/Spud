@@ -7,9 +7,9 @@ import sys
 from . import ghread, prcmds, publish, settings_sync
 from ..core import homeconf, kernel, launchagents
 from ..hooks import gitrepos, hookio, snapshots, worktrees
-from ..projects import agentdef, install
+from ..projects import agentdef, install, sessions
 from ..render import prices
-from ..state import backup, ledgerdb, lookup, schema
+from ..state import actors, backup, ledgerdb, lookup, schema
 
 WATCHER_DOWN = ("the render watcher %s is installed but not running: the vault is stale until `spud --as spud schedule install` reloads it"
                 % launchagents.RENDER_LABEL)
@@ -117,6 +117,7 @@ def doctor_report(ctx):
     if no_project:
         notes.append(NO_PROJECT % (config.get("tickets", {}).get("prefix"), config.get("teams", {}).get("prefix")))
     report["projects"] = doctor_projects(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else []
+    report["hooks"] = doctor_session_hooks(ctx, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["repositories"] = doctor_repositories(ctx, problems) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["render"] = doctor_render(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION and config is not None else None
     report["pull_requests"] = doctor_pull_requests(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
@@ -147,6 +148,8 @@ def doctor_report(ctx):
         lines.append("pricing     %s" % ("%s: every cost shows —" % prices.NO_TABLE if not prices.price_table(config)[1] else "no usable price table: see problems"))
     for p in report["projects"]:
         lines.append("project     %s at %s: %s" % (p["key"], p["root"], ", ".join(p["checks"]) or "no check passed"))
+    if report["hooks"] is not None:  # SPW-003: the installation above can be perfect and this session still load none of it
+        lines.extend(("hooks       " if n == 0 else "            ") + line for n, line in enumerate(report["hooks"]["lines"]))
     if report["repositories"] is not None:
         r = report["repositories"]
         lines.append("repos       %d checkout%s read: %s" % (
@@ -267,6 +270,27 @@ def doctor_projects(ctx, problems, notes):
     if note:
         notes.append(note)
     return out
+
+
+def doctor_session_hooks(ctx, notes):
+    """doctor's hooks section (SPW-003): whether the session doctor itself runs in has this home's ledger hooks loaded
+    where that session actually reads them -- the question the project lines above cannot answer, since they check the
+    files this home installs and a session launched somewhere else reads none of them.
+
+    A note, never a problem, for the two states that are proven wrong (`absent` and `partial`).  What is wrong then is
+    where the session was launched, not anything in this home: doctor's exit code would otherwise call a healthy home
+    broken, and `home move`, which refuses on this report's problems, would refuse from such a session -- which is
+    exactly the session most likely to be running it.  `unknown` and `no_session` add nothing: the hooks line says what
+    was read, and neither proves a gap."""
+    con = ledgerdb.open_connection(ctx.db_path)
+    try:
+        hooks = sessions.session_hooks(ctx, con, actors.planning_session(os.environ))
+    finally:
+        con.close()
+    hooks["lines"] = sessions.session_hooks_lines(ctx, hooks)
+    if hooks["state"] in ("absent", "partial"):
+        notes.append(hooks["lines"][0])  # the state; the fix is on the hooks line itself, and in the report
+    return hooks
 
 
 def doctor_repositories(ctx, problems):

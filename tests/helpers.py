@@ -250,8 +250,12 @@ class Home:
         # not stamp that live session on scratch rows, so a test that wants a session names it.
         self.env.pop("CLAUDE_CODE_SESSION_ID", None)
         # SPD-014: the hooks read the session's launch directory from CLAUDE_PROJECT_DIR, which a suite run from a Claude
-        # Code session inherits; a test that wants one sets it.  `project install` writes user-scope files and the home
-        # pointer: both go under this scratch home, never into ~/.claude or ~/.config/spud.
+        # Code session inherits; a test that wants one sets it.  Since SPW-003 `session show` and `doctor` read it too,
+        # to say whether the session they describe loads any ledger hook at all: with neither this nor
+        # CLAUDE_CODE_SESSION_ID set, which is every home here by default, that answer is `no_session` and both commands
+        # say nothing new.  `project install` writes user-scope files and the home pointer: both go under this scratch
+        # home, never into ~/.claude or ~/.config/spud -- and SPUD_USER_CLAUDE_DIR is also the ~/.claude/settings.json
+        # that check reads, so this Mac's own hook lines can never answer for a scratch home.
         self.env.pop("CLAUDE_PROJECT_DIR", None)
         self.env["SPUD_USER_CLAUDE_DIR"] = str(self.path / ".user-claude")
         self.env["SPUD_CONFIG_DIR"] = str(self.path / ".user-config")

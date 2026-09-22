@@ -208,6 +208,47 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertEqual(self.cli("project", "sync", "nope", actor="spud", check=False).returncode, EXIT_ERROR)
         self.assertEqual(self.cli("project", "sync", actor="spud", check=False).returncode, 2)
 
+    def test_doctor_says_whether_the_session_it_runs_in_loaded_this_homes_hooks(self):
+        """SPW-003, beside the project lines above: those check the files this home installs, and a session launched
+        somewhere else reads none of them, so a perfect installation says nothing about the session doctor is in.  A
+        note, never a problem -- what is wrong is where the session was launched, not anything in this home, and
+        `home move` refuses on this report's problems from the very session most likely to be running it."""
+        self.install()
+        session = "77777777-8888-4999-8aaa-bbbbbbbbbbbb"
+        nowhere = self.scratch_dir("nowhere-")
+
+        def report(launch=None, session=session):
+            env = {"CLAUDE_PROJECT_DIR": str(launch)} if launch is not None else {}
+            out = self.cli_json("doctor", env=env, session=session)
+            text = self.cli("doctor", env=env, session=session).stdout
+            self.assertEqual(out["problems"], [])  # never a problem, in any state
+            return out, text
+
+        out, text = report(self.other)  # the installed checkout: loaded, and nothing to note
+        self.assertEqual(out["hooks"]["state"], "loaded")
+        self.assertEqual([n for n in out["notes"] if "ledger hook" in n], [])
+        self.assertIn("hooks       this home's ledger hooks are loaded in this session, from %s" % self.local, text)
+
+        out, text = report(nowhere)  # launched outside every project: none loaded, one note, still exit 0
+        self.assertEqual((out["hooks"]["state"], out["hooks"]["launch"], out["hooks"]["events"]), ("absent", str(nowhere), []))
+        self.assertEqual(self.cli("doctor", env={"CLAUDE_PROJECT_DIR": str(nowhere)}, session=session).returncode, EXIT_OK)
+        self.assertIn("hooks       no ledger hook of this home is loaded in this session", text)
+        self.assertIn("            relaunch the session in %s" % self.home.path, text)
+        note = next(n for n in out["notes"] if "ledger hook" in n)
+        self.assertEqual(out["hooks"]["lines"][0], note)  # the note is the state; the fix is the second line, and the text's
+        self.assertIn("no ledger hook of this home is loaded in this session", note)
+        self.assertIn("note        no ledger hook of this home is loaded", text)
+
+        out, text = report()  # no CLAUDE_PROJECT_DIR: unknown, and no note, because nothing is proven wrong
+        self.assertEqual(out["hooks"]["state"], "unknown")
+        self.assertEqual([n for n in out["notes"] if "ledger hook" in n], [])
+        self.assertIn("hooks       whether this home's ledger hooks are loaded in this session is unknown", text)
+
+        out, text = report(nowhere, session=None)  # no session: nothing loads hooks, and nothing is wrong
+        self.assertEqual(out["hooks"]["state"], "no_session")
+        self.assertEqual([n for n in out["notes"] if "ledger hook" in n], [])
+        self.assertIn("hooks       there is no Claude Code session here", text)
+
     def test_install_renders_the_launcher_into_the_installed_definition(self):
         """SPW-002: the repository ships a template, so the installed definition names the launcher that actually runs here
         and the source keeps its placeholder -- no machine's absolute path is shipped."""

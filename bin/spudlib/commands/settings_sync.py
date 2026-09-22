@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from ..core import homeconf, kernel
+from ..projects import sessions
 from ..state import ledgerdb
 
 
@@ -23,7 +24,6 @@ HOOK_TABLE = (
     ("UserPromptSubmit", None),  # SPD-057: a prompt naming a claim project's ticket claims the session; the event takes no matcher
 )
 HOOK_TIMEOUT = 30  # seconds; a hook is one Python start and one short transaction (busy_timeout 5 s)
-HOOK_MARK = "bin/spud hook"  # what marks a hook entry as the ledger's, whatever home it was generated for
 # What marks an allow rule as the ledger's, whatever home it names and whatever spelling an older sync wrote (the #! rule
 # `Bash(<home>/bin/spud *)` until SPD-038, the `:*` form): settings sync drops every such rule and writes cli_allow_rules.
 ALLOW_RULE_MARK = re.compile(r"^Bash\(.*bin/spud(?: \*|:\*)\)$")
@@ -63,7 +63,9 @@ def tool_warning(ctx):
 
 
 def is_ledger_hook(entry):
-    return isinstance(entry, dict) and HOOK_MARK in str(entry.get("command", ""))
+    """SPW-003: the mark itself lives in projects/sessions, which reads installed hook lines too and, unlike every
+    module here, may be imported by a hook -- so there is one spelling of it."""
+    return isinstance(entry, dict) and sessions.HOOK_MARK in str(entry.get("command", ""))
 
 
 def merge_hooks(ctx, settings, project_key=None):
@@ -205,21 +207,8 @@ def cmd_settings_sync(ctx, args):
 
 
 def settings_hold_hooks(ctx, path, key=None):
-    """Whether a settings file carries every ledger hook of HOOK_TABLE for this home (and, for a project, with its key)."""
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    hooks = data.get("hooks") if isinstance(data, dict) else None
-    if not isinstance(hooks, dict):
-        return False
-    prefix = "SPUD_HOME=%s " % shlex.quote(str(ctx.home))
-    suffix = (" --project %s" % shlex.quote(key)) if key else None
-    found = set()
-    for event, groups in hooks.items():
-        for group in groups if isinstance(groups, list) else []:
-            for h in (group.get("hooks") if isinstance(group, dict) and isinstance(group.get("hooks"), list) else []):
-                command = h.get("command") if isinstance(h, dict) else None
-                if isinstance(command, str) and HOOK_MARK in command and command.startswith(prefix) and (suffix is None or command.endswith(suffix)):
-                    found.add(event)
-    return found >= {e for e, _ in HOOK_TABLE}
+    """Whether a settings file carries every ledger hook of HOOK_TABLE for this home (and, for a project, with its key).
+    SPW-003 moved the reading itself to projects/sessions.settings_hook_events, because `session show` asks the same
+    question of the files its own session loads and cannot import this module (the hook path); this stays the whole-table
+    answer, which is what `project install`, `home move`, `project list` and doctor's per-project check want."""
+    return sessions.settings_hook_events(ctx, path, key) >= {e for e, _ in HOOK_TABLE}
