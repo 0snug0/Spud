@@ -385,7 +385,7 @@ class TextTest(BoundCase):
         self.assertIn("board (spud):", card)  # the added line leaves the board its room
         self.assertIn("SPD-098", self.home.run("member", "new", "--help").stdout)
         self.assertIn("ticket worktrees (SPD-098)", self.home.run("--help").stdout)
-        agent = (REPO / ".claude" / "agents" / "spudagent.md").read_text(encoding="utf-8")
+        agent = (REPO / "share" / "agents" / "spudagent.md").read_text(encoding="utf-8")  # SPW-004
         self.assertIn("A bare glob is relative to the linked worktree your ticket is bound to", agent)
         self.assertNotIn("the root or a worktree of it", agent)
 

@@ -105,7 +105,7 @@ class SeparateToolTest(RepoMixin, SpudTestCase):
         # SPW-002: the tool repository's definition is a template, and this tool checkout is at a path no shipped file
         # names, so the installed copy is the shipped one with this run's launcher filled in, placeholder and all gone.
         agent = (self.home.path / ".user-claude" / "agents" / "spudagent.md").read_text(encoding="utf-8")
-        source = (self.tool / ".claude" / "agents" / "spudagent.md").read_text(encoding="utf-8")
+        source = (self.tool / "share" / "agents" / "spudagent.md").read_text(encoding="utf-8")  # SPW-004
         self.assertIn("{{launcher}}", source)
         self.assertNotIn("{{launcher}}", agent)
         self.assertIn("python3.14 -I -S %s" % self.launcher, agent)

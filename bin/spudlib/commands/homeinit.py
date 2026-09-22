@@ -55,7 +55,10 @@ DEFAULT_NAME = "Spud"
 DEFAULT_PRONOUNS = "he/him/his"
 CONFIG_NAME = "spud.config.json"
 # Step 4's seven files and five directories, in the order the design lists them (section 2.2).  Each relative path is
-# both the path under <tool>/share/ and the path in the home: share/ mirrors the home's own layout.
+# both the path under <tool>/share/ and the path in the home: share/ mirrors the home's own layout.  Not every shipped
+# file is here -- share/agents/spudagent.md is rendered to user scope by step 7's `project install`, never into a home
+# (SPW-004, which moved it out of the tool repository's own .claude/agents/, where Claude Code read it in preference to
+# the installed copy) -- so this is the scaffolding, not the shipped set, which tests/test_share.py holds.
 SCAFFOLDING = ("CLAUDE.md", "ledger/Home.md", "ledger/Spud.md", "ledger/Board.base", "ledger/Fleet.base",
                "ledger/_templates/ticket.md", "ledger/_templates/spudagent.md")
 DIRECTORIES = ("ledger/tickets", "ledger/teams", "reports", "docs/spikes", "docs/design")

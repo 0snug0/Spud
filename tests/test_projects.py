@@ -127,9 +127,7 @@ class ProjectAddTest(RepoMixin, SpudTestCase):
         """`installed` is settings_hold_hooks over the project's local settings, whose reading SPW-003 moved into
         projects/sessions so that `session show` could ask the same question: it still takes the whole hook table, so a
         file one event short reads as not installed, here as in doctor."""
-        agents = self.home.path / ".claude" / "agents"
-        agents.mkdir(parents=True, exist_ok=True)
-        (agents / "spudagent.md").write_text("---\nname: spudagent\n---\nRun `{{launcher}}`.\n", encoding="utf-8")
+        self.home.agent_source("---\nname: spudagent\n---\nRun `{{launcher}}`.\n")  # SPW-004: share/agents/, under the tool
         self.add_project(self.other)
         self.cli("project", "install", "badtakes", actor="spud")
         self.assertTrue(self.cli_json("project", "show", "badtakes")["project"]["installed"])

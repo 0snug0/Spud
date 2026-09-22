@@ -24,9 +24,10 @@ EVENTS = {"PreToolUse": 3, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop":
 class InstallTest(RepoMixin, SpudTestCase):
     def setUp(self):
         super().setUp()
-        agents = self.home.path / ".claude" / "agents"
-        agents.mkdir(parents=True)
-        (agents / "spudagent.md").write_text(AGENT, encoding="utf-8")
+        # SPW-004: the source is share/agents/spudagent.md under the tool, which here is the home itself; Home.agent_source
+        # gives this home its own share/ first, so writing the fixture cannot reach the repository's copy through helpers'
+        # symlink.  Every test below that edits or deletes the source uses this path.
+        self.source = self.home.agent_source(AGENT)
         self.other = self.make_repo("badtakes-")
         (self.other / ".claude").mkdir()
         self.local = self.other / ".claude" / "settings.local.json"
@@ -173,7 +174,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         proc = self.install("tracked", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn("is tracked", proc.stderr)
-        (self.home.path / ".claude" / "agents" / "spudagent.md").unlink()
+        self.source.unlink()
         proc = self.install(check=False)
         self.assertIn("spudagent definition is the source", proc.stderr)
 
@@ -194,7 +195,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertEqual([(p["key"], p["checks"]) for p in projects],
                          [("spud", ["root is the home (before home move)", "not installed"]),
                           ("badtakes", ["main checkout", "hooks", "ignored", "agent", "skill"])])
-        (self.home.path / ".claude" / "agents" / "spudagent.md").write_text(AGENT + "A new rule.\n", encoding="utf-8")
+        self.source.write_text(AGENT + "A new rule.\n", encoding="utf-8")
         proc = self.cli("--json", "doctor", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn("project sync --all", proc.stdout)
@@ -257,7 +258,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertIn("python3.14 -I -S %s/bin/spud" % self.home.path, agent)
         self.assertNotIn("{{launcher}}", agent)
         self.assertEqual(agent, self.rendered())
-        self.assertIn("{{launcher}}", (self.home.path / ".claude" / "agents" / "spudagent.md").read_text(encoding="utf-8"))
+        self.assertIn("{{launcher}}", self.source.read_text(encoding="utf-8"))
         self.assertEqual(self.cli_json("doctor")["problems"], [])
 
     def test_doctor_reads_the_installed_definition_against_what_this_home_renders(self):
@@ -277,16 +278,48 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertEqual(self.cli_json("doctor")["problems"], [])
         agent.unlink()
         self.assertIn("no spudagent definition at %s" % agent, self.cli("--json", "doctor", check=False).stdout)
-        (self.home.path / ".claude" / "agents" / "spudagent.md").unlink()
+        self.source.unlink()
         self.assertIn("spudagent definition is the source", self.cli("--json", "doctor", check=False).stdout)
+
+    def test_doctor_reports_a_definition_at_project_scope_and_says_which_one_a_session_there_reads(self):
+        """SPW-004: Claude Code reads `<checkout>/.claude/agents/spudagent.md` in preference to the copy install writes at
+        user scope, and nothing among the installed files shows it -- which is how the tool repository's own template, an
+        unrendered {{launcher}} and all, was the definition every spudagent working a ticket in that checkout read.
+
+        A note, never a problem, and doctor stays green: the file belongs to that repository, and doctor's problems are
+        what `home init` and `home move` refuse on.  The report answers the question either way, so `--json` says `no`
+        as plainly as the note says `yes`."""
+        self.install()
+        out = self.cli_json("doctor")
+        self.assertEqual(out["problems"], [])
+        installed = next(p for p in out["projects"] if p["key"] == "badtakes")
+        self.assertIsNone(installed["project_scope_agent"])
+        self.assertEqual([n for n in out["notes"] if "project-scope" in n], [])
+        own = self.other / ".claude" / "agents" / "spudagent.md"
+        own.parent.mkdir(parents=True, exist_ok=True)
+        own.write_text(AGENT, encoding="utf-8")
+        out = self.cli_json("doctor")
+        self.assertEqual(out["problems"], [])
+        self.assertEqual(self.cli("doctor").returncode, EXIT_OK)
+        installed = next(p for p in out["projects"] if p["key"] == "badtakes")
+        self.assertEqual(installed["project_scope_agent"], str(own))
+        note = next(n for n in out["notes"] if str(own) in n)
+        self.assertIn("reads it and not %s" % (self.user / "agents" / "spudagent.md"), note)
+        self.assertIn("prefers a project-scope agent definition", note)
+        self.assertIn("note        %s" % note, self.cli("doctor").stdout)
+        # Read for installed projects only: project spud is not installed here (its root is the home), and the home's own
+        # .claude/agents/ is Spud's hand-written set, not a project's shadow.
+        self.assertIsNone(next(p for p in out["projects"] if p["key"] == "spud")["project_scope_agent"])
+        own.unlink()
+        self.assertEqual([n for n in self.cli_json("doctor")["notes"] if "project-scope" in n], [])
 
     def test_sync_rewrites_the_definition_when_the_tool_checkout_moves(self):
         """SPW-002's point: the same source under a checkout at another path renders another launcher.  doctor names the
         stale installed copy and `project sync` writes the new one -- which is what a machine other than this one gets."""
         self.install()
         moved = self.make_repo("moved-tool-")
-        (moved / ".claude" / "agents").mkdir(parents=True)
-        (moved / ".claude" / "agents" / "spudagent.md").write_text(AGENT, encoding="utf-8")
+        (moved / "share" / "agents").mkdir(parents=True)
+        (moved / "share" / "agents" / "spudagent.md").write_text(AGENT, encoding="utf-8")
         env = {"SPUD_TOOL_DIR": str(moved)}
         proc = self.cli("--json", "doctor", check=False, env=env)
         self.assertEqual(proc.returncode, EXIT_ERROR)
