@@ -23,6 +23,10 @@ HOOK_TABLE = (
     ("Stop", None),
     ("UserPromptSubmit", None),  # SPD-057: a prompt naming a claim project's ticket claims the session; the event takes no matcher
 )
+# The events those nine rows install, in the table's order: PreToolUse has three matchers and is one event, and one hook
+# line is one event however many matchers it has -- which is what merge_hooks writes, what settings_hook_events reads
+# back, and what settings_missing_hooks and doctor's `settings` line count (SPW-006).
+TABLE_EVENTS = tuple(dict.fromkeys(e for e, _ in HOOK_TABLE))
 HOOK_TIMEOUT = 30  # seconds; a hook is one Python start and one short transaction (busy_timeout 5 s)
 # What marks an allow rule as the ledger's, whatever home it names and whatever spelling an older sync wrote (the #! rule
 # `Bash(<home>/bin/spud *)` until SPD-038, the `:*` form): settings sync drops every such rule and writes cli_allow_rules.
@@ -75,7 +79,7 @@ def merge_hooks(ctx, settings, project_key=None):
     if not isinstance(hooks, dict):
         hooks = {}
         settings["hooks"] = hooks
-    for event in dict.fromkeys(e for e, _ in HOOK_TABLE):
+    for event in TABLE_EVENTS:
         kept = []
         groups = hooks.get(event)
         for group in (groups if isinstance(groups, list) else []):
@@ -206,9 +210,51 @@ def cmd_settings_sync(ctx, args):
                          stderr=tool_warning(ctx) or "")
 
 
+def settings_exact_hooks(ctx, path, key=None):
+    """The events `path` carries the hook line this home writes for them, byte for byte as hook_command writes it now.
+
+    SPW-006: the strongest evidence a file can carry, and read at all because projects/sessions.HOOK_MARK cannot see a
+    line whose launcher word got quoted.  shlex.quote quotes any path outside ASCII `[\\w@%+=:,./-]`, so in a home whose
+    path holds a space or a non-ASCII character (SPD-029's `Spüd`) every installed line reads
+    `... '<home>/bin/spud' hook Stop`, in which `bin/spud hook` is not a substring: the mark then finds nothing, and a
+    home `settings sync` had just written read as a home with no ledger hook at all.  Answering with the generated
+    string instead of parsing one cannot have that class of bug.  The mark still answers beside this, because a line an
+    older sync wrote -- another interpreter path, an older spelling -- is this home's line and does run."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return set()
+    found = set()
+    for event in TABLE_EVENTS:
+        groups = hooks.get(event)
+        want = hook_command(ctx, event, key)
+        for group in (groups if isinstance(groups, list) else []):
+            for h in (group.get("hooks") if isinstance(group, dict) and isinstance(group.get("hooks"), list) else []):
+                if isinstance(h, dict) and h.get("command") == want:
+                    found.add(event)
+    return found
+
+
+def settings_missing_hooks(ctx, path, key=None):
+    """The events of HOOK_TABLE a settings file carries no ledger hook line of this home for (and, for a project, none
+    with its key), in the table's own order; the empty list for a file that carries them all.
+
+    SPW-006: doctor's `settings` line names these rather than saying only that something is wrong, because a file one
+    event short and a file with nothing in it are fixed by the same `settings sync` and read completely differently --
+    the first is a hand edit or an older table, the second an installation that never happened -- and a report that
+    says neither leaves Eric to diff the file himself.  One line is one event however many matchers it has, as
+    merge_hooks writes it and both readings below take it, so the table's nine rows answer for seven events."""
+    found = settings_exact_hooks(ctx, path, key) | sessions.settings_hook_events(ctx, path, key)
+    return [e for e in TABLE_EVENTS if e not in found]
+
+
 def settings_hold_hooks(ctx, path, key=None):
     """Whether a settings file carries every ledger hook of HOOK_TABLE for this home (and, for a project, with its key).
-    SPW-003 moved the reading itself to projects/sessions.settings_hook_events, because `session show` asks the same
+    SPW-003 moved the marked reading to projects/sessions.settings_hook_events, because `session show` asks the same
     question of the files its own session loads and cannot import this module (the hook path); this stays the whole-table
-    answer, which is what `project install`, `home move`, `project list` and doctor's per-project check want."""
-    return sessions.settings_hook_events(ctx, path, key) >= {e for e, _ in HOOK_TABLE}
+    answer, which is what `project install`, `home move`, `project list` and doctor's two checks want."""
+    return not settings_missing_hooks(ctx, path, key)

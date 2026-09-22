@@ -771,11 +771,11 @@ class InstallTailTest(MachineMixin, unittest.TestCase):
         self.assertEqual(out["doctor"]["problems"], [])
         self.assertEqual(json.loads(self.spud("--json", "doctor").stdout)["problems"], [])
         self.assertIn("problems    none", self.spud("doctor").stdout)
-        # 6. the home's own settings carry this home's ledger hooks.  Asserted on the file, not through doctor, which
-        # does not look at the home's own settings at all (SPW-006): a green doctor above proves nothing about it.
+        # 6. the home's own settings carry this home's ledger hooks.  The green doctor above is that assertion since
+        # SPW-006, which gave doctor a `settings` check of its own -- a home one event short of the table is a problem
+        # there -- so this reads only what doctor does not: the nine lines init reported writing, and the allow rules.
         spud = load_spud_module()
         settings = self.target / ".claude" / "settings.json"
-        self.assertTrue(spud.settings_hold_hooks(self.ctx(), settings))
         self.assertEqual(out["settings"], {"path": str(settings), "written": True, "hooks": 9})
         rules = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
         self.assertTrue(any(str(self.tool / "bin" / "spud") in rule for rule in rules), rules)
@@ -807,10 +807,10 @@ class InstallTailTest(MachineMixin, unittest.TestCase):
         self.assertIsNone(out["install"])
         self.assertTrue(any("no project to install (--no-project)" in line for line in out["done"]), out["done"])
         # step 6 still ran -- the home's own hooks are nobody's project's -- and step 9 rendered the entry's day file
-        self.assertTrue(load_spud_module().settings_hold_hooks(self.ctx(), self.target / ".claude" / "settings.json"))
         self.assertEqual(out["render"]["written"], ["ledger/Projects.md", self.report_day()])
         report = json.loads(self.spud("--json", "doctor").stdout)
-        self.assertEqual(report["problems"], [])
+        self.assertEqual(report["problems"], [])  # step 6 among them, since SPW-006 gave doctor the `settings` check
+        self.assertEqual(report["settings"]["missing"], [])
         self.assertTrue(any("no project is registered" in n for n in report["notes"]), report["notes"])
         # and nothing was installed at user scope: those two files are a project's, and there is no project
         self.assertFalse((self.user_claude / "agents" / "spudagent.md").exists())

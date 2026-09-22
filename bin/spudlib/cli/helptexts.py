@@ -21,7 +21,11 @@ hooks: `spud hook <event>` is the harness's entry point (payload on stdin, answe
        A session loads them from the directory it was launched in (CLAUDE_PROJECT_DIR),
        so one launched outside the home and outside every registered project's checkout
        runs none of them and nothing it does is recorded or guarded (SPW-003):
-       `spud session show` and `spud doctor` say so, and name the fix.
+       `spud session show` and `spud doctor` say so, and name the fix -- as a note, since
+       what is wrong there is where the session was launched.  The home's own
+       .claude/settings.json is this home's own installation, and the whole of what makes
+       a session launched in the home Spud, so doctor's `settings` line reports it absent,
+       unreadable or an event short as a problem: `spud --as spud settings sync` (SPW-006).
 
 deliverable globs (--deliverable): repository-relative, no leading slash and no `..`;
        `*` and `?` match inside one path segment, `**` crosses segments, a trailing `/`
