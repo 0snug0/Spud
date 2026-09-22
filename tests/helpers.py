@@ -31,6 +31,36 @@ from pathlib import Path
 # cache directories are also removed when the interpreter exits.
 sys.dont_write_bytecode = True
 
+# SPW-011: the refusing launchctl the guard block below and every Home name.  A program, not a path that does not exist,
+# for two reasons: it can say what the fixture forgot, and `schedule show`'s `launchctl print` still gets an answer -- a
+# non-zero one, which is this scratch home's own truth (no job of this home's is loaded anywhere) rather than a read of
+# this Mac's running jobs, which is what /bin/launchctl would have answered.  Nothing here reaches launchd.
+GUARD_LAUNCHCTL_REFUSAL = "spud test guard: refusing to run launchctl"
+# Distinct from the fake launchctl's 64 and from launchctl's own 3 (bootout), 5 (bootstrap) and 113 (print), so no test
+# and no reader can mistake this refusal for something launchd said.
+GUARD_LAUNCHCTL_EXIT = 70
+
+
+def write_guard_launchctl():
+    """The refusing launchctl, written under a scratch directory of its own and removed at exit: the program."""
+    directory = tempfile.mkdtemp(prefix="spud-test-guard-launchctl-")
+    atexit.register(shutil.rmtree, directory, True)
+    path = Path(directory) / "launchctl"
+    path.write_text(
+        '#!/bin/sh\n'
+        'echo "%s $*" >&2\n'
+        "cat >&2 <<'EOF'\n"
+        "$SPUD_LAUNCHCTL names tests/helpers.py's refusing stub, so this fixture reached launchctl without one of its\n"
+        "own.  gui/%d, local.spud.backup and local.spud.render are this Mac's user domain and this Mac's two running\n"
+        "jobs: SPUD_LAUNCH_AGENTS_DIR moves the plist a test writes, never the job a bootout removes.  Nothing was run.\n"
+        "Give the fixture a launchctl: helpers.LaunchdMixin (or helpers.fake_launchctl) points SPUD_LAUNCHCTL at the\n"
+        "recording fake, and `spud init --no-schedule` skips step 8 rather than installing the two LaunchAgents.\n"
+        "EOF\n"
+        "exit %d\n" % (GUARD_LAUNCHCTL_REFUSAL, os.getuid(), GUARD_LAUNCHCTL_EXIT), encoding="utf-8")
+    path.chmod(0o755)
+    return path
+
+
 # SPD-097: the real home is off limits.  The test process's own environment names a home that does not exist, so a CLI run
 # that inherits os.environ without a Home's env fails on "no ledger at" or "no spud.config.json in" the guard path instead
 # of opening the real ledger: the cause SPD-092 could not name was a run with no SPUD_HOME, which resolved the real home
@@ -44,6 +74,15 @@ os.environ["SPUD_TOOL_DIR"] = GUARD_HOME
 # ~/.claude/shell-snapshots/.  This Mac's snapshots must not decide a test in this process either, so the guard path
 # stands in for ~/.claude here as it does for the home; every Home sets its own SPUD_USER_CLAUDE_DIR below.
 os.environ["SPUD_USER_CLAUDE_DIR"] = os.path.join(GUARD_HOME, "user-claude")
+# SPW-011: `schedule show|install|uninstall`, `init`'s step 8 and `home move` run $SPUD_LAUNCHCTL
+# (commands/schedule.launchctl, default /bin/launchctl) against gui/<uid> and the labels local.spud.backup and
+# local.spud.render -- this Mac's own user domain and its own two jobs.  SPUD_LAUNCH_AGENTS_DIR moves the plist a test
+# writes; nothing moves the job a `bootout` removes, so a fixture that reached launchd would unload the real backup and
+# the real render watcher whatever else it had overridden.  The guard program stands in for the real thing here as the
+# guard path does for the home: it refuses, names the fixture's omission, and runs nothing.  Every Home sets it below,
+# and a test about the LaunchAgents replaces it with the recording fake (`fake_launchctl`, LaunchdMixin).
+GUARD_LAUNCHCTL = write_guard_launchctl()
+os.environ["SPUD_LAUNCHCTL"] = str(GUARD_LAUNCHCTL)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -220,6 +259,12 @@ class Home:
         # ~/Library/LaunchAgents must not decide a test: every home looks in a directory of its own, which nothing
         # creates unless the test installs an agent.  LaunchdMixin points it at its own scratch and its fake launchctl.
         self.env["SPUD_LAUNCH_AGENTS_DIR"] = str(self.path / "LaunchAgents")
+        # SPW-011: and the launchctl a run of this home's reaches is the guard block's refusing program, because the
+        # directory above moves the plist and only this moves the job: `schedule install`, `init` without
+        # --no-schedule and `home move` boot out local.spud.backup and local.spud.render in gui/<uid>, which are this
+        # Mac's.  So a fixture that forgets fails loudly and locally instead of unloading the real render watcher; a
+        # test about the LaunchAgents calls setup_launchd() (LaunchdMixin) for the recording fake.
+        self.env["SPUD_LAUNCHCTL"] = str(GUARD_LAUNCHCTL)
         # SPD-077: the suite never touches the network.  `off` is the one value that stops every `gh pr view` the
         # reconciler would make, `spud board`'s own run included, so no test can reach GitHub by forgetting something; a
         # test that wants a read points this at a fake gh of its own (GhMixin below).
@@ -265,10 +310,12 @@ class Home:
         INSERT left behind, so every home here keeps the shape it had; a test of the empty registry passes False.
 
         `--no-schedule` is not a convenience: since phase 4 `init` installs the two LaunchAgents, and `launchctl`'s
-        domain and the two labels are the *machine's*, not this scratch home's -- a home sets SPUD_LAUNCH_AGENTS_DIR but
-        not SPUD_LAUNCHCTL, so an init here would boot out this Mac's own `local.spud.backup` and `local.spud.render`
-        and then fail to bootstrap a plist from /var/folders.  Every Home therefore skips step 8, and the tests that are
-        about the LaunchAgents install them through the fake launchctl (LaunchdMixin, `fake_launchctl`).
+        domain and the two labels are the *machine's*, not this scratch home's -- SPUD_LAUNCH_AGENTS_DIR moves the plist
+        and nothing moves the job, so before SPW-011 an init here booted out this Mac's own `local.spud.backup` and
+        `local.spud.render` and then failed to bootstrap a plist from /var/folders.  Every Home now names the refusing
+        launchctl of the guard block, so such an init fails on the refusal instead; it skips step 8 all the same, and
+        the tests that are about the LaunchAgents install them through the fake launchctl (LaunchdMixin,
+        `fake_launchctl`).
         """
         out = self.json("init", "--no-schedule")
         if project:
@@ -739,6 +786,10 @@ def fake_launchctl(scratch, env):
     and launchctl's domain is this Mac's user domain while `local.spud.backup` and `local.spud.render` are this Mac's
     own labels -- SPUD_LAUNCH_AGENTS_DIR moves the plist a test writes, and nothing moves the job a `bootout` removes.
     So every fixture that can reach `schedule install`, init included, names a launchctl of its own.
+
+    SPW-011: what this replaces is `GUARD_LAUNCHCTL`, the refusing stub the guard block gives this process and every
+    Home.  One mechanism, two programs: a fixture that wants to watch launchctl calls it here, and a fixture that
+    forgets gets the refusal rather than /bin/launchctl.
     """
     state = scratch / "launchctl-state"
     state.mkdir(parents=True, exist_ok=True)
