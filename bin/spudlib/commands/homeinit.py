@@ -2,7 +2,8 @@
 docs/design/2026-09-21-spud-init.md sections 2 and 6).
 
 All ten of the design's steps.  Steps 1 to 5 build the home: the directory and the config, the database, the first
-project with one report entry, the vault scaffolding, the home pointer.  Steps 6 to 10 are the install tail --
+project with one report entry, the vault -- its scaffolding, and then, unless `--no-vault`, the Obsidian settings and
+every plugin and theme the lock pins (SPD-156, step 4b) -- and the home pointer.  Steps 6 to 10 are the install tail --
 `finish_install` (`settings sync` into the home's own `.claude/settings.json`, `project install` for the first project,
 the two LaunchAgents) and `verify` (the first render under the render lock, then doctor) -- and when they end green one
 command has taken a fresh clone to `spud doctor` reporting `problems none`, which is the ticket's definition of done.
@@ -41,7 +42,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import doctor, publish, reportentry, schedule, settings_sync
+from . import doctor, publish, reportentry, schedule, settings_sync, vaultinstall, vaultlock
 from ..core import homeconf, kernel, launchagents, lazy, shipped
 from ..projects import install, registry
 from ..render import notefiles
@@ -108,8 +109,13 @@ NO_PROJECT_TO_INSTALL = ("7. no project to install (--no-project): the home's ow
 SCHEDULE_SKIPPED = ("8. %s: %s and %s not installed, so nothing renders or backs up on its own until"
                     " `%s --as spud schedule install` -- which doctor reports as a note, never a problem")
 NOT_DARWIN = "%s is not darwin, and launchctl is macOS's"
+# Step 4b's two skips, both notes and never a failure (design section 3): a home whose plugins did not download is a home
+# that opens and works, with the views the tool ships and no plugin behind them, and one command later it is complete.
+VAULT_SKIPPED = "4b. no Obsidian vault installed (--no-vault): `%s --as spud vault install` sets one up later"
+VAULT_REFUSED = ("4b. %d download(s) refused, so those plugins and themes are not installed and the vault opens without"
+                 " them: run `%s --as spud vault install` once the network is back")
 INIT_BY_HAND = """by hand, now:
-  - open %(home)s as a vault in Obsidian
+  - open %(home)s as a vault in Obsidian, and choose Trust author and enable plugins
   - start a Claude Code session there: it is Spud's"""
 
 
@@ -351,8 +357,12 @@ def init_steps(ctx, args, plan):
         ("create %s in WAL at user_version %d" % (ctx.db_path, schema.SCHEMA_VERSION) if not ctx.db_path.exists() else
          "migrate %s to user_version %d if it is behind, backup first" % (ctx.db_path, schema.SCHEMA_VERSION)),
         project,
-        "write the %d scaffolding files absent from %s (%s) and the %d directories (%s), keeping every file already there"
-        % (len(SCAFFOLDING), ctx.home, ", ".join(SCAFFOLDING), len(DIRECTORIES), ", ".join(DIRECTORIES)),
+        "write the %d scaffolding files absent from %s (%s) and the %d directories (%s), keeping every file already there;"
+        " then %s"
+        % (len(SCAFFOLDING), ctx.home, ", ".join(SCAFFOLDING), len(DIRECTORIES), ", ".join(DIRECTORIES),
+           "install no vault (--no-vault)" if args.no_vault else
+           "write %s from %s and download every plugin and theme %s pins, checking each SHA-256"
+           % (ctx.home / vaultlock.OBSIDIAN, vaultlock.share_vault(ctx), vaultlock.lock_path(ctx))),
         "write %s" % (homeconf.spud_config_dir() / "home"),
         "settings sync into %s: %d ledger hook lines, the two CLI allow rules, the two Agent deny rules, the two env caps"
         % (ctx.home / ".claude" / "settings.json", len(settings_sync.HOOK_TABLE)),
@@ -525,6 +535,27 @@ def write_scaffolding(ctx, project):
     for rel in DIRECTORIES:
         (ctx.home / rel).mkdir(parents=True, exist_ok=True)
     return written, kept, dropped
+
+
+def install_home_vault(ctx, args, done):
+    """Step 4b: the Obsidian vault, `vault install` over the home step 4a just scaffolded (SPD-156).
+
+    Part of step 4 and not a step of its own, because it is the same sentence of the design -- the files a new home
+    needs before anybody opens it -- and because the ten steps' numbers are what every other message here names.  It
+    calls `install_vault` rather than `cmd_vault_install`: init resolves no actor and opens no database for this.
+
+    A refused download is a note and never a failure: the settings and the views are written whatever the network did,
+    the vault opens, and one `vault install` later it is complete.
+    """
+    if args.no_vault:
+        done.append(VAULT_SKIPPED % ctx.launcher)
+        return {"skipped": "--no-vault"}
+    record, lines = vaultinstall.install_vault(ctx)
+    done.append("4b. %s" % lines[0])
+    done.extend("    %s" % line.strip() for line in lines[1:])
+    if record["refused"]:
+        done.append(VAULT_REFUSED % (len(record["refused"]), ctx.launcher))
+    return record
 
 
 def write_pointer(ctx):
@@ -703,10 +734,11 @@ def cmd_init(ctx, args):
                                                                "landing", "sessions", "default_branch", "remote")}
         written, kept, dropped = write_scaffolding(ctx, project)
         data["scaffolding"] = {"written": written, "kept": kept, "dropped_lines": dropped}
-        done.append("4. scaffolding: %s written, %d kept%s; %d directories"
+        done.append("4a. scaffolding: %s written, %d kept%s; %d directories"
                     % (", ".join(written) or "nothing", len(kept), "" if not dropped else
                        " (%d line(s) about project 1 left out, for want of one: `project add`, then they are yours to write back)" % dropped,
                        len(DIRECTORIES)))
+        data["vault"] = install_home_vault(ctx, args, done)
         line, pointed = write_pointer(ctx)
         done.append(line)
         data["pointer"] = {"path": str(homeconf.spud_config_dir() / "home"), "written": pointed}

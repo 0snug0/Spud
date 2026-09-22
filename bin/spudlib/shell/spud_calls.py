@@ -33,7 +33,7 @@ def parse_spud_call(words):
         if call["command"] is None:
             call["command"] = w
         elif call["subcommand"] is None and call["command"] in ("config", "settings", "ticket", "member", "proposal", "handoff", "report",
-                                                                  "project", "session", "ledger", "schedule", "pr"):
+                                                                  "project", "session", "ledger", "schedule", "pr", "vault"):
             call["subcommand"] = w
         else:
             call["rest"].append(w)
