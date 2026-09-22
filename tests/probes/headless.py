@@ -20,6 +20,19 @@ plans a member with `member new` and ends its turn without spawning it: Spud's S
 clause, and the row's session_id is compared with the Stop payload's).  Run them one at a time:
 each spawns real subagents and costs about $0.10 to $0.50 on haiku.  Nothing touches the
 repository: SPUD_HOME is the scratch home, and the session's cwd is that home.
+
+One scenario is a different shape (SPW-001, design section 5 and phase 8): spud-init builds a scratch *clone* of
+this repository instead of a scratch home -- a copy of bin/, share/, the bootstrap skill and the two files section 5
+asks for, with a `git init` so `git rev-parse --show-toplevel` answers the way a real clone's does, and nothing
+installed anywhere on the machine.  It runs `claude -p` there with the prompt `/spud-init` and nothing else, the
+same four environment overrides tests/test_init.py's MachineMixin uses (SPUD_CONFIG_DIR, SPUD_USER_CLAUDE_DIR,
+SPUD_LAUNCH_AGENTS_DIR, and a fake launchctl of its own) so a run that reaches the schedule step never touches this
+machine's real launchd, plus SPUD_HOME naming the home `spud init` should build.  If that first turn only asks the
+clarifying question the skill's own "ask" instructions call for -- reasonable, since a `claude -p` turn has nobody
+to ask but its next turn -- a second turn resumes the same session with the answer a person would give
+(run_init_probe, FOLLOWUP_ANSWER); the first turn is still typed as nothing but `/spud-init`.  Afterwards it runs
+`spud doctor` itself, independently of anything either turn claimed, against that home -- the ground truth for
+whether the skill actually took the clone all the way to `problems    none`.
 """
 
 import argparse
@@ -291,6 +304,175 @@ def build_home(root, scenario):
     return home, env, settings, capture
 
 
+# ----------------------------------------------------------------------------
+# spud-init: a scratch clone, not a scratch home (SPW-001, design section 5 and phase 8)
+# ----------------------------------------------------------------------------
+
+# The stand-in for launchctl this scenario alone needs: a run that reaches step 8 without --no-schedule would
+# otherwise bootstrap a real LaunchAgent into this machine's own launchd domain, since the *plist* moves with
+# SPUD_LAUNCH_AGENTS_DIR but the job's label does not (tests/helpers.FAKE_LAUNCHCTL, tests/test_init.py's
+# MachineMixin comment on the same point).  Same three verbs schedule.py's launchctl() calls, same shape.
+FAKE_LAUNCHCTL_SCRIPT = r'''"""A stand-in for launchctl: records each call and tracks a job's loaded state in a file,
+so the spud-init probe's own run never reaches this machine's real launchd."""
+import json
+import os
+import sys
+
+state = os.environ["SPUD_INIT_PROBE_LAUNCHCTL_STATE"]
+args = sys.argv[1:]
+with open(os.path.join(state, "calls.jsonl"), "a", encoding="utf-8") as f:
+    f.write(json.dumps(args) + "\n")
+verb = args[0] if args else ""
+
+
+def loaded_file(label):
+    return os.path.join(state, "loaded-" + label)
+
+
+if verb == "bootout":
+    label = args[1].rsplit("/", 1)[-1]
+    if os.path.exists(loaded_file(label)):
+        os.remove(loaded_file(label))
+        sys.exit(0)
+    sys.stderr.write("Boot-out failed: 3: No such process\n")
+    sys.exit(3)
+if verb == "bootstrap":
+    label = os.path.basename(args[2])[:-len(".plist")]
+    open(loaded_file(label), "w").close()
+    sys.exit(0)
+if verb == "print":
+    label = args[1].rsplit("/", 1)[-1]
+    if os.path.exists(loaded_file(label)):
+        sys.stdout.write("%s = {\n}\n" % args[1])
+        sys.exit(0)
+    sys.stderr.write('Could not find service "%s" in domain for user gui: %d\n' % (label, os.getuid()))
+    sys.exit(113)
+sys.stderr.write("fake launchctl: unexpected arguments %r\n" % (args,))
+sys.exit(64)
+'''
+
+
+def build_init_clone(root):
+    """A copy of this repository's own tree the way a fresh `git clone` would have it: `bin/`, `share/`, the
+    bootstrap skill, the spudagent definition `project install` needs to install this project, and the two files
+    design section 5 names (README.md, CLAUDE.md) -- nothing else, and nothing installed anywhere on the machine.
+    `git init` alone (no commit needed: `git rev-parse --show-toplevel` answers before there is a first commit) so
+    the skill's own first step, finding the root with git, answers the way a real clone's does instead of failing
+    on "not a git repository" -- a failure that would be this scenario's own plumbing, not the skill's content."""
+    clone = root / "clone"
+    (clone / "bin").mkdir(parents=True)
+    shutil.copy2(SPUD, clone / "bin" / "spud")
+    shutil.copy2(SPUD.parent / "spud_ledger.py", clone / "bin" / "spud_ledger.py")
+    shutil.copytree(SPUD.parent / "spudlib", clone / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
+    shutil.copytree(REPO / "share", clone / "share")
+    shutil.copytree(REPO / ".claude" / "skills" / "spud-init", clone / ".claude" / "skills" / "spud-init")
+    (clone / ".claude" / "agents").mkdir(parents=True)
+    shutil.copy2(REPO / ".claude" / "agents" / "spudagent.md", clone / ".claude" / "agents" / "spudagent.md")
+    shutil.copy2(REPO / "README.md", clone / "README.md")
+    shutil.copy2(REPO / "CLAUDE.md", clone / "CLAUDE.md")
+    run(["git", "init", "--quiet", str(clone)], dict(os.environ))
+    return clone
+
+
+def init_probe_env(root, target_home):
+    """This scenario's environment: SPUD_HOME names the home `/spud-init` should build (a directory that does not
+    yet exist), and SPUD_CONFIG_DIR, SPUD_USER_CLAUDE_DIR, SPUD_LAUNCH_AGENTS_DIR and SPUD_LAUNCHCTL keep every
+    other write -- the home pointer, `~/.claude`, the two LaunchAgents -- inside `root` too: the same four
+    overrides tests/test_init.py's MachineMixin uses to make a real `spud init` run a test rather than an accident
+    on this machine, plus the fake launchctl above.  What this cannot cover: a session that types `--home` with a
+    literal path of its own instead of leaving the flag out for SPUD_HOME to answer.  The skill offers `~/SpudHome`
+    only as Recipe 1's example, not Recipe 2's -- Recipe 2 is the one a session sees here, since this clone is the
+    Spud tool repository itself -- so a run is expected to reach the intended home; the summary reports where it
+    actually landed either way."""
+    env = dict(os.environ)
+    env.pop("CLAUDECODE", None)
+    env.pop("CLAUDE_CODE_SESSION_ID", None)
+    for name in ("SPUD_HOME", "SPUD_TOOL_DIR"):
+        env.pop(name, None)
+    launchctl_state = root / "launchctl-state"
+    launchctl_state.mkdir(parents=True)
+    fake = root / "fake_launchctl.py"
+    fake.write_text(FAKE_LAUNCHCTL_SCRIPT, encoding="utf-8")
+    launchctl = root / "launchctl"
+    launchctl.write_text("#!/bin/sh\nexec %s -I -S %s \"$@\"\n" % (shlex.quote(PYTHON), shlex.quote(str(fake))), encoding="utf-8")
+    launchctl.chmod(0o755)
+    env.update(SPUD_HOME=str(target_home), SPUD_CONFIG_DIR=str(root / "config"), SPUD_USER_CLAUDE_DIR=str(root / "user-claude"),
+               SPUD_LAUNCH_AGENTS_DIR=str(root / "launchagents"), SPUD_LAUNCHCTL=str(launchctl),
+               SPUD_INIT_PROBE_LAUNCHCTL_STATE=str(launchctl_state))
+    return env
+
+
+def transcript_used_bash(stdout):
+    """Whether the harness's own stream-json shows the turn called the Bash tool at all.  A turn given only
+    `/spud-init` may reasonably ask a clarifying question instead of acting -- the skill says to ask for the home,
+    the project root and the two prefixes, and a `claude -p` turn has nobody to ask but its own next turn -- and this
+    is how `run_init_probe` tells the two apart."""
+    for raw in stdout.splitlines():
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            continue
+        if msg.get("type") != "assistant":
+            continue
+        for block in msg.get("message", {}).get("content", []):
+            if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "Bash":
+                return True
+    return False
+
+
+def session_id_of(stdout):
+    """The session id every stream-json message of one `claude -p` run carries, for `--resume`."""
+    for raw in stdout.splitlines():
+        try:
+            msg = json.loads(raw)
+        except ValueError:
+            continue
+        sid = msg.get("session_id")
+        if isinstance(sid, str) and sid:
+            return sid
+    return None
+
+
+# What a person would answer the clarifying question the skill's own "ask" instructions produce, if the first turn
+# asked one instead of acting: the recipe this clone is (Recipe 2, since cwd is the Spud tool repository itself),
+# and the three values with no default, with the home given as this scenario's own scratch path -- never `~/SpudHome`
+# -- so a second turn cannot reach outside `root` even if the first turn's own guess would have.
+FOLLOWUP_ANSWER = ("Recipe 2 (this Spud clone itself) -- run it now, non-interactively, with exactly these values and "
+                   "ask nothing further: home directory {home}, ticket prefix ZZZ, team prefix ZZZS, everything else "
+                   "the defaults the skill already names.")
+
+
+def run_init_probe(root, model):
+    """The scenario itself: `claude -p` in the clone, given the prompt `/spud-init` and nothing else for its first
+    turn -- no preamble, no numbered steps, the thing design section 5 promised a fresh clone gets for free.  If that
+    turn asked rather than acted (transcript_used_bash is False), a second turn resumes the same session with the
+    answer a person would have given (FOLLOWUP_ANSWER) -- the natural continuation of one `/spud-init` conversation,
+    not a second incantation typed instead of the first.  Returns (clone, target_home, env, turns, elapsed, doctor):
+    `turns` is [(prompt, cmd, proc), ...], one or two; `doctor` is this function's own `spud doctor` against
+    `target_home`, run after the session ends and independent of anything the session itself claimed -- the ground
+    truth for whether the skill actually reached `problems    none`, the same discipline the design's phase 4
+    verification uses."""
+    target_home = root / "home"  # deliberately absent: /spud-init should create it
+    clone = build_init_clone(root)
+    env = init_probe_env(root, target_home)
+    fixed = ["--strict-mcp-config", "--output-format", "stream-json", "--verbose", "--model", model,
+             "--permission-mode", "acceptEdits", "--allowedTools", "Bash"]
+    started = time.time()
+    cmd1 = ["claude", "-p", "/spud-init"] + fixed
+    proc1 = subprocess.run(cmd1, env=env, cwd=str(clone), capture_output=True, text=True)
+    turns = [("/spud-init", cmd1, proc1)]
+    if proc1.returncode == 0 and not transcript_used_bash(proc1.stdout):
+        session_id = session_id_of(proc1.stdout)
+        if session_id:
+            answer = FOLLOWUP_ANSWER.format(home=target_home)
+            cmd2 = ["claude", "-p", answer, "--resume", session_id] + fixed
+            proc2 = subprocess.run(cmd2, env=env, cwd=str(clone), capture_output=True, text=True)
+            turns.append((answer, cmd2, proc2))
+    elapsed = time.time() - started
+    doctor = run([PYTHON, "-I", "-S", str(clone / "bin" / "spud"), "doctor", "--json"], env, check=False)
+    return clone, target_home, env, turns, elapsed, doctor
+
+
 def run_claude(home, env, settings, prompt, model, allow_spud):
     agents = {"spudagent": {"description": "A probe spudagent (ledger hooks headless probe).", "prompt": CHILD_PROMPT, "model": "haiku"}}
     allowed = ["Agent", "Write", "Edit", "Bash(git *)", "Bash(ls *)", "Bash(echo *)"]
@@ -473,9 +655,61 @@ def summarize_transcripts(path):
     return lines or ["(no subagent transcripts)"]
 
 
+SPUD_INIT_SCENARIO = "spud-init"  # a scratch clone, not a scratch home; handled on its own below (build_init_clone)
+
+
+# doctor.WATCHER_DOWN, verbatim (bin/spudlib/commands/doctor.py): the one problem the fake launchctl above can never
+# clear on its own, since `launchagents.watcher_alive` asks whether something holds <home>/.spud/render.lock, and
+# nothing this probe starts is a real background watcher that could hold it.  `homeinit.verify` excuses the identical
+# case for the same reason -- a watcher bootstrapped seconds ago and not up yet -- and tests/test_init.py's
+# ScheduleStepTest names it too (`out["doctor"]["problems"], [load_spud_module().WATCHER_DOWN]`).  Excused here only
+# by this exact string, so any other problem still fails the scenario.
+FAKE_LAUNCHCTL_EXCUSED_PROBLEM = ("the render watcher %s is installed but not running: the vault is stale until"
+                                  " `spud --as spud schedule install` reloads it" % "local.spud.render")
+
+
+def main_spud_init(root, model):
+    """The spud-init scenario's report: the harness's own transcript of each turn, and then the independent
+    `spud doctor` this driver runs itself against the home the environment named -- not a claim the session made
+    about itself."""
+    clone, target_home, env, turns, elapsed, doctor = run_init_probe(root, model)
+    out = []
+    out.append("probe spud-init in %s (%.0f s, %d turn(s))" % (root, elapsed, len(turns)))
+    out.append("clone: %s" % clone)
+    out.append("intended home (SPUD_HOME): %s" % target_home)
+    last_exit = 0
+    for n, (prompt, cmd, proc) in enumerate(turns, start=1):
+        (root / ("stream%d.jsonl" % n)).write_text(proc.stdout, encoding="utf-8")
+        (root / ("stderr%d.txt" % n)).write_text(proc.stderr, encoding="utf-8")
+        last_exit = proc.returncode
+        out.append("--- turn %d: %s %s (exit %d) ---" % (n, cmd[0], json.dumps(prompt), proc.returncode))
+        out.extend(summarize_stream(proc.stdout))
+        if proc.stderr.strip():
+            out.append("--- turn %d stderr ---" % n)
+            out.append(proc.stderr.strip()[:2000])
+    out.append("--- independent check: this driver's own `spud doctor --json` against the intended home ---")
+    out.append("exit %d" % doctor.returncode)
+    out.append((doctor.stdout or "(no stdout)").strip())
+    if doctor.stderr.strip():
+        out.append("stderr: " + doctor.stderr.strip()[:2000])
+    problems = None
+    try:
+        problems = json.loads(doctor.stdout).get("problems") if doctor.stdout.strip() else None
+    except ValueError:
+        problems = None
+    real_problems = None if problems is None else [p for p in problems if p != FAKE_LAUNCHCTL_EXCUSED_PROBLEM]
+    if real_problems is not None and real_problems != problems:
+        out.append("(excused: %r -- this probe's fake launchctl starts no real watcher; see FAKE_LAUNCHCTL_EXCUSED_PROBLEM)"
+                   % FAKE_LAUNCHCTL_EXCUSED_PROBLEM)
+    text = "\n".join(out)
+    (root / "summary.txt").write_text(text + "\n", encoding="utf-8")
+    print(text)
+    return 0 if last_exit == 0 and real_problems == [] else 1
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("scenario", choices=sorted(SCENARIOS))
+    ap.add_argument("scenario", choices=sorted(SCENARIOS) + [SPUD_INIT_SCENARIO])
     ap.add_argument("--root", help="scratch directory (default $TMPDIR/spud-probes)")
     ap.add_argument("--model", default="haiku", help="the main session's model (default haiku)")
     ap.add_argument("--no-allow-spud", action="store_true", help="omit the CLI from --allowedTools: does the hook's own allow decision let a child run spud?")
@@ -485,6 +719,8 @@ def main(argv=None):
     base = Path(args.root or os.path.join(os.environ.get("TMPDIR", "/tmp"), "spud-probes")).resolve()
     root = base / ("%s-%s" % (args.scenario, time.strftime("%Y%m%dT%H%M%S")))
     root.mkdir(parents=True)
+    if args.scenario == SPUD_INIT_SCENARIO:
+        return main_spud_init(root, args.model)
     home, env, settings, capture = build_home(root, args.scenario)
     prompt = SCENARIOS[args.scenario]["prompt"].replace("{home}", str(home))
     cmd, proc, elapsed = run_claude(home, env, settings, prompt, args.model, not args.no_allow_spud)
