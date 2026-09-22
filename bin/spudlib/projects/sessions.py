@@ -1,5 +1,12 @@
-"""projects/sessions: Session mode and claims, the /spud skill text, the board brief, the session commands.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""projects/sessions: Session mode and claims, the /spud skill text, the board brief, the session commands, and what a
+session has loaded of the ledger's hooks (SPW-003).  Moved from bin/spud_ledger.py (SPD-065).
 
+Past 250 lines deliberately (the rule of SPD-065): all of it is what one session is to the ledger, and this is the only
+module of tests/test_package.HOOK_PATH that a command may import as freely as a hook does -- which is why SPW-003's
+reading of the settings files a session loads its hooks from is here, and not beside
+commands/settings_sync.settings_hold_hooks, whose question it is but which no hook may import (Eric's decision 2)."""
+
+import json
 import os
 
 from ..core import homeconf, kernel
@@ -156,6 +163,188 @@ def session_mode(ctx, con, payload, env=None):
     return "plain", project, None
 
 
+# ----------------------------------------------------------------------------
+# Whether the session a command describes has the ledger's hooks loaded (SPW-003)
+# ----------------------------------------------------------------------------
+#
+# Claude Code reads hooks from the user's own ~/.claude/settings.json and from the .claude/settings.json and
+# .claude/settings.local.json of the session's *project directory*: the directory the session was launched in, which the
+# harness exports as CLAUDE_PROJECT_DIR and which stays there after EnterWorktree (probe P5).  `settings sync` writes the
+# home's file and `project install` each project root's local one, so a session launched anywhere else reads neither and
+# loads no ledger hook at all -- and every consequence of that is silent: a spawned member never binds (no
+# PostToolUse(Agent) runs), its child gets no agent_id (no SubagentStart), PreToolUse guards nothing and Stop holds no
+# turn.  That is SPW-003, where a recorded claim on top of it made `session show` print `mode spud` over a session in
+# which nothing of the ledger ran at all.
+#
+# The evidence the report may use is those files, read now, and nothing else:
+#
+#   * The working directory is not evidence.  A command runs where it runs -- another worktree, a subagent's cwd,
+#     wherever Eric cd'd to -- while the session goes on reading the settings of the directory it was launched in.
+#     session_mode falls back to the payload's cwd because a hook has nothing better; a command must not turn that guess
+#     into a claim, and reading the cwd is exactly what hid SPW-003.
+#   * CLAUDE_PROJECT_DIR unset is its own answer, `unknown`, and never `absent`: it was unset in the very session that
+#     found SPW-003, so its absence proves nothing either way.  The one file that can still be named is the user-scope
+#     one, so `loaded` still holds when that carries the lines; otherwise the honest answer is that the directory cannot
+#     be named -- and the fix is named anyway, since it is the same relaunch.
+#   * With no session at all -- a terminal, a LaunchAgent, a cron run -- there is nothing to load hooks, which is
+#     `no_session`: nothing to warn about, and no note for doctor.
+#   * A managed enterprise policy file could carry hook lines too.  It is the machine's, Spud never writes one, and this
+#     check does not read it, so the wording names the files it did read instead of claiming nothing anywhere is loaded.
+#
+# None of this runs inside a hook: `session show` and `doctor` call it, and the settings read stays out of session_mode,
+# which every hook run pays for.  It lives here, rather than beside commands/settings_sync.settings_hold_hooks whose
+# question it is, because cmd_session_show is in this module and every commands/* module is off the hook path for good
+# (Eric's decision 2, SPD-065); settings_hold_hooks asks that question of one file through settings_hook_events below, so
+# the reading of a settings file is written once.
+HOOK_MARK = "bin/spud hook"  # what marks a hook entry as the ledger's, whatever home it was generated for
+HOOKS_LOADED = "this home's ledger hooks are loaded in this session, from %s"
+HOOKS_PARTIAL = ("some of this home's ledger hooks are not loaded in this session: no file it reads carries a line for %s,"
+                 " so those events record and guard nothing")
+HOOKS_ABSENT = ("no ledger hook of this home is loaded in this session: it reads its hooks from %s, where no file carries this"
+                " home's hook lines, so nothing it does is recorded or guarded -- a spawned member never binds, a subagent gets"
+                " no agent_id, and PreToolUse and Stop hold nothing")
+HOOKS_UNKNOWN = ("whether this home's ledger hooks are loaded in this session is unknown: CLAUDE_PROJECT_DIR is not set, so the"
+                 " directory it reads its project settings from cannot be named, and %s, the file every session reads, carries"
+                 " none of this home's hook lines")
+HOOKS_NO_SESSION = "there is no Claude Code session here, so nothing loads this home's ledger hooks"
+HOOKS_RELAUNCH = "relaunch the session in %s or in a registered project's checkout (`spud project list`)"
+HOOKS_INSTALL_HERE = ", or install this home's hook lines where this session reads them: `spud --as spud settings sync --path %s`"
+HOOKS_NOT_THE_ROOT = ("%s is in `%s` but is not %s, the directory this home installs its hook lines into: relaunch the session"
+                      " there -- EnterWorktree leaves CLAUDE_PROJECT_DIR at the directory the session started in (probe P5), so"
+                      " a worktree reached from there keeps them")
+HOOKS_SYNC_HOME = "run `spud --as spud settings sync`, which writes them into %s"
+HOOKS_SYNC_PROJECT = "run `spud --as spud project install %s`, which writes them into %s"
+
+
+def shell_word_forms(text):
+    """The two spellings shlex.quote can write `text` as, and so the two an installed hook line can carry it in: the text
+    itself, when it needs no quoting, and single-quoted with every quote closed and reopened.  Generating both is exact
+    and keeps `import shlex` -- 0.11 ms of every hook run, measured on SPW-003 -- off the hook path for a read only two
+    commands make; tests/test_settings.py pins the pair against shlex.quote itself."""
+    return (text, "'%s'" % text.replace("'", "'\"'\"'"))
+
+
+def settings_hook_events(ctx, path, key=None):
+    """The hook events a settings file carries a ledger hook line of *this home* for (`key`: of this project's lines,
+    which end in `--project <key>`); the empty set for a file that is absent, unreadable, or not the shape settings sync
+    writes.  One line is one event however many matchers it has, as the file itself groups them.
+    commands/settings_sync.settings_hold_hooks asks whether what this finds covers its whole table."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict):
+        return set()
+    prefixes = tuple("SPUD_HOME=%s " % form for form in shell_word_forms(str(ctx.home)))
+    suffixes = tuple(" --project %s" % form for form in shell_word_forms(key)) if key else None
+    found = set()
+    for event, groups in hooks.items():
+        for group in groups if isinstance(groups, list) else []:
+            for h in (group.get("hooks") if isinstance(group, dict) and isinstance(group.get("hooks"), list) else []):
+                command = h.get("command") if isinstance(h, dict) else None
+                if isinstance(command, str) and HOOK_MARK in command and command.startswith(prefixes) and (suffixes is None or command.endswith(suffixes)):
+                    found.add(event)
+    return found
+
+
+def session_settings_files(ctx, launch):
+    """The settings files a Claude Code session launched in `launch` reads its hooks from, in the order the harness merges
+    them: the user's own ~/.claude/settings.json, which every session reads whatever directory it was launched in, then
+    the project directory's shared and local files -- `settings sync`'s in the home, `project install`'s in a project's
+    main checkout.  Just the paths: a file that does not exist is read as carrying nothing."""
+    files = [str(homeconf.user_claude_dir() / "settings.json")]
+    if launch:
+        files += [os.path.join(launch, ".claude", "settings.json"), os.path.join(launch, ".claude", "settings.local.json")]
+    return files
+
+
+def session_hooks(ctx, con, session, env=None):
+    """What this home's ledger hooks are in the session `session`, on the evidence above (SPW-003):
+
+      state    `loaded`, `partial`, `absent`, `unknown` or `no_session`
+      launch   CLAUDE_PROJECT_DIR, the directory the session reads its project settings from, or None
+      files    [{path, exists, events}] for every file read, in the order the harness merges them
+      events   sorted, the hook events those files carry a line of; `missing`, those of hookio.HOOK_EVENTS they do not
+      project  the key of the project the launch directory is in (`home` for the home), or None for neither
+      root     the directory this home installs that project's hook lines into (its main checkout, or the home itself),
+               when the launch directory is in the project but is not that directory -- a worktree, or a subdirectory
+               deeper than the file `settings sync` and `project install` write; else None
+
+    A worktree list git cannot give leaves `project` None, the way an unmapped directory does: the fix named then is the
+    general one, which is true whatever the directory turns out to be."""
+    env = os.environ if env is None else env
+    launch = env.get("CLAUDE_PROJECT_DIR") or None
+    files, events = [], set()
+    for path in session_settings_files(ctx, launch):
+        # No key: a line's `--project <key>` sets its failure policy (SPD-014), not which ledger it writes, so any line
+        # of this home's runs here and counts, whichever project it was installed for.
+        found = settings_hook_events(ctx, path)
+        files.append({"path": path, "exists": os.path.isfile(path), "events": sorted(found)})
+        events |= found
+    missing = [e for e in hookio.HOOK_EVENTS if e not in events]
+    project = root = None
+    if launch:
+        try:
+            mapped = worktrees.project_of_path(ctx, con, launch)
+        except hookio.HookError:
+            mapped = None
+        if mapped is not None:
+            project = mapped[0]["key"]
+            checkout = worktrees.project_root(ctx, mapped[0])
+            # The launch directory itself, not mapped[1]: a subdirectory of a checkout maps to that checkout, and its own
+            # .claude is what the session reads, so `<home>/docs` is as unhooked as a worktree is.
+            root = None if worktrees.file_identity(launch) == worktrees.file_identity(checkout) else checkout
+    if session is None:
+        state = "no_session"
+    elif not missing:
+        state = "loaded"
+    elif events:
+        state = "partial"
+    elif launch is None:
+        state = "unknown"
+    else:
+        state = "absent"
+    return {"state": state, "launch": launch, "files": files, "events": sorted(events), "missing": missing,
+            "project": project, "root": root}
+
+
+def session_hooks_fix(ctx, hooks):
+    """The one thing that gives this session the ledger's hooks, in the shape the directory it reads them from allows:
+    the sync command for the directory this home installs into, a relaunch there for a worktree or a subdirectory
+    launched in directly (which neither command writes), and otherwise a relaunch in the home or in a registered
+    checkout -- with, when there is a directory to name, the other honest fix of installing the lines there."""
+    launch, project, root = hooks["launch"], hooks["project"], hooks["root"]
+    if project is None:
+        fix = HOOKS_RELAUNCH % ctx.home
+        return fix + (HOOKS_INSTALL_HERE % os.path.join(launch, ".claude", "settings.json") if launch else "")
+    if root is not None:
+        return HOOKS_NOT_THE_ROOT % (launch, project, root)
+    if project == kernel.HOME_KEY:
+        return HOOKS_SYNC_HOME % os.path.join(launch, ".claude", "settings.json")
+    return HOOKS_SYNC_PROJECT % (project, os.path.join(launch, ".claude", "settings.local.json"))
+
+
+def session_hooks_lines(ctx, hooks):
+    """What `session show` and `doctor` say about it: the state in one sentence, then the fix when there is one to name.
+    Each caller puts its own label before the first line and indents the rest under it, and carries these lines in its
+    report under `hooks.lines`, so `--json` says as much as the text does; `session show` prints nothing at all for
+    `loaded` and `no_session`, where there is no news, and doctor prints every state because it is a report."""
+    state = hooks["state"]
+    if state == "no_session":
+        return [HOOKS_NO_SESSION]
+    if state == "loaded":
+        return [HOOKS_LOADED % ", ".join(f["path"] for f in hooks["files"] if f["events"])]
+    if state == "partial":
+        first = HOOKS_PARTIAL % ", ".join(hooks["missing"])
+    elif state == "absent":
+        first = HOOKS_ABSENT % hooks["launch"]
+    else:
+        first = HOOKS_UNKNOWN % hooks["files"][0]["path"]
+    return [first, session_hooks_fix(ctx, hooks)]
+
+
 def cut_note(count):
     """The closing line of a cut: how many of the body's lines it left out, and where the rest is (SPD-048)."""
     return "(%d more line%s cut to fit; run `spud board --brief` for the rest)" % (count, "" if count == 1 else "s")
@@ -309,7 +498,10 @@ def cmd_session_release(ctx, args):
 
 def cmd_session_show(ctx, args):
     """The ritual's first step outside the home (design section 6.3): the home, the working directory's project and
-    checkout, the session and its mode."""
+    checkout, the session and its mode -- and, since SPW-003, whether this session has the ledger's hooks loaded where it
+    actually reads them, which the mode alone never says: `mode spud` was printed for a session in which no hook of the
+    ledger had run.  The `hooks` line appears only when there is news (see session_hooks_lines), so a session launched in
+    the home or in a registered project's checkout reads exactly as it did before."""
     session = actors.planning_session(os.environ)
     try:
         cwd = os.getcwd()
@@ -322,6 +514,8 @@ def cmd_session_show(ctx, args):
             mode, launch, claim = session_mode(ctx, con, {"session_id": session, "cwd": cwd})
         except hookio.HookError as e:
             raise kernel.SpudError(kernel.EXIT_ERROR, str(e))
+        hooks = session_hooks(ctx, con, session)
+        hooks["lines"] = session_hooks_lines(ctx, hooks)
         project = checkout = None
         if mapped is not None and worktrees.is_home(mapped[0]):  # SPD-097: launched in the home, which is not a project
             checkout = {"path": str(ctx.home), "kind": "home", "branch": None}
@@ -335,7 +529,8 @@ def cmd_session_show(ctx, args):
     finally:
         con.close()
     data = {"home": str(ctx.home), "cwd": cwd, "project": project, "checkout": checkout, "session_id": session, "mode": mode,
-            "launch_project": launch["key"] if launch is not None else None, "claimed_at": claim["claimed_at"] if claim is not None else None}
+            "launch_project": launch["key"] if launch is not None else None, "claimed_at": claim["claimed_at"] if claim is not None else None,
+            "hooks": hooks}
     lines = ["home      %s" % ctx.home]
     if project:
         lines.append("project   %s: %s (%s-nnn tickets, %s-nnn teams; landing %s, sessions %s)" % (
@@ -350,4 +545,6 @@ def cmd_session_show(ctx, args):
     lines.append("mode      %s" % {"spud": "spud" + (" (claimed %s)" % kernel.fm_minute(claim["claimed_at"]) if claim is not None else ""),
                                    "plain": "plain: this session is not Spud; type /spud to make it Spud",
                                    "outside": "outside every project (behaves as Spud)"}[mode])
+    if hooks["state"] not in ("loaded", "no_session"):  # SPW-003: only when there is news; the data carries the answer either way
+        lines.extend(("hooks     " if n == 0 else "          ") + line for n, line in enumerate(hooks["lines"]))
     return kernel.Result(data, "\n".join(lines))

@@ -18,6 +18,10 @@ hooks: `spud hook <event>` is the harness's entry point (payload on stdin, answe
        stdout); `spud settings sync` installs the seven events into .claude/settings.json.
        Enforcing hooks fail closed (exit 2), recording hooks fail open (spool, then
        hook.error events).  Inspect the database with `spud sql --readonly '<statement>'`.
+       A session loads them from the directory it was launched in (CLAUDE_PROJECT_DIR),
+       so one launched outside the home and outside every registered project's checkout
+       runs none of them and nothing it does is recorded or guarded (SPW-003):
+       `spud session show` and `spud doctor` say so, and name the fix.
 
 deliverable globs (--deliverable): repository-relative, no leading slash and no `..`;
        `*` and `?` match inside one path segment, `**` crosses segments, a trailing `/`
