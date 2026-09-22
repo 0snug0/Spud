@@ -15,9 +15,9 @@ class ReportTest(SpudTestCase):
         self.assertEqual(entry["title"], "SPD-001 done")
         self.assertRegex(entry["at"], r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$")
         events = self.home.json("events", "--kind", "report.entry")["events"]
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["body"], "- Next: commit; Eric decides SPD-002")
-        self.assertEqual(events[0]["data"]["title"], "SPD-001 done")
+        self.assertEqual(len(events), 2)  # init's own, and this one (SPW-001)
+        self.assertEqual(events[-1]["body"], "- Next: commit; Eric decides SPD-002")
+        self.assertEqual(events[-1]["data"]["title"], "SPD-001 done")
         outdir = self.home.path / "out"
         self.home.json("render", "--out", outdir)
         day = entry["at"][:10]
@@ -25,8 +25,9 @@ class ReportTest(SpudTestCase):
         lines = text.split("\n")
         self.assertEqual(lines[0], MARKER)
         self.assertEqual(lines[1], "# " + day)
-        self.assertEqual(lines[3], "## %s — SPD-001 done" % entry["at"][11:16])
-        self.assertEqual(lines[4], "- Next: commit; Eric decides SPD-002")
+        heading = "## %s — SPD-001 done" % entry["at"][11:16]
+        self.assertIn(heading, lines)  # after init's own entry, which leads the day this home was built (SPW-001)
+        self.assertEqual(lines[lines.index(heading) + 1], "- Next: commit; Eric decides SPD-002")
         self.assertTrue(text.endswith("\n"))
 
     def test_report_add_is_spuds(self):

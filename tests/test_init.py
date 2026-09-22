@@ -1,22 +1,33 @@
 """init, migrate, backup, config sync, doctor, and the CLI's error shapes."""
 
 import json
+import os
 import re
 import sqlite3
+import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import (
     EXIT_ERROR,
+    EXIT_OWNERSHIP,
     EXIT_USAGE,
     Home,
     RepoMixin,
     SpudTestCase,
+    init_report_day,
+    isolated_git_env,
+    load_spud_module,
     real_config,
 )
 
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
+# SPW-001: what `spud init` writes into a home besides the database (design sections 2.2 and 4.1).
+SCAFFOLDING = ("CLAUDE.md", "ledger/Home.md", "ledger/Spud.md", "ledger/Board.base", "ledger/Fleet.base",
+               "ledger/_templates/ticket.md", "ledger/_templates/spudagent.md")
+DIRECTORIES = ("ledger/tickets", "ledger/teams", "reports", "docs/spikes", "docs/design")
 
 TABLES = {
     "projects",
@@ -193,6 +204,20 @@ class InitTest(SpudTestCase):
         after = set((REPO / "bin").rglob("*.pyc"))
         self.assertEqual(after - before, set())
 
+    def test_init_leaves_the_scaffolding_the_directories_and_the_pointer(self):
+        """SPW-001 steps 4 and 5, as every scratch home now gets them (this class runs init cold, warm_cache False)."""
+        for rel in SCAFFOLDING:
+            path = self.home.path / rel
+            self.assertTrue(path.is_file(), rel)
+            self.assertNotIn("{{", path.read_text(encoding="utf-8"), rel)  # no mark reaches a home unrendered
+        for rel in DIRECTORIES:
+            self.assertTrue((self.home.path / rel).is_dir(), rel)
+        pointer = self.home.path / ".user-config" / "home"  # helpers.Home's scratch SPUD_CONFIG_DIR
+        self.assertEqual(pointer.read_text(encoding="utf-8").strip(), str(self.home.path))
+        spud_md = (self.home.path / "ledger" / "Spud.md").read_text(encoding="utf-8")
+        self.assertIn("name: Spud", spud_md)
+        self.assertIn("model: %s" % real_config()["identity"]["model"], spud_md)
+
     def test_help_says_the_hooks_bind_and_check_as(self):
         text = self.home.run("--help").stdout
         self.assertIn("--as", text)
@@ -243,7 +268,9 @@ class EmptyRegistryTest(RepoMixin, SpudTestCase):
         project claims sessions, which is right, because the only sessions carrying ledger hooks are sessions in the
         home -- and a session in the home is Spud's either way."""
         self.assertEqual(self.cli("board").stdout.strip(), "(none)")
-        self.assertEqual(self.cli_json("render", actor="spud")["written"], ["ledger/Projects.md"])
+        # SPW-001: init's own report entry (step 3) is the one row a home starts with, so the first render writes its day
+        # too -- the day the ledger says init wrote, not the day this line runs, so a run at midnight reads the same
+        self.assertEqual(self.cli_json("render", actor="spud")["written"], ["ledger/Projects.md", init_report_day(self.home)])
         self.assertIn("project   none:", self.cli("session", "show").stdout)
         base = {"session_id": SESSION, "transcript_path": "/tmp/x.jsonl", "cwd": str(self.home.path), "permission_mode": "default"}
         start = self.home.hook("SessionStart", dict(base, hook_event_name="SessionStart", source="startup"))
@@ -292,6 +319,395 @@ class EmptyRegistryTest(RepoMixin, SpudTestCase):
         self.cli("config", "sync")
         self.assertEqual(self.home.rows("SELECT ticket_prefix, team_prefix FROM projects"), [{"ticket_prefix": "SPD", "team_prefix": "SPUD"}])
         self.assertEqual(self.cli_json("doctor")["problems"], [])
+
+
+class MachineMixin(RepoMixin):
+    """A machine with no Spud on it: no `~/.config/spud`, no home, no `~/.claude`, no LaunchAgents -- the four environment
+    overrides that make the ticket's definition of done a test rather than a hand ritual (SPW-001 design section 9) --
+    and a fresh clone of the tool whose own `bin/spud` is the launcher, so `tool_root()` finds a main checkout the way it
+    does for a person who has just cloned and has nothing else."""
+
+    # The first project's directory name, chosen rather than left to mkdtemp, because init derives the default project
+    # key from it: `_` is a character registry.PROJECT_KEY_RE rejects, so the key is sanitized and the display name is
+    # not, and a name mkdtemp chose would carry an underscore only some of the time -- a test that reads both must be
+    # able to say they differ every run.  test_the_project_key_default_is_sanitized_and_never_guessed pins the rule.
+    REPO_DIR = "My_Notes"
+    REPO_KEY = "my-notes"
+
+    def machine(self):
+        self.tool = self.make_tool()
+        scratch = self.scratch_dir("spud-machine-")
+        self.config_dir = scratch / "config"
+        self.target = scratch / "SpudHome"  # deliberately absent: init creates it
+        self.pointer = self.config_dir / "home"
+        env = isolated_git_env()
+        for name in ("SPUD_HOME", "SPUD_TOOL_DIR", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR", "SPUD_SUITE_PYCACHE"):
+            env.pop(name, None)
+        env.update(SPUD_CONFIG_DIR=str(self.config_dir), SPUD_USER_CLAUDE_DIR=str(scratch / "user-claude"),
+                   SPUD_LAUNCH_AGENTS_DIR=str(scratch / "LaunchAgents"), SPUD_GH="off")
+        self.env = env
+        return scratch
+
+    def spud(self, *args, check=True, cwd=None, session=None, launcher=None, env=None):
+        """The scratch clone's own launcher, from `cwd` (default the clone), with stdin a pipe -- so `isatty()` is false
+        and no value is ever prompted for, which is how a scripted run and the suite see init."""
+        e = dict(self.env, **(env or {}))
+        if session is not None:
+            e["CLAUDE_CODE_SESSION_ID"] = session
+        cmd = [sys.executable, "-I", "-S", str(launcher or (self.tool / "bin" / "spud"))] + [str(a) for a in args]
+        proc = subprocess.run(cmd, capture_output=True, text=True, env=e, cwd=str(cwd or self.tool), input="")
+        if check and proc.returncode != 0:
+            raise AssertionError("spud %s exited %d\nstdout: %s\nstderr: %s" % (" ".join(str(a) for a in args), proc.returncode, proc.stdout, proc.stderr))
+        return proc
+
+    def init_argv(self, *extra, home=None, project=True):
+        argv = ["init", "--home", home or self.target]
+        argv += (["--project-root", self.repo] if project else ["--no-project"])
+        return argv + ["--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS", *extra]
+
+    def scaffolding_state(self):
+        return {rel: (self.target / rel).read_text(encoding="utf-8") for rel in SCAFFOLDING}
+
+
+class FreshMachineTest(MachineMixin, unittest.TestCase):
+    """SPW-001 phase 3: `spud init` from a fresh clone on a machine that has never had a home (design sections 2.2 and 8).
+
+    The steps it proves are 1 to 5 -- the config, the database, the first project with its report entry, the vault
+    scaffolding, the pointer.  Steps 6 to 10 (settings sync, project install, the LaunchAgents, the render, doctor) are
+    phase 4's, so nothing here asserts a hook line or an installed project; `doctor` is still green without them."""
+
+    def setUp(self):
+        self.machine()
+        self.repo = self.make_repo("mine-", origin=True, name=self.REPO_DIR)
+
+    def test_init_builds_a_home_from_nothing(self):
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["home"], str(self.target))
+        self.assertEqual(out["how"], "--home")
+        # 1. the config, rendered from the shipped template and cleared by config_problems (doctor runs it)
+        config = json.loads((self.target / "spud.config.json").read_text(encoding="utf-8"))
+        self.assertEqual((config["tickets"]["prefix"], config["teams"]["prefix"]), ("ZZZ", "ZZZS"))
+        self.assertEqual(config["identity"]["name"], "Spud")
+        self.assertEqual(config["identity"]["pronouns"], {"subject": "he", "object": "him", "possessive": "his"})
+        self.assertEqual(config["naming"]["pool"], real_config()["naming"]["pool"])
+        self.assertNotIn("{{", (self.target / "spud.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(self.spud("--json", "doctor").stdout)["problems"], [])
+        # 2. the database
+        con = sqlite3.connect(self.target / ".spud" / "ledger.db")
+        try:
+            self.assertEqual(con.execute("PRAGMA user_version").fetchone()[0], SCHEMA)
+            self.assertEqual(con.execute("PRAGMA journal_mode").fetchone()[0], "wal")
+            con.row_factory = sqlite3.Row
+            # 3. the first project: id 1, the flags' prefixes, and project add's own defaults for the rest
+            rows = [dict(r) for r in con.execute("SELECT * FROM projects").fetchall()]
+            events = [dict(r) for r in con.execute("SELECT actor, kind, body FROM events ORDER BY id").fetchall()]
+        finally:
+            con.close()
+        self.assertEqual(len(rows), 1, rows)
+        row = rows[0]
+        # the key is the directory name sanitized towards registry.PROJECT_KEY_RE; the display name is that name as it is
+        self.assertEqual((row["id"], row["key"], row["name"]), (1, self.REPO_KEY, self.REPO_DIR))
+        self.assertEqual((row["ticket_prefix"], row["team_prefix"]), ("ZZZ", "ZZZS"))
+        self.assertEqual((row["sessions"], row["landing"], row["default_branch"]), ("claim", "merge", "main"))
+        self.assertEqual(row["root_path"], str(self.repo))
+        self.assertEqual(row["remote"], str(self.origin))
+        self.assertEqual([e["kind"] for e in events], ["project.added", "report.entry"])
+        self.assertTrue(all(e["actor"] == "spud" for e in events), events)  # init resolves no actor (design 2.3)
+        self.assertIn("Spud initialized at %s" % self.target, out["report_entry"]["title"])
+        # 4. the scaffolding and the directories
+        self.assertEqual(out["scaffolding"]["written"], list(SCAFFOLDING))
+        self.assertEqual(out["scaffolding"]["dropped_lines"], 0)  # a project is registered, so every line is renderable
+        for rel, text in self.scaffolding_state().items():
+            self.assertNotIn("{{", text, rel)
+            for path in (self.target, self.tool, self.repo):  # {{memory_dir}} spells the home's path with hyphens
+                text = text.replace(str(path), "").replace(str(path).replace("/", "-").replace(".", "-"), "")
+            self.assertNotIn("/Users/", text, rel)  # no shipped file names a machine's own path (SPW-002's rule)
+        for rel in DIRECTORIES:
+            self.assertTrue((self.target / rel).is_dir(), rel)
+        claude = (self.target / "CLAUDE.md").read_text(encoding="utf-8")
+        for fact in (str(self.target), str(self.tool), str(self.tool / "bin" / "spud"), str(self.repo), "ZZZ-nnn", "ZZZS-nnn", self.REPO_KEY):
+            self.assertIn(fact, claude, fact)
+        # 5. the pointer, and the home resolvable through it alone
+        self.assertEqual(self.pointer.read_text(encoding="utf-8").strip(), str(self.target))
+        self.assertEqual(json.loads(self.spud("--json", "doctor").stdout)["spud_home"]["resolved_by"], "~/.config/spud/home")
+
+    def test_a_second_run_changes_nothing(self):
+        self.spud(*self.init_argv())
+        before = self.scaffolding_state()
+        stamps = {rel: (self.target / rel).stat().st_mtime_ns for rel in SCAFFOLDING}
+        proc = self.spud(*self.init_argv())
+        self.assertIn("kept %s" % (self.target / "spud.config.json"), proc.stdout)
+        self.assertIn("is up to date (user_version %d)" % SCHEMA, proc.stdout)
+        self.assertIn("project %s is registered already" % self.REPO_KEY, proc.stdout)
+        self.assertIn("no report entry: this run changed nothing", proc.stdout)
+        self.assertIn("nothing written, 7 kept", proc.stdout)
+        self.assertIn("already", proc.stdout.split("5. ")[1])
+        self.assertEqual(self.scaffolding_state(), before)  # never overwrites a file a person may have edited
+        self.assertEqual({rel: (self.target / rel).stat().st_mtime_ns for rel in SCAFFOLDING}, stamps)
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertNotIn("report_entry", out)
+        self.assertEqual(out["scaffolding"]["written"], [])
+        con = sqlite3.connect(self.target / ".spud" / "ledger.db")
+        try:
+            self.assertEqual(con.execute("SELECT count(*) FROM projects").fetchone()[0], 1)
+            self.assertEqual(con.execute("SELECT count(*) FROM events WHERE kind = 'report.entry'").fetchone()[0], 1)
+        finally:
+            con.close()
+
+    def test_init_keeps_a_hand_edited_scaffolding_file_and_writes_back_a_missing_one(self):
+        """Section 6: the scaffolding is in hooks/hookio.SPUD_PATHS, Spud's hand-written set, so a second init must not
+        take an edit back -- and a run that finds a file gone writes that one and only that one."""
+        self.spud(*self.init_argv())
+        (self.target / "ledger" / "Home.md").write_text("mine\n", encoding="utf-8")
+        (self.target / "ledger" / "Spud.md").unlink()
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertEqual(out["scaffolding"]["written"], ["ledger/Spud.md"])
+        self.assertEqual(out["scaffolding"]["kept"], [rel for rel in SCAFFOLDING if rel != "ledger/Spud.md"])
+        self.assertEqual((self.target / "ledger" / "Home.md").read_text(encoding="utf-8"), "mine\n")
+        self.assertIn("name: Spud", (self.target / "ledger" / "Spud.md").read_text(encoding="utf-8"))
+
+    def test_a_config_already_there_is_left_alone_and_is_authoritative(self):
+        """Section 6's first rule, and the reason for it: doctor compares project 1's prefixes with the config's, so the
+        prefixes init writes into the row must be the ones the config on disk carries."""
+        self.target.mkdir(parents=True)
+        (self.target / "spud.config.json").write_text(json.dumps(dict(real_config()), indent=2), encoding="utf-8")
+        proc = self.spud(*self.init_argv("--ticket-prefix", "ZZZ"), check=False)
+        self.assertEqual(proc.returncode, EXIT_USAGE, proc.stderr)
+        self.assertIn("--ticket-prefix ZZZ differs from the spud.config.json already in", proc.stderr)
+        self.assertIn("which carries SPD", proc.stderr)
+        proc = self.spud("init", "--home", self.target, "--project-root", self.repo)  # no prefix flags: the config's
+        self.assertIn("kept %s" % (self.target / "spud.config.json"), proc.stdout)
+        con = sqlite3.connect(self.target / ".spud" / "ledger.db")
+        try:
+            self.assertEqual(list(con.execute("SELECT ticket_prefix, team_prefix FROM projects").fetchone()), ["SPD", "SPUD"])
+        finally:
+            con.close()
+        self.assertEqual(json.loads(self.spud("--json", "doctor").stdout)["problems"], [])
+        for flag in ("--name", "--pronouns"):
+            proc = self.spud("init", "--home", self.target, "--no-project", flag, "x", check=False)
+            self.assertEqual(proc.returncode, EXIT_USAGE, proc.stderr)
+            self.assertIn("%s has nothing to write" % flag, proc.stderr)
+
+    def test_the_project_key_default_is_sanitized_and_never_guessed(self):
+        """The rule homeinit.project_key_for documents: the default key is the root's directory name lower-cased and
+        sanitized towards registry.PROJECT_KEY_RE, while the display name is that directory name as it is -- and a name
+        that cannot become a key at all is refused, naming --project-key, rather than guessed at."""
+        for directory, key in (("My_Notes", "my-notes"), ("Notes (2026)!", "notes-2026"), ("UPPER.CASE", "upper-case")):
+            repo = self.make_repo("keys-", name=directory)
+            home = self.scratch_dir("key-home-") / "SpudHome"
+            out = json.loads(self.spud("--json", "init", "--home", home, "--repoint", "--project-root", repo,
+                                       "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS").stdout)
+            self.assertEqual((out["project"]["key"], out["project"]["name"]), (key, directory), directory)
+        # "2026" sanitizes to "2026", which the pattern rejects: a key must start with a letter, and init says so
+        refused = self.spud("init", "--home", self.scratch_dir("key-home-") / "SpudHome", "--repoint", "--project-root",
+                            self.make_repo("keys-", name="2026"), "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS", check=False)
+        self.assertEqual(refused.returncode, EXIT_ERROR, refused.stderr)
+        self.assertIn("--project-key '2026' must be lower-case letters, digits and hyphens, starting with a letter", refused.stderr)
+        self.assertIn("init refused", refused.stderr)
+
+    def test_the_identity_flags_reach_the_config(self):
+        self.spud(*self.init_argv("--name", "Tater", "--pronouns", "they/them/their", project=False))
+        config = json.loads((self.target / "spud.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["identity"]["name"], "Tater")
+        self.assertEqual(config["identity"]["pronouns"], {"subject": "they", "object": "them", "possessive": "their"})
+        self.assertIn("name: Tater", (self.target / "ledger" / "Spud.md").read_text(encoding="utf-8"))
+        proc = self.spud("init", "--home", self.scratch_dir("other-home-"), "--repoint", "--no-project",
+                         "--ticket-prefix", "YYY", "--team-prefix", "YYYS", "--pronouns", "they/them", check=False)
+        self.assertEqual(proc.returncode, EXIT_USAGE, proc.stderr)
+        self.assertIn("--pronouns is subject/object/possessive", proc.stderr)
+
+    def test_no_project_leaves_an_empty_registry_and_drops_the_lines_about_one(self):
+        out = json.loads(self.spud("--json", *self.init_argv(project=False)).stdout)
+        self.assertIsNone(out["project"])
+        self.assertEqual(json.loads(self.spud("--json", "project", "list").stdout)["projects"], [])
+        self.assertGreater(out["scaffolding"]["dropped_lines"], 0)
+        self.assertIn("left out, for want of one", out["done"][-2])
+        for rel in ("CLAUDE.md", "ledger/Home.md"):
+            text = (self.target / rel).read_text(encoding="utf-8")
+            self.assertNotIn("{{", text, rel)
+            self.assertNotIn("**project", text, rel)
+        report = json.loads(self.spud("--json", "doctor").stdout)
+        self.assertEqual(report["problems"], [])
+        self.assertTrue(any("no project is registered" in n for n in report["notes"]), report["notes"])
+        self.assertIn("--ticket-prefix ZZZ --team-prefix ZZZS", " ".join(report["notes"]))  # the config's, waiting for a project
+
+    def test_the_main_branch_lets_init_dry_run_where_every_other_command_cannot(self):
+        """design 2.3's first trap, as a regression test: main resolves the home before it dispatches, so `spud init`
+        never ran on a machine with no SPUD_HOME and no pointer -- which is every machine before its first init."""
+        self.assertFalse(self.pointer.exists())
+        self.assertNotIn("SPUD_HOME", self.env)
+        out = json.loads(self.spud("--json", *self.init_argv("--dry-run")).stdout)
+        self.assertTrue(out["ok"])
+        self.assertTrue(out["dry_run"])
+        self.assertEqual(len(out["steps"]), 5)  # 1 to 5; 6 to 10 arrive with finish_install
+        self.assertIn("the preconditions hold", self.spud(*self.init_argv("--dry-run")).stdout)
+        self.assertFalse(self.target.exists())  # writes nothing at all
+        self.assertFalse(self.config_dir.exists())
+        for argv in (["board"], ["doctor"], ["migrate"], ["project", "list"], ["--as", "spud", "render"]):
+            failed = self.spud(*argv, check=False)
+            self.assertEqual(failed.returncode, EXIT_ERROR, argv)
+            self.assertIn("cannot find Spud's home: set SPUD_HOME, or write the home's path to", failed.stderr, argv)
+        bare = self.spud("init", "--dry-run", check=False)  # and with no --home there is nothing to build
+        self.assertEqual(bare.returncode, EXIT_USAGE, bare.stderr)
+        self.assertIn("no home to build: give `--home <dir>` (~/SpudHome is the usual choice)", bare.stderr)
+        self.assertNotIn("cannot find Spud's home", bare.stderr)
+
+    def test_dry_run_takes_the_home_from_spud_home_and_from_the_pointer(self):
+        out = json.loads(self.spud("--json", "init", "--dry-run", "--no-project", "--ticket-prefix", "ZZZ",
+                                   "--team-prefix", "ZZZS", env={"SPUD_HOME": str(self.target)}).stdout)
+        self.assertEqual((out["home"], out["how"]), (str(self.target), "SPUD_HOME"))
+        self.spud(*self.init_argv(project=False))
+        out = json.loads(self.spud("--json", "init", "--dry-run").stdout)  # the pointer alone, and the config's values
+        self.assertEqual((out["home"], out["how"]), (str(self.target), "~/.config/spud/home"))
+
+    def test_the_actor_trap(self):
+        """design 2.3: init registers a repository as a `claim` project, which makes the session doing the work
+        unclaimed in a claim project -- exactly what actors.require_spud refuses.  So init resolves no actor at all."""
+        refused = self.spud("--as", "SPUW-001/Ranger", *self.init_argv("--dry-run"), check=False)
+        self.assertEqual(refused.returncode, EXIT_OWNERSHIP, refused.stderr)
+        self.assertIn("init resolves no actor", refused.stderr)
+        self.assertIn("--as SPUW-001/Ranger", refused.stderr)
+        self.assertFalse(self.target.exists())
+        self.spud("--as", "spud", *self.init_argv("--dry-run"))
+        # the regression: a session launched in the repository init is about to register, with the work being done there
+        out = json.loads(self.spud("--json", *self.init_argv(), cwd=self.repo, session=SESSION).stdout)
+        self.assertTrue(out["ok"])
+        self.assertEqual(out["project"]["sessions"], "claim")
+        self.assertEqual(json.loads(self.spud("--json", "init", cwd=self.repo, session=SESSION).stdout)["ok"], True)
+
+    def test_next_goes_on_the_report_entry_init_writes(self):
+        out = json.loads(self.spud("--json", *self.init_argv("--next", "Open the vault in Obsidian.")).stdout)
+        self.assertIn("- Next: Open the vault in Obsidian.", out["report_entry"]["body"])
+        self.assertIn("Project %s:" % self.REPO_KEY, out["report_entry"]["body"])
+        empty = self.spud(*self.init_argv("--next", ""), check=False)
+        self.assertEqual(empty.returncode, EXIT_USAGE, empty.stderr)
+        self.assertIn("--next is empty", empty.stderr)
+        again = self.spud(*self.init_argv("--next", "Twice."), check=False)  # a second run writes no entry to put it on
+        self.assertEqual(again.returncode, EXIT_USAGE, again.stderr)
+        self.assertIn("--next has no report entry to go on", again.stderr)
+
+    def test_a_step_that_fails_names_the_steps_that_completed_and_removes_nothing(self):
+        """design 2.4: init never removes anything, the message names every step that completed, and a rerun continues.
+        The failure here is step 3's own: a second repository cannot take project 1's prefixes (registry.check_prefixes)."""
+        self.spud(*self.init_argv())
+        other = self.make_repo("other-")
+        proc = self.spud("init", "--home", self.target, "--project-root", other, "--project-key", "other", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stderr)
+        self.assertIn("init stopped after:", proc.stderr)
+        self.assertIn("1. kept", proc.stderr)
+        self.assertIn("2. %s is up to date" % (self.target / ".spud" / "ledger.db"), proc.stderr)
+        self.assertIn("prefix ZZZ is project %s's already" % self.REPO_KEY, proc.stderr)
+        self.assertIn("nothing init wrote is removed", proc.stderr)
+        con = sqlite3.connect(self.target / ".spud" / "ledger.db")
+        try:
+            self.assertEqual([r[0] for r in con.execute("SELECT key FROM projects").fetchall()], [self.REPO_KEY])
+        finally:
+            con.close()
+        self.spud(*self.init_argv())  # and the home is still usable, unchanged
+
+
+class InitRefusalTest(MachineMixin, unittest.TestCase):
+    """Each of the design's section 6 refusals, with its own message, before anything is written.  Five are
+    `homemove.move_preconditions`', one is the pointer's, one is the first project's shape, and one is the interpreter's."""
+
+    def setUp(self):
+        self.machine()
+        self.repo = self.make_repo("mine-", origin=True, name=self.REPO_DIR)
+
+    def refused(self, *args, code=EXIT_ERROR):
+        proc = self.spud(*args, check=False)
+        self.assertEqual(proc.returncode, code, proc.stderr)
+        self.assertFalse((self.target / ".spud").exists())  # nothing written on a refusal
+        return proc.stderr
+
+    def test_the_target_is_not_a_directory(self):
+        self.target.parent.mkdir(parents=True, exist_ok=True)
+        self.target.write_text("a file\n", encoding="utf-8")
+        self.assertIn("exists and is not a directory", self.refused(*self.init_argv()))
+
+    def test_the_target_is_not_empty_and_is_no_spud_home(self):
+        (self.target / "notes").mkdir(parents=True)
+        (self.target / "a.txt").write_text("x", encoding="utf-8")
+        message = self.refused(*self.init_argv())
+        self.assertIn("is not an empty directory and is no Spud home", message)
+        self.assertIn("a.txt, notes", message)
+
+    def test_the_target_inside_a_git_work_tree(self):
+        message = self.refused(*self.init_argv(home=self.repo / "SpudHome"))
+        self.assertIn("is inside a git work tree", message)
+        self.assertIn("the home is a plain directory", message)
+
+    def test_the_pointer_names_another_home_unless_repointed(self):
+        first = self.scratch_dir("first-home-")
+        self.spud("init", "--home", first, "--no-project", "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS")
+        message = self.refused(*self.init_argv())
+        self.assertIn("names %s, not %s" % (first, self.target), message)
+        self.assertIn("--repoint", message)
+        out = json.loads(self.spud("--json", *self.init_argv("--repoint")).stdout)
+        self.assertTrue(out["pointer"]["written"])
+        self.assertEqual(self.pointer.read_text(encoding="utf-8").strip(), str(self.target))
+        self.assertIn("that home is untouched", out["done"][-1])
+        self.assertTrue((first / ".spud" / "ledger.db").is_file())  # the orphaned home is left exactly as it was
+
+    def test_spud_home_names_another_home(self):
+        """After init the shell's SPUD_HOME beats the pointer in resolve_home, so the person would be working on a home
+        other than the one init just built."""
+        elsewhere = self.scratch_dir("elsewhere-")
+        proc = self.spud(*self.init_argv(), check=False, env={"SPUD_HOME": str(elsewhere)})
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stderr)
+        self.assertIn("SPUD_HOME is %s, not %s" % (elsewhere, self.target), proc.stderr)
+        self.assertFalse(self.target.exists())
+
+    def test_the_running_launcher_is_in_a_linked_worktree(self):
+        worktree = self.add_worktree(self.tool, "wt")
+        message = self.spud(*self.init_argv(), check=False, launcher=worktree / "bin" / "spud").stderr
+        self.assertIn("the running bin/spud is in a linked worktree", message)
+        self.assertIn(str(worktree), message)
+        self.assertFalse(self.target.exists())
+
+    def rooted(self, root, ticket="ZZZ", team="ZZZS", *extra):
+        return self.refused("init", "--home", self.target, "--project-root", root, "--ticket-prefix", ticket, "--team-prefix", team, *extra)
+
+    def test_the_first_projects_root(self):
+        inside = self.repo / "sub"
+        inside.mkdir()
+        self.assertIn("is not a git repository with a work tree", self.rooted(self.scratch_dir("not-a-repo-")))
+        self.assertIn("is not an existing directory", self.rooted(self.repo / "nope"))
+        self.assertIn("not its root; register the root", self.rooted(inside))
+        self.assertIn("is a linked worktree; register the main checkout", self.rooted(self.add_worktree(self.repo, "mine-wt")))
+
+    def test_the_first_projects_key_and_prefixes(self):
+        self.assertIn("--project-key 'Mine' must be lower-case", self.rooted(self.repo, "ZZZ", "ZZZS", "--project-key", "Mine"))
+        self.assertIn("--project-key home is reserved", self.rooted(self.repo, "ZZZ", "ZZZS", "--project-key", "home"))
+        self.assertIn("--ticket-prefix 'zzz' must be upper-case", self.rooted(self.repo, "zzz"))
+        self.assertIn("--team-prefix 'zz-1' must be upper-case", self.rooted(self.repo, "ZZZ", "zz-1"))
+        self.assertIn("must differ (both ZZZ)", self.rooted(self.repo, "ZZZ", "ZZZ"))
+
+    def test_the_prefixes_have_no_default_when_a_config_is_written(self):
+        message = self.refused("init", "--home", self.target, "--project-root", self.repo, code=EXIT_USAGE)
+        self.assertIn("has no spud.config.json yet, and a config carries the two prefixes", message)
+        self.assertIn("--ticket-prefix XXX --team-prefix XXXS", message)
+        self.assertFalse(self.target.exists())
+
+    def test_the_home_is_the_home_and_never_a_project(self):
+        self.spud(*self.init_argv(project=False))
+        message = self.spud("init", "--home", self.target, "--project-root", self.target, "--project-key", "mine", check=False).stderr
+        self.assertIn("is Spud's home, which is not a project", message)
+
+    def test_the_interpreter_must_be_3_14(self):
+        """The one refusal a subprocess cannot stage: doctor makes a wrong interpreter a problem, so init cannot end
+        green without it, and `init_preconditions` is called here directly with the version faked."""
+        spud = load_spud_module()
+        ctx = spud.Ctx(self.target, "--home", False, tool=self.tool)
+        args = mock.Mock(repoint=False, yes=True, home=str(self.target), landing="merge", sessions="claim")
+        plan = {"config_exists": False, "ticket_prefix": "ZZZ", "team_prefix": "ZZZS", "project_root": None,
+                "project_key": None, "project_name": None}
+        with mock.patch.dict(os.environ, {"SPUD_CONFIG_DIR": str(self.config_dir)}, clear=False):
+            os.environ.pop("SPUD_HOME", None)
+            self.assertEqual(spud.init_preconditions(ctx, args, plan), [])
+            with mock.patch.object(sys, "version_info", (3, 13, 2, "final", 0)):
+                self.assertEqual(spud.init_preconditions(ctx, args, plan), ["interpreter is Python 3.13.2, not 3.14"])
 
 
 class WithoutDatabaseTest(unittest.TestCase):

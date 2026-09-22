@@ -8,6 +8,7 @@ import hashlib
 import json
 import sys
 import unittest
+from pathlib import Path
 
 from helpers import EXIT_ERROR, EXIT_OK, RepoMixin, SpudTestCase, git
 
@@ -286,8 +287,16 @@ class InstallTest(RepoMixin, SpudTestCase):
     def test_the_install_record_keeps_what_uninstall_needs(self):
         self.install()
         record = json.loads(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))
+        # SPW-001: `spud init` writes the pointer itself now (step 5), so install finds it there and records False; the
+        # write below is the only way the record's True arises any more -- a home whose pointer was removed by hand.
         self.assertEqual({k: record[k] for k in ("path", "created_file", "original", "added_additional_dir", "added_exclude", "wrote_pointer")},
-                         {"path": str(self.local), "created_file": False, "original": BADTAKES_LOCAL, "added_additional_dir": True, "added_exclude": True, "wrote_pointer": True})
+                         {"path": str(self.local), "created_file": False, "original": BADTAKES_LOCAL, "added_additional_dir": True, "added_exclude": True, "wrote_pointer": False})
+        pointer = Path(self.home.env["SPUD_CONFIG_DIR"]) / "home"
+        self.assertEqual(pointer.read_text(encoding="utf-8").strip(), str(self.home.path))
+        pointer.unlink()
+        self.cli("project", "sync", "badtakes", actor="spud")
+        self.assertTrue(json.loads(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))["wrote_pointer"])
+        self.assertEqual(pointer.read_text(encoding="utf-8").strip(), str(self.home.path))
         self.assertEqual(record["agent_sha256"], hashlib.sha256(self.rendered().encode("utf-8")).hexdigest())
         shown = self.cli_json("project", "show", "badtakes")["project"]
         self.assertNotIn("original", shown["install_record"])

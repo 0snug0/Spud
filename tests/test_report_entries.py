@@ -14,6 +14,7 @@ import re
 import subprocess
 import tarfile
 import unittest
+from pathlib import Path
 
 from helpers import (
     EXIT_ERROR,
@@ -24,6 +25,7 @@ from helpers import (
     MARKER,
     REPO,
     SpudTestCase,
+    init_report_day,
 )
 
 ISO_WITH_OFFSET = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$")
@@ -315,7 +317,8 @@ class RefusedCommandTest(EntryCase):
         self.home.json("proposal", "decide", str(p["id"]), "--decision", "escalate", actor=russet["ref"])
         self.refused(EXIT_ERROR, "proposal", "decide", str(p["id"]), "--decision", "escalate", "--next", "y")
         self.refused(EXIT_ERROR, "ticket", "move", "SPD-404", "--status", "active", "--next", "y")
-        self.assertEqual([e["data"]["title"] for e in self.entries()], ["SPD-001 created (queued, P2): Refusals"])
+        self.assertEqual([e["data"]["title"] for e in self.entries()][1:],  # [0] is init's own (SPW-001)
+                         ["SPD-001 created (queued, P2): Refusals"])
 
 
 class OutputTest(EntryCase):
@@ -366,7 +369,8 @@ class ReportDayTest(EntryCase):
         self.home.json("ticket", "move", t["key"], "--status", "done", "--next", "Nothing left.", actor="spud")
         self.home.json("report", "add", "Installed", "--next", "Nothing.", actor="spud")
         events = self.entries()
-        self.assertEqual([e["data"].get("generated") for e in events], [None, "ticket new", "member finish", "ticket move", None])
+        # SPW-001: init's own entry is every home's first, and this day file is the day it was built
+        self.assertEqual([e["data"].get("generated") for e in events], ["init", None, "ticket new", "member finish", "ticket move", None])
         return events
 
     def test_a_day_renders_each_entry_as_its_heading_then_its_body_lines_in_order(self):
@@ -427,7 +431,8 @@ class RenderedDaysPinTest(SpudTestCase):
         self.assertEqual(self.home.json("import", src / "reports")["reports"], len(days))
         out = self.home.path / "out"
         self.home.json("render", "--out", out)
-        self.assertEqual(sorted(p.name for p in (out / "reports").glob("*.md")), PINNED_DAYS)
+        # the pinned days, and today's, which holds the report entry `spud init` wrote when this home was built (SPW-001)
+        self.assertEqual(sorted(p.name for p in (out / "reports").glob("*.md")), sorted(PINNED_DAYS + [Path(init_report_day(self.home)).name]))
         for path in days:
             self.assertEqual((out / "reports" / path.name).read_bytes(), path.read_bytes(), path.name)
 

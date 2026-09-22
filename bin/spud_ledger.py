@@ -143,7 +143,15 @@ def main(argv=None):
         args = cliparser.build_parser().parse_args(cliparser.normalize_argv(argv))
     ctx = None
     try:
-        home, how = homeconf.resolve_home(os.environ)
+        if getattr(args, "command", None) == "init":
+            # SPW-001: resolve_home raises on a machine with no SPUD_HOME and no pointer, which is every fresh machine,
+            # and `spud init` is the command that has to run there.  One branch beside the two hook branches above, and
+            # the command module imported in it the way cliparser is: resolve_home, which every hook runs, is untouched.
+            from spudlib.commands import homeinit
+
+            home, how = homeinit.init_ctx(os.environ, args)
+        else:
+            home, how = homeconf.resolve_home(os.environ)
         ctx = homeconf.Ctx(home, how, args.json)
         actors.ACTIVE_CTX[:] = [ctx]
         result = args.func(ctx, args)

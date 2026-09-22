@@ -77,6 +77,14 @@ def setup(launcher):
     config = write_config(home)
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR")}
     env.update(SPUD_HOME=home, SPUD_USER_CLAUDE_DIR=os.path.join(home, ".user-claude"), SPUD_CONFIG_DIR=os.path.join(home, ".user-config"))
+    # SPW-001: this home plays the tool, as it does for tests/helpers.py and the other probes, for two reasons that
+    # arrived with `spud init` building a home: init refuses to build one when the running bin/spud is in a linked
+    # worktree (design section 6, refusal 6) -- and the second launcher this probe is run with is exactly that -- and it
+    # writes the vault scaffolding from the tool's share/, so the scratch tool must ship it.  Both launchers get the
+    # same treatment, which is what the comparison needs; project 1 below still names the launcher's own checkout, so
+    # each hook reads the same row and lists the same worktrees as before.
+    env["SPUD_TOOL_DIR"] = home
+    os.symlink(os.path.join(os.path.dirname(os.path.dirname(HERE)), "share"), os.path.join(home, "share"), target_is_directory=True)
     subprocess.run([PY, "-I", "-S", launcher, "init"], env=env, check=True, capture_output=True)
     seed_project_one(home, config, os.path.dirname(os.path.dirname(launcher)))
     return home, env

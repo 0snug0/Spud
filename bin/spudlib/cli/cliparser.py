@@ -9,6 +9,7 @@ from ..commands import (
     admincmds,
     doctor,
     ghread,
+    homeinit,
     homemove,
     membercmds,
     prcmds,
@@ -59,8 +60,27 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", metavar="<command>")
     sub.required = True
 
-    p = sub.add_parser("init", help="create the database if absent, migrate if behind, refuse if ahead")
-    p.set_defaults(func=admincmds.cmd_init)
+    # SPW-001: init builds a home from nothing -- the config, the database, the first project, the vault scaffolding and
+    # the pointer -- so it is the one command that may run with no home to resolve (bin/spud_ledger.main's own branch),
+    # and every value it needs is a flag, prompted for only when stdin is a tty.
+    p = sub.add_parser("init", help="build a home from nothing: the config, the database (created, or migrated if behind), the first project, the vault scaffolding, the ~/.config/spud/home pointer (Spud's)")
+    p.add_argument("--home", help="the home to build: a directory that does not exist or is empty, outside every git work tree (default: SPUD_HOME, else ~/.config/spud/home, else ~/SpudHome offered at the prompt)")
+    p.add_argument("--name", help="identity.name in the config written for a home that has none (default Spud)")
+    p.add_argument("--pronouns", help="identity.pronouns, subject/object/possessive (default he/him/his)")
+    p.add_argument("--project-root", help="the first project's repository: its main checkout, registered as project 1, whose name and prefixes the config carries")
+    p.add_argument("--no-project", action="store_true", help="register no project: the home holds an empty registry, and no ticket until `project add`")
+    p.add_argument("--project-key", help="lower-case key, [a-z][a-z0-9-]{0,31}; home is reserved (default: the root's directory name)")
+    p.add_argument("--project-name", help="display name (default: the root's directory name)")
+    p.add_argument("--ticket-prefix", help="upper-case ticket prefix (SPD gives SPD-001): no default, and permanent once a ticket carries it")
+    p.add_argument("--team-prefix", help="upper-case team prefix (SPUD gives SPUD-001): no default")
+    p.add_argument("--landing", choices=("merge", "pr"), default="merge", help="how the first project's verified branch lands (default merge)")
+    p.add_argument("--sessions", choices=("claim", "always"), default="claim", help="claim (default): a session in the project is Spud only after /spud claims it")
+    p.add_argument("--default-branch", help="the first project's default branch (default: origin/HEAD's branch, else main)")
+    p.add_argument("--repoint", action="store_true", help="~/.config/spud/home names another home: point this machine here instead (that home is left untouched)")
+    p.add_argument("--yes", action="store_true", help="never prompt: every value not given takes its default, and one with no default is refused")
+    p.add_argument("--dry-run", action="store_true", help="check the preconditions and print the steps; write nothing")
+    p.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry init writes")
+    p.set_defaults(func=homeinit.cmd_init)
     p = sub.add_parser("migrate", help="apply pending migrations (backup first)")
     p.set_defaults(func=admincmds.cmd_migrate)
     p = sub.add_parser("backup", help="wal_checkpoint(TRUNCATE) then VACUUM INTO .spud/backups/; --daily keeps one checked copy a day, the newest 14 (Spud's)",
