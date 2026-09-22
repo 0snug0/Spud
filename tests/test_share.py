@@ -46,6 +46,23 @@ FLOW = {"[": "a flow sequence", "{": "a flow mapping", "&": "an anchor", "*": "a
 # session before there is a home for share/'s own templates to be rendered into.
 SPUD_INIT_SKILL = REPO / ".claude" / "skills" / "spud-init" / "SKILL.md"
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+# SPW-005: every top-level block the shipped config carries, and what reads it.  The config `spud init` writes is the one
+# file a person edits expecting an effect, so a block in it with no reader is a lie the program tells; the `ledger` block
+# that shipped until SPW-005 was one -- `format` read `markdown-v0` long after the ledger's format became `sqlite-v1`,
+# and `tickets`, `teams`, `reports` and `spikes` moved nothing, because `render/notefiles.render_targets` and
+# `commands/homeinit.DIRECTORIES` hard-code the vault's layout that `hooks/hookio.GENERATED_ROOTS`, `imports/accept`,
+# `imports/bulkimport`, `commands/homemove.COPIED_DIRS` and the shipped `Board.base` and `Fleet.base` all depend on.
+# The readers are named rather than found: `"ledger"` is all over `bin/` as a path segment, so any grep for a block's
+# name would have passed the very block this set exists to have caught.  Adding a block is naming its reader here.
+CONFIG_BLOCK_READERS = {
+    "identity": "core/shipped.marks (five marks), commands/homeinit",
+    "naming": "core/homeconf.Ctx.id_pad and config_problems, state/ledgerdb.sync_config_rows, state/ops (the pool)",
+    "personas": "core/homeconf.Ctx.persona_tier and Ctx.personas and config_problems, state/ops",
+    "limits": "core/homeconf.Ctx.limits and config_problems, commands/doctor",
+    "tickets": "tickets.prefix: core/shipped.marks, state/ledgerdb.sync_config_rows, core/homeconf.config_problems, commands/doctor",
+    "teams": "teams.prefix: core/shipped.marks, state/ledgerdb.sync_config_rows, core/homeconf.config_problems, commands/doctor",
+    "pricing": "render/prices.price_table, core/homeconf.Ctx.pricing, commands/doctor",
+}
 
 
 def skill_frontmatter(text):
@@ -426,6 +443,16 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertEqual((config["tickets"]["prefix"], config["teams"]["prefix"]), ("SPD", "SPUD"))
         self.assertEqual((config["identity"]["name"], config["identity"]["pronouns"]["object"]), ("Spud", "him"))
         self.assertEqual(spud.config_problems(config), [])
+
+    def test_every_block_it_ships_is_one_the_program_reads(self):
+        """SPW-005: no decorative key in the file every home starts from.  The `ledger` block is gone, and a block added
+        without a reader named in CONFIG_BLOCK_READERS fails here.  A home whose own config still carries `ledger` is a
+        separate promise, kept by `tests/test_init.UnknownConfigBlockTest`: nothing validates a config's key set, so an
+        extra block in a home is harmless and is never migrated away."""
+        config = json.loads((SHARE / "spud.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(config), sorted(CONFIG_BLOCK_READERS))
+        self.assertNotIn("ledger", config)
+        self.assertNotIn("markdown-v0", (SHARE / "spud.config.json").read_text(encoding="utf-8"))
 
 
 class ShippedSetTest(unittest.TestCase):

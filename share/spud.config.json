@@ -121,13 +121,6 @@
   "teams": {
     "prefix": "{{team_prefix}}"
   },
-  "ledger": {
-    "format": "markdown-v0",
-    "tickets": "ledger/tickets",
-    "teams": "ledger/teams",
-    "reports": "reports",
-    "spikes": "docs/spikes"
-  },
   "pricing": {
     "as_of": "2026-09-13",
     "source": "https://platform.claude.com/docs/en/about-claude/pricing",
