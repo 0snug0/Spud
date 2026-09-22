@@ -42,6 +42,22 @@ ADDRESS_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]*[A-Za-z]")
 KEY_RE = re.compile(r"([A-Za-z_][\w.]*):(?: (.*))?$")
 FLOW = {"[": "a flow sequence", "{": "a flow mapping", "&": "an anchor", "*": "an alias", "!": "a tag",
         "|": "a block scalar", ">": "a folded block scalar", "%": "a directive"}
+# The bootstrap skill (SPW-001 design section 5): it ships outside share/, at project scope, because it has to reach a
+# session before there is a home for share/'s own templates to be rendered into.
+SPUD_INIT_SKILL = REPO / ".claude" / "skills" / "spud-init" / "SKILL.md"
+FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+
+
+def skill_frontmatter(text):
+    """A skill's frontmatter as {key: value}, one line each -- the shape every skill in this repository uses (the
+    `/spud` skill's own SKILL_HEAD, `projects/sessions.py`), not full YAML."""
+    match = FRONTMATTER_RE.match(text)
+    assert match is not None, "no --- frontmatter block"
+    fields = {}
+    for line in match.group(1).split("\n"):
+        key, _, value = line.partition(":")
+        fields[key.strip()] = value.strip()
+    return fields
 
 
 class YamlRefusal(Exception):
@@ -439,6 +455,64 @@ class ShippedSetTest(unittest.TestCase):
             self.assertIn("ledger/Nothing.md", str(caught.exception))
         finally:
             home.cleanup()
+
+
+class SpudInitSkillTest(unittest.TestCase):
+    """`.claude/skills/spud-init/SKILL.md` (SPW-001 design section 5): the project-scope skill that reaches a fresh
+    clone of this repository with nothing installed at all, because the user-scope `/spud` skill cannot exist until
+    `spud init` has already built the home that `project install` writes it into.  Every bullet of section 5 that
+    the text itself can carry -- as opposed to `ShippedPathsTest`'s reach for the machine-path guard every shipped
+    file gets -- is asserted here, once, so a later edit of the skill cannot quietly drop one."""
+
+    def text(self):
+        self.assertTrue(SPUD_INIT_SKILL.is_file(), "%s is missing" % SPUD_INIT_SKILL.relative_to(REPO))
+        return SPUD_INIT_SKILL.read_text(encoding="utf-8")
+
+    def test_frontmatter_names_the_skill_spud_init_not_init(self):
+        # "init" would collide with Claude Code's own built-in /init (design section 5).
+        fields = skill_frontmatter(self.text())
+        self.assertEqual(fields.get("name"), "spud-init")
+        self.assertTrue(fields.get("description"), "no description")
+
+    def test_the_skill_runs_only_when_a_person_types_it(self):
+        # disable-model-invocation: true, as the /spud skill has (projects/sessions.SKILL_HEAD) -- never on the
+        # model's own initiative.
+        self.assertEqual(skill_frontmatter(self.text()).get("disable-model-invocation"), "true")
+
+    def test_the_skill_names_no_machine_and_nobody(self):
+        text = self.text()
+        self.assertNotIn("/Users/", text)
+        self.assertEqual(ADDRESS_RE.findall(text), [], text)
+
+    def test_the_skill_finds_the_repository_root_instead_of_spelling_one(self):
+        self.assertIn("rev-parse --show-toplevel", self.text())
+
+    def test_the_skill_carries_both_recipes_with_the_collision_warning_in_the_second(self):
+        text = self.text()
+        self.assertIn("--project-root", text)
+        recipe_1, recipe_2 = text.index("Recipe 1"), text.index("Recipe 2")
+        self.assertLess(recipe_1, recipe_2)
+        self.assertNotIn("collide", text[:recipe_2].lower())  # the warning belongs to the second recipe, not the first
+        self.assertIn("collide", text[recipe_2:].lower())
+
+    def test_the_skill_says_it_is_idempotent_and_names_doctor(self):
+        text = self.text()
+        self.assertIn("idempotent", text.lower())
+        self.assertIn("spud doctor", text)
+
+
+class InitReadmeAndClaudeMdTest(unittest.TestCase):
+    """The two files design section 5 asks for beside the skill itself."""
+
+    def test_the_readme_carries_the_one_command_a_fresh_clone_can_run(self):
+        readme = (REPO / "README.md").read_text(encoding="utf-8")
+        self.assertIn("bin/spud init", readme)
+        self.assertNotIn("/Users/", readme)
+        self.assertEqual(ADDRESS_RE.findall(readme), [], readme)
+
+    def test_the_tools_claude_md_names_the_skill(self):
+        claude_md = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("spud-init", claude_md)
 
 
 if __name__ == "__main__":
