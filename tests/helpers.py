@@ -82,6 +82,23 @@ EXIT_TRANSITION = 5
 EXIT_CONFLICT = 6
 
 
+# SPW-001: `spud init` writes one report entry of its own into every home it builds (design section 2.2, step 3), so a
+# fresh home is not an empty event log: it holds that entry, and a render writes today's day file for it.  A test about
+# what the caller wrote reads NOT_INIT_ENTRY; a test about a rendered tree expects init_report_day() beside the corpus'.
+INIT_ENTRY_TITLE = "Spud initialized at"
+NOT_INIT_ENTRY = "json_extract(data, '$.generated') IS NOT 'init'"
+
+
+def init_report_day(home=None):
+    """`reports/<day>.md` for the entry init wrote: read from the home's own first entry when one is given, so a run that
+    crosses midnight still names the day init wrote rather than the day the assertion ran; else today."""
+    if home is not None:
+        at = home.scalar("SELECT at FROM events WHERE kind = 'report.entry' AND json_extract(data, '$.generated') = 'init' ORDER BY id LIMIT 1")
+        if at:
+            return "reports/%s.md" % at[:10]
+    return "reports/%s.md" % datetime.now().astimezone().date().isoformat()
+
+
 def config_text():
     """The shipped config template rendered with the suite's marks (SPD/SPUD, Spud, he/him/his): what a scratch home holds."""
     text = CONFIG.read_text(encoding="utf-8")
@@ -178,6 +195,13 @@ class Home:
         self.config = config if config is not None else real_config()
         with open(self.path / "spud.config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=2)
+        # SPW-001: this home plays the tool (SPUD_TOOL_DIR below), and the tool ships share/ -- the config, CLAUDE.md and
+        # the vault scaffolding `spud init` writes through core/shipped.  A symlink, so every home reads the one copy in
+        # the repository and no test can write through it into the checkout (the files init writes are the home's own).
+        try:
+            os.symlink(REPO / "share", self.path / "share", target_is_directory=True)
+        except OSError:
+            shutil.copytree(REPO / "share", self.path / "share")
         if warm and SUITE_PYCACHE != "off":
             seed_pycache(self.path)
         self.env = dict(os.environ)
@@ -373,8 +397,14 @@ class RepoMixin:
         self.addCleanup(shutil.rmtree, path, True)
         return path
 
-    def make_repo(self, prefix="other-", branch="main", origin=False):
+    def make_repo(self, prefix="other-", branch="main", origin=False, name=None):
         repo = self.scratch_dir(prefix)
+        if name is not None:
+            # SPW-001: a repository whose directory name the test chooses, for the tests that read that name -- `spud
+            # init` derives the default project key from it, and a name mkdtemp chose carries an underscore some of the
+            # time, which the key sanitizes to a hyphen and the display name keeps.
+            repo = repo / name
+            repo.mkdir()
         git(repo, "init", "-q", "-b", branch)
         git(repo, "commit", "-q", "--allow-empty", "-m", "root")
         if origin:
@@ -393,10 +423,11 @@ class RepoMixin:
         return path
 
     def make_tool(self):
-        """A scratch main checkout playing the tool repository (SPD-097): this checkout's bin/ and its spudagent source,
-        committed on main, with .claude/settings.local.json ignored as the real repository ignores it."""
+        """A scratch main checkout playing the tool repository (SPD-097): this checkout's bin/ and share/ and its
+        spudagent source, committed on main, with .claude/settings.local.json ignored as the real repository ignores it."""
         tool = self.make_repo("tool-")
         shutil.copytree(REPO / "bin", tool / "bin", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(REPO / "share", tool / "share")  # SPW-001: what `spud init` writes a home from
         (tool / ".claude" / "agents").mkdir(parents=True)
         shutil.copyfile(REPO / ".claude" / "agents" / "spudagent.md", tool / ".claude" / "agents" / "spudagent.md")
         (tool / ".gitignore").write_text(".claude/settings.local.json\n", encoding="utf-8")

@@ -720,8 +720,8 @@ class HandEditAllowlistTest(SpudTestCase):
         path.write_text(text + "\n## 23:59 — Appended by hand\n- Next: by hand\n", encoding="utf-8")
         accepted = self.home.json("import", "--file", path, actor="spud")
         self.assertEqual(accepted["changed"], ["entries:1"])
-        # the three, and the entry setUp's ticket new wrote (SPD-011)
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'"), 4)
+        # the three, the entry setUp's ticket new wrote (SPD-011), and init's own (SPW-001)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'"), 5)
         self.home.json("render")
         text = path.read_text(encoding="utf-8")
         path.write_text(text.replace("- Next: a", "- Next: changed"), encoding="utf-8")
@@ -736,7 +736,7 @@ class HandEditAllowlistTest(SpudTestCase):
         proc = self.home.run("import", "--file", path, actor="spud", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn("Second", proc.stderr)
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'"), 4)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'"), 5)
 
 
 class DiscardTest(SpudTestCase):

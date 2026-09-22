@@ -1,4 +1,7 @@
-"""commands/admincmds: init, migrate, config sync, sql, import.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""commands/admincmds: migrate, config sync, sql, import.  Moved from bin/spud_ledger.py (SPD-065).
+
+SPW-001: `cmd_init` left here for `commands/homeinit.create_database`, which is its body -- `spud init` stopped being a
+command about a database and became the command that builds a home, and the database is step 2 of five."""
 
 import re
 import sqlite3
@@ -6,30 +9,6 @@ import sqlite3
 from ..core import kernel
 from ..imports import accept, bulkimport
 from ..state import actors, ledgerdb
-
-
-def cmd_init(ctx, args):
-    created = not ctx.db_path.exists()
-    ctx.config  # the config must exist before a ledger is created
-    ctx.db_path.parent.mkdir(parents=True, exist_ok=True)
-    con = ledgerdb.open_connection(ctx.db_path)
-    try:
-        if created:
-            con.execute("PRAGMA journal_mode = WAL")
-        applied, backups = ledgerdb.apply_migrations(ctx, con, created)
-        with ledgerdb.write_txn(con):
-            ledgerdb.sync_config_rows(ctx, con)
-        version = con.execute("PRAGMA user_version").fetchone()[0]
-    finally:
-        con.close()
-    data = {"database": str(ctx.db_path), "created": created, "user_version": version, "applied": applied, "backups": backups}
-    if created:
-        text = "created %s (user_version %d)" % (ctx.db_path, version)
-    elif applied:
-        text = "migrated %s to user_version %d (%s)" % (ctx.db_path, version, ", ".join(applied))
-    else:
-        text = "%s is up to date (user_version %d)" % (ctx.db_path, version)
-    return kernel.Result(data, text)
 
 
 def cmd_migrate(ctx, args):

@@ -107,6 +107,12 @@ def run(launcher):
     checkout = os.path.dirname(os.path.dirname(launcher))
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR", "SPUD_HOME")}
     env.update(SPUD_HOME=home, SPUD_USER_CLAUDE_DIR=home + "/.user-claude", SPUD_CONFIG_DIR=home + "/.user-config")
+    # SPW-001: this home plays the tool, as it does for tests/helpers.py and tests/probes/hook_timing.py, for the two
+    # reasons the `init` step below now has: init refuses to build a home when the running bin/spud is in a linked
+    # worktree (design section 6, refusal 6), and the second launcher this probe is run with is exactly that; and it
+    # writes the vault scaffolding from the tool's share/, so the scratch tool must ship it.  Both launchers alike.
+    env["SPUD_TOOL_DIR"] = home
+    os.symlink(os.path.join(os.path.dirname(os.path.dirname(HERE)), "share"), os.path.join(home, "share"), target_is_directory=True)
     out = []
     try:
         for argv, stdin in script(home):

@@ -270,7 +270,13 @@ class ProjectRenderTest(RepoMixin, SpudTestCase):
         fresh = Home()
         self.addCleanup(fresh.cleanup)
         fresh.init()
-        counts = fresh.json("import", self.home.path / "ledger", self.home.path / "reports")
+        # SPW-001: both homes hold init's own report entry for today, and a bulk import refuses a day it already has, so
+        # the tree this round trip takes is the ledger's.  (Proposal filed: `spud init` then `spud import` of a vault
+        # rendered today, the disaster-recovery path, hits the same refusal.)
+        refused = fresh.run("import", self.home.path / "ledger", self.home.path / "reports", check=False)
+        self.assertEqual(refused.returncode, EXIT_ERROR)
+        self.assertIn("already has entries in the ledger", refused.stderr)
+        counts = fresh.json("import", self.home.path / "ledger")
         self.assertEqual((counts["projects"], counts["tickets"], counts["members"]), (1, 2, 1))
         cols = "key, name, root_path, ticket_prefix, team_prefix, default_branch, landing, sessions, remote, archived_at"
         self.assertEqual(fresh.rows("SELECT %s FROM projects WHERE key = 'badtakes'" % cols), self.home.rows("SELECT %s FROM projects WHERE key = 'badtakes'" % cols))

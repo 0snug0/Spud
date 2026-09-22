@@ -27,13 +27,25 @@ import difflib
 import io
 import json
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import REPO, MARKER, Home, load_spud_module, normalize_markdown, split_team_section, team_section_problems
+from helpers import (
+    INIT_ENTRY_TITLE,
+    MARKER,
+    NOT_INIT_ENTRY,
+    REPO,
+    Home,
+    init_report_day,
+    load_spud_module,
+    normalize_markdown,
+    split_team_section,
+    team_section_problems,
+)
 
 spud = load_spud_module()
 
@@ -180,9 +192,15 @@ class RoundTripMixin:
         self.assertGreater(self.imported["report_entries"], 0)
 
     def test_every_source_file_is_generated_and_nothing_else(self):
-        expected = set(self.sources()) | {Path("ledger/Projects.md")}  # generated whatever the corpus holds (SPD-014)
+        # ledger/Projects.md is generated whatever the corpus holds (SPD-014), and today's day file holds the one report
+        # entry `spud init` wrote when this home was built (SPW-001) -- asserted below to be that and nothing else, so
+        # "nothing else" still means it.
+        expected = set(self.sources()) | {Path("ledger/Projects.md"), Path(init_report_day(self.home))}
         generated = {p.relative_to(self.out) for p in self.out.rglob("*") if p.is_file()}
         self.assertEqual(generated, expected)
+        headings = [l for l in (self.out / init_report_day(self.home)).read_text(encoding="utf-8").split("\n") if l.startswith("## ")]
+        self.assertEqual(len(headings), 1, headings)
+        self.assertIn(INIT_ENTRY_TITLE, headings[0])
         for never in ["ledger/Home.md", "ledger/Spud.md", "ledger/Board.base", "ledger/Fleet.base"]:
             self.assertFalse((self.out / never).exists(), never)
         self.assertFalse((self.out / "ledger" / "_templates").exists())
@@ -296,7 +314,12 @@ class RoundTripMixin:
         other = Home()
         self.addCleanup(other.cleanup)
         other.init()
-        other.json("import", self.out / "ledger", self.out / "reports")
+        # SPW-001: the fresh ledger holds its own init entry for today, and a bulk import refuses a day it already has,
+        # so what is imported is the rendered tree without this home's init day -- the corpus, which is the subject.
+        tree = Path(self.tmp.name) / ("for-import-" + self.__class__.__name__)
+        shutil.copytree(self.out, tree)
+        (tree / init_report_day(self.home)).unlink()
+        other.json("import", tree / "ledger", tree / "reports")
         again = Path(self.tmp.name) / "again"
         other.json("render", "--out", again)
         for rel in self.sources():
@@ -443,7 +466,7 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
         self.assertEqual([(r["f"], r["t"]) for r in rows], [("Kestrel", "Huckleberry"), ("Kestrel", "Rosara"), ("Huckleberry", "Ozette"), ("Kestrel", None)])
 
     def test_report_entries_are_events(self):
-        rows = self.home.rows("SELECT at, body, data FROM events WHERE kind = 'report.entry' ORDER BY id")
+        rows = self.home.rows("SELECT at, body, data FROM events WHERE kind = 'report.entry' AND %s ORDER BY id" % NOT_INIT_ENTRY)
         self.assertEqual(len(rows), 22)
         self.assertEqual(rows[0]["at"], "2026-09-12T12:25")
         self.assertTrue(rows[0]["body"].startswith("- Ticket: [[SPD-001]]"))
@@ -470,7 +493,7 @@ class CutoverReadinessTest(RoundTripMixin, unittest.TestCase):
         for path in self.src.glob("reports/*.md"):
             expected += len([l for l in path.read_text(encoding="utf-8").split("\n") if re.match(r"^## \d{2}:\d{2} — ", l)])
         self.assertGreater(expected, 0)
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry'"), expected)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'report.entry' AND %s" % NOT_INIT_ENTRY), expected)
 
 
 if __name__ == "__main__":
