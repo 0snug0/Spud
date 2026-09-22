@@ -73,16 +73,17 @@ class WatcherTest(WatchCase):
     def test_the_watcher_renders_once_after_an_event_and_not_after_its_own(self):
         t = self.new_ticket("Watched")
         path = self.home.path / "ledger" / "tickets" / "SPD-001.md"
+        base = self.render_events()  # SPW-001 phase 4: init rendered the home it built, so the watcher's is not the first
         proc = self.watcher()
         self.assertTrue(self.wait_for(path.is_file), "the first pass renders the ticket")
-        self.assertTrue(self.wait_for(lambda: self.render_events() == 1))
+        self.assertTrue(self.wait_for(lambda: self.render_events() == base + 1))
         time.sleep(0.4)  # eight ticks with nothing new
-        self.assertEqual(self.render_events(), 1)
+        self.assertEqual(self.render_events(), base + 1)
         self.home.json("ticket", "edit", t["key"], "--title", "Renamed", actor="spud")
         self.assertTrue(self.wait_for(lambda: "Renamed" in path.read_text(encoding="utf-8")))
-        self.assertTrue(self.wait_for(lambda: self.render_events() == 2))
+        self.assertTrue(self.wait_for(lambda: self.render_events() == base + 2))
         time.sleep(0.4)
-        self.assertEqual(self.render_events(), 2)
+        self.assertEqual(self.render_events(), base + 2)
         proc.terminate()
         out, err = proc.communicate(timeout=10)
         self.assertEqual((proc.returncode, err), (0, ""), (out, err))

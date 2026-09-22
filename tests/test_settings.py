@@ -209,8 +209,11 @@ class SettingsSyncTest(SpudTestCase):
         self.assertIn("unchanged", self.home.run("settings", "sync", "--path", path).stdout)
 
     def test_config_synced_event(self):
-        self.home.json("settings", "sync", "--path", self.home.path / "s.json")
-        events = self.home.json("events", "--kind", "config.synced")["events"]
+        path = self.home.path / "s.json"
+        self.home.json("settings", "sync", "--path", path)
+        # SPW-001 phase 4: init syncs <home>/.claude/settings.json itself, so the log holds that event too; this is the
+        # one for the path the test named.
+        events = [e for e in self.home.json("events", "--kind", "config.synced")["events"] if e["data"]["path"] == str(path)]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["data"]["hooks"], 9)
         self.assertEqual(events[0]["data"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])

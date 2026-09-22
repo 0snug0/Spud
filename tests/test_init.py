@@ -17,6 +17,8 @@ from helpers import (
     Home,
     RepoMixin,
     SpudTestCase,
+    fake_launchctl,
+    git,
     init_report_day,
     isolated_git_env,
     load_spud_module,
@@ -130,7 +132,9 @@ class InitTest(SpudTestCase):
         self.assertEqual(self.home.scalar("SELECT active FROM name_pool WHERE name = 'Tuber'"), 1)
         self.assertEqual(self.home.scalar("SELECT ticket_prefix FROM projects WHERE id = 1"), "TKT")
         self.assertEqual(self.home.scalar("SELECT team_prefix FROM projects WHERE id = 1"), "TEAM")
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'config.synced'"), 1)
+        bodies = [e["body"] for e in self.home.rows("SELECT body FROM events WHERE kind = 'config.synced' ORDER BY id")]
+        self.assertIn("settings synced to", bodies[0])  # init's own settings sync, step 6 (SPW-001 phase 4)
+        self.assertEqual(bodies[1:], ["config synced"])  # and this `config sync`, the only other one
         self.assertIn("project spud's prefixes TKT / TEAM", self.home.run("config", "sync").stdout)  # a second sync: the line
 
     def test_backup_writes_a_vacuumed_copy(self):
@@ -268,9 +272,12 @@ class EmptyRegistryTest(RepoMixin, SpudTestCase):
         project claims sessions, which is right, because the only sessions carrying ledger hooks are sessions in the
         home -- and a session in the home is Spud's either way."""
         self.assertEqual(self.cli("board").stdout.strip(), "(none)")
-        # SPW-001: init's own report entry (step 3) is the one row a home starts with, so the first render writes its day
-        # too -- the day the ledger says init wrote, not the day this line runs, so a run at midnight reads the same
-        self.assertEqual(self.cli_json("render", actor="spud")["written"], ["ledger/Projects.md", init_report_day(self.home)])
+        # SPW-001: init's own report entry (step 3) is the one row a home starts with, and init's own render (step 9)
+        # writes its day file -- the day the ledger says init wrote, not the day this line runs, so a run at midnight
+        # reads the same.  Which leaves this render nothing to write and both files on disk.
+        rendered = self.cli_json("render", actor="spud")
+        self.assertEqual((rendered["written"], rendered["conflicts"]), ([], []))
+        self.assertEqual(sorted(rendered["unchanged"]), ["ledger/Projects.md", init_report_day(self.home)])
         self.assertIn("project   none:", self.cli("session", "show").stdout)
         base = {"session_id": SESSION, "transcript_path": "/tmp/x.jsonl", "cwd": str(self.home.path), "permission_mode": "default"}
         start = self.home.hook("SessionStart", dict(base, hook_event_name="SessionStart", source="startup"))
@@ -340,13 +347,49 @@ class MachineMixin(RepoMixin):
         self.config_dir = scratch / "config"
         self.target = scratch / "SpudHome"  # deliberately absent: init creates it
         self.pointer = self.config_dir / "home"
+        self.agents = scratch / "LaunchAgents"
+        self.user_claude = scratch / "user-claude"
         env = isolated_git_env()
         for name in ("SPUD_HOME", "SPUD_TOOL_DIR", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR", "SPUD_SUITE_PYCACHE"):
             env.pop(name, None)
-        env.update(SPUD_CONFIG_DIR=str(self.config_dir), SPUD_USER_CLAUDE_DIR=str(scratch / "user-claude"),
-                   SPUD_LAUNCH_AGENTS_DIR=str(scratch / "LaunchAgents"), SPUD_GH="off")
+        env.update(SPUD_CONFIG_DIR=str(self.config_dir), SPUD_USER_CLAUDE_DIR=str(self.user_claude),
+                   SPUD_LAUNCH_AGENTS_DIR=str(self.agents), SPUD_GH="off")
+        # A launchctl of this machine's own, because step 8 is init's: SPUD_LAUNCH_AGENTS_DIR moves the plist, and only
+        # this moves the job -- `local.spud.backup` and `local.spud.render` are labels in the real user domain, and a
+        # `bootout` of one is this Mac's watcher gone.  init_argv passes --no-schedule besides, so the tests that are
+        # not about step 8 never call it at all; ScheduleStepTest is the one that does.
+        self.launchctl, self.launchctl_state = fake_launchctl(scratch, env)
         self.env = env
         return scratch
+
+    def launchctl_calls(self):
+        path = self.launchctl_state / "calls.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.is_file() else []
+
+    def ctx(self):
+        """A Ctx for the home init built, for the checks that read the program rather than the CLI."""
+        return load_spud_module().Ctx(self.target, "--home", False, tool=self.tool)
+
+    def rows(self, sql):
+        con = sqlite3.connect(self.target / ".spud" / "ledger.db")
+        con.row_factory = sqlite3.Row
+        try:
+            return [dict(r) for r in con.execute(sql).fetchall()]
+        finally:
+            con.close()
+
+    def report_day(self, home=None):
+        """`reports/<day>.md` for the entry init wrote into this machine's home, read from the home's own event log the
+        way `helpers.init_report_day` reads a Home's: a run that crossed midnight between step 3 and this assertion
+        still names the day init wrote.  Never `date.today()` (SPW-001, the window phase 3 closed)."""
+        con = sqlite3.connect((home or self.target) / ".spud" / "ledger.db")
+        try:
+            row = con.execute("SELECT at FROM events WHERE kind = 'report.entry'"
+                              " AND json_extract(data, '$.generated') = 'init' ORDER BY id LIMIT 1").fetchone()
+        finally:
+            con.close()
+        self.assertIsNotNone(row, "no init report entry in %s" % (home or self.target))
+        return "reports/%s.md" % row[0][:10]
 
     def spud(self, *args, check=True, cwd=None, session=None, launcher=None, env=None):
         """The scratch clone's own launcher, from `cwd` (default the clone), with stdin a pipe -- so `isatty()` is false
@@ -360,9 +403,13 @@ class MachineMixin(RepoMixin):
             raise AssertionError("spud %s exited %d\nstdout: %s\nstderr: %s" % (" ".join(str(a) for a in args), proc.returncode, proc.stdout, proc.stderr))
         return proc
 
-    def init_argv(self, *extra, home=None, project=True):
+    def init_argv(self, *extra, home=None, project=True, schedule=False):
+        """init's flags for this machine.  `--no-schedule` by default: step 8 is `schedule.install_agents`, which keeps
+        its own coverage (SPW-001 design, phase 4), and a run that installs two LaunchAgents to prove something about
+        the config is two launchctl calls nobody reads.  `schedule=True` asks for the step itself."""
         argv = ["init", "--home", home or self.target]
         argv += (["--project-root", self.repo] if project else ["--no-project"])
+        argv += [] if schedule else ["--no-schedule"]
         return argv + ["--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS", *extra]
 
     def scaffolding_state(self):
@@ -412,7 +459,9 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         self.assertEqual((row["sessions"], row["landing"], row["default_branch"]), ("claim", "merge", "main"))
         self.assertEqual(row["root_path"], str(self.repo))
         self.assertEqual(row["remote"], str(self.origin))
-        self.assertEqual([e["kind"] for e in events], ["project.added", "report.entry"])
+        # steps 3, 6, 7 and 9, in order: the project and its entry, the settings sync, the install, the first render
+        self.assertEqual([e["kind"] for e in events],
+                         ["project.added", "report.entry", "config.synced", "project.installed", "render"])
         self.assertTrue(all(e["actor"] == "spud" for e in events), events)  # init resolves no actor (design 2.3)
         self.assertIn("Spud initialized at %s" % self.target, out["report_entry"]["title"])
         # 4. the scaffolding and the directories
@@ -476,7 +525,7 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         self.assertEqual(proc.returncode, EXIT_USAGE, proc.stderr)
         self.assertIn("--ticket-prefix ZZZ differs from the spud.config.json already in", proc.stderr)
         self.assertIn("which carries SPD", proc.stderr)
-        proc = self.spud("init", "--home", self.target, "--project-root", self.repo)  # no prefix flags: the config's
+        proc = self.spud("init", "--home", self.target, "--project-root", self.repo, "--no-schedule")  # no prefix flags: the config's
         self.assertIn("kept %s" % (self.target / "spud.config.json"), proc.stdout)
         con = sqlite3.connect(self.target / ".spud" / "ledger.db")
         try:
@@ -496,7 +545,7 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         for directory, key in (("My_Notes", "my-notes"), ("Notes (2026)!", "notes-2026"), ("UPPER.CASE", "upper-case")):
             repo = self.make_repo("keys-", name=directory)
             home = self.scratch_dir("key-home-") / "SpudHome"
-            out = json.loads(self.spud("--json", "init", "--home", home, "--repoint", "--project-root", repo,
+            out = json.loads(self.spud("--json", "init", "--home", home, "--repoint", "--project-root", repo, "--no-schedule",
                                        "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS").stdout)
             self.assertEqual((out["project"]["key"], out["project"]["name"]), (key, directory), directory)
         # "2026" sanitizes to "2026", which the pattern rejects: a key must start with a letter, and init says so
@@ -522,7 +571,7 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         self.assertIsNone(out["project"])
         self.assertEqual(json.loads(self.spud("--json", "project", "list").stdout)["projects"], [])
         self.assertGreater(out["scaffolding"]["dropped_lines"], 0)
-        self.assertIn("left out, for want of one", out["done"][-2])
+        self.assertTrue(any("left out, for want of one" in line for line in out["done"]), out["done"])
         for rel in ("CLAUDE.md", "ledger/Home.md"):
             text = (self.target / rel).read_text(encoding="utf-8")
             self.assertNotIn("{{", text, rel)
@@ -540,7 +589,8 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         out = json.loads(self.spud("--json", *self.init_argv("--dry-run")).stdout)
         self.assertTrue(out["ok"])
         self.assertTrue(out["dry_run"])
-        self.assertEqual(len(out["steps"]), 5)  # 1 to 5; 6 to 10 arrive with finish_install
+        self.assertEqual(len(out["steps"]), 10)  # all ten, and step 8 says which skip it would take
+        self.assertIn("--no-schedule", out["steps"][7])
         self.assertIn("the preconditions hold", self.spud(*self.init_argv("--dry-run")).stdout)
         self.assertFalse(self.target.exists())  # writes nothing at all
         self.assertFalse(self.config_dir.exists())
@@ -574,7 +624,7 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         out = json.loads(self.spud("--json", *self.init_argv(), cwd=self.repo, session=SESSION).stdout)
         self.assertTrue(out["ok"])
         self.assertEqual(out["project"]["sessions"], "claim")
-        self.assertEqual(json.loads(self.spud("--json", "init", cwd=self.repo, session=SESSION).stdout)["ok"], True)
+        self.assertEqual(json.loads(self.spud("--json", "init", "--no-schedule", cwd=self.repo, session=SESSION).stdout)["ok"], True)
 
     def test_next_goes_on_the_report_entry_init_writes(self):
         out = json.loads(self.spud("--json", *self.init_argv("--next", "Open the vault in Obsidian.")).stdout)
@@ -605,6 +655,273 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         finally:
             con.close()
         self.spud(*self.init_argv())  # and the home is still usable, unchanged
+
+
+class InstallTailTest(MachineMixin, unittest.TestCase):
+    """SPW-001 phase 4: steps 6 to 10, the install tail (design sections 2.1, 2.2 and 8).
+
+    This is where the ticket's definition of done becomes a test rather than a hand ritual: one command from a fresh
+    clone, and `spud doctor` reports `problems none`.  `--no-schedule` throughout except in ScheduleStepTest, so
+    `schedule.install_agents` keeps its own coverage and init adds none to it.
+    """
+
+    def setUp(self):
+        self.machine()
+        self.repo = self.make_repo("mine-", origin=True, name=self.REPO_DIR)
+
+    def installed_paths(self):
+        """Every path `install.install_project` writes, named here rather than read from `install_files`, so this test
+        would notice if install stopped writing one of them."""
+        return {
+            "settings": self.repo / ".claude" / "settings.local.json",
+            "agent": self.user_claude / "agents" / "spudagent.md",
+            "skill": self.user_claude / "skills" / "spud" / "SKILL.md",
+            "pointer": self.pointer,
+        }
+
+    def test_init_ends_on_a_green_doctor_with_the_home_installed(self):
+        """The ticket's definition of done, end to end: the five assertions of the design's phase 4."""
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertTrue(out["ok"])
+        # 10. doctor is green -- the definition of done.  From init's own step 10, and from `spud doctor` after it.
+        self.assertEqual(out["doctor"]["problems"], [])
+        self.assertEqual(json.loads(self.spud("--json", "doctor").stdout)["problems"], [])
+        self.assertIn("problems    none", self.spud("doctor").stdout)
+        # 6. the home's own settings carry this home's ledger hooks.  Asserted on the file, not through doctor, which
+        # does not look at the home's own settings at all (SPW-006): a green doctor above proves nothing about it.
+        spud = load_spud_module()
+        settings = self.target / ".claude" / "settings.json"
+        self.assertTrue(spud.settings_hold_hooks(self.ctx(), settings))
+        self.assertEqual(out["settings"], {"path": str(settings), "written": True, "hooks": 9})
+        rules = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
+        self.assertTrue(any(str(self.tool / "bin" / "spud") in rule for rule in rules), rules)
+        # 7. every path project install writes is there, and the project's own hooks carry its key
+        for name, path in self.installed_paths().items():
+            self.assertTrue(path.is_file(), "%s: %s" % (name, path))
+        self.assertTrue(spud.settings_hold_hooks(self.ctx(), self.installed_paths()["settings"], self.REPO_KEY))
+        self.assertIn(".claude/settings.local.json", (self.repo / ".git" / "info" / "exclude").read_text(encoding="utf-8"))
+        self.assertEqual(out["install"]["project"], self.REPO_KEY)
+        self.assertIn(str(self.installed_paths()["agent"]), out["install"]["written"])
+        # 8. the schedule step is reported as skipped, and launchctl was never called
+        self.assertEqual(out["schedule"], {"skipped": "--no-schedule", "agents": []})
+        self.assertEqual(self.launchctl_calls(), [])
+        self.assertFalse(self.agents.exists())
+        # 9. the render wrote ledger/Projects.md and the day file of the entry init wrote, and nothing else
+        self.assertEqual(out["render"]["written"], ["ledger/Projects.md", self.report_day()])
+        self.assertEqual(out["render"]["conflicts"], [])
+        for rel in out["render"]["written"]:
+            self.assertTrue((self.target / rel).is_file(), rel)
+        self.assertIn("Spud initialized at", (self.target / self.report_day()).read_text(encoding="utf-8"))
+        self.assertIn(self.REPO_KEY, (self.target / "ledger" / "Projects.md").read_text(encoding="utf-8"))
+        # and what is left by hand is the two lines the design allows it (2.1), neither of them a spud command
+        self.assertEqual(out["by_hand"].count("\n  - "), 2)
+        self.assertIn("open %s as a vault in Obsidian" % self.target, out["by_hand"])
+        self.assertNotIn("settings sync", out["by_hand"])
+
+    def test_no_project_reaches_a_green_doctor_with_step_7_skipped(self):
+        out = json.loads(self.spud("--json", *self.init_argv(project=False)).stdout)
+        self.assertIsNone(out["install"])
+        self.assertTrue(any("no project to install (--no-project)" in line for line in out["done"]), out["done"])
+        # step 6 still ran -- the home's own hooks are nobody's project's -- and step 9 rendered the entry's day file
+        self.assertTrue(load_spud_module().settings_hold_hooks(self.ctx(), self.target / ".claude" / "settings.json"))
+        self.assertEqual(out["render"]["written"], ["ledger/Projects.md", self.report_day()])
+        report = json.loads(self.spud("--json", "doctor").stdout)
+        self.assertEqual(report["problems"], [])
+        self.assertTrue(any("no project is registered" in n for n in report["notes"]), report["notes"])
+        # and nothing was installed at user scope: those two files are a project's, and there is no project
+        self.assertFalse((self.user_claude / "agents" / "spudagent.md").exists())
+        self.assertFalse((self.user_claude / "skills" / "spud" / "SKILL.md").exists())
+        self.assertTrue(self.pointer.is_file())  # step 5 wrote it, not install
+
+    def test_a_second_run_reports_every_step_of_the_tail_unchanged(self):
+        self.spud(*self.init_argv())
+        watched = [self.target / ".claude" / "settings.json", *self.installed_paths().values()]
+        before = {p: p.read_bytes() for p in watched}
+        stamps = {p: p.stat().st_mtime_ns for p in watched}
+        rows = self.rows("SELECT path, sha256, through_event_id FROM renders ORDER BY path")
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertFalse(out["settings"]["written"])
+        self.assertTrue(any("installed: unchanged" in line for line in out["done"]), out["done"])
+        self.assertEqual((out["render"]["written"], out["render"]["conflicts"]), ([], []))
+        self.assertEqual(out["done"][-1], "10. doctor ok")
+        self.assertEqual({p: p.read_bytes() for p in watched}, before)  # not one byte, and not one mtime
+        self.assertEqual({p: p.stat().st_mtime_ns for p in watched}, stamps)
+        self.assertEqual(self.rows("SELECT path, sha256, through_event_id FROM renders ORDER BY path"), rows)
+        # the project.installed record and the render event follow a run that changed something, and this one did not
+        self.assertEqual([r["kind"] for r in self.rows("SELECT kind FROM events WHERE kind IN ('project.installed', 'render') ORDER BY id")],
+                         ["project.installed", "render"])
+
+
+class InstallTailFailureTest(MachineMixin, unittest.TestCase):
+    """Design 2.4's last five rows: what a failure in steps 6 to 10 leaves on disk, and that the report names every step
+    that completed -- which is why `finish_install` appends each line as its step ends rather than at its own return.
+    Init removes nothing in any of them, and each case then reruns and continues from where it stopped."""
+
+    def setUp(self):
+        self.machine()
+        self.repo = self.make_repo("mine-", origin=True, name=self.REPO_DIR)
+
+    def stopped_after(self, *args, code=EXIT_ERROR):
+        proc = self.spud(*(args or self.init_argv()), check=False)
+        self.assertEqual(proc.returncode, code, proc.stderr)
+        self.assertIn("init stopped after:", proc.stderr)
+        self.assertIn("nothing init wrote is removed", proc.stderr)
+        return proc.stderr
+
+    def test_6_settings_sync_leaves_a_complete_home_whose_own_hooks_are_missing(self):
+        """2.4's sixth row.  A home holding a config is a Spud home already (refusal 2's one exception), so this is a
+        first run: steps 1 to 5 complete, and step 6 fails on a settings file that is not JSON."""
+        config = dict(real_config())
+        config["tickets"], config["teams"] = dict(config["tickets"], prefix="ZZZ"), dict(config["teams"], prefix="ZZZS")
+        (self.target / ".claude").mkdir(parents=True)
+        (self.target / "spud.config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+        settings = self.target / ".claude" / "settings.json"
+        settings.write_text("{not json", encoding="utf-8")
+        message = self.stopped_after()
+        self.assertIn("is not valid JSON", message)
+        self.assertIn("5. %s names %s" % (self.pointer, self.target), message)  # every step before it completed
+        self.assertNotIn("\n  6. ", message)
+        self.assertTrue((self.target / ".spud" / "ledger.db").is_file())  # a complete home, with no hooks of its own
+        self.assertFalse(load_spud_module().settings_hold_hooks(self.ctx(), settings))
+        settings.unlink()
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)  # and the rerun continues from step 6
+        self.assertTrue(out["settings"]["written"])
+        self.assertEqual(out["doctor"]["problems"], [])
+
+    def test_7_project_install_stops_with_step_6_named_and_nothing_undone(self):
+        """2.4's seventh row.  `install_project` refuses to write into a tracked tree, which is a failure only step 7
+        can have: the home is complete and its own hooks are in place, so the report must name step 6 as completed."""
+        (self.repo / ".claude").mkdir()
+        (self.repo / ".claude" / "settings.local.json").write_text("{}\n", encoding="utf-8")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "tracked settings")
+        message = self.stopped_after()
+        self.assertIn("install writes nothing in the tracked tree", message)
+        self.assertIn("6. %s written" % (self.target / ".claude" / "settings.json"), message)
+        self.assertNotIn("\n  7. ", message)
+        self.assertTrue(load_spud_module().settings_hold_hooks(self.ctx(), self.target / ".claude" / "settings.json"))
+        self.assertFalse((self.user_claude / "agents" / "spudagent.md").exists())
+        git(self.repo, "rm", "-q", "--cached", ".claude/settings.local.json")
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertEqual(out["install"]["project"], self.REPO_KEY)
+        self.assertEqual(out["doctor"]["problems"], [])
+
+    def test_9_a_hand_edited_render_target_stops_the_command_at_the_render(self):
+        """2.4's ninth row.  The guard test of the design's 4.4 keeps a shipped file off a render target, so a fresh
+        home cannot collide by itself -- it takes a hand edit of a file init has already rendered."""
+        self.spud(*self.init_argv())
+        projects = self.target / "ledger" / "Projects.md"
+        projects.write_text("mine, now\n", encoding="utf-8")
+        message = self.stopped_after()
+        self.assertIn("found 1 conflict(s)", message)
+        self.assertIn("render --discard", message)
+        self.assertNotIn("\n  9. ", message)  # step 9 is the one that did not complete
+        self.assertIn("8. --no-schedule", message)
+        self.assertEqual(projects.read_text(encoding="utf-8"), "mine, now\n")  # the hand edit is not overwritten
+        self.spud("--as", "spud", "render", "--discard", projects)
+        self.assertEqual(json.loads(self.spud("--json", *self.init_argv()).stdout)["doctor"]["problems"], [])
+
+    def test_9_a_vault_behind_the_ledger_is_the_other_reading_of_the_same_refusal(self):
+        """Step 9's set is a fresh ledger's, and init is also the migration path ('the database is behind; run `spud
+        init`'), so a rerun whose pass writes a note that was never rendered is refused too.  The message says which
+        reading it is, and the pass has brought the vault up to date, so the next run is green."""
+        self.spud(*self.init_argv())
+        self.spud("--as", "spud", "ticket", "new", "--title", "Behind")  # no watcher here: the note is never rendered
+        message = self.stopped_after()
+        self.assertIn("wrote ledger/tickets/ZZZ-001.md", message)
+        self.assertIn("this home was not fresh and its vault was behind", message)
+        self.assertIn("a rerun is green", message)
+        self.assertTrue((self.target / "ledger" / "tickets" / "ZZZ-001.md").is_file())  # the pass wrote it before refusing
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertEqual((out["render"]["written"], out["doctor"]["problems"]), ([], []))
+
+    def test_10_doctor_red_fails_the_command_with_the_report_attached_and_the_home_complete(self):
+        """2.4's tenth row: a problem init does not refuse and doctor does -- here a git hook planted in the project
+        init is about to register, which doctor's repositories section reads (SPD-123)."""
+        hook = self.repo / ".git" / "hooks" / "pre-commit"
+        hook.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        proc = self.spud("--json", *self.init_argv(), check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stderr)
+        out = json.loads(proc.stdout)
+        self.assertIn("doctor on %s found 1 problem(s)" % self.target, out["error"])
+        self.assertIn(str(hook), out["error"])
+        self.assertEqual(len(out["problems"]), 1)  # the report itself is attached, not the message alone
+        self.assertIn("9. render", "\n".join(out["done"]))  # step 9 completed; step 10 is the one that failed
+        # a complete home: the settings, the install and the pointer all stand, and nothing is undone
+        self.assertTrue(load_spud_module().settings_hold_hooks(self.ctx(), self.target / ".claude" / "settings.json"))
+        self.assertTrue((self.user_claude / "skills" / "spud" / "SKILL.md").is_file())
+        self.assertTrue(self.pointer.is_file())
+        hook.unlink()
+        self.assertEqual(json.loads(self.spud("--json", *self.init_argv()).stdout)["doctor"]["problems"], [])
+
+
+class ScheduleStepTest(MachineMixin, unittest.TestCase):
+    """Step 8 itself: the two LaunchAgents, its two skips, and 2.4's eighth row.  The one class here that lets init
+    reach `launchctl` -- `helpers.fake_launchctl`'s, never this Mac's own, whose domain and two labels are the ones a
+    real `schedule install` uses and which SPUD_LAUNCH_AGENTS_DIR does not move."""
+
+    def setUp(self):
+        self.machine()
+        self.repo = self.make_repo("mine-", origin=True, name=self.REPO_DIR)
+
+    @unittest.skipUnless(sys.platform == "darwin", "step 8 installs LaunchAgents only where launchctl lives")
+    def test_init_installs_and_loads_both_launch_agents(self):
+        out = json.loads(self.spud("--json", *self.init_argv(schedule=True)).stdout)
+        self.assertIsNone(out["schedule"]["skipped"])
+        self.assertEqual([r["label"] for r in out["schedule"]["agents"]], ["local.spud.backup", "local.spud.render"])
+        self.assertEqual(out["schedule"]["at"], "03:00")
+        for label in ("local.spud.backup", "local.spud.render"):
+            self.assertTrue((self.agents / (label + ".plist")).is_file(), label)
+            self.assertTrue((self.launchctl_state / ("loaded-" + label)).exists(), label)
+        self.assertEqual([c[0] for c in self.launchctl_calls()], ["bootout", "bootstrap", "bootout", "bootstrap"])
+        # and init still ends green: the fake launchctl loads no process, so the vault's watcher is installed and not
+        # running -- doctor's one problem, and the one step 10 excuses, because it was bootstrapped seconds ago
+        self.assertEqual(out["doctor"]["problems"], [load_spud_module().WATCHER_DOWN])
+        self.assertIn("is not up yet", out["done"][-1])
+
+    @unittest.skipUnless(sys.platform == "darwin", "step 8 installs LaunchAgents only where launchctl lives")
+    def test_8_a_bootstrap_that_fails_leaves_the_plist_and_names_the_way_out(self):
+        """2.4's eighth row: the plist written and not loaded, `install_agents` saying so and naming `schedule
+        uninstall`, and every step before it named.  The rerun takes 2.4's own second option, `--no-schedule`."""
+        proc = self.spud(*self.init_argv(schedule=True), check=False, env={"FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES": "all"})
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stderr)
+        message = proc.stderr
+        self.assertIn("init stopped after:", message)
+        self.assertIn("launchctl bootstrap gui/", message)
+        self.assertIn("spud schedule uninstall removes it", message)
+        self.assertIn("7. project %s installed" % self.REPO_KEY, message)
+        self.assertNotIn("\n  8. ", message)
+        self.assertTrue((self.agents / "local.spud.backup.plist").is_file())  # written, and never loaded
+        self.assertFalse((self.launchctl_state / "loaded-local.spud.backup").exists())
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)  # --no-schedule, and the rest of the tail runs
+        self.assertEqual(out["schedule"]["skipped"], "--no-schedule")
+        self.assertEqual(out["doctor"]["problems"], [])
+        self.assertEqual(out["done"][-1], "10. doctor ok")
+
+    def test_step_8_is_skipped_with_a_note_where_launchctl_does_not_live(self):
+        """The `sys.platform != "darwin"` skip, tested as the branch it is rather than by pretending this Mac is Linux:
+        `install_schedule` and `init_steps` both read `sys.platform`, and neither may call `install_agents` there."""
+        spud = load_spud_module()
+        ctx = self.ctx()
+        args = mock.Mock(no_schedule=False, landing="merge", sessions="claim")
+        plan = {"config_exists": True, "ticket_prefix": "ZZZ", "team_prefix": "ZZZS", "project_root": str(self.repo),
+                "project_key": self.REPO_KEY, "project_name": self.REPO_DIR, "name": "Spud", "pronouns": ["he", "him", "his"]}
+        with mock.patch("spudlib.commands.schedule.install_agents") as install_agents:
+            with mock.patch.object(sys, "platform", "linux"):
+                done = []
+                self.assertEqual(spud.install_schedule(ctx, args, done),
+                                 {"skipped": "linux is not darwin, and launchctl is macOS's", "agents": []})
+                self.assertIn("linux is not darwin", done[0])
+                self.assertIn("local.spud.render not installed", done[0])
+                self.assertIn("schedule install", done[0])
+                self.assertIn("linux is not darwin", spud.init_steps(ctx, args, plan)[7])  # and the dry run says so too
+            self.assertFalse(install_agents.called)
+            args.no_schedule = True  # the other skip, on this platform, naming itself
+            done = []
+            self.assertEqual(spud.install_schedule(ctx, args, done)["skipped"], "--no-schedule")
+            self.assertIn("8. --no-schedule", done[0])
+            self.assertIn("--no-schedule", spud.init_steps(ctx, args, plan)[7])
+            self.assertFalse(install_agents.called)
 
 
 class InitRefusalTest(MachineMixin, unittest.TestCase):
@@ -640,14 +957,14 @@ class InitRefusalTest(MachineMixin, unittest.TestCase):
 
     def test_the_pointer_names_another_home_unless_repointed(self):
         first = self.scratch_dir("first-home-")
-        self.spud("init", "--home", first, "--no-project", "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS")
+        self.spud("init", "--home", first, "--no-project", "--no-schedule", "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS")
         message = self.refused(*self.init_argv())
         self.assertIn("names %s, not %s" % (first, self.target), message)
         self.assertIn("--repoint", message)
         out = json.loads(self.spud("--json", *self.init_argv("--repoint")).stdout)
         self.assertTrue(out["pointer"]["written"])
         self.assertEqual(self.pointer.read_text(encoding="utf-8").strip(), str(self.target))
-        self.assertIn("that home is untouched", out["done"][-1])
+        self.assertTrue(any("that home is untouched" in line for line in out["done"]), out["done"])
         self.assertTrue((first / ".spud" / "ledger.db").is_file())  # the orphaned home is left exactly as it was
 
     def test_spud_home_names_another_home(self):
@@ -732,8 +1049,10 @@ class WithoutDatabaseTest(unittest.TestCase):
         self.home.init()
         entries = sorted(p.name for p in (self.home.path / ".spud").iterdir())
         self.assertIn("ledger.db", entries)
+        # SPW-001 phase 4: init renders the home it builds, so its own pass leaves the render lock it took and the
+        # watermark every pass writes (SPD-117).  Nothing else: no backup, no watch lock, no log directory.
         for name in entries:
-            self.assertTrue(name.startswith("ledger.db") or name == "backups", name)
+            self.assertTrue(name.startswith("ledger.db") or name in ("backups", "render.lock", "rendered.json"), name)
 
 
 if __name__ == "__main__":
