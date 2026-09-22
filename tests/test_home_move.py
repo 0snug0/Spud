@@ -33,8 +33,8 @@ class HomeMoveCase(LaunchdMixin, RepoMixin, SpudTestCase):
         self.addCleanup(self.home.cleanup)
         home = self.home.path
         shutil.copytree(REPO / "bin", home / "bin", ignore=shutil.ignore_patterns("__pycache__"))
-        (home / ".claude" / "agents").mkdir(parents=True)
-        shutil.copyfile(REPO / ".claude" / "agents" / "spudagent.md", home / ".claude" / "agents" / "spudagent.md")
+        # No spudagent source is copied: since SPW-004 it is share/agents/spudagent.md, and Home already gives this
+        # home-as-tool the repository's share/.
         (home / ".gitignore").write_text(".spud/\n.user-claude/\n.user-config/\n.claude/settings.local.json\n", encoding="utf-8")
         (home / "docs").mkdir()
         (home / "docs" / "note.md").write_text("a doc\n", encoding="utf-8")
@@ -221,8 +221,6 @@ class ProjectlessMoveTest(LaunchdMixin, RepoMixin, SpudTestCase):
         self.addCleanup(self.home.cleanup)
         home = self.home.path
         shutil.copytree(REPO / "bin", home / "bin", ignore=shutil.ignore_patterns("__pycache__"))
-        (home / ".claude" / "agents").mkdir(parents=True)
-        shutil.copyfile(REPO / ".claude" / "agents" / "spudagent.md", home / ".claude" / "agents" / "spudagent.md")
         (home / ".gitignore").write_text(".spud/\n.user-claude/\n.user-config/\n.claude/settings.local.json\n", encoding="utf-8")
         (home / "docs").mkdir()
         (home / "docs" / "note.md").write_text("a doc\n", encoding="utf-8")

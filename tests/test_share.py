@@ -66,6 +66,23 @@ FLOW = {"[": "a flow sequence", "{": "a flow mapping", "&": "an anchor", "*": "a
 # session before there is a home for share/'s own templates to be rendered into.
 SPUD_INIT_SKILL = REPO / ".claude" / "skills" / "spud-init" / "SKILL.md"
 FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
+# SPW-005: every top-level block the shipped config carries, and what reads it.  The config `spud init` writes is the one
+# file a person edits expecting an effect, so a block in it with no reader is a lie the program tells; the `ledger` block
+# that shipped until SPW-005 was one -- `format` read `markdown-v0` long after the ledger's format became `sqlite-v1`,
+# and `tickets`, `teams`, `reports` and `spikes` moved nothing, because `render/notefiles.render_targets` and
+# `commands/homeinit.DIRECTORIES` hard-code the vault's layout that `hooks/hookio.GENERATED_ROOTS`, `imports/accept`,
+# `imports/bulkimport`, `commands/homemove.COPIED_DIRS` and the shipped `Board.base` and `Fleet.base` all depend on.
+# The readers are named rather than found: `"ledger"` is all over `bin/` as a path segment, so any grep for a block's
+# name would have passed the very block this set exists to have caught.  Adding a block is naming its reader here.
+CONFIG_BLOCK_READERS = {
+    "identity": "core/shipped.marks (five marks), commands/homeinit",
+    "naming": "core/homeconf.Ctx.id_pad and config_problems, state/ledgerdb.sync_config_rows, state/ops (the pool)",
+    "personas": "core/homeconf.Ctx.persona_tier and Ctx.personas and config_problems, state/ops",
+    "limits": "core/homeconf.Ctx.limits and config_problems, commands/doctor",
+    "tickets": "tickets.prefix: core/shipped.marks, state/ledgerdb.sync_config_rows, core/homeconf.config_problems, commands/doctor",
+    "teams": "teams.prefix: core/shipped.marks, state/ledgerdb.sync_config_rows, core/homeconf.config_problems, commands/doctor",
+    "pricing": "render/prices.price_table, core/homeconf.Ctx.pricing, commands/doctor",
+}
 
 
 def skill_frontmatter(text):
@@ -479,15 +496,26 @@ class ShippedConfigTest(unittest.TestCase):
         self.assertEqual((config["identity"]["name"], config["identity"]["pronouns"]["object"]), ("Spud", "him"))
         self.assertEqual(spud.config_problems(config), [])
 
+    def test_every_block_it_ships_is_one_the_program_reads(self):
+        """SPW-005: no decorative key in the file every home starts from.  The `ledger` block is gone, and a block added
+        without a reader named in CONFIG_BLOCK_READERS fails here.  A home whose own config still carries `ledger` is a
+        separate promise, kept by `tests/test_init.UnknownConfigBlockTest`: nothing validates a config's key set, so an
+        extra block in a home is harmless and is never migrated away."""
+        config = json.loads((SHARE / "spud.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(sorted(config), sorted(CONFIG_BLOCK_READERS))
+        self.assertNotIn("ledger", config)
+        self.assertNotIn("markdown-v0", (SHARE / "spud.config.json").read_text(encoding="utf-8"))
+
 
 class ShippedSetTest(unittest.TestCase):
-    """What the tool ships for a home, as a set: the eight files of the `spud init` design's section 4, and since
-    SPD-156 the Obsidian vault -- the settings, each turned-on plugin's own data, and the lock.  Nothing that is state,
-    and nothing a person's window layout or a plugin's code."""
+    """What the tool ships, as a set: the eight files of the `spud init` design's section 4, the spudagent definition
+    SPW-004 moved in beside them, and since SPD-156 the Obsidian vault -- the settings, each turned-on plugin's own
+    data, and the lock.  Nothing that is state, and nothing a person's window layout or a plugin's code."""
 
     def test_the_shipped_set_is_the_files_a_home_needs(self):
         self.assertEqual([rel for rel, _ in shipped()], [
             "CLAUDE.md",
+            "agents/spudagent.md",  # SPW-004: shipped, but rendered to user scope by install, never into a home
             "ledger/Board.base",
             "ledger/Fleet.base",
             "ledger/Home.md",
@@ -505,6 +533,25 @@ class ShippedSetTest(unittest.TestCase):
             "obsidian.lock.json",
             "spud.config.json",
         ])
+
+    def test_the_spudagent_source_is_the_shipped_file_and_no_home_gets_a_copy(self):
+        """SPW-004: `projects/agentdef.agent_source` reads share/agents/spudagent.md through core/shipped.share_dir, so
+        share/ has one owner; and it is the one shipped file `spud init` does not write into the home, because it belongs
+        at user scope, where Claude Code reads an agent definition from.  The vault SPD-156 ships is subtracted below
+        rather than counted against that: init's step 4b does write it into the home, under `.obsidian/` instead of at
+        its own share-relative path, and the lock beside it is what that install reads."""
+        home = helpers.Home()
+        try:
+            ctx = spud.Ctx(home.path, "SPUD_HOME", False, tool=REPO)
+            self.assertEqual(spud.agent_source(ctx), SHARE / "agents" / "spudagent.md")
+            self.assertTrue(spud.agent_source(ctx).is_file())
+            self.assertNotIn("agents/spudagent.md", spud.SCAFFOLDING)
+            shipped_paths = [rel for rel, _ in shipped()]
+            vault = {rel for rel in shipped_paths if rel == LOCK.name or rel.startswith("obsidian/")}
+            self.assertEqual(sorted(set(shipped_paths) - set(spud.SCAFFOLDING) - vault - {"spud.config.json"}),
+                             ["agents/spudagent.md"])
+        finally:
+            home.cleanup()
 
     def test_the_shipped_vault_holds_no_layout_no_plugin_code_and_no_note(self):
         # Design section 1: `workspace.json` and `workspace-mobile.json` are one person's window layout, `.DS_Store` is

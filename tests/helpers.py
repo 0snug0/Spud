@@ -250,8 +250,12 @@ class Home:
         # not stamp that live session on scratch rows, so a test that wants a session names it.
         self.env.pop("CLAUDE_CODE_SESSION_ID", None)
         # SPD-014: the hooks read the session's launch directory from CLAUDE_PROJECT_DIR, which a suite run from a Claude
-        # Code session inherits; a test that wants one sets it.  `project install` writes user-scope files and the home
-        # pointer: both go under this scratch home, never into ~/.claude or ~/.config/spud.
+        # Code session inherits; a test that wants one sets it.  Since SPW-003 `session show` and `doctor` read it too,
+        # to say whether the session they describe loads any ledger hook at all: with neither this nor
+        # CLAUDE_CODE_SESSION_ID set, which is every home here by default, that answer is `no_session` and both commands
+        # say nothing new.  `project install` writes user-scope files and the home pointer: both go under this scratch
+        # home, never into ~/.claude or ~/.config/spud -- and SPUD_USER_CLAUDE_DIR is also the ~/.claude/settings.json
+        # that check reads, so this Mac's own hook lines can never answer for a scratch home.
         self.env.pop("CLAUDE_PROJECT_DIR", None)
         self.env["SPUD_USER_CLAUDE_DIR"] = str(self.path / ".user-claude")
         self.env["SPUD_CONFIG_DIR"] = str(self.path / ".user-config")
@@ -377,6 +381,24 @@ class Home:
             f.write("\n")
         return p
 
+    def agent_source(self, text=None):
+        """This home-as-tool's `share/agents/spudagent.md`, the template `project install` renders (SPW-004), made this
+        home's own to write first.
+
+        The share/ a Home gets is a symlink to the repository's, so that no test can write through it into the checkout
+        (__init__ above).  A test that writes a fixture source, edits it or deletes it -- which is most of the tests about
+        install, sync and doctor -- would be writing into `share/agents/` now that the source lives there, so the symlink
+        is replaced by a copy the first time this is called.  `text` writes it in the same breath."""
+        share = self.path / "share"
+        if share.is_symlink():
+            share.unlink()
+            shutil.copytree(REPO / "share", share)
+        source = share / "agents" / "spudagent.md"
+        if text is not None:
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text(text, encoding="utf-8")
+        return source
+
     def write_config(self, config):
         """Rewrite the home's spud.config.json (the CLI reads it on every run)."""
         self.config = config
@@ -481,13 +503,12 @@ class RepoMixin:
         return path
 
     def make_tool(self):
-        """A scratch main checkout playing the tool repository (SPD-097): this checkout's bin/ and share/ and its
-        spudagent source, committed on main, with .claude/settings.local.json ignored as the real repository ignores it."""
+        """A scratch main checkout playing the tool repository (SPD-097): this checkout's bin/ and share/, committed on
+        main, with .claude/settings.local.json ignored as the real repository ignores it.  share/ carries the spudagent
+        source with it since SPW-004 moved it to share/agents/spudagent.md, so nothing copies that file on its own."""
         tool = self.make_repo("tool-")
         shutil.copytree(REPO / "bin", tool / "bin", ignore=shutil.ignore_patterns("__pycache__"))
         shutil.copytree(REPO / "share", tool / "share")  # SPW-001: what `spud init` writes a home from
-        (tool / ".claude" / "agents").mkdir(parents=True)
-        shutil.copyfile(REPO / ".claude" / "agents" / "spudagent.md", tool / ".claude" / "agents" / "spudagent.md")
         (tool / ".gitignore").write_text(".claude/settings.local.json\n", encoding="utf-8")
         git(tool, "add", "-A")
         git(tool, "commit", "-q", "-m", "tool")

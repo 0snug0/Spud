@@ -7,9 +7,9 @@ import sys
 from . import ghread, prcmds, publish, settings_sync, vaultlock
 from ..core import homeconf, kernel, launchagents
 from ..hooks import gitrepos, hookio, snapshots, worktrees
-from ..projects import agentdef, install
+from ..projects import agentdef, install, sessions
 from ..render import prices
-from ..state import backup, ledgerdb, lookup, schema
+from ..state import actors, backup, ledgerdb, lookup, schema
 
 WATCHER_DOWN = ("the render watcher %s is installed but not running: the vault is stale until `spud --as spud schedule install` reloads it"
                 % launchagents.RENDER_LABEL)
@@ -117,6 +117,7 @@ def doctor_report(ctx):
     if no_project:
         notes.append(NO_PROJECT % (config.get("tickets", {}).get("prefix"), config.get("teams", {}).get("prefix")))
     report["projects"] = doctor_projects(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else []
+    report["hooks"] = doctor_session_hooks(ctx, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["repositories"] = doctor_repositories(ctx, problems) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
     report["render"] = doctor_render(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION and config is not None else None
     report["pull_requests"] = doctor_pull_requests(ctx, problems, notes) if db["exists"] and db.get("user_version") == schema.SCHEMA_VERSION else None
@@ -148,6 +149,8 @@ def doctor_report(ctx):
         lines.append("pricing     %s" % ("%s: every cost shows —" % prices.NO_TABLE if not prices.price_table(config)[1] else "no usable price table: see problems"))
     for p in report["projects"]:
         lines.append("project     %s at %s: %s" % (p["key"], p["root"], ", ".join(p["checks"]) or "no check passed"))
+    if report["hooks"] is not None:  # SPW-003: the installation above can be perfect and this session still load none of it
+        lines.extend(("hooks       " if n == 0 else "            ") + line for n, line in enumerate(report["hooks"]["lines"]))
     if report["repositories"] is not None:
         r = report["repositories"]
         lines.append("repos       %d checkout%s read: %s" % (
@@ -201,28 +204,40 @@ AGENT_ABSENT = "no spudagent definition at %s; " + SYNC_ALL
 # SPW-002: a hand edit of the installed copy and a home whose launcher moved read the same way -- the copy is not what
 # install renders from the tool repository's template now -- and one sync settles both.
 AGENT_DIFFERS = "%s is not the spudagent definition this home installs from %s; " + SYNC_ALL
+# SPW-004: Claude Code reads a project-scope agent definition in preference to the user-scope copy install writes, so a
+# `.claude/agents/spudagent.md` in a project's own checkout is the definition every session there actually reads -- which
+# is how the tool repository's own template, `{{launcher}}` and all, shadowed the installed copy until SPW-004 moved it
+# under share/.  Nothing in the installed files shows it, so doctor says it in as many words.
+AGENT_SHADOWED = ("%s exists, so a spudagent in that checkout reads it and not %s, the definition this home installs:"
+                  " Claude Code prefers a project-scope agent definition to the user-scope one")
 
 
 def doctor_projects(ctx, problems, notes):
     """doctor's projects section (SPD-014): each active project, its root a main checkout (or the home itself, before
     `home move`), and when it is installed its local settings carrying this home's hooks, the file ignored, the
-    user-scope agent being what this home installs now and the /spud skill present.  The home pointer and the superseded
-    worktree cache are notes, never problems."""
+    user-scope agent being what this home installs now, the /spud skill present, and whether a definition of the
+    project's own shadows the installed one (SPW-004).  The home pointer, the superseded worktree cache and that shadow
+    are notes, never problems.
+
+    The shadow is a note because the file is that repository's and not this home's: doctor's problems are what `home
+    init` and `home move` refuse on, and neither has anything to do with a file a project's git tracks.  It is read for
+    installed projects only -- the ones this home has written a definition for, and so the ones where two definitions can
+    disagree.  The root is read, not each worktree: a file a project tracks reaches every worktree of it anyway."""
     out = []
     con = ledgerdb.open_connection(ctx.db_path)
     try:
         rows = con.execute("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall()
     finally:
         con.close()
-    # SPD-097: the tool repository's copy is the source, and since SPW-002 a template: the installed copy is compared with
-    # what this home renders from it now, never with the source's bytes, which name no machine's launcher.
+    # SPD-097: the tool repository's copy is the source, and since SPW-002 a template under share/ (SPW-004): the installed
+    # copy is compared with what this home renders from it now, never with the source's bytes, which name no machine's launcher.
     source_agent = agentdef.agent_source(ctx)
     try:
         expected_agent, agent_gone = agentdef.agent_markdown(ctx), None
     except kernel.SpudError as e:
         expected_agent, agent_gone = None, e.message
     for p in rows:
-        root, checks, bad = p["root_path"], [], []
+        root, checks, bad, project_agent = p["root_path"], [], [], None
         if not os.path.isdir(root):
             bad.append("root %s is not a directory" % root)
         elif worktrees.file_identity(root) == worktrees.file_identity(ctx.home):
@@ -261,10 +276,15 @@ def doctor_projects(ctx, problems, notes):
                 bad.append("no /spud skill at %s; run `spud --as spud project sync %s`" % (files["skill"], p["key"]))
             if not files["pointer"].is_file():
                 notes.append("no home pointer at %s (a launcher copied outside every checkout cannot find the home)" % files["pointer"])
+            own = agentdef.project_scope_agent(root)
+            if own.is_file():  # SPW-004: it wins over files["agent"], so say so; the report carries the answer either way
+                project_agent = str(own)
+                notes.append(AGENT_SHADOWED % (project_agent, files["agent"]))
         else:
             checks.append("not installed")
         problems.extend("project %s: %s" % (p["key"], b) for b in bad)
-        out.append({"key": p["key"], "root": root, "installed": bool(p["installed"]), "checks": checks, "problems": bad})
+        out.append({"key": p["key"], "root": root, "installed": bool(p["installed"]), "checks": checks, "problems": bad,
+                    "project_scope_agent": project_agent})
     if (ctx.home / hookio.STATE_DIR / "worktrees.json").exists():
         notes.append(".spud/worktrees.json is superseded by .spud/worktrees/<key>.json and ignored")
     problem, note = snapshots.table_report(str(ctx.home))  # SPD-133: what the Bash hook reads a command word against
@@ -273,6 +293,27 @@ def doctor_projects(ctx, problems, notes):
     if note:
         notes.append(note)
     return out
+
+
+def doctor_session_hooks(ctx, notes):
+    """doctor's hooks section (SPW-003): whether the session doctor itself runs in has this home's ledger hooks loaded
+    where that session actually reads them -- the question the project lines above cannot answer, since they check the
+    files this home installs and a session launched somewhere else reads none of them.
+
+    A note, never a problem, for the two states that are proven wrong (`absent` and `partial`).  What is wrong then is
+    where the session was launched, not anything in this home: doctor's exit code would otherwise call a healthy home
+    broken, and `home move`, which refuses on this report's problems, would refuse from such a session -- which is
+    exactly the session most likely to be running it.  `unknown` and `no_session` add nothing: the hooks line says what
+    was read, and neither proves a gap."""
+    con = ledgerdb.open_connection(ctx.db_path)
+    try:
+        hooks = sessions.session_hooks(ctx, con, actors.planning_session(os.environ))
+    finally:
+        con.close()
+    hooks["lines"] = sessions.session_hooks_lines(ctx, hooks)
+    if hooks["state"] in ("absent", "partial"):
+        notes.append(hooks["lines"][0])  # the state; the fix is on the hooks line itself, and in the report
+    return hooks
 
 
 def doctor_vault(ctx, notes):

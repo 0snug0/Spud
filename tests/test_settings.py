@@ -1,12 +1,18 @@
 """settings sync: the two env caps generated from spud.config.json limits, the seven
 ledger hooks and the CLI allow rules, written into a settings file with every
-other key preserved. Always against a temp file."""
+other key preserved. Always against a temp file.
+
+HookEvidenceTest is SPW-003: the one reading of a settings file, which `settings sync`
+writes, doctor asks per project and `session show` asks of the files its own session
+loads -- and the two hand-rolled pieces that reading rests on, pinned against the
+standard library and against the table sync installs."""
 
 import json
+import shlex
 import sys
 import unittest
 
-from helpers import SpudTestCase
+from helpers import SpudTestCase, load_spud_module
 
 FIXTURE = {
     "model": "claude-fable-5-1",
@@ -231,6 +237,56 @@ class SettingsSyncTest(SpudTestCase):
         out = self.home.json("settings", "sync", "--path", path)
         self.assertFalse(out["written"])
         self.assertEqual(path.stat().st_mtime_ns, mtime)
+
+
+class HookEvidenceTest(SpudTestCase):
+    def ctx(self):
+        spud = load_spud_module()
+        return spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+
+    def test_the_events_a_settings_file_carries_are_read_once_for_every_reader(self):
+        """SPW-003 moved the reading to projects/sessions.settings_hook_events, where `session show` can reach it;
+        settings_hold_hooks is the whole-table answer over it and keeps its meaning for install, home move and doctor."""
+        spud = load_spud_module()
+        ctx = self.ctx()
+        path = self.home.path / "elsewhere" / "settings.json"
+        self.assertEqual(spud.settings_hook_events(ctx, path), set())  # absent
+        self.assertFalse(spud.settings_hold_hooks(ctx, path))
+        self.home.json("settings", "sync", "--path", path)
+        self.assertEqual(spud.settings_hook_events(ctx, path), {e for e, _ in spud.HOOK_TABLE})
+        self.assertTrue(spud.settings_hold_hooks(ctx, path))
+        # a project's lines end in `--project <key>`, and only that key's reader may count them
+        project = self.home.path / "p" / "settings.local.json"
+        project.parent.mkdir(parents=True)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        for groups in data["hooks"].values():
+            for g in groups:
+                for h in g["hooks"]:
+                    if "bin/spud hook" in h["command"]:
+                        h["command"] += " --project badtakes"
+        project.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        self.assertEqual(spud.settings_hook_events(ctx, project, "badtakes"), {e for e, _ in spud.HOOK_TABLE})
+        self.assertEqual(spud.settings_hook_events(ctx, project, "elsewhere"), set())
+        self.assertTrue(spud.settings_hold_hooks(ctx, project, "badtakes"))
+        self.assertFalse(spud.settings_hold_hooks(ctx, project, "elsewhere"))
+        # junk is not evidence: a file that is not JSON, not an object, or not the shape sync writes carries nothing
+        for junk in ("not json", "[]", '{"hooks": "nope"}', '{"hooks": {"Stop": [{"hooks": [{"command": 7}]}]}}'):
+            path.write_text(junk, encoding="utf-8")
+            self.assertEqual(spud.settings_hook_events(ctx, path), set(), junk)
+
+    def test_the_two_spellings_of_a_shell_word_are_the_two_shlex_quote_writes(self):
+        """SPW-003: projects/sessions generates both forms instead of importing shlex, which every hook run would pay
+        0.11 ms for.  Exact for any text, this pins it: whatever shlex.quote writes is one of the two."""
+        spud = load_spud_module()
+        for text in ("/Users/eric/Spud", "/Users/eric/My Home", "/tmp/it's here", "a$b`c", "", "plain", "a'b'c", "/a\nb"):
+            self.assertIn(shlex.quote(text), spud.shell_word_forms(text), text)
+
+    def test_the_hook_table_installs_exactly_the_events_the_program_handles(self):
+        """Why `missing` may be measured against hookio.HOOK_EVENTS (SPW-003): the events settings sync installs are the
+        events a hook run can be dispatched to, so an event in one list and not the other would be a gap either way."""
+        spud = load_spud_module()
+        self.assertEqual({e for e, _ in spud.HOOK_TABLE}, set(spud.HOOK_EVENTS))
+        self.assertEqual(set(spud.HOOK_HANDLERS), set(spud.HOOK_EVENTS))
 
 
 if __name__ == "__main__":

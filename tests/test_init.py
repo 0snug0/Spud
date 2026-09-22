@@ -31,6 +31,29 @@ SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
 SCAFFOLDING = ("CLAUDE.md", "ledger/Home.md", "ledger/Spud.md", "ledger/Board.base", "ledger/Fleet.base",
                "ledger/_templates/ticket.md", "ledger/_templates/spudagent.md")
 DIRECTORIES = ("ledger/tickets", "ledger/teams", "reports", "docs/spikes", "docs/design")
+# SPW-005: the block share/spud.config.json carried until SPW-005 dropped it, with every path in it moved under one
+# directory of its own -- so a test that finds a note or a folder under DROPPED_ROOT has found a reader of the block,
+# which there is none of.  `format` keeps its shipped value, the one that read `markdown-v0` while the ledger's format
+# had been `sqlite-v1` since the database landed, because that staleness was harmless too.
+DROPPED_ROOT = "elsewhere"
+DROPPED_LEDGER_BLOCK = {
+    "format": "markdown-v0",
+    "tickets": DROPPED_ROOT + "/tickets",
+    "teams": DROPPED_ROOT + "/teams",
+    "reports": DROPPED_ROOT,
+    "spikes": DROPPED_ROOT + "/spikes",
+}
+UNKNOWN_BLOCK = "a_block_no_version_of_spud_ever_knew"
+
+
+def extra_block_config():
+    """The shipped config plus the dropped `ledger` block and a block no version of the program knew: what a home may
+    carry after SPW-005, since nothing validates the config's key set and nothing migrates it."""
+    config = real_config()
+    config["ledger"] = dict(DROPPED_LEDGER_BLOCK)
+    config[UNKNOWN_BLOCK] = {"nested": [1, 2, 3]}
+    return config
+
 
 TABLES = {
     "projects",
@@ -229,6 +252,63 @@ class InitTest(SpudTestCase):
         self.assertIn("bound to its", text)
         self.assertIn("spud hook", text)
         self.assertNotIn("SPD-008", text)
+
+
+class UnknownConfigBlockTest(SpudTestCase):
+    """SPW-005: a home's `spud.config.json` may carry a block the program does not read, and nothing complains.
+
+    The shipped config carried a `ledger` block (`format`, `tickets`, `teams`, `reports`, `spikes`) that no module ever
+    read: `render/notefiles.render_targets` and `commands/homeinit.DIRECTORIES` hard-code the vault's layout, because the
+    hooks (`hooks/hookio.GENERATED_ROOTS`, `imports/accept`, `imports/bulkimport`, `commands/homemove.COPIED_DIRS`) and
+    the shipped `Board.base` and `Fleet.base` all depend on that layout.  Eric's call (2026-09-22) dropped the block from
+    `share/spud.config.json`, and there is no migration: `Ctx.config` is `json.load` and `homeconf.config_problems`
+    checks the blocks it knows, so a home whose file still carries the block -- Eric's own, until he removes it by hand
+    -- keeps working untouched, and so does one carrying any other key nothing reads.  This home carries both, with the
+    old block's paths deliberately pointing somewhere the renderer does not write, and everything below is green.  A
+    key-set or schema check added later fails here rather than in somebody's live home.
+    """
+
+    config = None  # built in setUp, so each test gets its own dict (SpudTestCase reads self.config)
+
+    def setUp(self):
+        self.config = extra_block_config()
+        super().setUp()
+
+    def test_the_config_reader_and_doctor_accept_the_blocks_nothing_reads(self):
+        self.assertEqual(load_spud_module().config_problems(self.config), [])
+        out = self.home.json("doctor")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["problems"], [])
+        self.assertEqual(out["config"]["problems"], [])
+        self.assertEqual(out["config"]["limits"], real_config()["limits"])
+        # and nothing rewrote or migrated the file underneath the home: both blocks are still in it, byte for byte
+        written = json.loads((self.home.path / "spud.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(written["ledger"], DROPPED_LEDGER_BLOCK)
+        self.assertEqual(written[UNKNOWN_BLOCK], {"nested": [1, 2, 3]})
+
+    def test_config_sync_mirrors_the_blocks_it_knows_and_leaves_the_rest_alone(self):
+        out = self.home.json("config", "sync")
+        self.assertTrue(out["ok"], out)
+        self.assertEqual(out["pool"], len(real_config()["naming"]["pool"]))
+        self.assertEqual((out["project"]["ticket_prefix"], out["project"]["team_prefix"]), ("SPD", "SPUD"))
+        self.assertIn("ledger", json.loads((self.home.path / "spud.config.json").read_text(encoding="utf-8")))
+
+    def test_the_renderer_writes_its_own_folders_whatever_the_dropped_block_says(self):
+        """The block was decorative, which is why it could go: its paths never chose a folder, and they still do not."""
+        ticket = self.new_ticket("A ticket")
+        self.new_member(ticket["key"], name="Russet")
+        out = self.home.path / "out"
+        self.home.json("render", "--out", out)
+        self.assertTrue((out / "ledger" / "tickets" / ("%s.md" % ticket["key"])).is_file())
+        self.assertTrue((out / "ledger" / "teams" / ticket["team_key"] / "Russet.md").is_file())
+        self.assertFalse((out / DROPPED_ROOT).exists())
+
+    def test_the_directories_init_creates_are_the_hard_coded_ones(self):
+        """`homeinit.DIRECTORIES`, not `ledger.spikes` and friends: the home this class built has the renderer's folders
+        and none of the block's."""
+        for rel in DIRECTORIES:
+            self.assertTrue((self.home.path / rel).is_dir(), rel)
+        self.assertFalse((self.home.path / DROPPED_ROOT).exists())
 
 
 class EmptyRegistryTest(RepoMixin, SpudTestCase):

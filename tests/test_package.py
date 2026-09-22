@@ -9,6 +9,7 @@ no test sets or patches an attribute of the loaded program, which no call site r
 
 import ast
 import json
+import re
 import subprocess
 import sys
 import unittest
@@ -228,13 +229,28 @@ class ShippedPathsTest(unittest.TestCase):
         self.assertEqual([(rel, needle) for rel, data in shipped for needle in needles if needle.encode("utf-8") in data], [])
 
     def test_the_spudagent_definition_is_a_template_install_renders(self):
-        text = (REPO / ".claude" / "agents" / "spudagent.md").read_text(encoding="utf-8")
-        self.assertTrue(text.startswith("---\nname: spudagent\n"), text[:64])  # still a Claude Code agent definition here
+        text = (REPO / "share" / "agents" / "spudagent.md").read_text(encoding="utf-8")  # SPW-004: under share/, not .claude/
+        self.assertTrue(text.startswith("---\nname: spudagent\n"), text[:64])  # the frontmatter the installed copy needs
         spud = load_spud_module()
         self.assertIn(spud.LAUNCHER_MARK, text)
         rendered = spud.render_launcher(text, "/somewhere/Spud/bin/spud")
         self.assertIn("python3.14 -I -S /somewhere/Spud/bin/spud", rendered)
         self.assertNotIn(spud.LAUNCHER_MARK, rendered)
+
+    def test_this_repository_tracks_no_project_scope_spudagent_definition(self):
+        """SPW-004: Claude Code reads `<checkout>/.claude/agents/spudagent.md` in preference to the user-scope copy
+        `project install` writes, so the template this repository used to keep there was the definition every spudagent
+        working a ticket in this checkout actually read -- an unrendered `{{launcher}}` and all.  A file full of {{marks}}
+        was never a usable agent definition; it only shadowed the one that was.  It lives under share/ now, and nothing
+        here puts one back: this guard is the whole defect, in one line."""
+        shadow = REPO / load_spud_module().PROJECT_SCOPE_REL
+        self.assertFalse(shadow.exists(), "%s is back and shadows the installed definition (SPW-004)" % shadow)
+        # And this repository's CLAUDE.md, which named that path twice: the source is share/agents/spudagent.md, and the
+        # only .claude/agents/spudagent.md left in the prose is the installed user-scope copy `project sync` refreshes.
+        claude_md = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("share/agents/spudagent.md", claude_md)
+        named = set(re.findall(r"[-~\w./]*\.claude/agents/spudagent\.md", claude_md))
+        self.assertEqual(named, {"~/.claude/agents/spudagent.md"})
 
 
 class PatchTargetTest(unittest.TestCase):
