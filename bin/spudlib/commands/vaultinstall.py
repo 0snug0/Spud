@@ -10,9 +10,9 @@ Three rules an edit here must keep:
 - **A file the tool does not ship is never touched.**  The vault is the person's; what the tool owns is the list in
   `core/vaultlock` and the files the lock pins, and nothing else in `.obsidian/` is read, moved or removed.
 - **A tool-owned file the home has changed is replaced, and a copy is kept** under `.spud/backups/vault-install/<when>/`
-  and named in the output.  The shipped `.base` views and settings are the tool's and an install refreshes them; a
-  person's own view survives because it carries its own name, which is the one sentence the output and `ledger/Home.md`
-  both say.  `--force` is for re-writing what matched anyway.
+  and named in the output.  The shipped `.base` views are the tool's too, but this command leaves them alone --
+  `spud home sync` is what refreshes them, keeping a copy of what it replaces, while a `.base` file of the reader's own
+  survives.  `--force` is for re-writing what matched anyway.
 - **A refused download is never fatal.**  `install_vault` collects them, names each, and returns; `spud init` turns the
   list into a note and a line telling the person to run `spud vault install` later (design section 3).
 """
