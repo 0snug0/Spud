@@ -1,11 +1,12 @@
 """commands/homeinit: `spud init`, one command from a fresh clone to a working Spud (SPW-001,
 docs/design/2026-09-21-spud-init.md sections 2 and 6).
 
-Steps 1 to 5 of the design's ten: the home directory and the config, the database, the first project with one report
-entry, the vault scaffolding, the home pointer.  Steps 6 to 10 -- `settings sync`, `project install`, the two
-LaunchAgents, the render and doctor -- are `finish_install` and `verify`, which land with phase 4; until they do, `init`
-prints them as the lines left by hand, and `--no-schedule` arrives with the step it skips rather than shipping as a flag
-that does nothing.
+All ten of the design's steps.  Steps 1 to 5 build the home: the directory and the config, the database, the first
+project with one report entry, the vault scaffolding, the home pointer.  Steps 6 to 10 are the install tail --
+`finish_install` (`settings sync` into the home's own `.claude/settings.json`, `project install` for the first project,
+the two LaunchAgents) and `verify` (the first render under the render lock, then doctor) -- and when they end green one
+command has taken a fresh clone to `spud doctor` reporting `problems none`, which is the ticket's definition of done.
+What is left by hand after that is two lines: open the home as a vault in Obsidian, and start a session there.
 
 **Kept whole, and past 250 lines on purpose.**  ~250 is the look-again point, never a cap (`.claude/skills/spudlib-modules`
 section 6), and the argument here is `commands/homemove`'s own: this is one procedure whose every step reads what the ones
@@ -13,11 +14,13 @@ before it did.  Step 1 decides what the config says; step 2 will not open a data
 `config_problems`; step 3's `INSERT` carries the prefixes step 1 wrote, because doctor compares the two; step 4 renders
 prose from the config step 1 wrote and the project row step 3 inserted, and must not run before step 3, so that no
 `CLAUDE.md` describes a project whose `INSERT` then failed on a `UNIQUE` constraint; step 5 writes the pointer only once
-the four before it made the directory a home.  Cutting that sequence at any point would give two modules that may only
-ever be called in one order, with the order itself written nowhere.  The seam that is real is the install tail, and
-phase 4 takes it as its own two functions.
+the four before it made the directory a home; step 7 installs the project row step 3 inserted; step 9 renders what steps
+3 to 8 wrote and refuses anything else; step 10 asks doctor about all of it.  Cutting that sequence at any point would
+give two modules that may only ever be called in one order, with the order itself written nowhere.  The one seam that is
+real is the install tail, which is `finish_install` and `verify` -- the two functions the design named, and the two the
+suite calls on their own.
 
-Two properties an edit here must keep:
+Three properties an edit here must keep:
 
 - **Init resolves no actor** (design 2.3).  `state/actors.resolve_actor(con, None)` refuses outright and `require_spud`
   refuses an unclaimed session in a `claim` project -- which is exactly the session init creates when it registers
@@ -26,16 +29,22 @@ Two properties an edit here must keep:
   through `require_spud`) is never called: init validates `--next` itself.
 - **`bin/spud_ledger.main` resolves the home for every other command** and `init` is the one that may run without one,
   through `init_ctx` in main's own branch.  `core/homeconf.resolve_home` is untouched, and nothing here joins the hook path.
+- **No step names a day from the clock.**  Step 3 writes init's report entry and step 9 renders it, and a run that
+  crosses midnight between the two would otherwise render a day file step 9 had not been told to expect and fail a
+  command that did everything right.  `report_days` reads the days from the entries themselves; nothing here calls
+  `kernel.now()` to name a file.
 """
 
+import json
 import os
 import re
 import sys
 from pathlib import Path
 
-from . import reportentry
-from ..core import homeconf, kernel, shipped
-from ..projects import registry
+from . import doctor, publish, reportentry, schedule, settings_sync
+from ..core import homeconf, kernel, launchagents, lazy, shipped
+from ..projects import install, registry
+from ..render import notefiles
 from ..state import ledgerdb, schema
 
 # The default home the prompt offers when neither --home, nor SPUD_HOME, nor the pointer names one: Eric's call
@@ -78,12 +87,27 @@ CONFIG_IS_THEIRS = "%s is already there and init leaves it alone (design section
 NOT_RENDERED = "the shipped %s still carries %s after rendering; core/shipped.MARKS and <tool>/share/ have drifted (tests/test_share.py is the guard)"
 LEFT_BEHIND = ("nothing init wrote is removed: %s is as the steps above left it, and a rerun continues from there,"
                " because every step is idempotent by content")
-INIT_BY_HAND = """by hand, now (steps 6 to 10, which `finish_install` takes over in phase 4):
-  - %(launcher)s --as spud settings sync%(install)s
-  - %(launcher)s --as spud schedule install
-  - %(launcher)s --as spud render
-  - %(launcher)s doctor
-  - open %(home)s as a vault in Obsidian, and start a Claude Code session there: it is Spud's"""
+# Step 9's refusal.  The design's 2.1 reads `move_check_vault`'s precondition -- the copied vault must already be what
+# the copied database renders -- as init's postcondition: a fresh vault has nothing rendered yet, so the scaffolding is
+# written first (step 4) and the first render must write nothing but what a fresh ledger generates.
+RENDER_UNEXPECTED = ("the render into %s wrote %s and found %d conflict(s); a fresh home renders %s and nothing else."
+                     "  Either a shipped file collides with a render target, which tests/test_share.py is the guard"
+                     " against, or this home was not fresh and its vault was behind -- and then the pass above has just"
+                     " brought it up to date, so a rerun is green.  A conflict is a hand edit instead:"
+                     " `%s --as spud render --discard <path>` takes one file back, `%s --as spud import --file <path>`"
+                     " keeps it.")
+DOCTOR_RED = ("doctor on %s found %d problem(s): %s.  The home is complete and nothing is undone: fix each and rerun"
+              " `%s doctor` -- or `%s init`, which continues from here.")
+WATCHER_JUST_UP = ("; the render watcher was installed seconds ago and is not up yet: `%s doctor` from the new session"
+                   " confirms it")
+NO_PROJECT_TO_INSTALL = ("7. no project to install (--no-project): the home's own hooks are step 6's, and"
+                         " `%s --as spud project install <key>` follows the `project add` that registers one")
+SCHEDULE_SKIPPED = ("8. %s: %s and %s not installed, so nothing renders or backs up on its own until"
+                    " `%s --as spud schedule install` -- which doctor reports as a note, never a problem")
+NOT_DARWIN = "%s is not darwin, and launchctl is macOS's"
+INIT_BY_HAND = """by hand, now:
+  - open %(home)s as a vault in Obsidian
+  - start a Claude Code session there: it is Spud's"""
 
 
 # ----------------------------------------------------------------------------
@@ -294,16 +318,28 @@ def init_preconditions(ctx, args, plan):
 
 
 def init_steps(ctx, args, plan):
-    """Steps 1 to 5 as `--dry-run` prints them, with this machine's paths filled in -- `homemove.move_steps`' shape.
+    """All ten steps as `--dry-run` prints them, with this machine's paths filled in -- `homemove.move_steps`' shape.
 
-    Steps 6 to 10 are not printed: they do not run yet (see the module docstring), and a dry run that promised them
-    would be the one thing a dry run may not be."""
+    Steps 8's two skips are decided here as well as in `install_schedule`, because a dry run that promised a LaunchAgent
+    it would not install would be the one thing a dry run may not be."""
     project = ("register %s as project %s (%s-nnn tickets, %s-nnn teams, landing %s, sessions %s) with its project.added"
                " event, and one report entry in the same transaction"
                % (plan["project_root"], plan["project_key"], plan["ticket_prefix"], plan["team_prefix"], args.landing, args.sessions)
                if plan["project_root"] else
                "register no project (--no-project), leaving an empty registry that can hold no ticket until `project add`,"
                " and write one report entry")
+    user = homeconf.user_claude_dir()
+    install_step = ("install project %s: %s, the .git/info/exclude line for it, %s and %s"
+                    % (plan["project_key"], Path(plan["project_root"]) / install.SETTINGS_LOCAL,
+                       user / "agents" / "spudagent.md", user / "skills" / "spud" / "SKILL.md")
+                    if plan["project_root"] else "install no project (--no-project)")
+    if args.no_schedule or sys.platform != "darwin":
+        schedule_step = ("install neither LaunchAgent (%s): %s and %s"
+                         % ("--no-schedule" if args.no_schedule else NOT_DARWIN % sys.platform,
+                            launchagents.SCHEDULE_LABEL, launchagents.RENDER_LABEL))
+    else:
+        schedule_step = ("install %s (daily at %s) and %s (at load, and again whenever it exits) and load both"
+                         % (launchagents.SCHEDULE_LABEL, schedule.SCHEDULE_AT, launchagents.RENDER_LABEL))
     return [
         ("check the %s already in %s with config_problems" % (CONFIG_NAME, ctx.home) if plan["config_exists"] else
          "mkdir %s and write %s from %s (identity %s, %s/%s, %s-nnn tickets, %s-nnn teams), then check it with config_problems"
@@ -315,6 +351,13 @@ def init_steps(ctx, args, plan):
         "write the %d scaffolding files absent from %s (%s) and the %d directories (%s), keeping every file already there"
         % (len(SCAFFOLDING), ctx.home, ", ".join(SCAFFOLDING), len(DIRECTORIES), ", ".join(DIRECTORIES)),
         "write %s" % (homeconf.spud_config_dir() / "home"),
+        "settings sync into %s: %d ledger hook lines, the two CLI allow rules, the two Agent deny rules, the two env caps"
+        % (ctx.home / ".claude" / "settings.json", len(settings_sync.HOOK_TABLE)),
+        install_step,
+        schedule_step,
+        "render into %s under the render lock, and require that it wrote nothing but %s and the day file of each report"
+        " entry, and found no conflict" % (ctx.home, notefiles.PROJECTS_NOTE),
+        "run doctor on %s and fail on every problem but a render watcher installed seconds ago and not up yet" % ctx.home,
     ]
 
 
@@ -493,6 +536,132 @@ def write_pointer(ctx):
 
 
 # ----------------------------------------------------------------------------
+# The install tail
+# ----------------------------------------------------------------------------
+
+
+def install_first_project(ctx, project, done):
+    """Step 7: `project install` for the first project, skipped with `--no-project` -- `homemove.move_resync`'s 5d over
+    one project, with the `projects.installed` record and the `project.installed` event written beside it (design 2.1).
+
+    Idempotent by content: `install.install_project` writes each file only when its text changes, so a second run
+    reports `unchanged`, and the record and the event follow only a run that wrote something or found the project not
+    installed.  A run that changed nothing writes no row at all, which is the rule the whole command keeps.
+    """
+    if project is None:
+        done.append(NO_PROJECT_TO_INSTALL % ctx.launcher)
+        return None
+    con = ledgerdb.connect(ctx)
+    try:
+        p = con.execute("SELECT * FROM projects WHERE id = ?", (project["id"],)).fetchone()
+        record, written, first_agent = install.install_project(ctx, con, p)
+        stored = json.loads(p["installed"]) if p["installed"] else None
+        if written or stored != record:
+            at = kernel.now()
+            with ledgerdb.write_txn(con):
+                con.execute("UPDATE projects SET installed = ? WHERE id = ?", (json.dumps(record), p["id"]))
+                ledgerdb.write_event(con, at, "spud", "project.installed",
+                                     "project %s installed by init: %d file(s) written" % (p["key"], len(written)),
+                                     data={"project": p["key"], "written": written, "sync": False})
+    finally:
+        con.close()
+    done.append("7. project %s installed: %s" % (p["key"], ", ".join(written) or "unchanged"))
+    return {"project": p["key"], "written": written, "restart": first_agent}
+
+
+def install_schedule(ctx, args, done):
+    """Step 8: the two LaunchAgents, `homemove`'s step 6 -- skipped with `--no-schedule`, and skipped with a printed note
+    where `launchctl` does not exist (`sys.platform != "darwin"`).
+
+    Both skips leave a green doctor, which is what makes them safe to offer: doctor reports a watcher never installed as
+    a note and only a watcher installed and *not running* as a problem, and step 10 excuses that one, because it is what
+    a watcher bootstrapped seconds ago looks like.  The two halves of that rule belong to one step and are written here
+    and in `verify` for that reason.
+    """
+    if args.no_schedule or sys.platform != "darwin":
+        why = "--no-schedule" if args.no_schedule else NOT_DARWIN % sys.platform
+        done.append(SCHEDULE_SKIPPED % (why, launchagents.SCHEDULE_LABEL, launchagents.RENDER_LABEL, ctx.launcher))
+        return {"skipped": why, "agents": []}
+    records = schedule.install_agents(ctx, schedule.at_arg(schedule.SCHEDULE_AT))
+    for record in records:
+        done.append("8. %s loaded from %s" % (record["label"], record["path"]))
+    return {"skipped": None, "agents": records, "at": schedule.SCHEDULE_AT}
+
+
+def finish_install(ctx, args, project, done):
+    """Steps 6 to 8: `settings sync` into the home's own `.claude/settings.json`, `project install` for the first
+    project, and the two LaunchAgents -- `homemove.move_resync`'s 5b and 5d and its step 6, over a home just built.
+
+    Each line goes into `done` as its step completes rather than being returned at the end, so the failure report of
+    `cmd_init` can name a step 6 that completed when step 7 is the one that failed (design 2.4).  Step 6 is first
+    because it is the step that makes a session in the home Spud's, and it is the one step no flag skips: a home whose
+    own `.claude/settings.json` carries no ledger hook loses every hook in every home session, and doctor does not check
+    it (SPW-006), so nothing downstream would notice.
+    """
+    synced = settings_sync.cmd_settings_sync(ctx, lazy.argparse.Namespace(path=None, dry_run=False))
+    done.append("6. %s %s (%d ledger hook lines)"
+                % (synced.data["path"], "written" if synced.data["written"] else "unchanged", synced.data["hooks"]))
+    data = {"settings": {k: synced.data[k] for k in ("path", "written", "hooks")}}
+    data["install"] = install_first_project(ctx, project, done)  # three statements, not one dict literal: the order is
+    data["schedule"] = install_schedule(ctx, args, done)  # the design's, and it should not rest on how a literal evaluates
+    return data
+
+
+def report_days(con):
+    """`reports/<day>.md` for every day the event log holds a report entry for: exactly the day files
+    `render/notefiles.render_targets` generates, read from the entries themselves and never from the clock.
+
+    Step 3 writes init's own entry and step 9 renders it.  A run that crossed midnight between the two would render a
+    day file that `kernel.now()[:10]` had not named, and step 9 would call it unexpected and fail a command that had
+    done everything right.  `homemove.move_verify`'s `allowed` set takes that risk (its own two steps are seconds
+    apart); init's does not, and `tests/helpers.init_report_day` reads the day the same way for the same reason.
+    """
+    return {"reports/%s.md" % r[0] for r in
+            con.execute("SELECT DISTINCT substr(at, 1, 10) FROM events WHERE kind = 'report.entry'").fetchall()}
+
+
+def verify(ctx, done):
+    """Steps 9 and 10, `homemove.move_verify` over a home just built: the first render under `publish.render_lock`,
+    which must write nothing but `ledger/Projects.md` and each report entry's day file and find no conflict, then
+    `doctor`, where every problem but the just-bootstrapped watcher's fails the command with the report attached.
+
+    Design 2.1: homemove requires a zero-write render *before* it writes the home it copied (`move_check_vault`),
+    because its vault arrives already rendered.  A fresh vault has nothing rendered yet, so the same rule is init's
+    **postcondition** instead -- the scaffolding is written first, at step 4, and the first render must write only what a
+    fresh ledger generates.  A shipped file that collided with a render target would surface here.
+
+    The strict set is kept on a rerun too, where init is also the migration path ("the database is behind; run `spud
+    init`"): a rerun whose pass writes a ticket note found a vault that was behind, which is worth a refusal rather than
+    a silent pass, and `RENDER_UNEXPECTED` names that reading beside the collision -- the pass has brought the vault up
+    to date, so the next run is green.
+    """
+    con = ledgerdb.connect(ctx)
+    try:
+        allowed = {notefiles.PROJECTS_NOTE} | report_days(con)
+        with publish.render_lock(ctx):
+            result = publish.render_pass(ctx, con, None)
+    finally:
+        con.close()
+    unexpected = [rel for rel in result["written"] if rel not in allowed]
+    if unexpected or result["conflicts"]:
+        raise kernel.SpudError(kernel.EXIT_ERROR, RENDER_UNEXPECTED
+                               % (ctx.home, ", ".join(unexpected) or "nothing unexpected", len(result["conflicts"]),
+                                  ", ".join(sorted(allowed)), ctx.launcher, ctx.launcher), data=result)
+    done.append("9. render into %s: %s written, %d unchanged"
+                % (ctx.home, ", ".join(result["written"]) or "nothing", len(result["unchanged"])))
+    report, problems, _lines = doctor.doctor_report(ctx)
+    real = [p for p in problems if p != doctor.WATCHER_DOWN]
+    if real:
+        raise kernel.SpudError(kernel.EXIT_ERROR, DOCTOR_RED % (ctx.home, len(real), "; ".join(real), ctx.launcher, ctx.launcher), data=report)
+    done.append("10. doctor ok" + ("" if len(real) == len(problems) else WATCHER_JUST_UP % ctx.launcher))
+    # `conflicts` is empty by the time anything reads this -- a conflict raised above -- and it is in the data because
+    # step 9's postcondition is two clauses, and a test that can only read one of them proves only half of it.
+    return {"render": {"written": result["written"], "unchanged": len(result["unchanged"]),
+                       "conflicts": result["conflicts"], "through": result["through"]},
+            "doctor": {"problems": problems, "notes": report["notes"]}}
+
+
+# ----------------------------------------------------------------------------
 # The command
 # ----------------------------------------------------------------------------
 
@@ -538,11 +707,12 @@ def cmd_init(ctx, args):
         line, pointed = write_pointer(ctx)
         done.append(line)
         data["pointer"] = {"path": str(homeconf.spud_config_dir() / "home"), "written": pointed}
+        data.update(finish_install(ctx, args, project, done))
+        data.update(verify(ctx, done))
     except kernel.SpudError as e:
         raise kernel.SpudError(e.code, "init stopped after:\n  %s\n%s\n%s" % ("\n  ".join(done) or "nothing", e.message, LEFT_BEHIND % ctx.home),
                                data=dict(e.data, done=done, home=str(ctx.home)))
-    by_hand = INIT_BY_HAND % {"launcher": ctx.launcher, "home": ctx.home,
-                         "install": ("\n  - %s --as spud project install %s" % (ctx.launcher, data["project"]["key"])) if data["project"] else ""}
+    by_hand = INIT_BY_HAND % {"home": ctx.home}
     data.update(done=done, by_hand=by_hand)
     if entry is not None:  # its line is step 3b already, so the entry goes into --json and the text is left alone
         data["report_entry"] = entry

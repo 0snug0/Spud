@@ -195,11 +195,14 @@ class RenderShapeTest(SpudTestCase):
     def test_render_out_never_generates_the_hand_written_notes(self):
         self.new_ticket("Only")
         out = self.home.path / "out"
+        # SPW-001 phase 4: `spud init` renders the home it builds, so the table is not empty here; what `--out` must
+        # leave is the table exactly as it found it (render_pass records nothing when it is not rendering into the home).
+        recorded = self.home.rows("SELECT path, sha256, through_event_id FROM renders ORDER BY path")
         self.home.json("render", "--out", out)
         self.assertFalse((out / "ledger" / "Home.md").exists())
         self.assertFalse((out / "ledger" / "Spud.md").exists())
         self.assertFalse((out / "ledger" / "Board.base").exists())
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM renders"), 0)
+        self.assertEqual(self.home.rows("SELECT path, sha256, through_event_id FROM renders ORDER BY path"), recorded)
 
 
 class RenderConflictTest(SpudTestCase):
@@ -216,10 +219,13 @@ class RenderConflictTest(SpudTestCase):
         rows = {r["path"]: r for r in self.home.rows("SELECT path, sha256, through_event_id FROM renders")}
         self.assertEqual(rows["ledger/tickets/SPD-001.md"]["sha256"], hashlib.sha256(ticket_path.read_bytes()).hexdigest())
         self.assertGreater(rows["ledger/tickets/SPD-001.md"]["through_event_id"], 0)
+        # SPD-097: the second pass changed nothing and wrote nothing.  Read as a delta because `spud init` renders the
+        # home it builds (SPW-001 phase 4), so this pass is not the first one the event log holds.
+        rendered = self.home.scalar("SELECT count(*) FROM events WHERE kind = 'render'")
         again = self.home.json("render")
         self.assertEqual(again["written"], [])
         self.assertEqual(sorted(again["unchanged"]), sorted(out["written"]))
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'render'"), 1)  # SPD-097: the second pass changed nothing and wrote nothing
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'render'"), rendered)
 
     def test_a_no_change_render_writes_nothing(self):
         self.new_ticket("Quiet")

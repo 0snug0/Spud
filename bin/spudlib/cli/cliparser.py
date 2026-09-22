@@ -76,6 +76,9 @@ def build_parser():
     p.add_argument("--landing", choices=("merge", "pr"), default="merge", help="how the first project's verified branch lands (default merge)")
     p.add_argument("--sessions", choices=("claim", "always"), default="claim", help="claim (default): a session in the project is Spud only after /spud claims it")
     p.add_argument("--default-branch", help="the first project's default branch (default: origin/HEAD's branch, else main)")
+    p.add_argument("--no-schedule", action="store_true",
+                   help="install neither LaunchAgent (%s, the daily backup, and %s, the render watcher): `spud schedule install` does it later, and doctor reports a watcher never installed as a note, not a problem"
+                        % (launchagents.SCHEDULE_LABEL, launchagents.RENDER_LABEL))
     p.add_argument("--repoint", action="store_true", help="~/.config/spud/home names another home: point this machine here instead (that home is left untouched)")
     p.add_argument("--yes", action="store_true", help="never prompt: every value not given takes its default, and one with no default is refused")
     p.add_argument("--dry-run", action="store_true", help="check the preconditions and print the steps; write nothing")

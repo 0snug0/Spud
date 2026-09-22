@@ -263,8 +263,14 @@ class Home:
         tool repository, and registering the first one is `spud init`'s own step (phase 3 of the design) or nobody's,
         since a home may hold none.  Until that step exists the suite seeds the row the dropped `sync_config_rows`
         INSERT left behind, so every home here keeps the shape it had; a test of the empty registry passes False.
+
+        `--no-schedule` is not a convenience: since phase 4 `init` installs the two LaunchAgents, and `launchctl`'s
+        domain and the two labels are the *machine's*, not this scratch home's -- a home sets SPUD_LAUNCH_AGENTS_DIR but
+        not SPUD_LAUNCHCTL, so an init here would boot out this Mac's own `local.spud.backup` and `local.spud.render`
+        and then fail to bootstrap a plist from /var/folders.  Every Home therefore skips step 8, and the tests that are
+        about the LaunchAgents install them through the fake launchctl (LaunchdMixin, `fake_launchctl`).
         """
-        out = self.json("init")
+        out = self.json("init", "--no-schedule")
         if project:
             self.seed_project_one()
         return out
@@ -726,6 +732,26 @@ class GhMixin:
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.is_file() else []
 
 
+def fake_launchctl(scratch, env):
+    """The stand-in for launchctl written under `scratch` and wired into `env`: (the program, its state directory).
+
+    SPW-001 phase 4 made this the difference between a test and an accident: `spud init` installs the two LaunchAgents,
+    and launchctl's domain is this Mac's user domain while `local.spud.backup` and `local.spud.render` are this Mac's
+    own labels -- SPUD_LAUNCH_AGENTS_DIR moves the plist a test writes, and nothing moves the job a `bootout` removes.
+    So every fixture that can reach `schedule install`, init included, names a launchctl of its own.
+    """
+    state = scratch / "launchctl-state"
+    state.mkdir(parents=True, exist_ok=True)
+    fake = scratch / "fake_launchctl.py"
+    fake.write_text(FAKE_LAUNCHCTL, encoding="utf-8")
+    launchctl = scratch / "launchctl"
+    launchctl.write_text("#!/bin/sh\nexec %s -I -S %s \"$@\"\n" % (shlex.quote(sys.executable), shlex.quote(str(fake))), encoding="utf-8")
+    launchctl.chmod(0o755)
+    env.update({"SPUD_LAUNCHCTL": str(launchctl), "FAKE_LAUNCHCTL_STATE": str(state)})
+    env.pop("FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES", None)
+    return launchctl, state
+
+
 class LaunchdMixin:
     """A scratch LaunchAgents directory and the fake launchctl, wired into self.home.env (SPD-012, shared since SPD-097)."""
 
@@ -734,15 +760,8 @@ class LaunchdMixin:
         self.addCleanup(scratch.cleanup)
         self.scratch = Path(scratch.name).resolve()
         self.agents = self.scratch / "LaunchAgents"
-        self.state = self.scratch / "launchctl-state"
-        self.state.mkdir()
-        fake = self.scratch / "fake_launchctl.py"
-        fake.write_text(FAKE_LAUNCHCTL, encoding="utf-8")
-        self.launchctl = self.scratch / "launchctl"
-        self.launchctl.write_text("#!/bin/sh\nexec %s -I -S %s \"$@\"\n" % (shlex.quote(sys.executable), shlex.quote(str(fake))), encoding="utf-8")
-        self.launchctl.chmod(0o755)
-        self.home.env.update({"SPUD_LAUNCH_AGENTS_DIR": str(self.agents), "SPUD_LAUNCHCTL": str(self.launchctl), "FAKE_LAUNCHCTL_STATE": str(self.state)})
-        self.home.env.pop("FAKE_LAUNCHCTL_BOOTSTRAP_FAILURES", None)
+        self.launchctl, self.state = fake_launchctl(self.scratch, self.home.env)
+        self.home.env["SPUD_LAUNCH_AGENTS_DIR"] = str(self.agents)
 
     def launchctl_calls(self):
         path = self.state / "calls.jsonl"
