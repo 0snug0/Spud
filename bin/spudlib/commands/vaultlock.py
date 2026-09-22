@@ -34,10 +34,21 @@ doctor's own module, is not: those findings *are* the comparisons above asked in
 `installed_version` would have to stay here anyway, since capture reads a manifest through it.  Three readers each use
 some of each, which is the reason the three do not each carry their own rule for what Obsidian's `/* nosourcemap */`
 means.
+
+**The restricted `.base` reader moved in from tests/test_share.py (SPD-159).**  It reads a `.base` file in the
+deliberately narrow YAML subset that guard test was built on: block mappings and sequences, `key:`, `key: value`,
+`- value`, `- key: value`, plain scalars to the end of the line, quoted scalars, integers and an *empty* flow
+collection, refusing a tab, a flow collection with anything in it, an anchor, an alias, a tag, a block scalar, a
+document marker, a comment, a duplicate key and any line it cannot place.  It moved here because doctor now reads a
+home's own `ledger/*.base` files too, to find a view whose plugin the home lacks (`missing_plugin_findings` below),
+and the rule this ticket was built on is one reader, not two: `tests/test_share.py` still guards the shipped set with
+it, reached as `spud.read_base` the way it already reaches `view_types`, rather than keeping a second copy that could
+drift from this one.
 """
 
 import json
 import os
+import re
 from pathlib import Path, PureWindowsPath
 
 from ..core import kernel, lazy, shipped
@@ -99,6 +110,12 @@ CAPTURE_HINT = "`spud --as <agent_id> vault capture --into <worktree>` on a tick
 DIFFERS = "the vault's %s differs from the one the tool ships (%s); " + CAPTURE_HINT
 VERSION_DIFFERS = "%s %s is installed and the lock pins %s; " + CAPTURE_HINT
 FILES_DIFFER = "%s %s is installed and %s %s not what the lock pins; " + CAPTURE_HINT
+# SPD-159: `spud init` writes a home's `ledger/*.base` views at step 4a whether or not step 4b's plugin downloads
+# succeeded, so a home can hold a view Obsidian has no plugin to render -- refused download, no network, a hash
+# mismatch -- and nothing said so until this note.  A view naming %r; the file it is in; the plugin(s) that provide
+# its type, none installed; and the command that settles it.
+MISSING_VIEW_PLUGIN = ("the %r view in %s needs the %s plugin, which this home does not have installed:"
+                       " `%s --as spud vault install` sets it up")
 
 
 class VaultDownloadError(Exception):
@@ -336,6 +353,141 @@ def view_types(lock):
 
 
 # ----------------------------------------------------------------------------
+# The restricted `.base` reader (SPD-159, moved in from tests/test_share.py)
+# ----------------------------------------------------------------------------
+
+
+class YamlRefusal(Exception):
+    """The restricted reader met something the shipped subset leaves out.  Raised, never tolerated: a reader that
+    accepted everything would have accepted `type: bases` (the incident tests/test_share.py exists for)."""
+
+
+KEY_RE = re.compile(r"([A-Za-z_][\w.]*):(?: (.*))?$")
+FLOW = {"[": "a flow sequence", "{": "a flow mapping", "&": "an anchor", "*": "an alias", "!": "a tag",
+        "|": "a block scalar", ">": "a folded block scalar", "%": "a directive"}
+
+
+def base_lines(text):
+    """[(indent, content, line number)] for every line that carries anything, refusing what the subset leaves out."""
+    rows = []
+    for number, raw in enumerate(text.split("\n"), start=1):
+        if "\t" in raw:
+            raise YamlRefusal("line %d: a tab" % number)
+        content = raw.strip()
+        if not content:
+            continue
+        if content.startswith("#"):
+            raise YamlRefusal("line %d: a comment" % number)
+        if content.startswith("---") or content.startswith("..."):
+            raise YamlRefusal("line %d: a document marker" % number)
+        if raw[:1] == "%":
+            raise YamlRefusal("line %d: a directive" % number)
+        rows.append((len(raw) - len(raw.lstrip(" ")), content, number))
+    if not rows:
+        raise YamlRefusal("nothing to read")
+    if rows[0][0] != 0:
+        raise YamlRefusal("line %d: the first line is indented" % rows[0][2])
+    return rows
+
+
+def read_scalar(content, number):
+    """A plain scalar to the end of the line, a single- or double-quoted scalar, an integer, or an empty flow
+    collection -- `columnNames: {}`, which Obsidian writes into a view whose columns it has never renamed."""
+    if content in ("{}", "[]"):
+        return {} if content == "{}" else []
+    if content[:1] in FLOW:
+        raise YamlRefusal("line %d: %s" % (number, FLOW[content[0]]))
+    if content[0] in "'\"":
+        quote = content[0]
+        if len(content) < 2 or content[-1] != quote or content.count(quote) != 2:
+            raise YamlRefusal("line %d: a quoted scalar the reader cannot read whole" % number)
+        return content[1:-1]
+    if re.fullmatch(r"-?\d+", content):
+        return int(content)
+    return content
+
+
+def split_key(content, number):
+    """(key, value) for `key:` -- value the empty string -- or `key: value`.  Refuses every other shape of line."""
+    match = KEY_RE.fullmatch(content)
+    if match is None:
+        raise YamlRefusal("line %d: %r is not `key:` or `key: value`" % (number, content))
+    return match.group(1), (match.group(2) or "").strip()
+
+
+def read_block(rows, at, indent):
+    """(value, the next row) for the block that starts at rows[at] and is indented `indent`."""
+    return read_sequence(rows, at, indent) if rows[at][1].startswith("-") else read_mapping(rows, at, indent)
+
+
+def read_mapping(rows, at, indent):
+    out = {}
+    while at < len(rows) and rows[at][0] == indent:
+        _, content, number = rows[at]
+        key, value = split_key(content, number)
+        if key in out:
+            raise YamlRefusal("line %d: %s twice in one mapping" % (number, key))
+        at += 1
+        if value == "":
+            if at < len(rows) and rows[at][0] > indent:
+                out[key], at = read_block(rows, at, rows[at][0])
+            else:
+                out[key] = None
+        else:
+            out[key] = read_scalar(value, number)
+            if at < len(rows) and rows[at][0] > indent:
+                raise YamlRefusal("line %d: indented under a key that already has a value" % rows[at][2])
+    if at < len(rows) and rows[at][0] > indent:
+        raise YamlRefusal("line %d: indented past the mapping it is in" % rows[at][2])
+    return out, at
+
+
+def read_sequence(rows, at, indent):
+    out = []
+    while at < len(rows) and rows[at][0] == indent and rows[at][1].startswith("-"):
+        _, content, number = rows[at]
+        if not content.startswith("- "):
+            raise YamlRefusal("line %d: %r is not `- value`" % (number, content))
+        rest = content[2:].strip()
+        at += 1
+        if KEY_RE.fullmatch(rest) is None:  # `- value`
+            out.append(read_scalar(rest, number))
+            if at < len(rows) and rows[at][0] > indent:
+                raise YamlRefusal("line %d: indented under a sequence entry that already has a value" % rows[at][2])
+            continue
+        key, value = split_key(rest, number)  # `- key:` or `- key: value`, the first key of a mapping entry
+        entry = {}
+        if value == "":
+            if at < len(rows) and rows[at][0] > indent + 2:
+                entry[key], at = read_block(rows, at, rows[at][0])
+            elif at < len(rows) and rows[at][0] == indent + 2 and rows[at][1].startswith("- "):
+                raise YamlRefusal("line %d: a sequence at the entry's own key column reads either way" % rows[at][2])
+            else:
+                entry[key] = None
+        else:
+            entry[key] = read_scalar(value, number)
+        if at < len(rows) and rows[at][0] == indent + 2:  # the entry's remaining keys
+            rest_of_entry, at = read_mapping(rows, at, indent + 2)
+            for name, held in rest_of_entry.items():
+                if name in entry:
+                    raise YamlRefusal("line %d: %s twice in one sequence entry" % (number, name))
+                entry[name] = held
+        out.append(entry)
+    if at < len(rows) and rows[at][0] >= indent and not rows[at][1].startswith("-"):
+        raise YamlRefusal("line %d: %r is in a sequence and is not an entry" % (rows[at][2], rows[at][1]))
+    return out, at
+
+
+def read_base(text):
+    """The parsed file, or YamlRefusal.  Every line is placed: a line left over is a line the reader cannot read."""
+    rows = base_lines(text)
+    value, at = read_block(rows, 0, 0)
+    if at != len(rows):
+        raise YamlRefusal("line %d: left unread" % rows[at][2])
+    return value
+
+
+# ----------------------------------------------------------------------------
 # doctor: where the home and the shipped copy have drifted
 # ----------------------------------------------------------------------------
 
@@ -362,6 +514,7 @@ def vault_findings(ctx):
             rel = VAULT_BASES + "/" + path.name
             findings.append((rel, DIFFERS % (rel, path)))
     findings.extend(locked_findings(ctx))
+    findings.extend(missing_plugin_findings(ctx))
     return findings
 
 
@@ -389,6 +542,46 @@ def locked_findings(ctx):
                    if (here / f["name"]).is_file() and not matches(f["sha256"], (here / f["name"]).read_bytes())]
         if changed:
             findings.append((name, FILES_DIFFER % (kind, name, ", ".join(changed), "is" if len(changed) == 1 else "are")))
+    return findings
+
+
+def missing_plugin_findings(ctx):
+    """[(what, sentence)]: a view in one of the home's own `ledger/*.base` files whose type the currently-shipped
+    lock names a plugin for, but that plugin is not in this home's `.obsidian/plugins/` -- the SPD-159 check.
+
+    A view whose type no locked plugin names is not a finding here: `table` is Obsidian's own, needing no plugin, and
+    every other unrecognised type is `tests/test_share.py`'s to guard, over the shipped set -- this reads a home's
+    plugins, not the repository's views, so a type the current lock has never heard of says nothing about either.  A
+    `.base` file the restricted reader refuses is skipped the same way: it is not one of the shipped ones (those are
+    guarded elsewhere), and a hand-written file of the reader's own need not fit the subset that catches `type: bases`.
+    """
+    try:
+        lock = read_lock(ctx)
+    except kernel.SpudError:
+        return []  # a tool with no lock ships no plugin; `locked_findings` already says so above
+    providers = {}
+    for entry in lock.get("plugins", []):
+        for view_type in entry.get("views") or []:
+            providers.setdefault(view_type, []).append(entry.get("id"))
+    findings = []
+    for path in sorted((ctx.home / VAULT_BASES).glob("*.base")):
+        try:
+            data = read_base(path.read_text(encoding="utf-8"))
+        except YamlRefusal:
+            continue
+        views = data.get("views") if isinstance(data, dict) else None
+        if not isinstance(views, list):
+            continue
+        rel = VAULT_BASES + "/" + path.name
+        for view in views:
+            if not isinstance(view, dict):
+                continue
+            view_type = view.get("type")
+            ids = providers.get(view_type) if isinstance(view_type, str) else None
+            if not ids or any(target_dir(ctx, "plugin", pid).is_dir() for pid in ids):
+                continue
+            name = view.get("name") if isinstance(view.get("name"), str) and view.get("name").strip() else view_type
+            findings.append((rel, MISSING_VIEW_PLUGIN % (name, rel, " or ".join(sorted(ids)), ctx.launcher)))
     return findings
 
 

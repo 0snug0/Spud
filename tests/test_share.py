@@ -2,14 +2,16 @@
 
 Nothing caught the `Board.base` that shipped a first view declaring `type: bases` -- which was not a view type in that
 vault -- and a half-created trailing view; both were fixed by hand on the machine that hit them.  This module is the
-guard.  It reads every shipped `.base` with a deliberately restricted block-YAML reader written here, its only user: the
-subset is block mappings and sequences, `key:`, `key: value`, `- value`, `- key: value`, plain scalars to the end of the
-line, quoted scalars, integers and an *empty* flow collection, and the reader *raises* on a tab, a flow collection with
-anything in it, an anchor, an alias, a tag, a block scalar, a document marker, a comment, a duplicate key and any line
-it cannot place.  A shipped file that reaches for a YAML feature the reader does not know therefore fails instead of
-passing unchecked, which is the property the broken file needed and a permissive parser would not have given.  (`{}` and
-`[]` joined the subset with SPD-156: Obsidian writes `columnNames: {}` into a view it has never renamed a column in, so
-the shipped files carry it, and an empty collection cannot hide a view the reader would otherwise have read.)
+guard.  It reads every shipped `.base` with a deliberately restricted block-YAML reader, `commands/vaultlock.read_base`
+(moved there on SPD-159, reached here as `spud.read_base`, since doctor now reads a home's own `.base` files with the
+same reader, to find a view whose plugin the home lacks -- one reader, not two): the subset is block mappings and
+sequences, `key:`, `key: value`, `- value`, `- key: value`, plain scalars to the end of the line, quoted scalars,
+integers and an *empty* flow collection, and the reader *raises* on a tab, a flow collection with anything in it, an
+anchor, an alias, a tag, a block scalar, a document marker, a comment, a duplicate key and any line it cannot place.  A
+shipped file that reaches for a YAML feature the reader does not know therefore fails instead of passing unchecked,
+which is the property the broken file needed and a permissive parser would not have given.  (`{}` and `[]` joined the
+subset with SPD-156: Obsidian writes `columnNames: {}` into a view it has never renamed a column in, so the shipped
+files carry it, and an empty collection cannot hide a view the reader would otherwise have read.)
 
 **A shipped view's type is the lock's question, not this module's** (SPD-156).  `table` is Obsidian's own, and every
 other type comes from a plugin -- `bases`, `notion-board` and `notion-list` are registered by extended-base, which is
@@ -64,9 +66,6 @@ ADDRESS_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]*[A-Za-z]")
 # number.  A hash algorithm's own name (`SHA-256`) reads the same shape and is not one.
 TICKET_RE = re.compile(r"\b[A-Z]{2,6}-\d{2,4}\b")
 TICKET_LOOKALIKE_EXCEPTIONS = {"SHA-256", "SHA-1", "SHA-512"}
-KEY_RE = re.compile(r"([A-Za-z_][\w.]*):(?: (.*))?$")
-FLOW = {"[": "a flow sequence", "{": "a flow mapping", "&": "an anchor", "*": "an alias", "!": "a tag",
-        "|": "a block scalar", ">": "a folded block scalar", "%": "a directive"}
 # The bootstrap skill (SPW-001 design section 5): it ships outside share/, at project scope, because it has to reach a
 # session before there is a home for share/'s own templates to be rendered into.
 SPUD_INIT_SKILL = REPO / ".claude" / "skills" / "spud-init" / "SKILL.md"
@@ -101,131 +100,6 @@ def skill_frontmatter(text):
         key, _, value = line.partition(":")
         fields[key.strip()] = value.strip()
     return fields
-
-
-class YamlRefusal(Exception):
-    """The restricted reader met something the shipped subset leaves out.  Raised, never tolerated: a reader that
-    accepted everything would have accepted `type: bases`."""
-
-
-def base_lines(text):
-    """[(indent, content, line number)] for every line that carries anything, refusing what the subset leaves out."""
-    rows = []
-    for number, raw in enumerate(text.split("\n"), start=1):
-        if "\t" in raw:
-            raise YamlRefusal("line %d: a tab" % number)
-        content = raw.strip()
-        if not content:
-            continue
-        if content.startswith("#"):
-            raise YamlRefusal("line %d: a comment" % number)
-        if content.startswith("---") or content.startswith("..."):
-            raise YamlRefusal("line %d: a document marker" % number)
-        if raw[:1] == "%":
-            raise YamlRefusal("line %d: a directive" % number)
-        rows.append((len(raw) - len(raw.lstrip(" ")), content, number))
-    if not rows:
-        raise YamlRefusal("nothing to read")
-    if rows[0][0] != 0:
-        raise YamlRefusal("line %d: the first line is indented" % rows[0][2])
-    return rows
-
-
-def read_scalar(content, number):
-    """A plain scalar to the end of the line, a single- or double-quoted scalar, an integer, or an empty flow
-    collection -- `columnNames: {}`, which Obsidian writes into a view whose columns it has never renamed."""
-    if content in ("{}", "[]"):
-        return {} if content == "{}" else []
-    if content[:1] in FLOW:
-        raise YamlRefusal("line %d: %s" % (number, FLOW[content[0]]))
-    if content[0] in "'\"":
-        quote = content[0]
-        if len(content) < 2 or content[-1] != quote or content.count(quote) != 2:
-            raise YamlRefusal("line %d: a quoted scalar the reader cannot read whole" % number)
-        return content[1:-1]
-    if re.fullmatch(r"-?\d+", content):
-        return int(content)
-    return content
-
-
-def split_key(content, number):
-    """(key, value) for `key:` -- value the empty string -- or `key: value`.  Refuses every other shape of line."""
-    match = KEY_RE.fullmatch(content)
-    if match is None:
-        raise YamlRefusal("line %d: %r is not `key:` or `key: value`" % (number, content))
-    return match.group(1), (match.group(2) or "").strip()
-
-
-def read_block(rows, at, indent):
-    """(value, the next row) for the block that starts at rows[at] and is indented `indent`."""
-    return read_sequence(rows, at, indent) if rows[at][1].startswith("-") else read_mapping(rows, at, indent)
-
-
-def read_mapping(rows, at, indent):
-    out = {}
-    while at < len(rows) and rows[at][0] == indent:
-        _, content, number = rows[at]
-        key, value = split_key(content, number)
-        if key in out:
-            raise YamlRefusal("line %d: %s twice in one mapping" % (number, key))
-        at += 1
-        if value == "":
-            if at < len(rows) and rows[at][0] > indent:
-                out[key], at = read_block(rows, at, rows[at][0])
-            else:
-                out[key] = None
-        else:
-            out[key] = read_scalar(value, number)
-            if at < len(rows) and rows[at][0] > indent:
-                raise YamlRefusal("line %d: indented under a key that already has a value" % rows[at][2])
-    if at < len(rows) and rows[at][0] > indent:
-        raise YamlRefusal("line %d: indented past the mapping it is in" % rows[at][2])
-    return out, at
-
-
-def read_sequence(rows, at, indent):
-    out = []
-    while at < len(rows) and rows[at][0] == indent and rows[at][1].startswith("-"):
-        _, content, number = rows[at]
-        if not content.startswith("- "):
-            raise YamlRefusal("line %d: %r is not `- value`" % (number, content))
-        rest = content[2:].strip()
-        at += 1
-        if KEY_RE.fullmatch(rest) is None:  # `- value`
-            out.append(read_scalar(rest, number))
-            if at < len(rows) and rows[at][0] > indent:
-                raise YamlRefusal("line %d: indented under a sequence entry that already has a value" % rows[at][2])
-            continue
-        key, value = split_key(rest, number)  # `- key:` or `- key: value`, the first key of a mapping entry
-        entry = {}
-        if value == "":
-            if at < len(rows) and rows[at][0] > indent + 2:
-                entry[key], at = read_block(rows, at, rows[at][0])
-            elif at < len(rows) and rows[at][0] == indent + 2 and rows[at][1].startswith("- "):
-                raise YamlRefusal("line %d: a sequence at the entry's own key column reads either way" % rows[at][2])
-            else:
-                entry[key] = None
-        else:
-            entry[key] = read_scalar(value, number)
-        if at < len(rows) and rows[at][0] == indent + 2:  # the entry's remaining keys
-            rest_of_entry, at = read_mapping(rows, at, indent + 2)
-            for name, held in rest_of_entry.items():
-                if name in entry:
-                    raise YamlRefusal("line %d: %s twice in one sequence entry" % (number, name))
-                entry[name] = held
-        out.append(entry)
-    if at < len(rows) and rows[at][0] >= indent and not rows[at][1].startswith("-"):
-        raise YamlRefusal("line %d: %r is in a sequence and is not an entry" % (rows[at][2], rows[at][1]))
-    return out, at
-
-
-def read_base(text):
-    """The parsed file, or YamlRefusal.  Every line is placed: a line left over is a line the reader cannot read."""
-    rows = base_lines(text)
-    value, at = read_block(rows, 0, 0)
-    if at != len(rows):
-        raise YamlRefusal("line %d: left unread" % rows[at][2])
-    return value
 
 
 def view_problems(data, types=None):
@@ -291,22 +165,22 @@ class RestrictedReaderTest(unittest.TestCase):
         text = ("filters:\n  and:\n    - file.hasTag(\"spudagent\")\n    - not:\n        - file.inFolder(\"ledger/_templates\")\n"
                 "views:\n  - type: table\n    name: Team\n    order:\n      - id\n    columnSize:\n      note.ticket: 154\n"
                 "    empty:\n")
-        self.assertEqual(read_base(text), {
+        self.assertEqual(spud.read_base(text), {
             "filters": {"and": ["file.hasTag(\"spudagent\")", {"not": ["file.inFolder(\"ledger/_templates\")"]}]},
             "views": [{"type": "table", "name": "Team", "order": ["id"], "columnSize": {"note.ticket": 154}, "empty": None}],
         })
 
     def test_it_reads_a_quoted_scalar_and_an_integer(self):
-        self.assertEqual(read_base("a: '!status.containsAny(\"done\", \"declined\")'\nb: \"\"\nc: 12\nd: x y z\n"),
+        self.assertEqual(spud.read_base("a: '!status.containsAny(\"done\", \"declined\")'\nb: \"\"\nc: 12\nd: x y z\n"),
                          {"a": "!status.containsAny(\"done\", \"declined\")", "b": "", "c": 12, "d": "x y z"})
 
     def test_it_reads_an_empty_flow_collection_and_still_refuses_one_with_anything_in_it(self):
         # SPD-156: `columnNames: {}` is what Obsidian writes into a view whose columns it has never renamed, so the
         # shipped files carry it; an empty collection hides nothing the reader would otherwise have had to read.
-        self.assertEqual(read_base("columnNames: {}\norder: []\n"), {"columnNames": {}, "order": []})
+        self.assertEqual(spud.read_base("columnNames: {}\norder: []\n"), {"columnNames": {}, "order": []})
         for text in ("columnNames: {a: 1}\n", "order: [id]\n", "order: [ ]\n"):
-            with self.assertRaises(YamlRefusal, msg=text):
-                read_base(text)
+            with self.assertRaises(spud.YamlRefusal, msg=text):
+                spud.read_base(text)
 
     def test_it_refuses_what_the_subset_leaves_out(self):
         for what, text in (("a tab", "views:\n\t- type: table\n"),
@@ -326,8 +200,8 @@ class RestrictedReaderTest(unittest.TestCase):
                            ("an indented line under a value", "type: table\n  name: Team\n"),
                            ("an ambiguous sequence", "views:\n  - not:\n    - a\n"),
                            ("an empty file", "\n\n")):
-            with self.assertRaises(YamlRefusal, msg=what):
-                read_base(text)
+            with self.assertRaises(spud.YamlRefusal, msg=what):
+                spud.read_base(text)
 
 
 class ShippedBaseTest(unittest.TestCase):
@@ -341,29 +215,29 @@ class ShippedBaseTest(unittest.TestCase):
     def test_every_shipped_base_file_reads_in_the_subset(self):
         for path in self.bases():
             try:
-                read_base(path.read_text(encoding="utf-8"))
-            except YamlRefusal as refusal:
+                spud.read_base(path.read_text(encoding="utf-8"))
+            except spud.YamlRefusal as refusal:
                 self.fail("%s: %s" % (path.relative_to(REPO), refusal))
 
     def test_every_view_of_every_shipped_base_file_is_a_whole_view_of_a_type_they_use(self):
         for path in self.bases():
-            self.assertEqual(view_problems(read_base(path.read_text(encoding="utf-8"))), [], path.relative_to(REPO))
+            self.assertEqual(view_problems(spud.read_base(path.read_text(encoding="utf-8"))), [], path.relative_to(REPO))
 
     def test_a_planted_view_type_and_a_truncated_view_both_fail(self):
         # The incident, in both halves, against the file as it ships: this is what the check would have caught.
         text = (SHARE / "ledger" / "Board.base").read_text(encoding="utf-8")
         planted = text.replace("- type: table\n    name: Board\n", "- type: kanban\n    name: Board\n", 1)
         self.assertNotEqual(planted, text)
-        self.assertTrue(any("kanban" in problem for problem in view_problems(read_base(planted))), view_problems(read_base(planted)))
+        self.assertTrue(any("kanban" in problem for problem in view_problems(spud.read_base(planted))), view_problems(spud.read_base(planted)))
         truncated = text.rstrip("\n") + "\n  - type: table\n"
-        self.assertTrue(any("no name" in problem for problem in view_problems(read_base(truncated))), view_problems(read_base(truncated)))
+        self.assertTrue(any("no name" in problem for problem in view_problems(spud.read_base(truncated))), view_problems(spud.read_base(truncated)))
 
     def test_the_view_type_rule_is_the_lock_s_in_both_directions(self):
         # SPD-156: what makes a type allowed is that a locked plugin names it, and nothing else.  Drop extended-base's
         # own list from the lock and the shipped Board.base fails exactly as it did before the plugin was in the vault.
         lock = shipped_lock()
         self.assertEqual(view_types(lock) - {BUILT_IN_VIEW_TYPE}, {"bases", "notion-board", "notion-list"})
-        data = read_base((SHARE / "ledger" / "Board.base").read_text(encoding="utf-8"))
+        data = spud.read_base((SHARE / "ledger" / "Board.base").read_text(encoding="utf-8"))
         self.assertEqual(view_problems(data, view_types(lock)), [])
         for entry in lock["plugins"]:
             entry["views"] = []
@@ -374,7 +248,7 @@ class ShippedBaseTest(unittest.TestCase):
     def test_every_view_type_the_lock_names_is_used_by_a_shipped_base_file_or_is_a_sibling_of_one(self):
         # A type in the lock that no shipped view uses is not wrong -- extended-base registers three and the files use
         # two -- but a type must come from a plugin that is actually pinned, never from a hand-written set.
-        used = {view["type"] for path in self.bases() for view in read_base(path.read_text(encoding="utf-8"))["views"]}
+        used = {view["type"] for path in self.bases() for view in spud.read_base(path.read_text(encoding="utf-8"))["views"]}
         self.assertTrue(used - {BUILT_IN_VIEW_TYPE}, "no shipped view uses a plugin's type; this check passes vacuously")
         self.assertLessEqual(used, view_types())
 
@@ -385,7 +259,7 @@ class ShippedBaseTest(unittest.TestCase):
         self.assertIsNotNone(embed, spud.TEAM_VIEW_EMBED)
         path = SHARE / "ledger" / embed.group("file")
         self.assertTrue(path.is_file(), "%s embeds %s, which the tool does not ship" % (spud.TEAM_VIEW_EMBED, path.relative_to(REPO)))
-        views = read_base(path.read_text(encoding="utf-8"))["views"]
+        views = spud.read_base(path.read_text(encoding="utf-8"))["views"]
         self.assertIn(embed.group("view"), [view.get("name") for view in views], spud.TEAM_VIEW_EMBED)
 
     def test_every_folder_a_shipped_base_file_filters_on_is_one_the_renderer_writes(self):

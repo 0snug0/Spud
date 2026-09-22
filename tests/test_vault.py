@@ -347,6 +347,24 @@ class InstallTest(VaultCase):
         self.assertTrue(self.vault("app.json").is_file())
         self.assertTrue(self.installed(PLUGIN_ONE, spud.PLUGIN_DATA).is_file())
 
+    def test_a_refused_plugin_with_views_names_what_will_not_render(self):
+        self.init()
+        shutil.rmtree(self.vault(spud.PLUGINS, PLUGIN_ONE["id"]))  # force install to fetch it again, not skip it as pinned
+        self.serve(plugin_url(PLUGIN_ONE, "main.js"), b"/* not what the lock pins */\n")
+        text = self.home.run("vault", "install", actor="spud", check=False).stdout
+        self.assertIn("refused plugin %s" % PLUGIN_ONE["id"], text)
+        self.assertIn(PLUGIN_ONE["views"][0], text)
+        self.assertIn("will not render", text)
+
+    def test_a_refused_plugin_with_no_views_names_nothing_extra(self):
+        self.init()
+        shutil.rmtree(self.vault(spud.PLUGINS, PLUGIN_TWO["id"]))
+        self.serve(plugin_url(PLUGIN_TWO, "main.js"), b"/* not what the lock pins */\n")
+        text = self.home.run("vault", "install", actor="spud", check=False).stdout
+        self.assertIn("refused plugin %s" % PLUGIN_TWO["id"], text)
+        self.assertEqual(PLUGIN_TWO["views"], [])
+        self.assertNotIn("will not render", text)
+
     def test_install_is_spud_s(self):
         self.init()
         t = self.new_ticket("Vault", status="active")
@@ -654,6 +672,43 @@ class DoctorVaultTest(VaultCase):
         # plugin the lock pins and the home lacks says nothing about whether the shipped copy is behind.
         shutil.rmtree(self.vault(spud.PLUGINS, PLUGIN_ONE["id"]))
         self.vault("types.json").unlink()
+        self.assertEqual(self.notes(), [])
+        self.assertEqual(self.report()["problems"], [])
+
+    def base_view(self, view_type, view_name="View", filename="Extra.base"):
+        """A `.base` file, written straight into the home's `ledger/`, with one view of `view_type` -- the shape
+        `spud.read_base` reads and `missing_plugin_findings` looks at (SPD-159)."""
+        (self.home.path / "ledger" / filename).write_text(
+            "views:\n  - type: %s\n    name: %s\n" % (view_type, view_name), encoding="utf-8")
+        return "ledger/" + filename
+
+    def test_a_view_whose_plugin_is_installed_is_quiet(self):
+        # PLUGIN_ONE's own view type, and a normal init installs PLUGIN_ONE: nothing for this check to say.
+        self.base_view(PLUGIN_ONE["views"][0])
+        self.assertEqual(self.notes(), [])
+        self.assertEqual(self.report()["problems"], [])
+
+    def test_a_view_whose_plugin_is_missing_is_a_note_naming_the_view_the_file_the_plugin_and_the_command(self):
+        rel = self.base_view(PLUGIN_ONE["views"][0], view_name="Notes")
+        shutil.rmtree(self.vault(spud.PLUGINS, PLUGIN_ONE["id"]))
+        self.assertEqual(self.notes(), [rel])
+        note = [n for n in self.report()["notes"] if rel in n][0]
+        self.assertIn("Notes", note)
+        self.assertIn(rel, note)
+        self.assertIn(PLUGIN_ONE["id"], note)
+        self.assertIn("vault install", note)
+
+    def test_a_table_only_base_file_is_quiet_even_without_the_plugin(self):
+        # `table` is Obsidian's own view type: it names no plugin, so removing one changes nothing for it.
+        shutil.rmtree(self.vault(spud.PLUGINS, PLUGIN_ONE["id"]))
+        self.base_view("table")
+        self.assertEqual(self.notes(), [])
+
+    def test_no_obsidian_at_all_is_quiet(self):
+        # `vault install` is already the command doctor names for a vault that was never installed (the test above
+        # this class); a view whose plugin the home cannot possibly have, because it has no vault, says nothing new.
+        self.base_view(PLUGIN_ONE["views"][0])
+        shutil.rmtree(self.vault())
         self.assertEqual(self.notes(), [])
         self.assertEqual(self.report()["problems"], [])
 
