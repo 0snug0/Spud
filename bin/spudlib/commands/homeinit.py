@@ -42,7 +42,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import doctor, publish, reportentry, schedule, settings_sync, vaultinstall, vaultlock
+from . import doctor, homesync, publish, reportentry, schedule, settings_sync, vaultinstall, vaultlock
 from ..core import homeconf, kernel, launchagents, lazy, shipped
 from ..projects import install, registry
 from ..render import notefiles
@@ -54,20 +54,18 @@ from ..state import ledgerdb, schema
 DEFAULT_HOME = "~/SpudHome"
 DEFAULT_NAME = "Spud"
 DEFAULT_PRONOUNS = "he/him/his"
+# The owner's pronouns have a default and the owner's name does not (SPD-157).  Pronouns nobody gave are the ones that
+# are right for anyone; a name nobody gave cannot be guessed at all, and it is in the generated CLAUDE.md, in every
+# brief template and in the note that says whose ledger this is -- so it joins the two prefixes as a value `--yes`
+# must be given rather than assume (design section 3.3's rule, one more value under it).
+DEFAULT_OWNER_PRONOUNS = "they/them/their"
 CONFIG_NAME = "spud.config.json"
-# Step 4's seven files and five directories, in the order the design lists them (section 2.2).  Each relative path is
-# both the path under <tool>/share/ and the path in the home: share/ mirrors the home's own layout.  Not every shipped
-# file is here -- share/agents/spudagent.md is rendered to user scope by step 7's `project install`, never into a home
-# (SPW-004, which moved it out of the tool repository's own .claude/agents/, where Claude Code read it in preference to
-# the installed copy) -- so this is the scaffolding, not the shipped set, which tests/test_share.py holds.
-SCAFFOLDING = ("CLAUDE.md", "ledger/Home.md", "ledger/Spud.md", "ledger/Board.base", "ledger/Fleet.base",
-               "ledger/_templates/ticket.md", "ledger/_templates/spudagent.md")
+# Step 4's five directories.  The files it writes are `commands/homesync.tool_owned` -- the seven of the design's
+# section 2.2 and every shipped skill beside them (SPD-157) -- which moved there when `home sync` became the second
+# command that writes them, and which is where the rendering, the project-line rule and the unrendered-mark refusal
+# live now.  Not every shipped file is in that list: share/agents/spudagent.md is rendered to user scope by step 7's
+# `project install`, never into a home (SPW-004), and share/obsidian/ is step 4b's.
 DIRECTORIES = ("ledger/tickets", "ledger/teams", "reports", "docs/spikes", "docs/design")
-# The three marks that have no value in a home with no project (core/shipped.marks leaves them empty).  A line carrying
-# one is a line about project 1, so with no project registered write_scaffolding leaves that line out and says how many
-# it left out: the shipped prose is share/'s to write and this command's to place (shipped.marks' own docstring).
-PROJECT_MARKS = ("project_key", "project_root", "project_remote")
-MARK_LEFT = re.compile(r"\{\{[a-z_]+\}\}")
 
 NOT_SPUD = ("init resolves no actor and `--as %s` names one: the first run has no database and no members table for"
             " anyone to own anything in, and `init` is Spud's own (hooks/hookio.SPUD_ONLY_COMMANDS)."
@@ -87,9 +85,12 @@ PREFIX_DIFFERS = ("%s %s differs from the %s already in %s, which carries %s; in
 NO_PREFIXES = ("%s has no %s yet, and a config carries the two prefixes: give `--ticket-prefix XXX --team-prefix XXXS`."
                "  They have no default on purpose -- a prefix is in every rendered file name and every wikilink forever,"
                " and `project edit` refuses to change one once the project has a ticket.")
+NO_OWNER = ("%s has no %s yet, and a config carries the name of the person the home is for: give `--owner-name '<name>'`."
+            "  It has no default on purpose -- it is in the CLAUDE.md the tool generates for this home, in the brief"
+            " template every spudagent is spawned with, and in the note that says whose ledger this is.  The pronouns"
+            " are `--owner-pronouns subject/object/possessive` and default to %s.")
 CONFIG_IS_THEIRS = "%s is already there and init leaves it alone (design section 6), so %s has nothing to write; edit the file instead"
-NOT_RENDERED = "the shipped %s still carries %s after rendering; core/shipped.MARKS and <tool>/share/ have drifted (tests/test_share.py is the guard)"
-LEFT_BEHIND = ("nothing init wrote is removed: %s is as the steps above left it, and a rerun continues from there,"
+LEFT_BEHIND =("nothing init wrote is removed: %s is as the steps above left it, and a rerun continues from there,"
                " because every step is idempotent by content")
 # Step 9's refusal.  The design's 2.1 reads `move_check_vault`'s precondition -- the copied vault must already be what
 # the copied database renders -- as init's postcondition: a fresh vault has nothing rendered yet, so the scaffolding is
@@ -193,13 +194,17 @@ def project_key_for(root):
     return re.sub(r"[^a-z0-9-]+", "-", os.path.basename(str(root)).lower()).strip("-")
 
 
-def pronouns_of(args):
-    """`--pronouns subject/object/possessive`, default DEFAULT_PRONOUNS: the three values the config and the shipped
-    prose carry."""
-    value = args.pronouns or ask(args, "Pronouns (subject/object/possessive)", DEFAULT_PRONOUNS) or DEFAULT_PRONOUNS
+def pronouns_of(args, flag, given, question, default):
+    """`subject/object/possessive` as one flag spells it, or the prompt's answer, or `default`: the three values the
+    config carries for one person and the shipped prose renders separately.
+
+    One function for both `--pronouns` (the identity's) and `--owner-pronouns` (SPD-157), because a second copy of the
+    three-word check is a second place for the two to drift.  `given` is passed already read rather than the flag's
+    name looked up, so a flag that was given skips its prompt, as every other value here does."""
+    value = given or ask(args, question, default) or default
     parts = [p.strip() for p in value.split("/")]
     if len(parts) != 3 or not all(parts):
-        raise kernel.SpudError(kernel.EXIT_USAGE, "--pronouns is subject/object/possessive, three words separated by slashes (%r)" % value)
+        raise kernel.SpudError(kernel.EXIT_USAGE, "%s is subject/object/possessive, three words separated by slashes (%r)" % (flag, value))
     return parts
 
 
@@ -218,18 +223,30 @@ def init_plan(ctx, args):
     plan = {"config_exists": config is not None}
     if config is None:
         plan["name"] = args.name or ask(args, "Spud's name", DEFAULT_NAME) or DEFAULT_NAME
-        plan["pronouns"] = pronouns_of(args)
+        plan["pronouns"] = pronouns_of(args, "--pronouns", args.pronouns, "Spud's pronouns (subject/object/possessive)", DEFAULT_PRONOUNS)
+        plan["owner_name"] = args.owner_name or ask(args, "Your name (the person this home is for)")
+        plan["owner_pronouns"] = pronouns_of(args, "--owner-pronouns", args.owner_pronouns,
+                                             "Your pronouns (subject/object/possessive)", DEFAULT_OWNER_PRONOUNS)
         ticket_prefix = args.ticket_prefix or ask(args, "Ticket prefix (SPD gives ticket SPD-001)")
         team_prefix = args.team_prefix or ask(args, "Team prefix (SPUD gives team SPUD-001)")
+        if not plan["owner_name"]:
+            raise kernel.SpudError(kernel.EXIT_USAGE, NO_OWNER % (ctx.home, CONFIG_NAME, DEFAULT_OWNER_PRONOUNS))
         if not ticket_prefix or not team_prefix:
             raise kernel.SpudError(kernel.EXIT_USAGE, NO_PREFIXES % (ctx.home, CONFIG_NAME))
     else:
-        given = [flag for flag, value in (("--name", args.name), ("--pronouns", args.pronouns)) if value]
+        given = [flag for flag, value in (("--name", args.name), ("--pronouns", args.pronouns),
+                                          ("--owner-name", args.owner_name), ("--owner-pronouns", args.owner_pronouns)) if value]
         if given:
             raise kernel.SpudError(kernel.EXIT_USAGE, CONFIG_IS_THEIRS % (ctx.config_path, " and ".join(given)))
         identity = config.get("identity", {})
         plan["name"] = identity.get("name", DEFAULT_NAME)
         plan["pronouns"] = [identity.get("pronouns", {}).get(k, "") for k in ("subject", "object", "possessive")]
+        # A config that predates the `owner` block, or one whose block is empty, reads as core/shipped's placeholder --
+        # the same value every shipped file renders for that home, so the dry run says what the files will say.
+        owner = config.get("owner") or {}
+        owner_pronouns = owner.get("pronouns") or {}
+        plan["owner_name"] = owner.get("name") or shipped.DEFAULT_OWNER["name"]
+        plan["owner_pronouns"] = [owner_pronouns.get(k) or shipped.DEFAULT_OWNER[k] for k in ("subject", "object", "possessive")]
         ticket_prefix = config.get("tickets", {}).get("prefix")
         team_prefix = config.get("teams", {}).get("prefix")
         for flag, value, have in (("--ticket-prefix", args.ticket_prefix, ticket_prefix), ("--team-prefix", args.team_prefix, team_prefix)):
@@ -349,17 +366,20 @@ def init_steps(ctx, args, plan):
     else:
         schedule_step = ("install %s (daily at %s) and %s (at load, and again whenever it exits) and load both"
                          % (launchagents.SCHEDULE_LABEL, schedule.SCHEDULE_AT, launchagents.RENDER_LABEL))
+    owned = [home_rel for _rel, home_rel in homesync.tool_owned(ctx)]  # the files step 4 writes, named as the home has them
     return [
         ("check the %s already in %s with config_problems" % (CONFIG_NAME, ctx.home) if plan["config_exists"] else
-         "mkdir %s and write %s from %s (identity %s, %s/%s, %s-nnn tickets, %s-nnn teams), then check it with config_problems"
+         "mkdir %s and write %s from %s (identity %s, %s/%s, working for %s, %s/%s, %s-nnn tickets, %s-nnn teams),"
+         " then check it with config_problems"
          % (ctx.home, ctx.config_path, shipped.share_dir(ctx) / CONFIG_NAME, plan["name"], plan["pronouns"][0], plan["pronouns"][1],
+            plan["owner_name"], plan["owner_pronouns"][0], plan["owner_pronouns"][1],
             plan["ticket_prefix"], plan["team_prefix"])),
         ("create %s in WAL at user_version %d" % (ctx.db_path, schema.SCHEMA_VERSION) if not ctx.db_path.exists() else
          "migrate %s to user_version %d if it is behind, backup first" % (ctx.db_path, schema.SCHEMA_VERSION)),
         project,
         "write the %d scaffolding files absent from %s (%s) and the %d directories (%s), keeping every file already there;"
         " then %s"
-        % (len(SCAFFOLDING), ctx.home, ", ".join(SCAFFOLDING), len(DIRECTORIES), ", ".join(DIRECTORIES),
+        % (len(owned), ctx.home, ", ".join(owned), len(DIRECTORIES), ", ".join(DIRECTORIES),
            "install no vault (--no-vault)" if args.no_vault else
            "write %s from %s and download every plugin and theme %s pins, checking each SHA-256"
            % (ctx.home / vaultlock.OBSIDIAN, vaultlock.share_vault(ctx), vaultlock.lock_path(ctx))),
@@ -379,12 +399,6 @@ def init_steps(ctx, args, plan):
 # ----------------------------------------------------------------------------
 
 
-def unrendered(text):
-    """The marks a rendered shipped file still carries, which must be none: a `{{…}}` reaching a person's home unrendered
-    is `core/shipped.MARKS` and `<tool>/share/` out of step, and init refuses rather than writing it."""
-    return sorted(set(MARK_LEFT.findall(text)))
-
-
 def write_config(ctx, plan):
     """Step 1: the home directory, and the config rendered from `<tool>/share/spud.config.json` when the home has none.
 
@@ -396,12 +410,15 @@ def write_config(ctx, plan):
     kept = plan["config_exists"]
     if not kept:
         subject, obj, possessive = plan["pronouns"]
+        owner_subject, owner_object, owner_possessive = plan["owner_pronouns"]
         text = shipped.render(shipped.read(ctx, CONFIG_NAME), {
             "identity_name": plan["name"], "pronoun_subject": subject, "pronoun_object": obj, "pronoun_possessive": possessive,
+            "owner_name": plan["owner_name"], "owner_subject": owner_subject, "owner_object": owner_object,
+            "owner_possessive": owner_possessive,
             "ticket_prefix": plan["ticket_prefix"], "team_prefix": plan["team_prefix"]})
-        left = unrendered(text)
+        left = homesync.unrendered(text)
         if left:
-            raise kernel.SpudError(kernel.EXIT_ERROR, NOT_RENDERED % (CONFIG_NAME, ", ".join(left)))
+            raise kernel.SpudError(kernel.EXIT_ERROR, homesync.NOT_RENDERED % (CONFIG_NAME, ", ".join(left)))
         kernel.write_whole(ctx.config_path, text)
     problems = homeconf.config_problems(ctx.config)
     if problems:
@@ -494,44 +511,27 @@ def add_first_project(ctx, con, args, plan, created):
     return done, None if row is None else dict(row), entry
 
 
-def without_project_lines(text):
-    """`text` without the lines that carry a project mark, and how many were dropped: what step 4 writes into a home with
-    no project.  Each of those lines is a sentence about project 1 -- the `This machine` bullet naming its root and
-    remote, the ticket key's project in `ledger/Home.md`, the `<key>:<glob>` example in the deliverable-path law -- and a
-    line rendered with the marks empty would say something untrue rather than nothing.  Init reports the count, because a
-    person who registers a project later will want those lines back and the files are theirs to edit from then on."""
-    marks = tuple(shipped.MARK % name for name in PROJECT_MARKS)
-    lines = text.split("\n")
-    kept = [line for line in lines if not any(mark in line for mark in marks)]
-    return "\n".join(kept), len(lines) - len(kept)
-
-
 def write_scaffolding(ctx, project):
-    """Step 4: the seven shipped files and the five directories, from `<tool>/share/` through `core/shipped` (design
-    section 2.2), after step 3 and not before.
+    """Step 4: every file the tool owns in a home and the five directories, from `<tool>/share/` through
+    `commands/homesync` (design section 2.2, and SPD-157 for the shipped skills beside the seven).
 
     Each file is written **only when absent** and a present one is kept: `CLAUDE.md`, `ledger/Home.md`, `ledger/Spud.md`,
     the two `.base` files and `ledger/_templates/**` are all in `hooks/hookio.SPUD_PATHS`, Spud's hand-written set, so
     they are his to edit after the first run -- and the mechanism that keeps them from a member must keep them from a
-    second init too.  Deliberately the opposite of `install.install_project`, which rewrites what it generates.
+    second init too.  Deliberately the opposite of `install.install_project`, which rewrites what it generates, and of
+    `home sync`, which is the command that takes such an edit back on purpose and keeps a copy of it first.
     Returns (written, kept, lines dropped for want of a project)."""
     values = shipped.marks(ctx, project)
     written, kept, dropped = [], [], 0
-    for rel in SCAFFOLDING:
-        path = ctx.home / rel
+    for rel, home_rel in homesync.tool_owned(ctx):
+        path = ctx.home / home_rel
         if path.exists():
-            kept.append(rel)
+            kept.append(home_rel)
             continue
-        text = shipped.read(ctx, rel)
-        if project is None:
-            text, count = without_project_lines(text)
-            dropped += count
-        text = shipped.render(text, values)
-        left = unrendered(text)
-        if left:
-            raise kernel.SpudError(kernel.EXIT_ERROR, NOT_RENDERED % (rel, ", ".join(left)))
+        text, count = homesync.shipped_text(ctx, rel, values, project)
+        dropped += count
         kernel.write_whole(path, text)
-        written.append(rel)
+        written.append(home_rel)
     for rel in DIRECTORIES:
         (ctx.home / rel).mkdir(parents=True, exist_ok=True)
     return written, kept, dropped

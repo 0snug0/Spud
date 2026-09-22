@@ -39,6 +39,43 @@ def backups_dir(ctx):
     return ctx.home / ".spud" / "backups"
 
 
+def copy_stamp(ctx, folder):
+    """The `<when>` directory a run keeps its copies under, inside `.spud/backups/<folder>/`: one no run of that command
+    has used, whatever the clock says (SPD-162).
+
+    The clock reads to the second, and two runs of one command inside a second are ordinary -- a `home sync` right after
+    the `--check` that settled it, a `vault install` run twice while a download is being fixed.  Sharing a folder, the
+    second run's copy of a file both replaced overwrote the first's, which was the only copy of somebody's hand edit
+    left anywhere.  So a second in use takes a counter: `<stamp>-02`, `<stamp>-03`, fixed width and after the bare stamp,
+    so the folder listing still reads as a time and still sorts as one.
+    """
+    stamp = kernel.now().replace(":", "-")
+    root = backups_dir(ctx) / folder
+    if not (root / stamp).exists():
+        return stamp
+    n = 2
+    while (root / ("%s-%02d" % (stamp, n))).exists():
+        n += 1
+    return "%s-%02d" % (stamp, n)
+
+
+def keep_copy(ctx, folder, stamp, rel, data, check_only=False):
+    """A copy of a tool-owned file a command is about to overwrite, at `.spud/backups/<folder>/<when>/<rel>`, beside
+    the ledger's own daily copies: the folder says which command, the stamp says when, and the path inside says what.
+
+    Returns its path, which the command's output names -- a person who has just lost a hand edit needs the path, not
+    the reassurance.  `check_only` names the path the command *would* keep and writes nothing, which is what makes
+    `spud home sync --check` able to say where each copy would go while writing none of them.
+
+    One function for `vault install` (SPD-156) and `home sync` (SPD-157), which differ in `folder` and nothing else,
+    and here in `state/backup` rather than in either command because this is where a backup's directory is decided.
+    """
+    path = backups_dir(ctx) / folder / stamp / rel
+    if not check_only:
+        kernel.write_bytes(path, data)
+    return path
+
+
 def backup_listing(directory):
     """(daily, other), from the listing of .spud/backups/ alone: the names of the regular files (a symlink or
     a directory is not one) whose whole name is a daily copy's, oldest first, and the count of the other

@@ -11,6 +11,7 @@ from ..commands import (
     ghread,
     homeinit,
     homemove,
+    homesync,
     membercmds,
     prcmds,
     proposalcmds,
@@ -69,6 +70,8 @@ def build_parser():
     p.add_argument("--home", help="the home to build: a directory that does not exist or is empty, outside every git work tree (default: SPUD_HOME, else ~/.config/spud/home, else ~/SpudHome offered at the prompt)")
     p.add_argument("--name", help="identity.name in the config written for a home that has none (default Spud)")
     p.add_argument("--pronouns", help="identity.pronouns, subject/object/possessive (default he/him/his)")
+    p.add_argument("--owner-name", help="owner.name in the config written for a home that has none: the person the home is for, named in its CLAUDE.md and in every brief. No default")
+    p.add_argument("--owner-pronouns", help="owner.pronouns, subject/object/possessive (default %s)" % homeinit.DEFAULT_OWNER_PRONOUNS)
     p.add_argument("--project-root", help="the first project's repository: its main checkout, registered as project 1, whose name and prefixes the config carries")
     p.add_argument("--no-project", action="store_true", help="register no project: the home holds an empty registry, and no ticket until `project add`")
     p.add_argument("--project-key", help="lower-case key, [a-z][a-z0-9-]{0,31}; home is reserved (default: the root's directory name)")
@@ -195,6 +198,10 @@ def build_parser():
     q.add_argument("--dry-run", action="store_true", help="check the preconditions and print the steps; move nothing")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry the move writes")
     q.set_defaults(func=homemove.cmd_home_move)
+    q = ps.add_parser("sync", help="write every file the tool owns in this home again from <tool>/share/, keeping a copy of each one it replaces (Spud's)",
+                      description=helptexts.HOME_SYNC_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
+    q.add_argument("--check", action="store_true", help="print what would change, file by file, and write nothing")
+    q.set_defaults(func=homesync.cmd_home_sync)
 
     p = sub.add_parser("vault", help="the home's Obsidian vault: install it from the tool's share/, or capture this one back into a ticket's worktree (SPD-156)",
                        description=helptexts.VAULT_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)

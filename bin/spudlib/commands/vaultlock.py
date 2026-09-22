@@ -185,20 +185,6 @@ def matches(sha256, data):
     return sha256 in (kernel.sha256_bytes(data), kernel.sha256_bytes(released(data)))
 
 
-def write_bytes(path, data):
-    """`kernel.write_whole` for bytes: a temporary file in the same directory, renamed into place, so a reader -- and
-    Obsidian is a reader -- never sees half a plugin."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.parent / (".spud-" + path.name + ".tmp")
-    try:
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
-    except BaseException:
-        if tmp.exists():
-            tmp.unlink()
-        raise
-
-
 def canonical(name, text):
     """A settings file's shipped text: its JSON, re-serialized with sorted keys and two-space indent, and for
     `core-plugins.json` with Sync turned off.  A file that is not JSON -- an enabled CSS snippet -- passes through.

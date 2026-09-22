@@ -22,8 +22,8 @@ from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
-# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
-CONFIG = os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "spud.config.json")
+# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).  The
+# template and the rest of share/ are each launcher's own (`checkout_of`); only the marks are this probe's.
 CONFIG_MARKS = os.path.join(os.path.dirname(HERE), "fixtures", "config_marks.json")
 PY = sys.executable
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
@@ -42,9 +42,21 @@ def cases(home):
     ]
 
 
-def write_config(home):
-    """Render the shipped config template into `home`/spud.config.json; returns it parsed."""
-    with open(CONFIG, encoding="utf-8") as f:
+def checkout_of(launcher):
+    """The checkout a launcher belongs to, given `<checkout>/bin/spud`.
+
+    Each scratch home plays the tool for its own launcher, so it ships *that* launcher's `share/` (SPD-157).  One
+    share/ for every launcher -- this probe's own checkout's, as it was -- breaks the moment a branch adds a
+    `{{mark}}`: the branch's shipped files carry a mark main's `core/shipped.MARKS` does not name, main's `spud init`
+    refuses to write a file it cannot render, and the run ends in a traceback instead of a comparison.  Nothing on the
+    hook path reads share/ at all, so this changes what `setup` builds and nothing that is measured.
+    """
+    return os.path.dirname(os.path.dirname(launcher))
+
+
+def write_config(home, launcher):
+    """Render that launcher's shipped config template into `home`/spud.config.json; returns it parsed."""
+    with open(os.path.join(checkout_of(launcher), "share", "spud.config.json"), encoding="utf-8") as f:
         text = f.read()
     with open(CONFIG_MARKS, encoding="utf-8") as f:
         for mark, value in json.load(f).items():
@@ -74,7 +86,7 @@ def seed_project_one(home, config, checkout):
 
 def setup(launcher):
     home = tempfile.mkdtemp(prefix="spud-hook-timing-")
-    config = write_config(home)
+    config = write_config(home, launcher)
     env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR")}
     env.update(SPUD_HOME=home, SPUD_USER_CLAUDE_DIR=os.path.join(home, ".user-claude"), SPUD_CONFIG_DIR=os.path.join(home, ".user-config"))
     # SPW-001: this home plays the tool, as it does for tests/helpers.py and the other probes, for two reasons that
@@ -84,7 +96,7 @@ def setup(launcher):
     # same treatment, which is what the comparison needs; project 1 below still names the launcher's own checkout, so
     # each hook reads the same row and lists the same worktrees as before.
     env["SPUD_TOOL_DIR"] = home
-    os.symlink(os.path.join(os.path.dirname(os.path.dirname(HERE)), "share"), os.path.join(home, "share"), target_is_directory=True)
+    os.symlink(os.path.join(checkout_of(launcher), "share"), os.path.join(home, "share"), target_is_directory=True)
     subprocess.run([PY, "-I", "-S", launcher, "init"], env=env, check=True, capture_output=True)
     seed_project_one(home, config, os.path.dirname(os.path.dirname(launcher)))
     return home, env

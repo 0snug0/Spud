@@ -15,7 +15,7 @@ tags: [ticket]
 
 ## Brief
 <!-- `spud --as spud ticket new --title … --priority … --status … --brief @-`; later `ticket edit --brief` -->
-What Eric asked for, in {{identity_name}}'s words. Done when: …
+What {{owner_name}} asked for, in {{identity_name}}'s words. Done when: …
 
 ## Size, persona and model decision
 <!-- `--sizing` on ticket new or ticket edit -->

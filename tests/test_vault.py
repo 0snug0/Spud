@@ -215,7 +215,7 @@ class InstallTest(VaultCase):
         self.assertEqual(record["refused"], [])
         self.assertIn("plugins/%s/%s" % (PLUGIN_ONE["id"], spud.PLUGIN_DATA), record["written"])
         # the line the design asks for, in the output a person reads
-        self.assertIn("copy a view to a new name", self.home.run("vault", "install", actor="spud").stdout)
+        self.assertIn("does not touch the shipped", self.home.run("vault", "install", actor="spud").stdout)
 
     def test_a_second_install_changes_nothing_and_downloads_nothing(self):
         self.init()

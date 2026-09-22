@@ -59,6 +59,11 @@ MARK_RE = re.compile(r"\{\{([^{}]*)\}\}")
 # Not a bare `@`: the CLI's own spelling for a brief on stdin or from a file, `--brief @-` and `--brief @file`, is in the
 # shipped protocol and in the shipped ticket template, and has to stay.
 ADDRESS_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]*[A-Za-z]")
+# A ticket key in this tracker's own spelling (SPD-nnn, SPUD-nnn, ...): meaningless, or wrong, in a tracker a fresh home
+# never has, so the shipped CLAUDE.md and the reference skill (SPD-157) keep the reasoning behind a rule and drop the
+# number.  A hash algorithm's own name (`SHA-256`) reads the same shape and is not one.
+TICKET_RE = re.compile(r"\b[A-Z]{2,6}-\d{2,4}\b")
+TICKET_LOOKALIKE_EXCEPTIONS = {"SHA-256", "SHA-1", "SHA-512"}
 KEY_RE = re.compile(r"([A-Za-z_][\w.]*):(?: (.*))?$")
 FLOW = {"[": "a flow sequence", "{": "a flow mapping", "&": "an anchor", "*": "an alias", "!": "a tag",
         "|": "a block scalar", ">": "a folded block scalar", "%": "a directive"}
@@ -76,6 +81,7 @@ FRONTMATTER_RE = re.compile(r"^---\n(.*?)\n---\n", re.DOTALL)
 # name would have passed the very block this set exists to have caught.  Adding a block is naming its reader here.
 CONFIG_BLOCK_READERS = {
     "identity": "core/shipped.marks (five marks), commands/homeinit",
+    "owner": "core/shipped.marks (four marks, falling back to DEFAULT_OWNER), commands/homeinit, commands/doctor",
     "naming": "core/homeconf.Ctx.id_pad and config_problems, state/ledgerdb.sync_config_rows, state/ops (the pool)",
     "personas": "core/homeconf.Ctx.persona_tier and Ctx.personas and config_problems, state/ops",
     "limits": "core/homeconf.Ctx.limits and config_problems, commands/doctor",
@@ -429,6 +435,39 @@ class ShippedMarkTest(unittest.TestCase):
                 used.add(mark)
         self.assertEqual(set(spud.MARKS) - used, set(), "a mark core/shipped names is used by no shipped file")
 
+    def test_the_owner_marks_carry_the_person_the_home_works_for(self):
+        # SPD-157: the config now names the person beside the assistant, and the shipped prose reads all four
+        # separately -- the name, and the three pronouns -- because no sentence may need a verb to agree with a mark.
+        marks = spud.marks(self.ctx)
+        self.assertEqual([marks[key] for key in ("owner_name", "owner_subject", "owner_object", "owner_possessive")],
+                         ["Pat", "they", "them", "their"])
+
+    def test_a_config_with_no_owner_block_renders_the_placeholder_and_never_nothing(self):
+        """The whole reason `core/shipped.DEFAULT_OWNER` exists: a config written before the block, or one whose block
+        somebody emptied, still renders every shipped file.  A mark that came out empty would leave a sentence with a
+        hole in it in a generated CLAUDE.md, which is a file nobody may fix by hand."""
+        for owner in ({}, {"owner": {}}, {"owner": {"name": "", "pronouns": {"subject": "", "object": "", "possessive": ""}}}):
+            config = dict(helpers.real_config())
+            config.pop("owner", None)
+            config.update(owner)
+            home = helpers.Home(config=config)
+            try:
+                marks = spud.marks(spud.Ctx(home.path, "SPUD_HOME", False, tool=REPO))
+                self.assertEqual([marks[key] for key in ("owner_name", "owner_subject", "owner_object", "owner_possessive")],
+                                 ["the owner", "they", "them", "their"], owner)
+                for rel, text in shipped():
+                    self.assertNotIn("{{", spud.render(text, marks), rel)
+            finally:
+                home.cleanup()
+
+    def test_no_shipped_file_names_a_person(self):
+        """SPD-157: the shipped text named one home's owner twenty times, which is a file that reads as somebody
+        else's in every other home.  Every one of those places is a mark now, so the names themselves may not come
+        back -- in the two files the ticket names or in any other, rendered or not."""
+        for rel, text in shipped():
+            for name in ("Eric", "Bob"):
+                self.assertNotIn(name, text, "share/%s names %s; the owner marks are what the prose reads" % (rel, name))
+
     def test_the_launcher_mark_install_renders_is_the_mark_table_s(self):
         self.assertEqual(spud.LAUNCHER_MARK, spud.MARK % "launcher")
 
@@ -444,6 +483,13 @@ class ShippedMarkTest(unittest.TestCase):
         for rel, text in shipped():
             self.assertNotIn("/Users/", text, rel)
             self.assertEqual(ADDRESS_RE.findall(text), [], rel)
+
+    def test_the_shipped_claude_md_carries_no_ticket_number(self):
+        # SPD-157: reconciled from a home's own CLAUDE.md, which explains a rule's history with "since SPD-nnn" -- a
+        # number that names no ticket in a tracker a fresh home has.  The reasoning stays; the number does not.
+        text = (SHARE / "CLAUDE.md").read_text(encoding="utf-8")
+        found = [m for m in TICKET_RE.findall(text) if m not in TICKET_LOOKALIKE_EXCEPTIONS]
+        self.assertEqual(found, [], found)
 
     def test_render_leaves_the_runtime_placeholders_of_the_shipped_claude_md_alone(self):
         # <agent_id>, <lineage>, <slug> and twenty more are what Spud fills per child when he writes a brief, not marks.
@@ -476,10 +522,14 @@ class ShippedConfigTest(unittest.TestCase):
     def test_the_rendered_config_is_one_config_problems_passes(self):
         text = (SHARE / "spud.config.json").read_text(encoding="utf-8")
         config = json.loads(spud.render(text, {"identity_name": "Tuber", "pronoun_subject": "they", "pronoun_object": "them",
-                                               "pronoun_possessive": "their", "ticket_prefix": "ZZZ", "team_prefix": "ZZZS"}))
+                                               "pronoun_possessive": "their", "owner_name": "Robin", "owner_subject": "she",
+                                               "owner_object": "her", "owner_possessive": "her",
+                                               "ticket_prefix": "ZZZ", "team_prefix": "ZZZS"}))
         self.assertEqual(spud.config_problems(config), [])
         self.assertIn(config["identity"]["model"], config["pricing"]["models"])  # or cost renders as NO_TABLE
         self.assertEqual((config["identity"]["name"], config["tickets"]["prefix"]), ("Tuber", "ZZZ"))
+        # SPD-157: the person the home works for, beside the identity of the one working.
+        self.assertEqual((config["owner"]["name"], config["owner"]["pronouns"]["possessive"]), ("Robin", "her"))
 
     def test_the_unrendered_template_is_json_and_is_not_a_config(self):
         # Deliberate (design 3.2): "{{ticket_prefix}}" is valid JSON and an invalid prefix, so every check above runs
@@ -494,7 +544,34 @@ class ShippedConfigTest(unittest.TestCase):
         config = helpers.real_config()
         self.assertEqual((config["tickets"]["prefix"], config["teams"]["prefix"]), ("SPD", "SPUD"))
         self.assertEqual((config["identity"]["name"], config["identity"]["pronouns"]["object"]), ("Spud", "him"))
+        self.assertEqual((config["owner"]["name"], config["owner"]["pronouns"]["subject"]), ("Pat", "they"))
         self.assertEqual(spud.config_problems(config), [])
+
+    def test_the_name_pool_is_the_one_block_the_suite_does_not_take_from_the_shipped_file(self):
+        """SPD-157: the shipped pool is the owner's own canon and the first thing a home replaces, while this corpus
+        spells its members' names in some five hundred assertions -- so the suite pins `tests/fixtures/name_pool.json`
+        and draws from that.  One block, and this is what holds it to one: everything else a scratch home's config says
+        still comes from the file the tool ships, so a change to any other block reaches every test in the suite."""
+        text = (SHARE / "spud.config.json").read_text(encoding="utf-8")
+        with open(helpers.CONFIG_MARKS, encoding="utf-8") as f:
+            for mark, value in json.load(f).items():
+                text = text.replace(mark, value)
+        shipped_config = json.loads(text)
+        suite = helpers.real_config()
+        with open(helpers.NAME_POOL, encoding="utf-8") as f:
+            pool = json.load(f)
+        self.assertEqual(suite["naming"]["pool"], pool)
+        self.assertNotEqual(shipped_config["naming"]["pool"], pool)  # else the pin says nothing
+        shipped_config["naming"]["pool"] = pool
+        self.assertEqual(shipped_config, suite)
+
+    def test_the_shipped_pool_is_a_pool_member_new_can_draw_from(self):
+        """Whatever names a home ships with, `state/ops.draw_name` reads them from `name_pool` one at a time: they have
+        to be distinct non-empty strings, or a draw returns a name no member can be told apart by."""
+        pool = json.loads((SHARE / "spud.config.json").read_text(encoding="utf-8"))["naming"]["pool"]
+        self.assertTrue(pool)
+        self.assertTrue(all(isinstance(name, str) and name.strip() == name and name for name in pool), pool)
+        self.assertEqual(len(set(pool)), len(pool), sorted(n for n in set(pool) if pool.count(n) > 1))
 
     def test_every_block_it_ships_is_one_the_program_reads(self):
         """SPW-005: no decorative key in the file every home starts from.  The `ledger` block is gone, and a block added
@@ -531,6 +608,7 @@ class ShippedSetTest(unittest.TestCase):
             "obsidian/plugins/pretty-properties/data.json",
             "obsidian/types.json",
             "obsidian.lock.json",
+            "skills/spud-reference/SKILL.md",  # SPD-157: the detail behind the shipped CLAUDE.md, generated into a home
             "spud.config.json",
         ])
 
@@ -539,7 +617,12 @@ class ShippedSetTest(unittest.TestCase):
         share/ has one owner; and it is the one shipped file `spud init` does not write into the home, because it belongs
         at user scope, where Claude Code reads an agent definition from.  The vault SPD-156 ships is subtracted below
         rather than counted against that: init's step 4b does write it into the home, under `.obsidian/` instead of at
-        its own share-relative path, and the lock beside it is what that install reads."""
+        its own share-relative path, and the lock beside it is what that install reads.
+
+        `skills/spud-reference/SKILL.md` (SPD-157) is the other file this leaves over: it too lands somewhere other than
+        its own share-relative path -- a home reads a skill from `.claude/skills/<name>/SKILL.md`, not from a bare
+        `skills/` at its root -- so it needs the same kind of dedicated install code `agent_source` gives spudagent.md,
+        rather than a straight `SCAFFOLDING` copy; that install path is not written yet."""
         home = helpers.Home()
         try:
             ctx = spud.Ctx(home.path, "SPUD_HOME", False, tool=REPO)
@@ -549,7 +632,7 @@ class ShippedSetTest(unittest.TestCase):
             shipped_paths = [rel for rel, _ in shipped()]
             vault = {rel for rel in shipped_paths if rel == LOCK.name or rel.startswith("obsidian/")}
             self.assertEqual(sorted(set(shipped_paths) - set(spud.SCAFFOLDING) - vault - {"spud.config.json"}),
-                             ["agents/spudagent.md"])
+                             ["agents/spudagent.md", "skills/spud-reference/SKILL.md"])
         finally:
             home.cleanup()
 
@@ -611,6 +694,44 @@ class ShippedSetTest(unittest.TestCase):
             self.assertIn("ledger/Nothing.md", str(caught.exception))
         finally:
             home.cleanup()
+
+
+class SpudReferenceSkillTest(unittest.TestCase):
+    """`share/skills/spud-reference/SKILL.md` (SPD-157): the shipped template for the detail a home's `CLAUDE.md`
+    points to -- the ledger's schema and history, the hook catalogue, render conflicts and import, worktree binding,
+    the pull-request landing rules -- generated into a home rather than hand-kept, the same way the rest of `share/`
+    is.  It gets every guard `ShippedMarkTest` already gives every shipped file (a rendered copy keeps no mark, names
+    no machine, nobody) just by existing under `share/`; the checks here are what is particular to a file meant to
+    read as anyone's home, never one home's own history: its frontmatter, checked the way `SpudInitSkillTest` checks
+    the other shipped skill's, and the ticket numbers and personal names a home's own reference skill carries freely
+    but this one, shipped to everyone, must not."""
+
+    PATH = SHARE / "skills" / "spud-reference" / "SKILL.md"
+
+    def text(self):
+        self.assertTrue(self.PATH.is_file(), "%s is missing" % self.PATH.relative_to(REPO))
+        return self.PATH.read_text(encoding="utf-8")
+
+    def test_frontmatter_names_the_skill_spud_reference(self):
+        fields = skill_frontmatter(self.text())
+        self.assertEqual(fields.get("name"), "spud-reference")
+        self.assertTrue(fields.get("description"), "no description")
+
+    def test_it_carries_no_ticket_number(self):
+        found = [m for m in TICKET_RE.findall(self.text()) if m not in TICKET_LOOKALIKE_EXCEPTIONS]
+        self.assertEqual(found, [], found)
+
+    def test_it_names_no_person_and_no_other_project_by_name(self):
+        text = self.text()
+        for name in ("Eric", "Bob", "BadTakes", "Jeremy", "Garfield", "Cascade"):
+            self.assertNotIn(name, text, "%r reads as one particular home's, not anyone's" % name)
+
+    def test_the_shipped_claude_md_points_at_the_path_this_file_installs_to(self):
+        # Point 4 of the brief: CLAUDE.md's pointer must be the path a home actually gets the skill at.  Until the
+        # install code that copies share/skills/ into a home exists (this ticket's other half), this pins what that
+        # path has to be, so the two do not drift apart before it is written.
+        claude_md = (SHARE / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn(".claude/skills/spud-reference/SKILL.md", claude_md)
 
 
 class SpudInitSkillTest(unittest.TestCase):

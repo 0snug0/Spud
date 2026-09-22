@@ -11,6 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import (
+    CONFIG,
     EXIT_ERROR,
     EXIT_OWNERSHIP,
     EXIT_USAGE,
@@ -30,6 +31,11 @@ SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
 # SPW-001: what `spud init` writes into a home besides the database (design sections 2.2 and 4.1).
 SCAFFOLDING = ("CLAUDE.md", "ledger/Home.md", "ledger/Spud.md", "ledger/Board.base", "ledger/Fleet.base",
                "ledger/_templates/ticket.md", "ledger/_templates/spudagent.md")
+# SPD-157: and every skill the tool ships, which is the one part of the shipped set whose path in a home is not its path
+# under share/ -- Claude Code reads a skill from `.claude/skills/`.  Spelled out rather than read from `share/skills/`,
+# so that a skill shipped without a thought for the home it lands in fails here as well as in tests/test_share.py.
+SHIPPED_SKILLS = (".claude/skills/spud-reference/SKILL.md",)
+TOOL_OWNED = SCAFFOLDING + SHIPPED_SKILLS  # `commands/homesync.tool_owned`, which init writes and `home sync` rewrites
 DIRECTORIES = ("ledger/tickets", "ledger/teams", "reports", "docs/spikes", "docs/design")
 # SPW-005: the block share/spud.config.json carried until SPW-005 dropped it, with every path in it moved under one
 # directory of its own -- so a test that finds a note or a folder under DROPPED_ROOT has found a reader of the block,
@@ -234,7 +240,7 @@ class InitTest(SpudTestCase):
 
     def test_init_leaves_the_scaffolding_the_directories_and_the_pointer(self):
         """SPW-001 steps 4 and 5, as every scratch home now gets them (this class runs init cold, warm_cache False)."""
-        for rel in SCAFFOLDING:
+        for rel in TOOL_OWNED:
             path = self.home.path / rel
             self.assertTrue(path.is_file(), rel)
             self.assertNotIn("{{", path.read_text(encoding="utf-8"), rel)  # no mark reaches a home unrendered
@@ -491,13 +497,22 @@ class MachineMixin(RepoMixin):
         """init's flags for this machine.  `--no-schedule` by default: step 8 is `schedule.install_agents`, which keeps
         its own coverage (SPW-001 design, phase 4), and a run that installs two LaunchAgents to prove something about
         the config is two launchctl calls nobody reads.  `schedule=True` asks for the step itself."""
-        argv = ["init", "--home", home or self.target]
+        target = Path(str(home or self.target))
+        argv = ["init", "--home", target]
         argv += (["--project-root", self.repo] if project else ["--no-project"])
         argv += [] if schedule else ["--no-schedule"]
-        return argv + ["--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS", *extra]
+        argv += ["--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS"]
+        # `--owner-name` joins the two prefixes as a value with no default (SPD-157), and it is refused once a config
+        # exists exactly as `--name` is -- the prefixes are the pair a second run may repeat, because the config's are
+        # authoritative and a matching flag is a no-op rather than an edit.  So a second run of this line leaves it out,
+        # the way a person rerunning `spud init` would.  A test about the refusal, or about another owner, says so in
+        # `extra`; argparse takes the last spelling of a flag.
+        if not (target / "spud.config.json").is_file():
+            argv += ["--owner-name", "Pat"]
+        return argv + list(extra)
 
     def scaffolding_state(self):
-        return {rel: (self.target / rel).read_text(encoding="utf-8") for rel in SCAFFOLDING}
+        return {rel: (self.target / rel).read_text(encoding="utf-8") for rel in TOOL_OWNED}
 
 
 class FreshMachineTest(MachineMixin, unittest.TestCase):
@@ -521,7 +536,9 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         self.assertEqual((config["tickets"]["prefix"], config["teams"]["prefix"]), ("ZZZ", "ZZZS"))
         self.assertEqual(config["identity"]["name"], "Spud")
         self.assertEqual(config["identity"]["pronouns"], {"subject": "he", "object": "him", "possessive": "his"})
-        self.assertEqual(config["naming"]["pool"], real_config()["naming"]["pool"])
+        # The pool a real `spud init` writes is the shipped one, never the suite's own (helpers.NAME_POOL, SPD-157):
+        # this is the one home in the suite the tool builds its config for rather than a fixture handing it one.
+        self.assertEqual(config["naming"]["pool"], json.loads(CONFIG.read_text(encoding="utf-8"))["naming"]["pool"])
         self.assertNotIn("{{", (self.target / "spud.config.json").read_text(encoding="utf-8"))
         self.assertEqual(json.loads(self.spud("--json", "doctor").stdout)["problems"], [])
         # 2. the database
@@ -549,7 +566,7 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         self.assertTrue(all(e["actor"] == "spud" for e in events), events)  # init resolves no actor (design 2.3)
         self.assertIn("Spud initialized at %s" % self.target, out["report_entry"]["title"])
         # 4. the scaffolding and the directories
-        self.assertEqual(out["scaffolding"]["written"], list(SCAFFOLDING))
+        self.assertEqual(out["scaffolding"]["written"], list(TOOL_OWNED))
         self.assertEqual(out["scaffolding"]["dropped_lines"], 0)  # a project is registered, so every line is renderable
         for rel, text in self.scaffolding_state().items():
             self.assertNotIn("{{", text, rel)
@@ -568,16 +585,16 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
     def test_a_second_run_changes_nothing(self):
         self.spud(*self.init_argv())
         before = self.scaffolding_state()
-        stamps = {rel: (self.target / rel).stat().st_mtime_ns for rel in SCAFFOLDING}
+        stamps = {rel: (self.target / rel).stat().st_mtime_ns for rel in TOOL_OWNED}
         proc = self.spud(*self.init_argv())
         self.assertIn("kept %s" % (self.target / "spud.config.json"), proc.stdout)
         self.assertIn("is up to date (user_version %d)" % SCHEMA, proc.stdout)
         self.assertIn("project %s is registered already" % self.REPO_KEY, proc.stdout)
         self.assertIn("no report entry: this run changed nothing", proc.stdout)
-        self.assertIn("nothing written, 7 kept", proc.stdout)
+        self.assertIn("nothing written, %d kept" % len(TOOL_OWNED), proc.stdout)
         self.assertIn("already", proc.stdout.split("5. ")[1])
         self.assertEqual(self.scaffolding_state(), before)  # never overwrites a file a person may have edited
-        self.assertEqual({rel: (self.target / rel).stat().st_mtime_ns for rel in SCAFFOLDING}, stamps)
+        self.assertEqual({rel: (self.target / rel).stat().st_mtime_ns for rel in TOOL_OWNED}, stamps)
         out = json.loads(self.spud("--json", *self.init_argv()).stdout)
         self.assertNotIn("report_entry", out)
         self.assertEqual(out["scaffolding"]["written"], [])
@@ -596,9 +613,22 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         (self.target / "ledger" / "Spud.md").unlink()
         out = json.loads(self.spud("--json", *self.init_argv()).stdout)
         self.assertEqual(out["scaffolding"]["written"], ["ledger/Spud.md"])
-        self.assertEqual(out["scaffolding"]["kept"], [rel for rel in SCAFFOLDING if rel != "ledger/Spud.md"])
+        self.assertEqual(out["scaffolding"]["kept"], [rel for rel in TOOL_OWNED if rel != "ledger/Spud.md"])
         self.assertEqual((self.target / "ledger" / "Home.md").read_text(encoding="utf-8"), "mine\n")
         self.assertIn("name: Spud", (self.target / "ledger" / "Spud.md").read_text(encoding="utf-8"))
+
+    def test_the_shipped_skill_lands_where_the_home_s_own_claude_md_says_it_does(self):
+        """SPD-157: the tool ships `share/skills/<name>/`, Claude Code reads a skill from `.claude/skills/`, and the
+        home's CLAUDE.md points a new Spud at the reference skill by path -- so the path it names must be the path init
+        wrote.  A skill that shipped at its share-relative path would leave that sentence pointing at nothing."""
+        self.spud(*self.init_argv())
+        claude = (self.target / "CLAUDE.md").read_text(encoding="utf-8")
+        for rel in SHIPPED_SKILLS:
+            path = self.target / rel
+            self.assertTrue(path.is_file(), rel)
+            self.assertNotIn("{{", path.read_text(encoding="utf-8"), rel)
+            self.assertIn(rel, claude, rel)
+            self.assertFalse((self.target / "skills").exists())  # never at its path under share/
 
     def test_a_config_already_there_is_left_alone_and_is_authoritative(self):
         """Section 6's first rule, and the reason for it: doctor compares project 1's prefixes with the config's, so the
@@ -617,7 +647,7 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         finally:
             con.close()
         self.assertEqual(json.loads(self.spud("--json", "doctor").stdout)["problems"], [])
-        for flag in ("--name", "--pronouns"):
+        for flag in ("--name", "--pronouns", "--owner-name", "--owner-pronouns"):
             proc = self.spud("init", "--home", self.target, "--no-project", flag, "x", check=False)
             self.assertEqual(proc.returncode, EXIT_USAGE, proc.stderr)
             self.assertIn("%s has nothing to write" % flag, proc.stderr)
@@ -630,11 +660,12 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
             repo = self.make_repo("keys-", name=directory)
             home = self.scratch_dir("key-home-") / "SpudHome"
             out = json.loads(self.spud("--json", "init", "--home", home, "--repoint", "--project-root", repo, "--no-schedule",
-                                       "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS").stdout)
+                                       "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS", "--owner-name", "Pat").stdout)
             self.assertEqual((out["project"]["key"], out["project"]["name"]), (key, directory), directory)
         # "2026" sanitizes to "2026", which the pattern rejects: a key must start with a letter, and init says so
         refused = self.spud("init", "--home", self.scratch_dir("key-home-") / "SpudHome", "--repoint", "--project-root",
-                            self.make_repo("keys-", name="2026"), "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS", check=False)
+                            self.make_repo("keys-", name="2026"), "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS",
+                            "--owner-name", "Pat", check=False)
         self.assertEqual(refused.returncode, EXIT_ERROR, refused.stderr)
         self.assertIn("--project-key '2026' must be lower-case letters, digits and hyphens, starting with a letter", refused.stderr)
         self.assertIn("init refused", refused.stderr)
@@ -646,9 +677,34 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
         self.assertEqual(config["identity"]["pronouns"], {"subject": "they", "object": "them", "possessive": "their"})
         self.assertIn("name: Tater", (self.target / "ledger" / "Spud.md").read_text(encoding="utf-8"))
         proc = self.spud("init", "--home", self.scratch_dir("other-home-"), "--repoint", "--no-project",
-                         "--ticket-prefix", "YYY", "--team-prefix", "YYYS", "--pronouns", "they/them", check=False)
+                         "--ticket-prefix", "YYY", "--team-prefix", "YYYS", "--owner-name", "Pat",
+                         "--pronouns", "they/them", check=False)
         self.assertEqual(proc.returncode, EXIT_USAGE, proc.stderr)
         self.assertIn("--pronouns is subject/object/possessive", proc.stderr)
+
+    def test_the_owner_flags_reach_the_config_and_the_files_it_renders(self):
+        """SPD-157: the config carries the person the home is *for* beside the assistant it describes, and every file
+        the tool generates reads the four marks -- so the name given here is in the home's own CLAUDE.md, not a name
+        the tool shipped."""
+        self.spud(*self.init_argv("--owner-name", "Robin", "--owner-pronouns", "she/her/her", project=False))
+        config = json.loads((self.target / "spud.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["owner"]["name"], "Robin")
+        self.assertEqual(config["owner"]["pronouns"], {"subject": "she", "object": "her", "possessive": "her"})
+        claude_md = (self.target / "CLAUDE.md").read_text(encoding="utf-8")
+        self.assertIn("Robin", claude_md)
+        self.assertNotIn("{{", claude_md)
+        self.assertIn("Robin", (self.target / "ledger" / "Spud.md").read_text(encoding="utf-8"))
+        self.assertEqual(json.loads(self.spud("--json", "doctor").stdout)["problems"], [])
+
+    def test_the_owner_pronouns_default_and_are_read_the_way_the_identitys_are(self):
+        self.spud(*self.init_argv(project=False))  # no --owner-pronouns
+        config = json.loads((self.target / "spud.config.json").read_text(encoding="utf-8"))
+        self.assertEqual(config["owner"]["pronouns"], {"subject": "they", "object": "them", "possessive": "their"})
+        proc = self.spud("init", "--home", self.scratch_dir("owner-home-"), "--repoint", "--no-project",
+                         "--ticket-prefix", "YYY", "--team-prefix", "YYYS", "--owner-name", "Pat",
+                         "--owner-pronouns", "she/her", check=False)
+        self.assertEqual(proc.returncode, EXIT_USAGE, proc.stderr)
+        self.assertIn("--owner-pronouns is subject/object/possessive", proc.stderr)
 
     def test_no_project_leaves_an_empty_registry_and_drops_the_lines_about_one(self):
         out = json.loads(self.spud("--json", *self.init_argv(project=False)).stdout)
@@ -689,7 +745,7 @@ class FreshMachineTest(MachineMixin, unittest.TestCase):
 
     def test_dry_run_takes_the_home_from_spud_home_and_from_the_pointer(self):
         out = json.loads(self.spud("--json", "init", "--dry-run", "--no-project", "--ticket-prefix", "ZZZ",
-                                   "--team-prefix", "ZZZS", env={"SPUD_HOME": str(self.target)}).stdout)
+                                   "--team-prefix", "ZZZS", "--owner-name", "Pat", env={"SPUD_HOME": str(self.target)}).stdout)
         self.assertEqual((out["home"], out["how"]), (str(self.target), "SPUD_HOME"))
         self.spud(*self.init_argv(project=False))
         out = json.loads(self.spud("--json", "init", "--dry-run").stdout)  # the pointer alone, and the config's values
@@ -1051,7 +1107,8 @@ class InitRefusalTest(MachineMixin, unittest.TestCase):
 
     def test_the_pointer_names_another_home_unless_repointed(self):
         first = self.scratch_dir("first-home-")
-        self.spud("init", "--home", first, "--no-project", "--no-schedule", "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS")
+        self.spud("init", "--home", first, "--no-project", "--no-schedule", "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS",
+                  "--owner-name", "Pat")
         message = self.refused(*self.init_argv())
         self.assertIn("names %s, not %s" % (first, self.target), message)
         self.assertIn("--repoint", message)
@@ -1078,7 +1135,8 @@ class InitRefusalTest(MachineMixin, unittest.TestCase):
         self.assertFalse(self.target.exists())
 
     def rooted(self, root, ticket="ZZZ", team="ZZZS", *extra):
-        return self.refused("init", "--home", self.target, "--project-root", root, "--ticket-prefix", ticket, "--team-prefix", team, *extra)
+        return self.refused("init", "--home", self.target, "--project-root", root, "--ticket-prefix", ticket, "--team-prefix", team,
+                            "--owner-name", "Pat", *extra)
 
     def test_the_first_projects_root(self):
         inside = self.repo / "sub"
@@ -1096,9 +1154,20 @@ class InitRefusalTest(MachineMixin, unittest.TestCase):
         self.assertIn("must differ (both ZZZ)", self.rooted(self.repo, "ZZZ", "ZZZ"))
 
     def test_the_prefixes_have_no_default_when_a_config_is_written(self):
-        message = self.refused("init", "--home", self.target, "--project-root", self.repo, code=EXIT_USAGE)
+        message = self.refused("init", "--home", self.target, "--project-root", self.repo, "--owner-name", "Pat", code=EXIT_USAGE)
         self.assertIn("has no spud.config.json yet, and a config carries the two prefixes", message)
         self.assertIn("--ticket-prefix XXX --team-prefix XXXS", message)
+        self.assertFalse(self.target.exists())
+
+    def test_the_owner_name_has_no_default_either(self):
+        """SPD-157: the third value a run off a tty must be given.  A person's name cannot be guessed, and it goes into
+        the CLAUDE.md the tool generates, the brief template and the root note -- so a home is not built without one,
+        and the refusal names the flag and says the pronouns have a default."""
+        message = self.refused("init", "--home", self.target, "--project-root", self.repo,
+                               "--ticket-prefix", "ZZZ", "--team-prefix", "ZZZS", code=EXIT_USAGE)
+        self.assertIn("a config carries the name of the person the home is for", message)
+        self.assertIn("--owner-name", message)
+        self.assertIn("they/them/their", message)
         self.assertFalse(self.target.exists())
 
     def test_the_home_is_the_home_and_never_a_project(self):

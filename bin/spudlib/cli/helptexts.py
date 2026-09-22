@@ -158,6 +158,24 @@ reinstalled; a render and spud doctor in the new home; the old .spud renamed .sp
 left by hand and how to roll back until the removal commit.  --dry-run checks the preconditions and prints the steps.
 """
 
+HOME_SYNC_DESCRIPTION = """\
+Write every file the tool owns in this home again from <tool>/share/ (SPD-157, the portable-home design part 2), so a
+home's own text is generated rather than hand-kept in two places: CLAUDE.md, ledger/Home.md, ledger/Spud.md,
+ledger/_templates/, the .base views, every skill under share/skills/ (which a home reads from .claude/skills/), and the
+Obsidian settings and pinned plugins through the same install `spud vault install` runs.  The ledger's rendered notes,
+the reports, docs/, the database and spud.config.json are never touched: they are the home's, not the tool's.
+
+A file that already holds the shipped text is left alone.  One that holds something else is replaced, and a copy of
+what it held is kept first, under a home-sync folder of the home's backups directory named by the time of the run, at
+the file's own path inside it; every copy is named in the output.  Nothing is written until everything can be: a
+{{mark}} with no value refuses the whole sync naming the mark, as `spud init` refuses, and so does a lock this tool
+will not install from.  A refused download is a line in the output, never a failed command.
+
+--check prints what would change, file by file -- what would be written, what already holds the shipped text, and where
+the copy of each replaced file would be kept -- and writes nothing, downloads nothing and keeps no copy.  Run it first.
+`spud doctor` names each tool-owned file this home does not have, or has and has changed, as a note.
+"""
+
 VAULT_DESCRIPTION = """\
 The home's Obsidian vault, which the tool ships and the tool captures (SPD-156, the portable-home design section 3).
 `vault install` writes <home>/.obsidian/ from <tool>/share/obsidian/ and downloads every plugin and theme

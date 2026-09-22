@@ -40,6 +40,9 @@ SPUD_ONLY_COMMANDS = ("init", "migrate", "import", "render", "backup", "schedule
 SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"), ("member", "resum"),
                          ("project", "add"), ("project", "edit"), ("project", "install"), ("project", "uninstall"), ("project", "sync"),
                          ("project", "remove"), ("session", "claim"), ("session", "release"), ("home", "move"),
+                         # SPD-157: `home sync` rewrites the home's own CLAUDE.md, notes, templates and views, every one
+                         # of them a SPUD_PATHS file the edit hook already refuses a member.
+                         ("home", "sync"),
                          ("pr", "record"),  # SPD-077: opening a pull request is part of landing, which is Spud's (Law 10)
                          # SPD-156: installing the vault writes the home's own .obsidian/, which is Spud's directory; the
                          # other half, `vault capture`, is a member's and writes only into that member's deliverables.
