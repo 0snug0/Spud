@@ -8,8 +8,8 @@ from ..state import lookup
 
 
 # What a refused write is called in each channel's reasons: the path rule's own reason wrapped for the write ("into"),
-# a target holding an expansion ("variable", a member alone: Spud's own such target the hook simply cannot read), a
-# target relative to a directory the hook cannot follow ("unfollowable", every caller), and the two a glob
+# a target holding an expansion the line does not settle ("variable", every caller since SPD-091), a
+# target relative to a directory the hook cannot follow ("unfollowable", every caller since SPD-035), and the two a glob
 # earns a member ("capped", "nomatch").  A target holding an operand the line does not spell (syntax.unknown_operand)
 # earns a member "input" -- what xargs reads from its input, what find hands its command -- or "anywhere", files a command
 # places where the line cannot say.
@@ -408,14 +408,12 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         when it opens, and the directory kind, None for every write that is not a directory's making or removal)."""
         for named, target, target_cwds, directory in entries:
             spelled = shown_picked(syntax.shown_operands(prepare.deglob(named if named else target)))
-            if syntax.unknown_operand(target):  # an operand the line does not spell, for a member as a variable is
+            if syntax.unknown_operand(target):  # an operand the line does not spell (xargs's input, find's {}, anywhere)
                 if strict:
                     return messages["anywhere" if syntax.ANY_PATH in target else "input"] % spelled
                 continue
-            if "$" in target or "`" in target or hookio.SUBST in target:
-                if strict:
-                    return messages["variable"] % spelled
-                continue
+            if "$" in target or "`" in target or hookio.SUBST in target:  # an expansion the line does not settle: refused for Spud too
+                return messages["variable"] % spelled
             if target_has_active_glob(target):
                 # The shell expands the target before opening it: check every file it opens from every candidate
                 # directory, not the literal spelling that maps under no root.
