@@ -22,29 +22,14 @@ import tempfile
 from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-# The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
-# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
-CONFIG = os.path.join(os.path.dirname(os.path.dirname(HERE)), "share", "spud.config.json")
-CONFIG_MARKS = os.path.join(os.path.dirname(HERE), "fixtures", "config_marks.json")
-NAME_POOL = os.path.join(os.path.dirname(HERE), "fixtures", "name_pool.json")  # SPD-157: the suite's own pool
+sys.dont_write_bytecode = True  # probe_env comes from this directory, and the checkout keeps no bytecode
+sys.path.insert(0, HERE)  # `python3.14 -I -S` puts no script directory on sys.path
+import probe_env  # noqa: E402  SPD-101: the isolation every probe's scratch home runs under
+
 PY = sys.executable
+INIT = ["init", "--no-schedule"]  # step 8 would reach launchctl; the scratch home's is probe_env's refusing stub
 AGENT = "a0123456789abcdef"
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
-
-
-def write_config(home):
-    """Render the shipped config template into `home`/spud.config.json; returns it parsed."""
-    with open(CONFIG, encoding="utf-8") as f:
-        text = f.read()
-    with open(CONFIG_MARKS, encoding="utf-8") as f:
-        for mark, value in json.load(f).items():
-            text = text.replace(mark, value)
-    config = json.loads(text)
-    with open(NAME_POOL, encoding="utf-8") as f:
-        config["naming"]["pool"] = json.load(f)
-    with open(os.path.join(home, "spud.config.json"), "w", encoding="utf-8") as f:
-        f.write(json.dumps(config, indent=2) + "\n")
-    return config
 
 
 def seed_project_one(home, config, checkout):
@@ -73,7 +58,7 @@ def script(home):
     base = {"session_id": SESSION, "transcript_path": "/tmp/x.jsonl", "cwd": home, "permission_mode": "default"}
     pre = dict(base, hook_event_name="PreToolUse")
     return [
-        (["--version"], None), (["--help"], None), (["no-such-command"], None), (["init"], None), (["board"], None),
+        (["--version"], None), (["--help"], None), (["no-such-command"], None), (INIT, None), (["board"], None),
         (["--as", "spud", "ticket", "new", "--title", "Split", "--priority", "P1", "--status", "active", "--brief", "b", "--sizing", "s"], None),
         (["--as", "spud", "ticket", "move", "SPD-001", "--status", "done"], None),
         (["--as", "spud", "ticket", "new", "--title", "Two", "--priority", "P2", "--status", "active", "--brief", "b", "--sizing", "s"], None),
@@ -107,27 +92,23 @@ def script(home):
 
 def run(launcher):
     home = tempfile.mkdtemp(prefix="spud-session-")
-    config = write_config(home)
-    checkout = os.path.dirname(os.path.dirname(launcher))
-    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR", "SPUD_HOME")}
-    env.update(SPUD_HOME=home, SPUD_USER_CLAUDE_DIR=home + "/.user-claude", SPUD_CONFIG_DIR=home + "/.user-config")
-    # SPW-001: this home plays the tool, as it does for tests/helpers.py and tests/probes/hook_timing.py, for the two
-    # reasons the `init` step below now has: init refuses to build a home when the running bin/spud is in a linked
-    # worktree (design section 6, refusal 6), and the second launcher this probe is run with is exactly that; and it
-    # writes the vault scaffolding from the tool's share/, so the scratch tool must ship it.  Both launchers alike.
-    env["SPUD_TOOL_DIR"] = home
-    # SPD-156: and its step 4b installs the vault, which downloads every plugin and theme the lock pins.  Off, so this
-    # probe answers the same offline as online and two runs cannot differ because a release moved: what the real lock
-    # really downloads is tests/probes/vault_download.py's question, asked once before each landing that changes it.
-    env["SPUD_VAULT_DOWNLOADS"] = "off"
-    os.symlink(os.path.join(os.path.dirname(os.path.dirname(HERE)), "share"), os.path.join(home, "share"), target_is_directory=True)
+    config = probe_env.write_config(home, name_pool=True)  # SPD-157: the suite's own pool, for the names the script spells
+    checkout = probe_env.main_checkout(launcher)  # project 1's root: one checkout for both launchers (SPD-101)
+    # SPD-101: helpers.Home's isolation, from the one helper every probe shares.  The home plays the tool (SPUD_TOOL_DIR),
+    # as SPW-001 made it: init refuses a bin/spud in a linked worktree, the second launcher here is exactly that, and init
+    # writes the vault scaffolding from the tool's share/.  SPUD_LAUNCH_AGENTS_DIR under the scratch is also what lets the
+    # two launchers answer alike at all: doctor and `board --brief` read the watcher's plist, and ~/Library/LaunchAgents
+    # names main's own launcher -- SPD-101's evidence, 41 of 44 identical without it.  SPUD_VAULT_DOWNLOADS is off (SPD-156),
+    # so this probe answers the same offline as online; what the real lock downloads is tests/probes/vault_download.py's.
+    env = probe_env.isolated_env(home)
+    probe_env.link_share(home)
     out = []
     try:
         for argv, stdin in script(home):
             text = stdin if isinstance(stdin, str) else (json.dumps(stdin) if stdin is not None else None)
             # cwd is the scratch home, so a command that reads the working directory answers alike wherever this runs
             p = subprocess.run([PY, "-I", "-S", launcher, *argv], input=text, capture_output=True, text=True, env=env, cwd=home)
-            if argv == ["init"]:
+            if argv == INIT:
                 seed_project_one(home, config, checkout)
             blob = "$ %s\nexit %d\n%s\n--stderr--\n%s" % (" ".join(argv[:4]), p.returncode, p.stdout, p.stderr)
             blob = blob.replace(home, "<HOME>").replace(os.path.realpath(home), "<HOME>")

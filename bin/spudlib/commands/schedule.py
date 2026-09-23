@@ -1,4 +1,5 @@
-"""commands/schedule: spud backup, and the two LaunchAgents that run the daily backup and the render watcher."""
+"""commands/schedule: spud backup, and the two LaunchAgents that run the daily backup and the render watcher.
+Past 250 lines and kept whole: the machine guard (SPD-101) fences exactly the plist writes and launchctl calls defined here."""
 
 import contextlib
 import os
@@ -9,7 +10,7 @@ import sys
 import time
 
 from . import settings_sync
-from ..core import kernel, launchagents, lazy
+from ..core import homeconf, kernel, launchagents, lazy
 from ..state import backup, ledgerdb
 
 
@@ -153,9 +154,82 @@ def agent_plists(ctx, at):
     return (("backup", schedule_plist(ctx, at)), ("render", render_plist(ctx)))
 
 
+def launchctl_program():
+    """$SPUD_LAUNCHCTL, default /bin/launchctl."""
+    return os.environ.get("SPUD_LAUNCHCTL") or REAL_LAUNCHCTL
+
+
+# SPD-101: the machine guard.  On 2026-09-22 a probe's scratch home ran `spud init` with neither SPUD_LAUNCH_AGENTS_DIR
+# nor SPUD_LAUNCHCTL set, and step 8 wrote its own local.spud.backup and local.spud.render plists into ~/Library/LaunchAgents
+# and bootstrapped them, booting out the real render watcher; once the scratch directory was gone launchd kept restarting a
+# watcher that could not start, and the vault went stale.  Overrides in the caller cannot be the only fence, because the
+# next probe or test that forgets them is the one that does it again.  So the tool itself decides: a write that reaches
+# this Mac's own agents -- the default LaunchAgents directory, where launchd reads plists at every login, or the real
+# launchctl, whose gui/<uid> jobs under these two labels are this Mac's whichever directory the plist is in -- is made
+# for the machine's own home alone, run by the tool that home runs.  SPUD_LAUNCH_AGENTS_DIR and SPUD_LAUNCHCTL, both set
+# away from the real ones, reach nothing of the machine's, and nothing is asked of them.
+REAL_LAUNCHCTL = "/bin/launchctl"
+MACHINE_REFUSAL = ("%s refused: it would reach %s, which are this Mac's own, but %s.  Only the machine's own home, the one"
+                   " %s names, run by the tool that home runs (no SPUD_TOOL_DIR, not a linked worktree), writes, loads or"
+                   " unloads this Mac's local.spud.* LaunchAgents.  A scratch home -- a test's or a probe's -- sets"
+                   " SPUD_LAUNCH_AGENTS_DIR to a directory of its own and SPUD_LAUNCHCTL to a launchctl of its own, or"
+                   " runs `spud init --no-schedule`.")
+
+
+def machine_reach():
+    """What of this Mac's own a schedule write would reach: the default LaunchAgents directory, and the real launchctl.
+    Empty when both are moved elsewhere.  Paths are compared resolved, so a symlink or a second spelling is no way round."""
+    reach = []
+    default = os.path.realpath(os.path.expanduser(launchagents.DEFAULT_AGENTS_DIR))
+    if os.path.realpath(launchagents.agents_dir()) == default:
+        reach.append("the LaunchAgents directory %s" % default)
+    if os.path.realpath(launchctl_program()) == os.path.realpath(REAL_LAUNCHCTL):
+        reach.append("launchctl %s and the jobs %s and %s in gui/%d" % (REAL_LAUNCHCTL, launchagents.SCHEDULE_LABEL, launchagents.RENDER_LABEL, os.getuid()))
+    return reach
+
+
+def machine_pointer():
+    """This Mac's own home pointer, ~/.config/spud/home -- never SPUD_CONFIG_DIR's: that variable moves the pointer a test
+    or a probe writes, and the agents guarded here are the machine's, so the home that may have them is the one the
+    machine's pointer names."""
+    return homeconf.spud_config_dir({}) / "home"
+
+
+def machine_home_problems(ctx):
+    """Why `ctx` may not reach this Mac's own agents: an empty list when it may.  The rule, whole: when machine_reach() is
+    not empty, the home must be the one ~/.config/spud/home names (paths resolved), SPUD_TOOL_DIR must be unset, and the
+    running tool must not be a linked worktree.  `spud init` on a new machine passes, because step 5 writes the pointer
+    before step 8 installs; `home move` passes, because its step 4 repoints before its step 6 installs."""
+    if not machine_reach():
+        return []
+    problems = []
+    pointer = machine_pointer()
+    try:
+        named = pointer.read_text(encoding="utf-8").strip() if pointer.is_file() else ""
+    except OSError:
+        named = ""
+    if not named:
+        problems.append("%s names no home" % pointer)
+    elif os.path.realpath(os.path.expanduser(named)) != os.path.realpath(ctx.home):
+        problems.append("the home is %s, and %s names %s" % (ctx.home, pointer, named))
+    if os.environ.get("SPUD_TOOL_DIR"):
+        problems.append("SPUD_TOOL_DIR sets the tool to %s" % os.environ["SPUD_TOOL_DIR"])
+    elif homeconf.tool_checkout_kind(ctx.tool) == "worktree":
+        problems.append("the running bin/spud is in a linked worktree, %s" % ctx.tool)
+    return problems
+
+
+def require_machine_home(ctx, what):
+    """Refuse `what` (EXIT_OWNERSHIP) before it writes a plist or runs launchctl, when machine_home_problems says so."""
+    problems = machine_home_problems(ctx)
+    if problems:
+        raise kernel.SpudError(kernel.EXIT_OWNERSHIP, MACHINE_REFUSAL % (what, " and ".join(machine_reach()), "; ".join(problems), machine_pointer()),
+                               data={"refused": what, "reach": machine_reach(), "problems": problems})
+
+
 def launchctl(*args):
     """Run launchctl ($SPUD_LAUNCHCTL, default /bin/launchctl): (exit code, stdout, stderr)."""
-    exe = os.environ.get("SPUD_LAUNCHCTL") or "/bin/launchctl"
+    exe = launchctl_program()
     try:
         proc = lazy.subprocess.run([exe, *args], capture_output=True, text=True, errors="replace", timeout=60)
     except (OSError, lazy.subprocess.TimeoutExpired) as e:
@@ -216,6 +290,7 @@ def install_agents(ctx, at):
     record per agent: label, path, replaced, booted_out, attempts."""
     import plistlib  # see cmd_schedule_show
 
+    require_machine_home(ctx, "installing the LaunchAgents")  # SPD-101: before a plist is written or launchctl runs
     if (ctx.home / ".spud").is_dir():
         (ctx.home / RENDER_LOG).parent.mkdir(parents=True, exist_ok=True)  # launchd opens the log itself; its directory must exist
     out = []
@@ -285,6 +360,7 @@ def cmd_schedule_install(ctx, args):
 
 def cmd_schedule_uninstall(ctx, args):
     require_spud_flag(args, "spud schedule uninstall")
+    require_machine_home(ctx, "spud schedule uninstall")  # SPD-101: a bootout of these labels unloads this Mac's jobs
     records, lines = {}, []
     for agent, label in launchagents.LABELS.items():
         path = launchagents.agent_plist_path(agent)

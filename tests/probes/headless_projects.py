@@ -31,6 +31,9 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python3.14 -I -S` puts no script directory on sys.path
+import probe_env  # noqa: E402  SPD-101: the isolation every probe's scratch home runs under
+
 REPO = Path(__file__).resolve().parents[2]
 # The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
 # the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
@@ -92,7 +95,11 @@ class Scratch:
         self.user = self.root / "user-claude"
         self.config = self.root / "user-config"
         self.log = []
-        self.env = dict(git_env(), SPUD_HOME=str(self.home), SPUD_USER_CLAUDE_DIR=str(self.user), SPUD_CONFIG_DIR=str(self.config))
+        # SPD-101: helpers.Home's isolation, from the one helper every probe shares: before it, this env left the
+        # LaunchAgents directory and launchctl this Mac's, and `spud init` below would have installed its watcher over
+        # the real one.  The home is the tool (its bin/ is a copy); the user-scope directories keep this probe's names.
+        self.env = probe_env.isolated_env(self.home, scratch=self.root, base=git_env())
+        self.env.update(SPUD_USER_CLAUDE_DIR=str(self.user), SPUD_CONFIG_DIR=str(self.config))
         for key in [k for k in self.env if k.startswith("CLAUDE") or k == "CLAUDECODE"]:
             self.env.pop(key)
 
@@ -125,7 +132,7 @@ class Scratch:
         git(self.root, "init", "-q", "--bare", "-b", "main", self.home_origin)
         git(self.home, "remote", "add", "origin", self.home_origin)
         git(self.home, "push", "-q", "-u", "origin", "main")
-        self.spud("init")
+        self.spud("init", "--no-schedule")
         seed_project_one(self.home, config)
         self.other.mkdir()
         (self.other / "README.md").write_text("# BadTakes stand-in\n", encoding="utf-8")
