@@ -106,8 +106,9 @@ _GLOB_UNSENTINEL = {v: k for k, v in _GLOB_SENTINELS.items()}
 # zsh's own glob operators: parenthesised alternation `(a|b)` and the numeric range `<n-m>`, which shlex reads as a
 # subshell and as an input redirection.  mark_zsh_patterns replaces each character zsh reads as part of such a pattern (the
 # parentheses, bars and blanks of a group, the angle brackets of a range) with one of these sentinels, so the pattern stays
-# in one word; they are active glob syntax, unlike the quoted sentinels above, and deglob restores both kinds.
-_ZSH_PATTERN_CHARS = "(|)<> \t"
+# in one word; they are active glob syntax, unlike the quoted sentinels above, and deglob restores both kinds.  A group
+# holds a newline as one more character of its pattern (SPD-183), so the newline has one too.
+_ZSH_PATTERN_CHARS = "(|)<> \t\n"
 _ZSH_SENTINELS = {c: chr(0xE010 + i) for i, c in enumerate(_ZSH_PATTERN_CHARS)}
 ZSH_OPEN, ZSH_BAR, ZSH_CLOSE, ZSH_RANGE_OPEN, ZSH_RANGE_CLOSE = (_ZSH_SENTINELS[c] for c in "(|)<>")
 _ZSH_UNSENTINEL = {v: k for k, v in _ZSH_SENTINELS.items()}
@@ -121,6 +122,11 @@ _LITERAL_EQUALS = chr(0xE020)  # a word's leading `=` that zsh's EQUALS is not t
 # of an unquoted one at its blanks (SPD-167); it ends the name as _NAME_END does.  deglob removes all five.
 _LITERAL_DOLLAR, _QUOTED_DOLLAR, _ARRAY_VALUE, _NAME_END = chr(0xE021), chr(0xE022), chr(0xE023), chr(0xE024)
 _QUOTED_NAME = chr(0xE025)
+# What newlines_as_separators writes, between two blanks, for an unquoted newline, where it once wrote `;` (SPD-183): the
+# `;` the walk reads everywhere but inside a zsh glob group, where zsh reads the newline as one more character of the
+# pattern and a spelled `;` ends the word.  mark_zsh_patterns replaces every one, with `;` or with the group's newline, so
+# shlex and the walk never see it and deglob has nothing to restore.
+LINE_BREAK = chr(0xE026)
 # The characters of an arithmetic command `(( ... ))` and of an arithmetic expansion `$(( ... ))`.  Both shells
 # evaluate what stands between the parentheses as arithmetic -- the `>` of `(( n > 2 ))` is a comparison and opens no file,
 # `|` is a bitwise or and not a pipeline, `;` separates a `for` header's three expressions and no commands -- so

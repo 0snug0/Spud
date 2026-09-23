@@ -86,18 +86,21 @@ def split_substitutions(command):
 
 def newlines_as_separators(text):
     """An unquoted newline ends a command as `;` does, but shlex reads it as a blank (`ls<newline>git push` once hid the
-    push).  A backslash-newline outside single quotes joins the lines.  A comment keeps its words (a word the shell ignores
-    is at worst read as one more command) with its quote characters blanked, so an apostrophe in it cannot unbalance
-    shlex, which gets no commenters."""
+    push).  It is written as syntax.LINE_BREAK between blanks, which mark_zsh_patterns reads as `;`, except inside a zsh
+    glob group, where zsh reads a newline as part of the pattern and a spelled `;` ends the word (SPD-183): the two could not
+    be told apart when a newline was written as ` ; `.  A backslash-newline outside single quotes joins the lines.  A
+    comment keeps its words (a word the shell ignores is at worst read as one more command) with its quote characters
+    blanked, so an apostrophe in it cannot unbalance shlex, which gets no commenters."""
     out = []
     i, n = 0, len(text)
     state = None  # None, "'", '"' or "#"
+    line_break = " " + syntax.LINE_BREAK + " "
     while i < n:
         c = text[i]
         if state == "#":
             if c == "\n":
                 state = None
-                out.append(" ; ")
+                out.append(line_break)
             else:
                 out.append(" " if c in "'\"`\\" else c)
             i += 1
@@ -124,7 +127,7 @@ def newlines_as_separators(text):
             state = "#"
             out.append(c)
         elif c == "\n":
-            out.append(" ; ")
+            out.append(line_break)
         else:
             out.append(c)
         i += 1

@@ -7019,6 +7019,205 @@ class CasePatternGroupTest(BashHookCase):
                     self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
+# SPD-183: a newline inside a zsh glob group, in a word zsh expands.  Each writes ledger/tickets/SPD-001.md in zsh (probed:
+# see GroupNewlineTest), the first the ticket's evidence.
+GROUP_NEWLINE_TARGETS = (
+    "(ledger|\nx)/tickets/SPD-001.md",
+    "(ledger|\n\nx)/tickets/SPD-001.md",
+    "(ledger|\t\n  x)/tickets/SPD-001.md",
+    "(x|\n|ledger)/tickets/SPD-001.md",
+    "(\nx|ledger)/tickets/SPD-001.md",
+    "led(ger|\nx)/tickets/SPD-001.md",
+    "(ledger|x)(|\n)/tickets/SPD-001.md",
+    "ledger/(tickets|\n)/SPD-001.md",
+    "ledger/tickets/SPD-00(1|\n2).md",
+    "(ledger|(x|\ny))/tickets/SPD-001.md",
+    "(ledger|\n# x\ny)/tickets/SPD-001.md",
+)
+
+
+class GroupNewlineTest(BashHookCase):
+    """SPD-183, filed by SPD-181's engineer: zsh reads a newline inside a glob group as part of the pattern in any word, not
+    only in a case pattern, but newlines_as_separators wrote every unquoted newline as ` ; `, and _zsh_group rejects a group
+    of a word holding a `;`, so the hook read a subshell there and a write into the group lost its target.  The proposer's
+    evidence, on the SPD-181 tree: `echo x > (ledger|<newline>x)/tickets/SPD-001.md` and `echo x | tee
+    (ledger|<newline>x)/tickets/SPD-001.md` recorded only /tickets/SPD-001.md (silent for Spud, Law 1).
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line but the qualifier's, and in GNU bash 3.2.57:
+
+    - a newline in a group is one more character of the pattern, wherever it stands in the group: each of
+      GROUP_NEWLINE_TARGETS wrote the ledger file through `>`, and the first through `>>`, `>|`, `&>`, `2>`, `tee -a`, `cp`,
+      `mv`, `rm` (which removed it), `touch -t` and `truncate -s 0` (the probe runs no git; `git diff --output=` opens the
+      file its word expands to as the others do), while `(ledger<newline>|x)` found no match, its first alternative being
+      `ledger` and a newline, and `echo (a|<newline>b)` failed with "no matches found: (a|\\nb)".  With a file named push
+      present, `echo (push|<newline>x)` and `echo p(u|<newline>x)sh` printed push, so a git verb spelled so is `git push`.
+      eval, `$( )` and `zsh -f -c` wrote l/t through `(l|<newline>x)/t`;
+    - under -f a glob qualifier's code with a newline in it ran (`ls tests/*(e{true<newline>echo QUAL-$REPLY})` printed
+      QUAL-); under nobareglobqual it is a group, and no file matched;
+    - a `#` after a newline in a group opens no comment there: `(ledger|<newline># x<newline>y)` is a pattern whose second
+      alternative holds it (the write above), as a `#` in the middle of any word is;
+    - a `;` spelled in a word's group ends the word there, the group left open: `x=a(l ; echo RAN7` with its `)` on the next
+      line printed RAN7 and then failed near that `)`, and `echo x > (l ; echo RAN3` failed with "bad pattern: (l ", so it
+      stays the plain reading's separator;
+    - `(` in command position opens a subshell whatever the newlines in it (`(echo A|<newline>cat)` printed A);
+    - bash rejected the first such line of every probe (`syntax error near unexpected token`), as it rejects any group
+      (ZshGlobOperatorTest).
+
+    A here-document whose `<<` line goes on into a group is not read here: the body starts after the line the command
+    ends on, which strip_heredocs does not know (proposal 292).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for rel in (self.TARGET, "docs/x.md", "tests/keep.py"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "generated", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_zsh_expands_it(self):
+        for line in ("echo x > (ledger|\nx)/tickets/SPD-001.md", "echo x | tee (ledger|\nx)/tickets/SPD-001.md"):
+            with self.subTest(line=line):
+                # zsh's reading, first; the other shell's, which bash rejects, still reads a subshell there
+                targets = [self.m.deglob(t) for t, _c in self.analysis(line).redirects]
+                self.assertEqual(targets, ["(ledger|\nx)/tickets/SPD-001.md", "/tickets/SPD-001.md"])
+            self.refused_everywhere(line)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_spelling_of_the_group(self):
+        for target in GROUP_NEWLINE_TARGETS:
+            for form in ("echo x > %s", "echo x | tee %s"):
+                self.refused_everywhere(form % target)
+            with self.subTest(target=target):
+                self.assertIn(target, [self.m.deglob(t) for t, _c in self.analysis("echo x > %s" % target).redirects])
+
+    def test_every_write_channel(self):
+        target = GROUP_NEWLINE_TARGETS[0]
+        for form in ("echo x >> %s", "echo x >| %s", "echo x &> %s", "echo x 2> %s", "echo x | tee -a tests/keep.py %s",
+                     "rm %s", "rm -f %s", "touch %s", "cp docs/x.md %s", "mv docs/x.md %s", "truncate -s 0 %s",
+                     "git diff --output=%s"):
+            with self.subTest(form=form):
+                self.assertRefused(form % target, "generated", AGENT_C)
+                self.assertRefused(form % target, "Law 1", agent_id=None)
+
+    def test_a_git_verb_spelled_with_a_newline_in_a_group(self):
+        for line in ("git (push|\nx)", "git p(u|\nx)sh", "git -C . (push|\nx)", "git (push|\nx) origin main",
+                     "git -C (ledger|\nx) push"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_glob_qualifier_code_holding_a_newline(self):
+        """zsh -f runs the code for each file the glob matches, newline and all; the hook reads it as a command."""
+        for line in ("ls tests/*(e{true\ngit push})", "cat tests/keep.py(e{true\ngit push})",
+                     "ls (tests|\nx)/*(e{git push})"):
+            self.law_7(line)
+
+    def test_every_enclosing_text(self):
+        for form in ("eval 'echo x > %s'", "x=$(echo x > %s)", "echo `echo x | tee %s`", "zsh -f -c 'echo x > %s'",
+                     "sh -c 'echo x | tee %s'", "if true; then echo x > %s; fi", "{ echo x | tee %s; }",
+                     "f() { echo x > %s; }; f", "echo a; echo x > %s", "echo a &&\necho x > %s"):
+            self.refused_everywhere(form % GROUP_NEWLINE_TARGETS[0])
+        line = "zsh <<'EOF'\necho x > %s\nEOF" % GROUP_NEWLINE_TARGETS[0]  # a body a shell reads
+        self.refused_everywhere(line)
+
+    def test_the_path_rule_reads_the_group(self):
+        """A member's own file through a group is its own, and a file outside its deliverables is not.  The groups are glued
+        inside their words, which the other reading keeps whole too: a group opening a word is a subshell there, whose
+        target (`/keep.py`) is outside every project, with a newline in it or not."""
+        for line in ("echo x | tee tests/(keep|\nx).py", "echo x > tests/keep.(py|\nzz)", "touch tests/(keep|\nx).py",
+                     "echo x | tee t(ests|\n)/keep.py"):
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+        for line in ("echo x | tee docs/(x|\ny).md", "rm docs/(x|\ny).md", "echo x > d(ocs|\n)/x.md"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "deliverables")
+                self.assertSilent(line, AGENT_C)
+        self.assertRefused("echo x > (nomatch|\nzz)/x.py", "matches no file", AGENT_C)
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_a_newline_is_still_a_separator_outside_a_group(self):
+        """In command position `(` opens a subshell, its newlines separators; after a group, a newline ends the command."""
+        for line in ("(ledger|\ngit push)", "(\ngit push)", "( echo a\ngit push )", "echo (a|b)\ngit push",
+                     "echo (tests|x)/keep.py\ngit push", "echo a\n(git push)", "x=$(echo a\ngit push)"):
+            self.law_7(line)
+        prepared = self.m.newlines_as_separators("echo a\necho (b|\nc)\n(echo d)")
+        marked, other = self.m.mark_zsh_patterns(prepared)
+        self.assertEqual([t for t in self.m.shell_tokens(marked) if t == ";"], [";", ";"])
+        self.assertEqual(self.m.deglob(marked), "echo a ; echo (b|\nc) ; (echo d)")
+        self.assertEqual(other, "echo a ; echo (b| ; c) ; (echo d)")
+        for text in ("echo a\ngit push", "a\n\nb", "a # c\nb"):  # no group: the text as the walk always read it
+            prepared = self.m.newlines_as_separators(text)
+            with self.subTest(text=text):
+                self.assertEqual(self.m.mark_zsh_patterns(prepared), (prepared.replace(self.m.LINE_BREAK, ";"),) * 2)
+
+    def test_a_spelled_semicolon_still_ends_the_word(self):
+        """zsh's lexer ends a word at a spelled `;` even inside a group, so the text after it is a command, run when the
+        group's `)` stands on a later line (probed: `x=a(l ; echo RAN7` then `)` printed RAN7) and a parse error when it
+        stands on the same one (`echo (a ; echo RAN1 )` failed near `)`): the plain reading stands either way."""
+        for line in ("x=a(l ; git push\n)", "echo x > (tests ; git push\n)/keep.py", "echo (a ; git push )",
+                     "echo (a|\nb ; git push\n)"):
+            self.law_7(line)
+        self.assertRefused("echo x > ledger/tickets/SPD-00(1;|3).md", "generated", AGENT_C)
+
+    def test_a_here_document_body_is_never_a_word(self):
+        """A body cat reads is data, whatever text it holds; the line writes only its own redirection target."""
+        for line in ("cat <<'EOF'\necho x > (ledger|\nx)/tickets/SPD-001.md\nEOF",
+                     "cat > /dev/null <<EOF\n(ledger|\nx)/tickets/SPD-001.md\nEOF"):
+            for agent_id in (AGENT_A, AGENT_C, None):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+        line = "cat <<EOF > tests/keep.py\n(ledger|\nx)/tickets/SPD-001.md\nEOF"
+        for agent_id in (AGENT_A, AGENT_C):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+
+    def test_a_case_pattern_reads_its_newline_as_the_newline(self):
+        """SPD-181's case pattern holds its newline as zsh reads it, and its body still follows the pattern."""
+        line = "case x in ((x|\ny)) tee (ledger|\nx)/tickets/SPD-001.md;; esac"
+        self.refused_everywhere(line)
+        self.law_7("case x in ((x|\ny)) {( git push )};; esac")
+        self.law_7("case x in (x|\ny)) git push;; esac")
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("echo x > (" + "a|\n" * 5000 + "ledger)/tickets/SPD-001.md",
+                     "echo x > " + "(ledger|\nx)" * 2000,
+                     "echo " + "(" * 3000 + "\n" * 3000 + ")" * 3000 + "\ngit push",
+                     "echo " + "(a\n" * 3000 + "\ngit push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                if line.endswith("git push"):
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
 class AliasEvalTest(BashHookCase):
     """SPD-059 (Burbank's SPD-054 proposal): `alias NAME=body` stores shell text the hook never read, and `eval NAME` on the
     same line ran it, so a member's VCS write behind an alias reached the hook with no finding (Law 7).  Probed in bash 3.2,
