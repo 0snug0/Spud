@@ -32,7 +32,8 @@ one is passed whole by zsh and split at its blanks by bash, so the printer is re
 it runs is what either prints (printed_text, _string_text, _either).
 
 What stays unread: standard input the line does not spell -- a file (`sh < f`), another program's output (`cat f | sh`,
-`curl ... | sh`), a value the line does not settle, or text this module cannot decode in either reading.  That is the same class as `sh script.sh`, a script the hook does
+`curl ... | sh`), a value the line does not settle, a command substitution's output in an unquoted here-document's body
+(heredocs.OutputBody, SPD-207), or text this module cannot decode in either reading.  That is the same class as `sh script.sh`, a script the hook does
 not read either.  Eric's call on SPD-145 (fail closed): a member is refused both, a shell reading standard input the
 line does not spell and a shell given a script file (script_operand below), by shell/script_files; Spud is not.
 
@@ -46,7 +47,7 @@ names.
 import os
 import re
 
-from . import arg_writes, directories, expansions, globbing, prepare, syntax
+from . import arg_writes, directories, expansions, globbing, heredocs, prepare, syntax
 
 # The operands that name the standard input the line gave the shell rather than a script file of its own (probed:
 # `bash /dev/stdin <<< 'vcs a'` and `bash - <<< 'vcs a'` both ran it).
@@ -126,7 +127,14 @@ def command_input(tokens, bodies, piped, a=None):
     descriptor (`sh <&3`) and a word holding an expansion, a substitution or a glob leave it unknown, and so does a
     here-string whose settled value the two shells do not read alike (_string_text).  A here-document and a `<` on one
     command are read in the order the redirections stand, which the body no longer stands in; the body wins, since the
-    hook reads it anyway.  `a`: the line's analysis, whose settled values a here-string's word is read with (SPD-148)."""
+    hook reads it anyway.  `a`: the line's analysis, whose settled values a here-string's word is read with (SPD-148).
+
+    A body holding a command substitution's output (heredocs.OutputBody, SPD-207) leaves the input unknown whatever
+    else stands there, since zsh reads each of a command's input redirections in turn, its MULTIOS (probed through
+    tests/probes/shell_probe.py in zsh 5.9 -f and -f -o nobareglobqual: `cat <<'A' <<'B' | sh` ran both bodies' lines,
+    and `sh <<'EOF' < x.sh` the body's and then x.sh's; bash 3.2.57 ran only the last)."""
+    if heredocs.holds_output(bodies):
+        return None
     text = bodies[-1] + "\n" if bodies else piped
     i = 0
     while i < len(tokens):

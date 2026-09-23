@@ -7700,6 +7700,93 @@ class HereDocumentInputTest(BashHookCase):
                 self.assertEqual(received(kept), kept)
 
 
+class HereDocumentOutputTest(BashHookCase):
+    """SPD-207, filed by SPD-206's engineer: a shell fed an unquoted here-document reads the body as its expansion leaves
+    it, and each command substitution there leaves its output in the text, which the shell then runs as commands: a
+    newline in the output starts another.  The hook reads the substitution where the outer shell runs it (SPD-192) and
+    hands the inner shell the body with the substitution as spelled (SPD-206), so the output was never read, and a member
+    could write a script into its scratchpad and run it through such a body -- what SPD-145 refuses as `sh x.sh` and as
+    `cat x.sh | sh`.  The ticket's evidence, on the SPD-206 tree: analyse_command recorded no finding for `sh <<EOF`
+    fed `echo a $(cat x.sh)` (LINE), nor for the same body with `git push` in a printf's output, while `echo "echo a
+    $(cat x.sh)" | sh` recorded a script "stdin" finding.
+
+    The rule: the text a command reads from such a body is text the line does not spell (shell/stdin_text), so a shell
+    that runs its standard input as commands is refused a member with SPD-145's reason for standard input the line does
+    not spell, whether the body is fed to it or printed into it through a pipe (shell/script_files); Spud keeps it.
+    A quoted delimiter, an unquoted body with no substitution, an escaped `\\$( )`, which the inner shell runs itself and
+    whose output is one of its words (SPD-206), and the same body fed to a command that only prints it read as before.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f and in GNU bash 3.2.57, which printed the same but where noted, with TMPPREFIX in the probe's directory:
+
+    - `sh` fed an unquoted body `echo a $(printf 'b\\necho RAN > l/p1')` printed `a b` and wrote l/p1, and so did the
+      same in backticks, in a default word (`${u:-$( )}`), after `<<-` with its tabs, fed to `sh -s`, `bash` and `zsh
+      -f`, and printed into `sh` and `bash` by `cat <<EOF |`; `echo a $(cat x.sh)`, x.sh holding `echo RAN > l/x1`,
+      wrote l/x1; zsh's `${(e)x}`, x holding such a substitution, wrote its file too (bash: bad substitution);
+    - `cat` fed the same body printed its two lines and wrote nothing; with the delimiter quoted (`<<'EOF'`, `<<"EOF"`,
+      `<<\\EOF`, `<<E"O"F`, `<<-'EOF'`) sh printed `a b echo RAN > l/q1` and wrote nothing, and so did `\\$(printf
+      ...)` in an unquoted body; a body holding `$((1 + 2))` and `${u:-b}` printed `a 3 b`."""
+
+    LINE = "sh <<EOF\necho a $(cat x.sh)\nEOF"  # the proposer's line
+    BODY = "echo a $(cat x.sh)"
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def forms(self, command):
+        """The forms of the script findings this line records."""
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def refused(self, line):
+        """Refused a member with SPD-145's reason for standard input the line does not spell; silent for Spud."""
+        with self.subTest(line=line):
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_refused_a_member(self):
+        self.refused(self.LINE)
+        self.refused("sh <<EOF\necho a $(printf 'b\\ngit push')\nEOF")
+        self.assertEqual(self.forms(self.LINE), ["stdin"])
+
+    def test_the_same_body_printed_into_a_shell(self):
+        for line in ("cat <<EOF | sh\n%s\nEOF", "cat <<EOF | bash\n%s\nEOF", "cat - <<EOF | sh -s\n%s\nEOF"):
+            self.refused(line % self.BODY)
+            self.assertEqual(self.forms(line % self.BODY), ["stdin"])
+
+    def test_every_shell_and_spelling(self):
+        for spelling in HEREDOC_EXPANDED_SPELLINGS:
+            self.refused("sh <<EOF\necho a %s\nEOF" % (spelling % "cat x.sh"))
+        for line in ("bash <<EOF\n%s\nEOF", "zsh -f <<EOF\n%s\nEOF", "sh -s <<EOF\n%s\nEOF", "env sh <<EOF\n%s\nEOF",
+                     "sh <<-EOF\n\t%s\n\tEOF", "sh - <<EOF\n%s\nEOF", "nice bash <<EOF\n%s\nEOF"):
+            self.refused(line % self.BODY)
+        self.refused("x='$(cat x.sh)'; sh <<EOF\necho a ${(e)x}\nEOF")  # zsh's (e) runs x's substitution in the body
+
+    def test_the_controls_read_as_before(self):
+        """The same body printed and nothing more, a quoted delimiter, an escaped substitution, and an unquoted body with
+        no substitution: no script finding, and silent for every caller."""
+        lines = ["cat <<EOF\n%s\nEOF" % self.BODY, "cat <<EOF > /dev/null\n%s\nEOF" % self.BODY,
+                 "cat <<'EOF' | sh\n%s\nEOF" % self.BODY, "sh <<EOF\necho a \\$(cat x.sh)\nEOF",
+                 "sh <<EOF\necho a $((1 + 2)) ${u:-b}\nEOF", "sh <<EOF\necho a\nEOF"]
+        lines += ["sh %s\n%s\nEOF" % (operator, self.BODY) for operator in HEREDOC_QUOTED_OPERATORS]
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual(self.forms(line), [])
+                self.assertSilent(line)
+                self.assertSilent(line, agent_id=None)
+
+    def test_the_reason_names_the_readable_form_and_an_earlier_reason_is_kept(self):
+        r = self.assertRefused(self.LINE, SCRIPT_WORDING)
+        for needle in ("Law 7: `sh` runs commands it reads on standard input that the line does not spell",
+                       "a command substitution's output in an unquoted here-document", "`sh <<'EOF'`"):
+            self.assertIn(needle, r.reason)
+        # read last, as SPD-145's refusals are: a git verb or a write the path rule refuses keeps its own reason
+        self.assertNotIn(SCRIPT_WORDING, self.assertRefused("sh <<EOF\ngit push\n%s\nEOF" % self.BODY, "Law 7").reason)
+        line = "sh <<EOF\necho x > docs/y.md\n%s\nEOF" % self.BODY
+        self.assertNotIn(SCRIPT_WORDING, self.assertRefused(line, "deliverables").reason)
+
+
 # SPD-184: the process substitutions zsh runs in a case's word and its patterns, `%s` standing for the list.  With a file
 # touched in place of %s, zsh 5.9 made it for each (CaseSubstitutionTest has the probes).
 CASE_EQUALS_FORMS = (

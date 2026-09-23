@@ -19,7 +19,8 @@ the shell may be in):
   `/tmp/x` -- and a wrapper's own word spelled that way, whatever the dispatch reads it as (`./git status` runs
   whatever `./git` holds).  The spud launcher is read as the spud call it is, as before.
 - "stdin": a shell that runs what it reads on standard input where the line feeds it text it does not spell (a `<` file,
-  another program's output); spelled text is read as SPD-143 and SPD-148 read it.
+  another program's output, and since SPD-207 an unquoted here-document whose body holds a command substitution's
+  output, fed to the shell or printed into it: heredocs.OutputBody); spelled text is read as SPD-143 and SPD-148 read it.
 - "xargs": a shell's `-c` string an xargs reads from input the line does not spell (`cat f | xargs -0 sh -c`).
 - "startup": a variable that names a file of commands a shell runs when it starts -- BASH_ENV (any non-interactive
   bash, a script's `#!/bin/bash` included), ENV and ZDOTDIR -- assigned anywhere on the line, and HOME assigned on a line
@@ -51,7 +52,7 @@ What stays open: an interpreter's program from a file (`python3 x.py`, `node x.j
 import json
 import os
 
-from . import prepare, stdin_text, syntax
+from . import heredocs, prepare, stdin_text, syntax
 from ..hooks import pathrule, worktrees
 from ..state import lookup
 
@@ -70,7 +71,8 @@ HOW = {
     "operand": "from the script file %s",
     "source": "from the file %s, which it reads into the shell",
     "exec": "from %s, a file run by its path rather than a program the shell finds on PATH",
-    "stdin": "it reads on standard input that the line does not spell (a `<` file, or another program's output through a pipe)",
+    "stdin": "it reads on standard input that the line does not spell (a `<` file, another program's output through a pipe,"
+             " or a command substitution's output in an unquoted here-document)",
     "xargs": "from a `-c` string xargs reads from input the line does not spell",
     "startup": "from a file of commands a shell runs as it starts (BASH_ENV, ENV and ZDOTDIR name one, and HOME holds"
                " a shell's own startup files)",
@@ -104,7 +106,10 @@ def read_shell(words, a, dash_c, string, xargs_input, stdin, fed, bodies):
     elif not dash_c and operand is None and xargs_input is not None and xargs_input[1]:
         # the words xargs appends are the shell's operands, the first of them its script (`echo x.sh | xargs sh`)
         record_script(a, "operand", cmd, syntax.INPUT_OPERAND)
-    if not bodies and not dash_c and operand is None and stdin is None and fed and stdin_text.reads_commands(words):
+    if not dash_c and operand is None and stdin_text.reads_commands(words) \
+            and (not bodies and stdin is None and fed or heredocs.holds_output(bodies)):
+        # standard input the line does not spell: a file, another program's output, or a here-document body holding a
+        # command substitution's output, which the shell runs as its commands (SPD-207)
         record_script(a, "stdin", cmd)
     if "HOME" in a.vars:
         record_script(a, "startup", "HOME=...")

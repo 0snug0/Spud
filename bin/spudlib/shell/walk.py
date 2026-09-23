@@ -412,7 +412,9 @@ class ShellWalk:
         which its own prefix assignments do not reach (probed: `x=a; x=b cat <<EOF` and `cat <<EOF ...; x=b` wrote into
         a, `cat <<EOF ...; cd d` where the line stood before the cd; tests/test_hooks.py HereDocumentExpansionTest).
         What the command reads, and what the bodies returned hold, is then the text the expansion leaves, its escapes
-        resolved (heredocs.received_body, SPD-206): `sh <<EOF` fed `\\$(git push)` runs the push."""
+        resolved (heredocs.received_body, SPD-206): `sh <<EOF` fed `\\$(git push)` runs the push.  Where the expansion ran a
+        substitution that text holds its output, which the line does not spell, and the body returned is a
+        heredocs.OutputBody (SPD-207): `sh <<EOF` fed `echo a $(cat x.sh)` runs x.sh's lines."""
         reevaluation.read_eval_words(words, self.a, self.depth)
         for w in words:
             for _ in range(w.count(hookio.SUBST) - w.count(PROCSUB_FILE)):  # a `<( )`'s file name lifted no body
@@ -434,8 +436,10 @@ class ShellWalk:
                 if self.bodies:
                     body = self.bodies.pop(0)
                     if self.expanded.pop(0):
-                        reevaluation.read_expanded_body(body, self.a, self.depth + 1)
+                        ran = reevaluation.read_expanded_body(body, self.a, self.depth + 1)
                         body = heredocs.received_body(body)
+                        if ran:
+                            body = heredocs.OutputBody(body)
                     bodies.append(body)
                 k += 2
                 continue

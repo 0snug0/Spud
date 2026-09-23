@@ -12,8 +12,9 @@ line's `)` (probed), and so does split_substitutions, which counts parentheses (
 as the outer line's commands, bash's reading.  tests/test_hooks.py HereDocumentBodyTest has the probes.  For each body it
 takes out the scan also says whether any character of its delimiter is quoted: a body whose delimiter has none is expanded
 before its command reads it, and ShellWalk.consume reads its substitutions (SPD-192, HereDocumentExpansionTest), then
-hands the command the text that expansion leaves, received_body (SPD-206, HereDocumentInputTest); a body whose delimiter
-is quoted reaches its command as it is spelled.
+hands the command the text that expansion leaves, received_body (SPD-206, HereDocumentInputTest), an OutputBody where
+that text holds a substitution's output (SPD-207, HereDocumentOutputTest); a body whose delimiter is quoted reaches its
+command as it is spelled.
 
 What the scan cannot tell from characters alone is what an open `(` is: a subshell or an array assignment, whose newline
 ends a command, or zsh's glob group or an arithmetic command, whose newline does not (and whose `<<` is a shift there).
@@ -106,6 +107,23 @@ def received_body(body):
             i += 1
     out.append(body[mark:])
     return "".join(out)
+
+
+class OutputBody(str):
+    """The text a command reads from an unquoted here-document whose expansion runs a command substitution (SPD-207):
+    received_body's text, each substitution as spelled, where the command reads that substitution's output, which the
+    line does not spell -- and a shell fed it runs that output as commands, a newline in it starting another (probed
+    through tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: tests/test_hooks.py
+    HereDocumentOutputTest).  So the command's standard input is unknown (stdin_text.command_input), and a shell that
+    runs its standard input is refused a member as SPD-145 refuses one fed a pipe the line does not spell
+    (script_files.read_shell); the text is still read as that shell's commands for what it does spell."""
+
+    __slots__ = ()
+
+
+def holds_output(bodies):
+    """Whether any of a command's here-document bodies holds a command substitution's output (OutputBody)."""
+    return any(isinstance(body, OutputBody) for body in bodies)
 
 
 class _Scan:

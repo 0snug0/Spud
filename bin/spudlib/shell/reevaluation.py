@@ -23,7 +23,11 @@ modifier or a subscript.  zsh.flag_group reads the group, whose delimited argume
 bash fails every one of these with "bad substitution".
 
 zsh and bash expand an unquoted here-document's body before its command reads it as (e) evaluates a value, so
-ShellWalk.consume hands such a body to read_expanded_body, which reads it with read_evaluated_text (SPD-192)."""
+ShellWalk.consume hands such a body to read_expanded_body, which reads it with read_evaluated_text (SPD-192) and says
+whether it ran a substitution, whose output the command then reads (SPD-207).
+
+Kept whole past 250 lines (the package's look-again point): (e)'s evaluation and a body's expansion are one reading of
+text as the shells expand it, and split apart they would each need the other's scan."""
 
 from . import analyse, assignment_words, prepare, syntax, zsh
 from ..hooks import hookio
@@ -45,13 +49,14 @@ _ESCAPED_DOLLAR = "\\$" + syntax._LITERAL_DOLLAR  # a backslash before a literal
 class _Reading:
     """One command's reading of its (e) expansions: the analysis, the texts being read now (a value met again inside
     its own reading expands itself, which never returns in zsh: probed with `x='${(e)x}'`), the (text, depth) pairs
-    read whole already, so a value named many times is read once, and each masked value's readings (_value_readings),
-    so a long one named many times is not scanned again."""
+    read whole already, so a value named many times is read once, each masked value's readings (_value_readings),
+    so a long one named many times is not scanned again, and whether any `$( )` or backtick substitution was read
+    (`ran`, which read_expanded_body answers with)."""
 
-    __slots__ = ("a", "open", "done", "texts")
+    __slots__ = ("a", "open", "done", "texts", "ran")
 
     def __init__(self, a):
-        self.a, self.open, self.done, self.texts = a, set(), set(), {}
+        self.a, self.open, self.done, self.texts, self.ran = a, set(), set(), {}, False
 
     def readings(self, value):
         found = self.texts.get(value)
@@ -131,11 +136,13 @@ def read_evaluated_text(text, reading, depth):
             if c == "$" and text.startswith("$(", i) and not text.startswith("$((", i):
                 j = prepare.substitution_end(text, i)
                 analyse.analyse_isolated(a, text[i + 2 : j], depth)
+                reading.ran = True
                 i = j + 1
                 continue
             if c == "`":
                 j = prepare.backtick_end(text, i)
                 analyse.analyse_isolated(a, text[i + 1 : j], depth)
+                reading.ran = True
                 i = j + 1
                 continue
             if c == "$" and text.startswith("${(", i):
@@ -153,9 +160,16 @@ def read_expanded_body(body, a, depth):
     are text, a backslash escapes `$`, a backtick, a backslash or a newline, and each `$( )`, backtick, default word,
     arithmetic expansion and zsh (e) expansion in it runs (probed through tests/probes/shell_probe.py in zsh 5.9 -f,
     -f -o nobareglobqual and bash 3.2.57: tests/test_hooks.py HereDocumentExpansionTest).  A body with neither a `$`
-    nor a backtick expands nothing, and is not scanned."""
-    if "$" in body or "`" in body:
-        read_evaluated_text(body, _Reading(a), depth)
+    nor a backtick expands nothing, and is not scanned.
+
+    Whether the expansion runs a command substitution -- a default word's, one in arithmetic and one an (e) expansion
+    evaluates among them -- whose output then stands in the text the command reads, text the line does not spell
+    (SPD-207, heredocs.OutputBody)."""
+    if "$" not in body and "`" not in body:
+        return False
+    reading = _Reading(a)
+    read_evaluated_text(body, reading, depth)
+    return reading.ran
 
 
 def _expansion_texts(text, letters, k, end, closes, reading, assigned, outer):
