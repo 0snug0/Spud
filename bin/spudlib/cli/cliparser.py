@@ -12,6 +12,7 @@ from ..commands import (
     homeinit,
     homemove,
     homesync,
+    logread,
     membercmds,
     prcmds,
     proposalcmds,
@@ -112,6 +113,11 @@ def build_parser():
     q.set_defaults(func=schedule.cmd_schedule_uninstall)
     p = sub.add_parser("doctor", help="interpreter, SQLite, SPUD_HOME, database pragmas, config sanity")
     p.set_defaults(func=doctor.cmd_doctor)
+    p = sub.add_parser("logs", help="read the render watcher's or the daily backup's log, which the hooks keep a shell command from reading (read-only, any actor)",
+                       description=helptexts.LOGS_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
+    p.add_argument("name", nargs="?", choices=tuple(logread.LOGS), help="the log to read; none lists them")
+    p.add_argument("--tail", type=logread.tail_arg, metavar="N", help="the last N lines, across the rotation (default %d)" % logread.DEFAULT_TAIL)
+    p.set_defaults(func=logread.cmd_logs)
 
     p = sub.add_parser("config", help="spud.config.json mirrors")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")

@@ -13,7 +13,7 @@ import json
 import os
 import unittest
 
-from helpers import SpudTestCase, load_spud_module
+from helpers import EXIT_ERROR, SpudTestCase, aged_event, hold_watch_lock, install_watcher_plist, load_spud_module
 
 spud = load_spud_module()
 
@@ -151,6 +151,56 @@ class ShippedSectionWithoutADatabaseTest(SpudTestCase):
         report = self.home.json("doctor", actor="spud", check=False)
         self.assertIsNone(report["shipped"])
         self.assertNotIn("shipped ", self.home.run("doctor", actor="spud", check=False).stdout)
+
+
+class RenderLogPointerTest(SpudTestCase):
+    """SPD-118: the render section names `spud logs render` whenever the watcher needs looking at -- installed and not
+    running, or running and not rendering -- since the hooks keep a shell command from reading .spud/logs/, and it carries
+    the log's two paths in the report.  A watcher never installed, or one keeping up, names nothing."""
+
+    def report(self):
+        return json.loads(self.home.run("--json", "doctor", check=False).stdout)
+
+    def test_a_watcher_down_names_the_command_and_the_command_shows_how_the_last_run_ended(self):
+        logs = self.home.path / ".spud" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        (logs / "render.log.1").write_text("2026-09-22T20:00:00-07:00 stopped after 4 pass(es): the program changed on disk\n", encoding="utf-8")
+        (logs / "render.log").write_text("", encoding="utf-8")
+        install_watcher_plist(self.home)  # installed, nothing holding the lock
+        proc = self.home.run("doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("installed but not running", proc.stderr)
+        self.assertIn("`spud logs render` shows its log", proc.stderr)
+        report = self.report()
+        self.assertEqual(report["render"]["state"], "down")
+        self.assertIn(spud.WATCHER_DOWN, report["problems"])  # the one string init and home move excuse, pointer and all
+        self.assertEqual(report["render"]["log"], [str(logs / "render.log"), str(logs / "render.log.1")])
+        shown = self.home.run("logs", "render", "--tail", "5").stdout  # what the pointer leads to, run with no actor
+        self.assertIn("stopped after 4 pass(es): the program changed on disk", shown)
+
+    def test_a_watcher_running_and_stuck_names_it_too(self):
+        self.new_ticket("Rendered")
+        self.home.json("render")
+        install_watcher_plist(self.home)
+        self.addCleanup(os.close, hold_watch_lock(self.home))
+        aged_event(self.home, 10 * 60)
+        report = self.report()
+        self.assertEqual(report["render"]["state"], "behind")
+        stuck = [p for p in report["problems"] if "running and not rendering" in p]
+        self.assertEqual(len(stuck), 1, report["problems"])
+        self.assertIn("`spud logs render`", stuck[0])
+
+    def test_no_watcher_installed_and_one_keeping_up_name_nothing(self):
+        self.new_ticket("Rendered")
+        self.home.json("render")
+        report = self.report()
+        self.assertEqual(report["render"]["state"], "absent")
+        self.assertNotIn("spud logs", " ".join(report["problems"] + report["notes"]))
+        install_watcher_plist(self.home)
+        self.addCleanup(os.close, hold_watch_lock(self.home))
+        report = self.report()
+        self.assertEqual((report["render"]["state"], report["problems"]), ("current", []))
+        self.assertNotIn("spud logs", " ".join(report["notes"]))
 
 
 if __name__ == "__main__":

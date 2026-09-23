@@ -27,11 +27,12 @@ PATH logging its arguments and each line run by /bin/bash -c from a scratch dire
 
 A word the printers are passed, and a here-string's word, is read through the value the line settled
 (arg_writes.resolved, SPD-148): `X='git push'; echo $X | sh` feeds the shell what `echo 'git push' | sh` does.  The
-masked words no longer tell `$X` from `"$X"`, so where a settled value holds a blank the printer is read as zsh passes the
-word and as bash splits it unquoted, and the text kept only where both print the same (printed_text, _string_text).
+masked words tell `"$X"` from `$X` (syntax._QUOTED_NAME, SPD-167): a quoted value is one word in both shells, an unquoted
+one is passed whole by zsh and split at its blanks by bash, so the printer is read both ways and the text a shell reading
+it runs is what either prints (printed_text, _string_text, _either).
 
 What stays unread: standard input the line does not spell -- a file (`sh < f`), another program's output (`cat f | sh`,
-`curl ... | sh`), a value the line does not settle or the two readings print apart, or text this module cannot decode.  That is the same class as `sh script.sh`, a script the hook does
+`curl ... | sh`), a value the line does not settle, or text this module cannot decode in either reading.  That is the same class as `sh script.sh`, a script the hook does
 not read either.  Eric's call on SPD-145 (fail closed): a member is refused both, a shell reading standard input the
 line does not spell and a shell given a script file (script_operand below), by shell/script_files; Spud is not.
 
@@ -84,27 +85,36 @@ def word_text(word, a=None):
 
 
 def word_fields(word, a):
-    """The words bash makes of this masked word were each of its expansions unquoted: a settled value split at its runs of
-    blanks, the default IFS, and an empty field at either end dropped (SPD-148).  [None] where word_text cannot say it."""
+    """The words bash makes of this masked word: the settled value of each unquoted expansion split at its runs of
+    blanks, the default IFS, and an empty field at either end dropped (SPD-148); a quoted one's (`"$X"`, SPD-167) kept
+    whole, as zsh keeps both.  [None] where word_text cannot say it."""
     text = word_text(arg_writes.resolved(word, a, _split))
     if text is None:
         return [None]
     return [f for f in text.split(_FIELD) if f] if _FIELD in text else [text]
 
 
-def _whole(value):
+def _whole(value, _quoted):
     return value
 
 
-def _split(value):
-    return syntax._IFS_BLANKS_RE.sub(_FIELD, value)
+def _split(value, quoted):
+    return value if quoted else syntax._IFS_BLANKS_RE.sub(_FIELD, value)
 
 
 def _readings(words, a):
-    """The words a command is passed as zsh reads them and as bash reads them unquoted -- each a list of texts, None for
-    a word the hook cannot say.  The masked words no longer tell `$X` from `"$X"`, so where a settled value holds a blank
-    the two are the only readings there are, and a caller keeps what they agree on."""
+    """The words a command is passed as zsh reads them and as bash reads them -- each a list of texts, None for a word the
+    hook cannot say.  They differ only where an unquoted expansion's settled value holds a blank."""
     return [word_text(w, a) for w in words], [f for w in words for f in word_fields(w, a)]
+
+
+def _either(zsh_text, bash_text):
+    """The text the two readings print, as one text a shell reading it runs: the one they agree on, or both one after the
+    other where they print apart (SPD-167), so every command either shell would run is read -- `X='-n git push'; echo $X`
+    is `git push` in bash alone.  None where either cannot be spelled: the fail-closed reading of what the hook cannot say."""
+    if zsh_text is None or bash_text is None or zsh_text == bash_text:
+        return None if bash_text is None else zsh_text
+    return zsh_text + ("" if zsh_text.endswith("\n") else "\n") + bash_text
 
 
 def command_input(tokens, bodies, piped, a=None):
@@ -134,13 +144,14 @@ def command_input(tokens, bodies, piped, a=None):
 
 
 def _string_text(word, a):
-    """A here-string's text, its word read with the line's settled values (`a`): whole, as zsh reads it, where bash's
-    reading of the word unquoted -- its fields joined by a blank -- is the same text, and None where the two differ."""
+    """A here-string's text, its word read with the line's settled values (`a`): whole, as zsh reads it, and as bash
+    3.2 reads it -- its fields joined by a blank, an unquoted expansion's value split -- and both where the two differ
+    (_either)."""
     whole = word_text(word, a)
     if a is None or whole is None or "$" not in word:
         return whole
     fields = word_fields(word, a)
-    return whole if None not in fields and " ".join(fields) == whole else None
+    return _either(whole, None if None in fields else " ".join(fields))
 
 
 def input_fed(tokens, bodies, piped):
@@ -234,10 +245,10 @@ def printed_text(tokens, bodies, piped, a=None):
     prints nothing into the pipe, and every other command prints text this module does not know.
 
     `a`, the line's analysis before this command runs: a `$NAME` the line settled is read as its value (SPD-148), the
-    value the shells expand it to, since the command's own prefix assignments reach none of its words.  The masked words
-    no longer say whether the expansion was quoted, and bash splits an unquoted one at its blanks where zsh never does, so
-    such a command is read both ways (_readings) and its text kept only where the two agree: `X='git push'; echo $X`
-    prints `git push` either way, `X='-n x'; echo $X` and `printf '%s\\n' $X` do not."""
+    value the shells expand it to, since the command's own prefix assignments reach none of its words.  bash splits an
+    unquoted expansion's value at its blanks where zsh never does, and neither splits a quoted one (SPD-167), so the
+    command is read both ways (_readings) and its text is what either prints (_either): `X='git push'; echo $X` prints
+    `git push` in both, `printf '%s\\n' "$X"` too, and `X='-n git push'; echo $X` prints it in bash alone."""
     if _stdout_taken(tokens):
         return None
     words = directories.separate_redirects(tokens)[0]
@@ -249,8 +260,9 @@ def printed_text(tokens, bodies, piped, a=None):
     if not _printer(word_text(words[0], a)):
         return None  # zsh's reading prints nothing this module reads, so bash's cannot agree with a text
     whole, fields = _readings(words, a)
-    text = _printed(whole, tokens, bodies, piped, a)
-    return text if fields and _printer(fields[0]) and text == _printed(fields, tokens, bodies, piped, a) else None
+    if not (fields and _printer(fields[0])):
+        return None
+    return _either(_printed(whole, tokens, bodies, piped, a), _printed(fields, tokens, bodies, piped, a))
 
 
 def _printer(name):
@@ -341,8 +353,8 @@ def _echo_text(args):
         w = args[0]
         if w is None:
             return None
-        if not w.startswith("-") or len(w) == 1:
-            break
+        if not w.startswith("-") or len(w) == 1 or syntax._IFS_BLANKS_RE.search(w):
+            break  # a blank makes it text in both shells (probed, zsh 5.9 -f and bash 3.2: `echo '-n vcs a'` printed it)
         if not _ECHO_OPTIONS_RE.fullmatch(w):
             return None
         newline = newline and "n" not in w

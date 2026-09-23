@@ -146,6 +146,22 @@ use, and then only for the home ~/.config/spud/home names, run by the tool that 
 linked worktree); anything else is refused with exit 3 before a plist is written or launchctl runs (SPD-101).
 """
 
+LOGS_DESCRIPTION = """\
+Read the LaunchAgents' logs, which a session cannot reach any other way: every hook refuses a shell command naming the
+home's .spud/, and a log is a file, not a row for `spud sql --readonly`.  Read-only, and any actor or none.
+
+  render   <home>/.spud/logs/render.log, the render watcher's (local.spud.render); each watcher start keeps the
+           last run's tail in render.log.1
+  backup   ~/Library/Logs/spud-backup.log, the daily backup's (local.spud.backup); never rotated
+
+With no name, lists each log's files, their sizes and last writes.  With a name, prints its last --tail lines
+(default 40).  --tail reads across the rotation: when render.log holds fewer lines than asked, the rest are the end of
+render.log.1, the previous run's, which is where the line saying why that run stopped is; each file's lines are then
+headed `==> <path> <==`.  `spud doctor` names this command when the watcher is down or stuck.
+
+--json: log, what, tail, lines (the count printed) and files, each with path, exists, bytes, modified, previous and lines.
+"""
+
 HOME_MOVE_DESCRIPTION = """\
 Move Spud's home to a plain directory.  Refused while any member is planned or active, when
 --to exists and is not empty, lies inside a git work tree or inside the current home, when a rendered file is hand-edited

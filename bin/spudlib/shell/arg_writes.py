@@ -68,8 +68,9 @@ MODE_TREE_OPTIONS = ("-R", "--recursive")
 # patterns a walk honours or None, whether a source spelled with a trailing `/` lands as its contents).
 RECURSIVE = "recursive"
 # A `$NAME` or `${NAME}` anywhere in a word, which `resolved` puts the line's own value in place of.  A `$` the quoting marked
-# literal is followed by that marker, never by a name, so it never matches.
-_EXPANSION_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
+# literal is followed by that marker, never by a name, so it never matches.  The third group is the _QUOTED_NAME after a
+# name that stood in double quotes (SPD-167), taken with the name so a value put in place leaves none behind.
+_EXPANSION_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})(" + syntax._QUOTED_NAME + ")?")
 
 
 def long_name(name, longs):
@@ -145,7 +146,8 @@ def resolved(word, a, blanks=None):
     one plain word it spells: a value the line settled (not doubted, not a loop's or a function body's, not one the shells
     set themselves), holding no blank (bash would split it), no glob character (bash expands an unquoted expansion's) and
     nothing left to expand.  `blanks`, for a reader that splits the words itself (shell/stdin_text, SPD-148): a value
-    holding a blank is put in place too, passed through this function first.  A member writes into its scratchpad through a variable it set on the line
+    holding a blank is put in place too, passed through this function first with whether the expansion stood in double
+    quotes (syntax._QUOTED_NAME, SPD-167), which bash splits no more than zsh does.  A member writes into its scratchpad through a variable it set on the line
     (`S=<scratchpad>; mkdir -p $S/base`) far too often for the raw word to be the reading here; everything else stays as
     spelled and earns the unresolvable-target refusal a redirection's spelling earns.
 
@@ -169,7 +171,7 @@ def resolved(word, a, blanks=None):
                 or syntax._ARRAY_VALUE in value \
                 or syntax.GLOB_RE.search(prepare.deglob(value)):  # deglob: a glob character the assignment's own quoting marked literal counts too
             return m.group(0)
-        return value if blanks is None else blanks(value)
+        return value if blanks is None else blanks(value, m.group(3) is not None)
 
     return _EXPANSION_RE.sub(one, word)
 
