@@ -414,7 +414,10 @@ class ShellWalk:
         What the command reads, and what the bodies returned hold, is then the text the expansion leaves, its escapes
         resolved (heredocs.received_body, SPD-206): `sh <<EOF` fed `\\$(git push)` runs the push.  Where the expansion ran a
         substitution that text holds its output, which the line does not spell, and the body returned is a
-        heredocs.OutputBody (SPD-207): `sh <<EOF` fed `echo a $(cat x.sh)` runs x.sh's lines."""
+        heredocs.OutputBody (SPD-207): `sh <<EOF` fed `echo a $(cat x.sh)` runs x.sh's lines.  Each parameter's value
+        stands in that text as well, where the line settles it, and a shell fed it parses the value again
+        (reevaluation.body_values, SPD-208): `x='a; git push'; sh <<EOF` fed `echo $x` pushes; where the line does not
+        settle a value the body is an OutputBody too."""
         reevaluation.read_eval_words(words, self.a, self.depth)
         for w in words:
             for _ in range(w.count(hookio.SUBST) - w.count(PROCSUB_FILE)):  # a `<( )`'s file name lifted no body
@@ -430,14 +433,15 @@ class ShellWalk:
                     self.a.loop_depth -= 1
                     self.a.cwds = directories.union_dirs(before, self.a.cwds)
                     self.a.cd_uncertain = False
-        cleaned, bodies, k = [], [], 0
+        cleaned, bodies, k, values = [], [], 0, None
         while k < len(words):
             if words[k] in ("<<", "<<-"):
                 if self.bodies:
                     body = self.bodies.pop(0)
                     if self.expanded.pop(0):
                         ran = reevaluation.read_expanded_body(body, self.a, self.depth + 1)
-                        body = heredocs.received_body(body)
+                        values = values or reevaluation.body_values(self.a, words)
+                        body = heredocs.received_body(body, values)
                         if ran:
                             body = heredocs.OutputBody(body)
                     bodies.append(body)

@@ -20,7 +20,8 @@ the shell may be in):
   whatever `./git` holds).  The spud launcher is read as the spud call it is, as before.
 - "stdin": a shell that runs what it reads on standard input where the line feeds it text it does not spell (a `<` file,
   another program's output, and since SPD-207 an unquoted here-document whose body holds a command substitution's
-  output, fed to the shell or printed into it: heredocs.OutputBody); spelled text is read as SPD-143 and SPD-148 read it.
+  output, fed to the shell or printed into it: heredocs.OutputBody, and since SPD-208 one holding a variable's value
+  the line does not settle); spelled text is read as SPD-143 and SPD-148 read it.
 - "xargs": a shell's `-c` string an xargs reads from input the line does not spell (`cat f | xargs -0 sh -c`).
 - "startup": a variable that names a file of commands a shell runs when it starts -- BASH_ENV (any non-interactive
   bash, a script's `#!/bin/bash` included), ENV and ZDOTDIR -- assigned anywhere on the line, and HOME assigned on a line
@@ -72,7 +73,8 @@ HOW = {
     "source": "from the file %s, which it reads into the shell",
     "exec": "from %s, a file run by its path rather than a program the shell finds on PATH",
     "stdin": "it reads on standard input that the line does not spell (a `<` file, another program's output through a pipe,"
-             " or a command substitution's output in an unquoted here-document)",
+             " a command substitution's output in an unquoted here-document, or a variable's value there that the line"
+             " does not settle)",
     "xargs": "from a `-c` string xargs reads from input the line does not spell",
     "startup": "from a file of commands a shell runs as it starts (BASH_ENV, ENV and ZDOTDIR name one, and HOME holds"
                " a shell's own startup files)",

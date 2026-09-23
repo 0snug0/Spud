@@ -12,9 +12,10 @@ line's `)` (probed), and so does split_substitutions, which counts parentheses (
 as the outer line's commands, bash's reading.  tests/test_hooks.py HereDocumentBodyTest has the probes.  For each body it
 takes out the scan also says whether any character of its delimiter is quoted: a body whose delimiter has none is expanded
 before its command reads it, and ShellWalk.consume reads its substitutions (SPD-192, HereDocumentExpansionTest), then
-hands the command the text that expansion leaves, received_body (SPD-206, HereDocumentInputTest), an OutputBody where
-that text holds a substitution's output (SPD-207, HereDocumentOutputTest); a body whose delimiter is quoted reaches its
-command as it is spelled.
+hands the command the text that expansion leaves, received_body (SPD-206, HereDocumentInputTest), with each value the
+line settles in place of its parameter (SPD-208, HereDocumentValueTest), an OutputBody where that text holds a
+substitution's output (SPD-207, HereDocumentOutputTest) or a value the line does not settle; a body whose delimiter is
+quoted reaches its command as it is spelled.
 
 What the scan cannot tell from characters alone is what an open `(` is: a subshell or an array assignment, whose newline
 ends a command, or zsh's glob group or an arithmetic command, whose newline does not (and whose `<<` is a shift there).
@@ -42,6 +43,9 @@ _ARITH_RE = re.compile(r"[\\$()\[\]]")  # in an arithmetic expansion
 _BACKTICK_RE = re.compile(r"[\\`]")
 _ANSI_RE = re.compile(r"[\\']")  # in `$'...'`
 _RECEIVED_RE = re.compile(r"[\\`$]")  # in an unquoted body (received_body)
+# An unbraced parameter expansion (received_body): a name, zsh's `$#NAME`, `$+NAME`, `$=NAME`, `$~NAME` and `$^NAME`,
+# or a special parameter
+_PARAMETER_RE = re.compile(r"\$(?:[#+=~^]?[A-Za-z_][A-Za-z0-9_]*|[0-9@*?$!#-])")
 _WORD_START = " \t\n;&|()<>"  # before a `#` that opens a comment (newlines_as_separators reads the same)
 _DELIMITER_END = " \t\n;&|<>()"
 _CASE_RE = re.compile(r"(?<![\w-])case(?![\w-])")
@@ -79,7 +83,7 @@ def strip_heredocs(command):
     return _Scan(command).run()
 
 
-def received_body(body):
+def received_body(body, values=None):
     """The text a command fed an unquoted here-document reads, as ShellWalk.consume hands it on (SPD-206): the body with
     the backslash taken off before a `$`, a backtick or a backslash, a backslash-newline taken out whole, which joins the
     two lines, and every other backslash kept, as zsh and bash expand it -- a default word's text included (probed
@@ -87,10 +91,18 @@ def received_body(body):
     [\\x] [a\\<newline>b]` printed `[$] [\\] [\\x] [ab]`, and sh fed `\\$(echo RAN > l/h1)` ran it; tests/test_hooks.py
     HereDocumentInputTest).  Each `$( )` and backtick substitution keeps its text as spelled, since that text is the
     substitution's own and what the command reads is its output: the substitution is read where it runs
-    (reevaluation.read_expanded_body), and read again, fail closed, by a shell fed the body."""
-    if "\\" not in body:
+    (reevaluation.read_expanded_body), and read again, fail closed, by a shell fed the body.
+
+    `values` (SPD-208, HereDocumentValueTest): the line's reading of each parameter expansion the body holds outside a
+    substitution and an arithmetic expansion -- `$NAME`, `${...}`, a special parameter, zsh's `$#NAME` and its kin --
+    called with the expansion's text and answering (the text the shells put in its place, or None to keep it as
+    spelled, whether the line settles every text it may leave), reevaluation.body_values.  A value is text a shell fed
+    the body parses again, its separators, redirections, newlines and substitutions commands there, so it is handed on
+    in place; a kept `${ }`'s own text is still read for its escapes.  Where any expansion is unsettled the text is an
+    OutputBody."""
+    if "\\" not in body and (values is None or "$" not in body):
         return body
-    out, mark, i = [], 0, 0
+    out, mark, i, quiet, unsettled = [], 0, 0, 0, False  # quiet: where the `$`s of an expansion read whole end
     while (m := _RECEIVED_RE.search(body, i)) is not None:
         i, c = m.start(), m.group()
         if c == "\\":
@@ -103,10 +115,60 @@ def received_body(body):
             i = prepare.backtick_end(body, i) + 1
         elif body.startswith("$(", i) and not body.startswith("$((", i):
             i = prepare.substitution_end(body, i) + 1
-        else:
+        elif values is None or i < quiet:
             i += 1
+        elif body.startswith(("$((", "$["), i):  # arithmetic, which leaves a number
+            quiet = prepare.substitution_end(body, i) if body[i + 1] == "(" else _bracket_end(body, i + 1)
+            i += 1
+        elif (end := _parameter_end(body, i)) is None:
+            i += 1  # a `$` that opens no expansion is text
+        else:
+            text, settled = values(body[i:end])
+            unsettled = unsettled or not settled
+            if text is None:
+                quiet, i = end, i + 1
+            else:
+                out += [body[mark:i], text]
+                mark = i = end
     out.append(body[mark:])
-    return "".join(out)
+    received = "".join(out)
+    return OutputBody(received) if unsettled else received
+
+
+def _parameter_end(body, i):
+    """The index after the parameter expansion whose `$` is body[i], or None where that `$` opens none.  A `${ }` ends
+    at the `}` that closes it, a substitution's and an escaped character's braces aside, or with the body."""
+    if body.startswith("${", i):
+        depth, j, n = 0, i + 1, len(body)
+        while j < n:
+            c = body[j]
+            if c == "\\":
+                j += 1
+            elif c == "`":
+                j = prepare.backtick_end(body, j)
+            elif body.startswith("$(", j):
+                j = prepare.substitution_end(body, j)
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if not depth:
+                    return j + 1
+            j += 1
+        return n
+    m = _PARAMETER_RE.match(body, i)
+    return None if m is None else m.end()
+
+
+def _bracket_end(body, j):
+    """The index of the `]` that closes the `[` at body[j], its brackets counted, or len(body) when none does."""
+    depth, n = 0, len(body)
+    while j < n:
+        depth += (body[j] == "[") - (body[j] == "]")
+        if not depth:
+            return j
+        j += 1
+    return n
 
 
 class OutputBody(str):
@@ -116,7 +178,9 @@ class OutputBody(str):
     through tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: tests/test_hooks.py
     HereDocumentOutputTest).  So the command's standard input is unknown (stdin_text.command_input), and a shell that
     runs its standard input is refused a member as SPD-145 refuses one fed a pipe the line does not spell
-    (script_files.read_shell); the text is still read as that shell's commands for what it does spell."""
+    (script_files.read_shell); the text is still read as that shell's commands for what it does spell.  A parameter
+    whose value the line does not settle leaves such text too, kept as spelled (SPD-208, reevaluation.body_values:
+    `Y=$(printf ...)` then a body `echo a $Y`)."""
 
     __slots__ = ()
 

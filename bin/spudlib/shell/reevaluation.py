@@ -24,10 +24,14 @@ bash fails every one of these with "bad substitution".
 
 zsh and bash expand an unquoted here-document's body before its command reads it as (e) evaluates a value, so
 ShellWalk.consume hands such a body to read_expanded_body, which reads it with read_evaluated_text (SPD-192) and says
-whether it ran a substitution, whose output the command then reads (SPD-207).
+whether it ran a substitution, whose output the command then reads (SPD-207), and reads each parameter's value in it
+with body_values, which heredocs.received_body puts in place where the line settles it (SPD-208).
 
 Kept whole past 250 lines (the package's look-again point): (e)'s evaluation and a body's expansion are one reading of
-text as the shells expand it, and split apart they would each need the other's scan."""
+text as the shells expand it, and split apart they would each need the other's scan; a body's parameters are read with
+(e)'s settled values (_variable_texts) and its cache (_Reading)."""
+
+import re
 
 from . import analyse, assignment_words, prepare, syntax, zsh
 from ..hooks import hookio
@@ -44,6 +48,16 @@ _WORD_TEXT = str.maketrans({k: v for k, v in syntax._SENTINEL_TEXT.items()
 # zsh expands it there all the same (probed: `$(( ${(e)x} + 1 ))` and `(( ${(e)x} ))` ran x's substitution)
 _ARITHMETIC_OPEN = "$" + syntax._LITERAL_DOLLAR + syntax._GLOB_SENTINELS["{"] + syntax._ARITH_SENTINELS["("]
 _ESCAPED_DOLLAR = "\\$" + syntax._LITERAL_DOLLAR  # a backslash before a literal `$` in a masked value (_value_readings)
+# What body_values reads in an unquoted here-document's body (SPD-208):
+_PLACED_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{(\(e\))?([A-Za-z_][A-Za-z0-9_]*)\})\Z")  # handed on as its value
+# the characters a shell fed the body parses as more than a word's plain text: blanks and separators, redirections,
+# quotes and escapes, expansions, braces, globs, and `=`, which makes a command's first word an assignment
+_BODY_SYNTAX_RE = re.compile(r"[\s;&|<>()'\"\\$`{}*?\[\]=]")
+_NUMBER_PARAMETERS = frozenset("?$!#-")  # an exit status, a process id, a count, the option letters
+_BRACED_UNREAD_RE = re.compile(r"[$`\\'\"(){}]")  # a nested expansion, quoting, zsh's flags, braces
+_BRACED_HEAD_RE = re.compile(r"([#!^=~+]*)([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*?$!#-])")  # modifiers, then the parameter
+_OPERATOR_RE = re.compile(r":?[-=+?]|##?|%%?|//?|\^\^?|,,?|:")
+_PATTERN_OPERATORS = frozenset(("#", "##", "%", "%%", ":?", "?", "^", "^^", ",", ",,"))  # their word leaves no text
 
 
 class _Reading:
@@ -170,6 +184,89 @@ def read_expanded_body(body, a, depth):
     reading = _Reading(a)
     read_evaluated_text(body, reading, depth)
     return reading.ran
+
+
+def body_values(a, words):
+    """The line's reading of each parameter expansion in an unquoted here-document's body, for heredocs.received_body
+    (SPD-208): the shell expanding the body puts each value in the text, and a shell fed it parses that text again, so
+    the value's separators, redirections, newlines and substitutions are commands it runs (probed through
+    tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: tests/test_hooks.py
+    HereDocumentValueTest).  `words` are the command's, whose prefix assignments bash expands the body with and zsh
+    does not (probed: `x=a; x=b cat <<EOF` printed `[$x]` as b in bash and a in zsh).
+
+    Called with an expansion's text, it answers (the text to put in its place or None, whether the line settles every
+    text it may leave).  A `$NAME`, `${NAME}` or zsh's `${(e)NAME}` whose value the line settles -- arg_writes.resolved's
+    reading, as _variable_texts reads it, bar the rules on blanks and glob characters, since nothing splits or globs a
+    value in a body -- is that value's text, and for (e) only a value with no expansion in it, which (e) leaves as it is.
+    Where the two shells' values differ the one holding shell syntax is put in place.  Every text an expansion may leave
+    that is not put in place must be plain for the line to settle it: an environment variable the line never touches, a
+    special parameter's number or option letters, a length, or a settled value or spelled word holding no shell syntax
+    (_BODY_SYNTAX_RE).  A value the line does not spell, a positional parameter, a variable the shells set themselves,
+    one a loop or function body reads, and a nested expansion or quoting inside a `${ }` settle nothing."""
+    reading, assigned = _Reading(a), {}
+    for w in words:
+        found = assignment_words.assignment_word(w) if "=" in w else None
+        if found is None:
+            break  # the command's prefix assignments end at its first other word
+        name, subscript, append, value = found
+        assigned[name] = None if (subscript is not None or append) else value
+
+    def value(text):
+        m = _PLACED_RE.match(text)
+        if m is None:
+            possible, placed = _operator_texts(text, reading, assigned), None
+        else:
+            possible = _parameter_texts(m.group(1) or m.group(3), reading, assigned)
+            if m.group(2):  # (e) evaluates a value holding an expansion into text the line does not spell
+                possible = [None if isinstance(t, str) and ("$" in t or "`" in t) else t for t in possible]
+            known = [t for t in possible if isinstance(t, str)]
+            placed = next((t for t in reversed(known) if _BODY_SYNTAX_RE.search(t)), known[-1] if known else None)
+        return placed, all(t is True or isinstance(t, str) and (t == placed or not _BODY_SYNTAX_RE.search(t))
+                           for t in possible)
+
+    return value
+
+
+def _parameter_texts(name, reading, assigned):
+    """The texts the parameter `name` may leave in a body: the value the line holds before the command (zsh's reading)
+    and the one the command's own prefix assigns (bash's).  A str is a value's text, None text the line does not spell,
+    True plain text that is not the line's -- an environment variable it never touches, a special parameter's number or
+    option letters."""
+    a = reading.a
+    if name in _NUMBER_PARAMETERS:
+        return [True]
+    if not syntax.IDENTIFIER_RE.match(name) or name in syntax.DYNAMIC_VARIABLES or a.all_doubt or a.loop_depth:
+        return [None]  # a positional parameter or $0, one the shells set, or a name a loop's next pass may assign
+    if name in a.vars or name in a.doubt or name in a.sticky:
+        texts, settled = _variable_texts(name, reading, {})
+        found = texts if settled else [None]
+    else:
+        found = [True]
+    if name in assigned:
+        found += reading.readings(assigned[name]) or [None]
+    return found
+
+
+def _operator_texts(text, reading, assigned):
+    """The texts an expansion other than a plain name may leave in a body, which is kept as spelled: its parameter's
+    values -- a piece of one or the whole -- and the word an operator may put in their place (`${u:-word}`,
+    `${x/pattern/word}`), where a pattern the operator only removes is left out.  A number for a length or zsh's `$+`,
+    and None for what the hook does not read here: bash's `${!name}`, zsh's flags, a subscript, a nested expansion."""
+    braced = text.startswith("${")
+    inner = text[2:-1] if braced and text.endswith("}") else None if braced else text[1:]
+    if inner is None or braced and inner not in _NUMBER_PARAMETERS and _BRACED_UNREAD_RE.search(inner):
+        return [None]
+    head = _BRACED_HEAD_RE.match(inner)
+    if head is None or "!" in head.group(1):
+        return [None]
+    if "#" in head.group(1) or "+" in head.group(1):
+        return [True]  # zsh's and bash's length, zsh's set-or-not: a number
+    possible = _parameter_texts(head.group(2), reading, assigned)
+    rest = inner[head.end() :]
+    op = _OPERATOR_RE.match(rest)
+    if op is None or op.group() not in _PATTERN_OPERATORS:
+        possible.append(rest[op.end() if op else 0 :])
+    return possible
 
 
 def _expansion_texts(text, letters, k, end, closes, reading, assigned, outer):

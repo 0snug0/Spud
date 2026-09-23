@@ -32,8 +32,8 @@ one is passed whole by zsh and split at its blanks by bash, so the printer is re
 it runs is what either prints (printed_text, _string_text, _either).
 
 What stays unread: standard input the line does not spell -- a file (`sh < f`), another program's output (`cat f | sh`,
-`curl ... | sh`), a value the line does not settle, a command substitution's output in an unquoted here-document's body
-(heredocs.OutputBody, SPD-207), or text this module cannot decode in either reading.  That is the same class as `sh script.sh`, a script the hook does
+`curl ... | sh`), a value the line does not settle, a command substitution's output or such a value in an unquoted
+here-document's body (heredocs.OutputBody, SPD-207 and SPD-208), or text this module cannot decode in either reading.  That is the same class as `sh script.sh`, a script the hook does
 not read either.  Eric's call on SPD-145 (fail closed): a member is refused both, a shell reading standard input the
 line does not spell and a shell given a script file (script_operand below), by shell/script_files; Spud is not.
 

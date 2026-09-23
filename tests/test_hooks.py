@@ -7787,6 +7787,152 @@ class HereDocumentOutputTest(BashHookCase):
         self.assertNotIn(SCRIPT_WORDING, self.assertRefused(line, "deliverables").reason)
 
 
+class HereDocumentValueTest(BashHookCase):
+    """SPD-208, filed by SPD-207's engineer: the shell that expands an unquoted here-document's body puts each parameter
+    expansion's value in the text, and a shell fed that text parses it again, so a separator, a redirection, a newline
+    or a substitution the value holds is a command the inner shell runs.  The hook handed that shell the body with `$x`
+    as spelled, which it read as one word.  The ticket's evidence, on the SPD-207 tree: analyse_command recorded no
+    finding for LINE, nor for the same line with a ledger file as the redirection target, nor for `Y=$(printf ...)`
+    and a body `echo a $Y`.
+
+    The rule (reevaluation.body_values, heredocs.received_body): a `$NAME` or `${NAME}` whose value the line settles --
+    arg_writes.resolved's reading -- is handed on as that value's text, and so is zsh's `${(e)NAME}` of a value holding
+    no expansion.  Any other parameter expansion is kept as spelled, as before, where every text it may leave is plain:
+    an environment variable the line never touches, a special parameter's number, a settled value or a spelled word
+    holding no shell syntax.  Otherwise the body holds text the line does not spell (heredocs.OutputBody), and a shell
+    reading it is refused a member with SPD-145's reason for standard input the line does not spell, as SPD-207 refuses
+    one fed a substitution's output; Spud reads on.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory, each file an
+    `echo RAN > l/<name>`:
+
+    - sh fed an unquoted body `echo $x`, x holding `a; echo RAN > l/v1`, printed a and wrote l/v1, and so did `${x}`, a
+      value holding a newline (`x=$'a\\necho RAN > l/v4'`) and one holding a substitution (`x='$(echo RAN > l/v5)'`,
+      which the inner shell ran, where `cat` fed the same body printed `$(echo RAN > l/v5)`); `Y=$(printf 'b\\necho RAN >
+      l/m4')` and a body `echo a $Y` wrote l/m4; zsh's `${(e)y}` wrote its file (bash: bad substitution); `echo
+      ${HOME:+a;echo RAN > l/v8}` wrote l/v8; `$1` in a function's body wrote its file once the function was called with
+      such a word, `$_` after `: 'a; echo RAN > l/v9'` wrote l/v9 in bash (zsh printed sh), and `for i in 1 2` fed sh
+      `echo pass $i $v` and then assigned v such a value, which its second pass wrote;
+    - with the delimiter quoted sh printed its words and wrote nothing; `echo "$x" '$x'` in an unquoted body printed the
+      value twice and wrote nothing, its quotes being the inner shell's; `echo d ${u:-b} $((1 + 2))` printed `d b 3`, and
+      `x=b` then `echo e $x` printed `e b`;
+    - `x='a; echo RAN > l/v13'; x=q sh <<EOF` with `echo pre $x` printed `pre a` and wrote l/v13 in zsh, and printed
+      `pre q` in bash, which expands a body with the command's own prefix assignments: `x=l/a3; x=l/b3 cat <<EOF` with
+      `[$x]` printed `[l/b3]` there and `[l/a3]` in zsh, and `u='c; echo RAN > l/w1' sh <<EOF` with `echo sh [$u]`
+      wrote `l/w1]` in bash and nothing in zsh."""
+
+    LINE = "x='a; git push'; sh <<EOF\necho $x\nEOF"  # the proposer's line
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        p = self.home.path / self.TARGET
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def unsettled(self, line):
+        """A "stdin" script finding, refused a member with SPD-145's reason for standard input the line does not spell;
+        silent for Spud."""
+        with self.subTest(line=line):
+            self.assertIn("stdin", [detail[0] for kind, detail in self.analysis(line).findings if kind == "script"])
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """Read as before: no push, no script finding, and silent for every caller."""
+        with self.subTest(line=line):
+            findings = self.analysis(line).findings
+            self.assertNotIn(("git", ("push", "push")), findings)
+            self.assertEqual([detail for kind, detail in findings if kind == "script"], [])
+            for agent_id in (AGENT_A, AGENT_C, None):
+                self.assertSilent(line, agent_id)
+
+    def test_the_tickets_evidence_is_refused(self):
+        self.law_7(self.LINE)
+        line = "x='a; echo x > %s'; sh <<EOF\necho $x\nEOF" % self.TARGET
+        self.assertEqual([t for t, _cwds in self.analysis(line).redirects], [self.TARGET])
+        for agent_id in (AGENT_A, AGENT_C):
+            self.assertRefused(line, "generated", agent_id)
+        self.assertRefused(line, "Law 1", agent_id=None)
+        self.unsettled("Y=$(printf 'b\\ngit push'); sh <<EOF\necho a $Y\nEOF")
+        self.law_7("y='a; git push'; sh <<EOF\necho ${(e)y}\nEOF")  # zsh's (e) of a value holding no expansion
+
+    def test_a_settled_value_is_read_as_the_inner_shell_parses_it(self):
+        for line in ("x='a; git push'; sh <<EOF\necho ${x}\nEOF",
+                     "x=$'a\\ngit push'; sh <<EOF\necho $x\nEOF",  # a newline in the value starts another command
+                     "x='$(git push)'; sh <<EOF\necho $x\nEOF",  # the inner shell runs the substitution the value spells
+                     "x='a; git push'; cat <<EOF | sh\necho $x\nEOF",
+                     "x='a; git push'; bash <<EOF\necho $x\nEOF",
+                     "x='a; git push'; zsh -f <<EOF\necho $x\nEOF",
+                     "x='a; git push'; sh <<-EOF\n\techo $x\n\tEOF",
+                     "x='a; git push'; x=b sh <<EOF\necho $x\nEOF",  # zsh's reading: the line's value
+                     "x=b; x='a; git push' sh <<EOF\necho $x\nEOF",  # bash's: the command's own prefix assignment
+                     "x=b; y='a; git push'; x=q sh <<EOF\necho $x $y\nEOF"):
+            self.law_7(line)
+        # the inner shell's own quotes keep the value one word, and a body only printed runs nothing
+        self.data("x='a; git push'; sh <<EOF\necho \"$x\" '$x'\nEOF")
+        self.data("x='$(git push)'; cat <<EOF\necho $x\nEOF")
+
+    def test_a_value_the_line_does_not_settle_is_refused_a_member(self):
+        for line in ("Y=$(cat x.sh); sh <<EOF\necho a $Y\nEOF",  # a substitution's output
+                     "read -r y < f; sh <<EOF\necho a $y\nEOF",  # text the line does not spell
+                     ": 'a; echo x'; sh <<EOF\necho $_\nEOF",  # bash's last word of the command before
+                     "sh <<EOF\necho $1 $@\nEOF",  # the positional parameters, which a function's call sets
+                     "x='a; echo x'; x='b; echo y' sh <<EOF\necho $x\nEOF",  # zsh's value and bash's, both commands
+                     "x='a; echo x'; sh <<EOF\necho ${x:-b}\nEOF",  # a value behind an operator
+                     "sh <<EOF\necho ${HOME:+a;echo x}\nEOF",  # a spelled word holding a separator
+                     # a loop may assign a variable after its body reads it, for the next pass
+                     "for i in 1 2; do sh <<EOF\necho $v\nEOF\nv='a; echo x'; done"):
+            self.unsettled(line)
+
+    def test_the_controls_read_as_before(self):
+        """A quoted delimiter, values holding no shell syntax, the environment's variables and the special parameters'
+        numbers, an escaped `\\$x`, and a body a command only prints."""
+        for operator in HEREDOC_QUOTED_OPERATORS:
+            self.data("x='a; git push'; sh %s\necho $x ${x} ${x:-b}\nEOF" % operator)
+        for line in ("x=hello; sh <<EOF\necho $x ${x} ${x:-b} ${#x} ${x%l*}\nEOF",
+                     "x=hello; x=world sh <<EOF\necho $x\nEOF",
+                     "sh <<EOF\necho $HOME ${HOME} ${u:-b} $((1 + 2)) $? $$ $# ${#}\nEOF",
+                     "x='a; git push'; sh <<EOF\necho \\$x\nEOF",
+                     "x='a; git push'; cat <<EOF\necho $x ${x:-b}\nEOF",
+                     "x='a; git push'; cat <<EOF > /dev/null\necho $x\nEOF"):
+            self.data(line)
+
+    def test_the_text_a_shell_receives(self):
+        values = {"$x": ("a; b", True), "${y}": (None, False)}.get
+        received = self.m.received_body("echo $x \\$x ${y} $(echo $x) `echo $x` $((1 + $x))", values)
+        self.assertEqual(received, "echo a; b $x ${y} $(echo $x) `echo $x` $((1 + $x))")
+        self.assertIsInstance(received, self.m.OutputBody)  # ${y}, which the line does not settle
+        received = self.m.received_body("echo $x ${u:-\\$(echo X)}", lambda text: ("v", True) if text == "$x" else (None, True))
+        self.assertEqual(received, "echo v ${u:-$(echo X)}")  # a kept expansion's escapes are taken off as before
+        self.assertNotIsInstance(received, self.m.OutputBody)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for body in ("${" * 3000, "${x:-" * 3000 + "}" * 3000, "echo $x" * 3000, "$[" * 3000, "${x}" * 3000,
+                     "${u:-b}" * 3000):
+            line = "x=a; sh <<EOF\n%s\nEOF\ngit push" % body
+            with self.subTest(body=body[:20]):
+                started = time.monotonic()
+                findings = self.analysis(line).findings
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), findings)
+
+
 # SPD-184: the process substitutions zsh runs in a case's word and its patterns, `%s` standing for the list.  With a file
 # touched in place of %s, zsh 5.9 made it for each (CaseSubstitutionTest has the probes).
 CASE_EQUALS_FORMS = (
