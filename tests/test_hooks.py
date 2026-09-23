@@ -8063,6 +8063,130 @@ class MultiosInputTest(BashHookCase):
             self.data(line)
 
 
+class CompoundInputTest(BashHookCase):
+    """SPD-210, filed by SPD-207's engineer and widened by SPD-209's: a shell inside a `-c` string, a `{ }` group, a `( )`
+    subshell, a loop or a conditional runs on the standard input the command around it is given, and SPD-145 read that
+    input only on a shell's own simple command.  On the SPD-209 tree analyse_command recorded no finding for the
+    proposer's `sh -c sh < x.sh`, `{ sh; } < x.sh` and `(sh) < x.sh`, while `sh < x.sh` records a script "stdin"
+    finding; nor for `{ sh; } <<'EOF'` with `git push` in the body, nor for `{ sh; } <<'EOF' < x.sh`.
+
+    The rule: a `-c` string's commands, and `eval`'s, start from the input of the command that runs them
+    (analyse.analyse_command's `stdin` and `fed`), and so do the substitutions in a command's words, which read the input
+    of the list they stand in; and a compound command's own input redirections, which the walk reads after its closer,
+    stand where it opens (walk.walk_line: where any compound on the line has one, the line is walked again with each
+    compound's input known when it opens), read as SPD-209 reads a command's: zsh's reading, the pipe that feeds the
+    compound and then each input in turn, and bash's, the last.  A shell there reading text the line spells reads it as
+    its commands; one reading text the line does not spell is refused a member with SPD-145's reason, and Spud reads on.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's
+    directory, each file and body a `touch`:
+
+    - all three ran the file's line for `sh -c sh < i1.sh`, `{ sh; } < i2.sh`, `(sh) < i3.sh`, `cat i4.sh | { sh; }`,
+      `cat i5.sh | (sh)`, `for f in a; do sh; done < i6.sh`, `if true; then sh; fi < i7.sh`, `case x in x) sh;; esac <
+      i8.sh`, `while true; do sh; break; done < i9.sh`, `until false; do sh; break; done < i10.sh`, `eval sh < i11.sh`,
+      `sh -c '{ sh; }' < i12.sh`, `sh -c 'sh -c sh' < i13.sh`, `{ { sh; }; } < x.sh` and `{ sh; } 2> /dev/null < x.sh |
+      cat`; and the body's or the string's line for the group, the subshell, the `-c` string, for, if, case, while and
+      until fed a here-document or a here-string, for `{ { sh; }; } <<< ...`, `{ sh; } <<< ... | cat`, `fn() { sh; } <<<
+      ...` once fn was called, `eval sh <<< ...`, `sh -c '{ sh; }' <<< ...`, `sh -c 'sh -c sh' <<< ...`, `{ echo $(sh) >
+      /dev/null; } <<< ...`, the same in backticks, `(echo $(sh) > /dev/null) <<< ...` and `sh -c 'echo $(sh) >
+      /dev/null' <<< ...`; zsh ran `repeat 1 do sh; done <<< ...` (bash: a syntax error), and bash ran the line after `1`
+      in a body fed to `select f in a; do sh; break; done` (zsh's select took no choice there and ran nothing);
+    - zsh ran both inputs of `{ sh; } <<'EOF' < x.sh` (the body, then x.sh), of `(sh) <<'EOF' < x.sh`, of `printf
+      'touch p1\\n' | { sh; } < x.sh`, of `printf 'touch p2\\n' | { sh; } <<'EOF'` and of `{ sh; } <<< 'touch a1'
+      <<'EOF'`, and bash the last alone in each; in `{ printf 'touch r1\\n' | echo $(sh) > /dev/null; } <<< 'touch r2'`
+      zsh's substitution read r2, the group's input, and bash's r1, the pipe;
+    - none ran anything for `{ sh; } 3< x.sh`, `echo $(sh) <<< ...` (the substitution runs before the command's own
+      redirection), or `{ :; } <<< ...; sh`; `while read -r l; do echo "got $l"; done < x.sh` and `cat x.sh | while
+      ...` printed the line, and `{ cat; } <<'EOF'` its body."""
+
+    EVIDENCE = ("sh -c sh < x.sh", "{ sh; } < x.sh", "(sh) < x.sh")  # the proposer's lines
+    FOLDED = "{ sh; } <<'EOF'\ngit push\nEOF"  # SPD-209's engineer's, with `{ sh; } < x.sh`
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def verbs(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "git"]
+
+    def forms(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def law_7(self, line):
+        """The analysis finds the push and nothing unread; a member is refused it, and Spud never is."""
+        with self.subTest(line=line):
+            self.assertIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def unspelled(self, line):
+        """A "stdin" script finding, refused a member with SPD-145's reason; silent for Spud."""
+        with self.subTest(line=line):
+            self.assertIn("stdin", self.forms(line))
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """No push, no script finding, and silent for every caller."""
+        with self.subTest(line=line):
+            self.assertNotIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertSilent(line)
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_refused_a_member(self):
+        for line in self.EVIDENCE:
+            self.unspelled(line)
+            self.assertEqual(self.forms(line), ["stdin"])
+        self.law_7(self.FOLDED)
+        self.unspelled("{ sh; } <<'EOF' < x.sh\ntrue\nEOF")
+
+    def test_a_spelled_input_is_the_inner_shells_program(self):
+        """The shapes of the evidence, and every compound command, fed a here-document or a here-string."""
+        for line in ("(sh) <<'EOF'\ngit push\nEOF", "sh -c sh <<'EOF'\ngit push\nEOF", "{ sh; } <<< 'git push'",
+                     "(sh) <<< 'git push'", "sh -c sh <<< 'git push'",
+                     "for f in a; do sh; done <<'EOF'\ngit push\nEOF", "if true; then sh; fi <<< 'git push'",
+                     "case x in x) sh;; esac <<'EOF'\ngit push\nEOF", "while true; do sh; break; done <<< 'git push'",
+                     "until false; do sh; break; done <<< 'git push'", "repeat 1 do sh; done <<< 'git push'",
+                     "select f in a; do sh; break; done <<'EOF'\n1\ngit push\nEOF",
+                     "{ { sh; }; } <<< 'git push'", "{ sh; } <<< 'git push' | cat", "fn() { sh; } <<< 'git push'",
+                     "eval sh <<< 'git push'", "sh -c '{ sh; }' <<< 'git push'", "sh -c 'sh -c sh' <<< 'git push'"):
+            self.law_7(line)
+
+    def test_a_file_on_any_compound_is_refused_a_member(self):
+        for line in ("cat x.sh | (sh)", "for f in a; do sh; done < x.sh", "if true; then sh; fi < x.sh",
+                     "case x in x) sh;; esac < x.sh", "while true; do sh; break; done < x.sh",
+                     "until false; do sh; break; done < x.sh", "eval sh < x.sh", "sh -c '{ sh; }' < x.sh",
+                     "sh -c 'sh -c sh' < x.sh", "{ { sh; }; } < x.sh", "{ sh; } 2> /dev/null < x.sh | cat"):
+            self.unspelled(line)
+
+    def test_a_substitution_reads_the_input_of_its_list(self):
+        for line in ("{ echo $(sh) > /dev/null; } <<< 'git push'", "{ echo `sh` > /dev/null; } <<< 'git push'",
+                     "(echo $(sh) > /dev/null) <<< 'git push'", "sh -c 'echo $(sh) > /dev/null' <<< 'git push'",
+                     "{ printf x | echo $(sh) > /dev/null; } <<< 'git push'"):  # zsh's reading: the group's input
+            self.law_7(line)
+        self.unspelled("{ echo $(sh) > /dev/null; } < x.sh")
+
+    def test_zsh_reads_a_compounds_inputs_in_turn(self):
+        """The pipe into the compound, then each of its own input redirections: zsh reads them all, bash the last."""
+        for line in ("{ sh; } <<'EOF' < x.sh\ntrue\nEOF", "(sh) <<'EOF' < x.sh\ntrue\nEOF",
+                     "echo 'git status' | { sh; } < x.sh"):
+            self.unspelled(line)
+        for line in ("echo 'git push' | { sh; } <<'EOF'\ntrue\nEOF", "{ sh; } <<< 'git push' <<'EOF'\ntrue\nEOF"):
+            self.law_7(line)
+
+    def test_the_controls_read_as_before(self):
+        """Another descriptor, a loop that only reads its input, input that stops at the compound's end, and a
+        substitution in the words of a command whose own redirection comes after it."""
+        for line in ("{ sh; } 3< x.sh", "while read -r l; do echo \"got $l\"; done < x.sh",
+                     "cat x.sh | while read -r l; do echo \"got $l\"; done", "{ :; } <<< 'git push'; sh",
+                     "echo $(sh) <<< 'git push'", "{ cat; } <<'EOF'\ngit push\nEOF"):
+            self.data(line)
+
+
 # SPD-184: the process substitutions zsh runs in a case's word and its patterns, `%s` standing for the list.  With a file
 # touched in place of %s, zsh 5.9 made it for each (CaseSubstitutionTest has the probes).
 CASE_EQUALS_FORMS = (

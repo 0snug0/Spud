@@ -35,6 +35,12 @@ A command's input redirections are read as each shell feeds them (SPD-209, comma
 in turn, after the pipe into the command, and bash the last alone, so where the two differ the text is a MultiosText
 holding both, and a shell fed it reads each.
 
+That input reaches the commands a command runs inside itself wherever nothing of theirs replaces it (SPD-210): a `-c`
+string's commands and eval's start from their command's (analyse.analyse_command's `stdin`), the commands in a compound
+command from its own input redirections, read as a simple command's are (walk.walk_line), and a command substitution
+from the input of the list it stands in (walk.ShellWalk.substitution_input).  So `sh -c sh < f`, `{ sh; } < f` and
+`(sh) <<'EOF'` read as `sh < f` and `sh <<'EOF'` do.
+
 What stays unread: standard input the line does not spell -- a file (`sh < f`), another program's output (`cat f | sh`,
 `curl ... | sh`), a value the line does not settle, a command substitution's output or such a value in an unquoted
 here-document's body (heredocs.OutputBody, SPD-207 and SPD-208), or text this module cannot decode in either reading.  That is the same class as `sh script.sh`, a script the hook does
@@ -115,6 +121,12 @@ def each_reading(text):
 def unspelled(text):
     """Whether either shell's reading of this standard input is text the line does not spell."""
     return text is None or isinstance(text, MultiosText) and text.zsh is None
+
+
+def reading_key(text, fed):
+    """The standard input a body is analysed with, as a key (analyse.analyse_isolated, SPD-210): each shell's reading of
+    the text, whether either is text the line does not spell, and whether anything stands there at all."""
+    return tuple(each_reading(text)), unspelled(text), fed
 
 
 def single(text):

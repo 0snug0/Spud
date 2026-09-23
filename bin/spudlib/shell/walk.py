@@ -44,7 +44,7 @@ class ShellFrame:
     `do ... done` (resolve_body)."""
 
     __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints",
-                 "procsub")
+                 "procsub", "serial", "bare")
 
     def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
@@ -74,6 +74,11 @@ class ShellFrame:
         # (/dev/fd/N), a word the line does not spell, which ShellWalk.pop puts among that command's words as PROCSUB_FILE
         # (SPD-145: `bash <(curl ...)` runs that file's text as a script; SPD-190).
         self.procsub = False
+        # which compound command of the walk this is, counting from 0 in the order they open -- the same in every walk of
+        # one line's tokens, which is how walk_line hands the second walk each compound's input (SPD-210) -- and whether
+        # it opens a command, no word before it, so that the words after its closer are its own redirections: not so for
+        # a process substitution, nor for a `(` after words.
+        self.serial, self.bare = 0, False
 
 
 class ShellWalk:
@@ -105,9 +110,13 @@ class ShellWalk:
       block runs where the try block left the shell and the compound ends at the always block's `}` (see close_brace);
     - zsh splits a brace off the word it is glued to: `{git push}` is the group `{ git push }` (see add_word).
       bash does not, so `glued` says which reading this walk is, and `split_brace` whether zsh's split one off this line:
-      analyse_command then walks the line again the other way and keeps both readings, as it does for zsh's globs."""
+      analyse_command then walks the line again the other way and keeps both readings, as it does for zsh's globs;
+    - every command on the line starts from the standard input the line is run on -- `stdin`, None where the line does not
+      spell it, and `fed`, whether anything stands there: a `-c` string's is its shell's (SPD-210) -- and a compound
+      command's own input redirections stand where it opens, as a simple command's do (walk_line); a substitution in a
+      command's words reads the input of the list it stands in (substitution_input)."""
 
-    def __init__(self, a, inner, bodies, expanded, depth, glued=True):
+    def __init__(self, a, inner, bodies, expanded, depth, glued=True, stdin=None, fed=False, inputs=None):
         self.a, self.inner, self.bodies, self.depth = a, list(inner), list(bodies), depth
         self.expanded = list(expanded)  # whether the shell expands each body (heredocs.strip_heredocs)
         self.glued = glued  # zsh's reading: a brace glued to a word opens or closes a group where a lone one would
@@ -121,15 +130,20 @@ class ShellWalk:
         self.toks, self.at = [], 0  # the line's tokens, and the index of the one add_word is reading
         # the text the pipeline element being read has printed so far, the text the elements before it in this
         # compound command printed, the text the element before it in its pipeline printed -- which this one reads on
-        # standard input -- and the input the compound command itself was given.  None is text the line does not spell,
-        # which absorbs (stdin_text.joined).
-        self.printed, self.frame_printed, self.piped_text, self.frame_stdin = "", "", None, None
-        # whether a pipe feeds the element being read at all, and whether one fed the compound command around
-        # it, which the texts above cannot say (None is both "nothing" and "text the line does not spell").
-        self.piped_fed, self.frame_stdin_fed = False, False
+        # standard input -- and the input the compound command itself was given, the line's own at the outermost level.
+        # None is text the line does not spell, which absorbs (stdin_text.joined).
+        self.printed, self.frame_printed, self.piped_text, self.frame_stdin = "", "", None, stdin
+        # whether a pipe feeds the element being read at all, and whether anything stands on the input of the compound
+        # command around it, which the texts above cannot say (None is both "nothing" and "text the line does not spell").
+        self.piped_fed, self.frame_stdin_fed = False, fed
         # whether the pipe feeds the element being read itself, a simple command's own input among its redirections in
         # zsh's reading (stdin_text.command_input, SPD-209), and not a compound command around it
         self.pipe_feeds = False
+        # The compound commands' own input redirections (SPD-210): the ones this walk found after a closer -- serial ->
+        # (the words after it, with their operators, and the bodies consume took for them) -- and the ones an earlier walk
+        # of the line found, which push reads where each compound opens (walk_line).  `closed`: the compound whose closer
+        # the walk has just read, while the words after it are read.
+        self.found, self.inputs, self.closed, self.opened = {}, inputs or {}, None, 0
         self.start_list()
 
     # -- lists and pipelines ------------------------------------------------------------
@@ -170,12 +184,19 @@ class ShellWalk:
                  self.skip, self.header, self.expect_body)
         funcs = set(self.a.functions) if kind == "sub" else None  # a subshell's own function definitions do not escape
         frame = ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned), funcs)
+        frame.serial, frame.bare, self.opened, self.closed = self.opened, not self.words, self.opened + 1, None
         # what the element around it printed so far is kept for after the compound command, and the standard
-        # input that element was given is the input every list inside it starts from
+        # input that element was given is the input every list inside it starts from -- with the compound's own input
+        # redirections, where an earlier walk of the line found any after its closer, read as a simple command's are,
+        # zsh's reading and bash's (stdin_text.command_input, SPD-209 and SPD-210)
         frame.printed, frame.earlier = self.printed, self.frame_printed
         frame.stdin = (self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed, self.pipe_feeds)
         self.printed, self.frame_printed = "", ""
         self.frame_stdin, self.frame_stdin_fed = self.piped_text, self.piped_fed
+        if frame.serial in self.inputs:
+            redirects, bodies = self.inputs[frame.serial]
+            self.frame_stdin = stdin_text.command_input(redirects, bodies, self.piped_text, self.pipe_feeds, self.a)
+            self.frame_stdin_fed = stdin_text.input_fed(redirects, bodies, self.piped_fed)
         self.stack.append(frame)
         if kind in ("loop", "func"):
             self.a.loop_depth += 1
@@ -202,6 +223,9 @@ class ShellWalk:
         after = frame.saved if frame.kind == "sub" else (inner if frame.kind == "group" else directories.union_dirs(frame.seen, inner))
         (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words,
          self.skip, self.header, self.expect_body) = frame.outer
+        # the words up to the next terminator are this compound's redirections (finish), or, after a short loop's compound
+        # body, the loop's, whose pop below takes this over
+        self.closed = frame if frame.bare else None
         if frame.procsub and not self.in_pattern():
             # the file name `<( list )` hands the command: a word the line does not spell, which every reader of
             # hookio.SUBST takes for one and consume pairs with no lifted body (SPD-190).  Not in a case's word or pattern
@@ -427,7 +451,7 @@ class ShellWalk:
         for w in words:
             for _ in range(w.count(hookio.SUBST) - w.count(PROCSUB_FILE)):  # a `<( )`'s file name lifted no body
                 if self.inner:
-                    analyse.analyse_isolated(self.a, self.inner.pop(0), self.depth + 1)
+                    analyse.analyse_isolated(self.a, self.inner.pop(0), self.depth + 1, *self.substitution_input())
             if syntax.ZSH_CLOSE in w:
                 for code in globbing.qualifier_code(w):
                     # zsh runs it in the shell that expands the word, once for every file the glob matches (probed: a cd there
@@ -456,6 +480,14 @@ class ShellWalk:
             k += 1
         return cleaned, bodies
 
+    def substitution_input(self):
+        """(the text, whether anything stands there) on the standard input a command substitution in the words being read
+        runs on: the input of the list the command stands in, which is the compound command's (SPD-210) -- zsh's reading
+        inside a pipeline element too.  Not the command's own redirections, which the shells perform after they expand
+        its words, and not the pipe into its element, which bash's reading takes there and this one does not yet (probed:
+        CompoundInputTest; SPD-210's proposal 320)."""
+        return self.frame_stdin, self.frame_stdin_fed
+
     def discard(self):
         self.consume(self.words)
         self.words = []
@@ -466,9 +498,14 @@ class ShellWalk:
         skip, self.skip = self.skip, False
         header, self.header = self.header, None
         redirect_cwds, self.redirect_cwds = self.redirect_cwds, syntax._CURRENT
+        closed, self.closed = self.closed, None
         if not words:
             return
         cleaned, bodies = self.consume(words)
+        if closed is not None and stdin_text.input_fed(words, bodies, False):
+            # a compound command's own input redirections, which zsh and bash perform before it runs, so the commands in it
+            # read that input: kept for walk_line to walk the line again with it standing where the compound opens
+            self.found[closed.serial] = (words, bodies)
         a = self.a
         if skip:
             if header != "repeat":  # a for or select header assigns its name; a repeat count assigns nothing
@@ -699,6 +736,7 @@ class ShellWalk:
                 self.push("sub", ")")
                 self.stack[-1].prints = t == "("  # a process substitution's output goes to the file it stands for
                 self.stack[-1].procsub = t == "<("
+                self.stack[-1].bare = self.stack[-1].bare and t == "("  # a word in the command around it, not a command
             elif t == ")":
                 self.close_sublists()
                 if self.stack and self.stack[-1].closer == ")":
@@ -749,4 +787,37 @@ class ShellWalk:
             self.pop()
         self.end_list()
         while self.inner:  # a substitution no word held (a malformed line): still analysed
-            analyse.analyse_isolated(self.a, self.inner.pop(0), self.depth + 1)
+            analyse.analyse_isolated(self.a, self.inner.pop(0), self.depth + 1, *self.substitution_input())
+
+
+def walk_line(a, tokens, inner, bodies, expanded, depth, start, glued=True, stdin=None, fed=False):
+    """Walk a line's tokens (ShellWalk), and walk them again where a compound command on it has input redirections of its
+    own (SPD-210): the shells perform those before the compound runs, so every command in it reads that input, but the
+    walk reads them after its closer, when those commands are read already.  The second walk hands each such compound its
+    input where it opens (ShellWalk.push), from the words the first found after its closer.  `start` is reading_start's
+    state from before the first walk, put back so the second reads the line from where the first did; whatever else the
+    first learnt stays -- doubt, a function's or a hashed name, an alias the hook cannot read, each of which only makes
+    the reading stricter -- and a body read in its own process is read once per starting state (analyse_isolated), so
+    the first walk's findings stand beside the second's, which adds the ones the input earns.  Returns the walk whose
+    reading stands, for analyse_command to ask whether zsh split a brace off a word."""
+    first = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed)
+    first.walk(tokens)
+    if not first.found:
+        return first
+    restore_reading(a, start)
+    again = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, first.found)
+    again.walk(tokens)
+    return again
+
+
+def reading_start(a):
+    """The state a walk reads a line's commands with, and changes as it goes, that restore_reading puts back: the
+    directories, the variables, the loop depth, the aliases and the loop names read as dashless."""
+    return a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases), set(a.dashless_loops)
+
+
+def restore_reading(a, start):
+    """Put back reading_start's state, copied, so one start serves every walk of the line."""
+    cwds, variables, loop_depth, aliases, dashless = start
+    a.cwds, a.vars, a.loop_depth, a.cd_uncertain = cwds, dict(variables), loop_depth, False
+    a.aliases, a.dashless_loops = dict(aliases), set(dashless)

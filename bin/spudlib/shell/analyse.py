@@ -6,10 +6,12 @@ from . import arg_writes, assignment_words, directories, downloads, expansions, 
 from ..hooks import hookio
 
 
-def analyse_command(command, analysis=None, depth=0):
+def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
     """Walk every simple command the shell would run, recursing into substitutions,
     `sh -c` strings, `eval`, here-documents fed to a shell, and the substitutions an unquoted here-document's
-    body expands wherever it is fed (SPD-192)."""
+    body expands wherever it is fed (SPD-192).  `stdin` and `fed`: the standard input the text runs on and whether
+    anything stands there (as syntax.ShellAnalysis.stdin and stdin_fed say them), which the commands in it read where
+    no redirection or pipe of their own replaces it -- a `-c` string's and eval's, their command's (SPD-210)."""
     a = analysis or syntax.ShellAnalysis()
     if depth > 6:
         return a
@@ -34,11 +36,10 @@ def analyse_command(command, analysis=None, depth=0):
             where = "line" if depth == 0 else "shell" if a.shell_reading else "nested"
             a.unparseable = syntax.untokenized(marked) + (where,)
         for sub in inner:
-            analyse_isolated(a, sub, depth + 1)
+            analyse_isolated(a, sub, depth + 1, stdin, fed)
         return a
-    cwds, variables, loop_depth, aliases = a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases)
-    zsh_walk = walk.ShellWalk(a, inner, bodies, expanded, depth)
-    zsh_walk.walk(tokens)
+    start = walk.reading_start(a)
+    zsh_walk = walk.walk_line(a, tokens, inner, bodies, expanded, depth, start, True, stdin, fed)
     if other == marked and not zsh_walk.split_brace:
         # one reading: the line holds no zsh pattern, or only markings both shells make (arithmetic), and no brace
         # glued to a word that zsh splits off
@@ -50,8 +51,9 @@ def analyse_command(command, analysis=None, depth=0):
     # Every command and target either reading finds is checked, zsh's first; the directories and variables after the line are
     # those of both.  The quotes are the same, so both tokenize.
     zsh_cwds, zsh_vars, zsh_aliases = a.cwds, a.vars, a.aliases
-    a.cwds, a.vars, a.loop_depth, a.cd_uncertain, a.aliases = cwds, variables, loop_depth, False, aliases
-    walk.ShellWalk(a, inner, bodies, expanded, depth, glued=False).walk(tokens if other == marked else syntax.shell_tokens(other) or [])
+    walk.restore_reading(a, start)
+    walk.walk_line(a, tokens if other == marked else syntax.shell_tokens(other) or [], inner, bodies, expanded, depth, start,
+                   False, stdin, fed)
     a.cwds = directories.union_dirs(zsh_cwds, a.cwds)
     a.doubt.update(set(zsh_vars) ^ set(a.vars))  # a variable only one reading assigns
     for name, value in zsh_vars.items():
@@ -77,25 +79,27 @@ def isolated(a, run):
     a.doubt.update(a.assigned[mark:])
 
 
-def analyse_isolated(a, command, depth):
+def analyse_isolated(a, command, depth, stdin=None, fed=False):
     """analyse_command on a body that runs in its own process, once per body and starting state: both readings of a line walk
-    its substitutions, and a nested line must not double its work at every level."""
+    its substitutions, and a nested line must not double its work at every level.  `stdin` and `fed`: the standard input
+    the body runs on (analyse_command), part of that state (SPD-210)."""
     key = (command, depth, a.cwds, a.loop_depth, tuple(sorted(a.vars.items())), frozenset(a.doubt), frozenset(a.sticky),
-           a.all_doubt, a.alias_scope)
+           a.all_doubt, a.alias_scope, stdin_text.reading_key(stdin, fed))
     if key in a.isolated_done:
         return
     a.isolated_done.add(key)
-    isolated(a, lambda: analyse_command(command, a, depth))
+    isolated(a, lambda: analyse_command(command, a, depth, stdin, fed))
 
 
-def analyse_new_shell(a, command, depth):
+def analyse_new_shell(a, command, depth, stdin=None, fed=False):
     """A body another shell process reads: a `-c` string, a here-document fed to a shell, the words `env -S` or `script -c`
     hand on.  An alias the line defined does not reach it (probed: `alias gp='git push'; eval 'sh -c gp'` ran
-    nothing, while `eval 'echo $(gp)'` ran it, the substitution being parsed by the shell that holds the alias)."""
+    nothing, while `eval 'echo $(gp)'` ran it, the substitution being parsed by the shell that holds the alias).  It runs
+    on the standard input `stdin` its command hands it, and `fed` says whether anything stands there (SPD-210)."""
     state = (a.alias_scope, a.aliases, a.alias_unknown)
     a.alias_scope, a.aliases, a.alias_unknown = 0, {}, False
     try:
-        analyse_isolated(a, command, depth)
+        analyse_isolated(a, command, depth, stdin, fed)
     finally:
         a.alias_scope, a.aliases, a.alias_unknown = state
 
@@ -283,7 +287,8 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             words = rest
             fresh = 0 if (shell_modifier or os.path.basename(w).casefold() in syntax.WRAPPER_TAKES_ASSIGNMENTS) else len(rest)
             for s in strings:
-                analyse_new_shell(a, prepare.deglob(s), depth + 1)  # a shell reads the string with its own quotes
+                # a shell reads the string with its own quotes, on the command's standard input (SPD-210)
+                analyse_new_shell(a, prepare.deglob(s), depth + 1, stdin, fed)
         else:
             break
     if not words:
@@ -308,7 +313,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         if body is not None or doubtful:
             if body is not None:
                 rest = " ".join(prepare.requoted(w) for w in words[1:])
-                analyse_command(body + (" " + rest if rest else ""), a, depth + 1)
+                analyse_command(body + (" " + rest if rest else ""), a, depth + 1, stdin, fed)
             else:
                 a.kinds.append("other")
             if doubtful:  # after the body, so a refusal the body itself earns keeps its own reason
@@ -343,7 +348,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             elif form == "text" and syntax.INPUT_OPERAND in body and input_string is None:
                 a.findings.append(("var", runtime_shells.runner_shown(words + unspelled)))  # text an xargs reads, unspelled
             elif form == "text":
-                analyse_new_shell(a, body.replace(syntax.INPUT_OPERAND, input_string or ""), depth + 1)
+                analyse_new_shell(a, body.replace(syntax.INPUT_OPERAND, input_string or ""), depth + 1, stdin, fed)
             else:
                 a.findings.append(("var", body))
     if base in script_runners.RUNNER_BASES:
@@ -397,13 +402,15 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                     # the string (`xargs -I% sh -c 'rm %'`) or as the whole string (`xargs -0 sh -c`)
                     string = input_string if string is None else string.replace(syntax.INPUT_OPERAND, input_string)
                 if string is not None:
-                    analyse_new_shell(a, string, depth + 1)  # read with its own quotes: `sh -c 'g?t push'`
+                    # read with its own quotes, `sh -c 'g?t push'`, and on the shell's standard input, which its commands
+                    # read where nothing of their own replaces it: `sh -c sh < x.sh` runs x.sh (SPD-210, CompoundInputTest)
+                    analyse_new_shell(a, string, depth + 1, stdin, fed)
                 break
             if not w.startswith("-"):
                 break
             i += 1
         for body in bodies:
-            analyse_new_shell(a, body, depth + 1)
+            analyse_new_shell(a, body, depth + 1, stdin, fed)
         if not dash_c and stdin_text.reads_commands(words):
             # With no -c string and no script of its own the shell runs what it reads on standard input, and
             # the line spells that text: `echo 'git push' | sh`, `bash -s <<< 'git push'`, `cat <<'EOF' | sh` -- zsh's
@@ -412,7 +419,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             fed_bodies = {body + "\n" for body in bodies}
             for text in stdin_text.each_reading(stdin):
                 if text not in fed_bodies:
-                    analyse_new_shell(a, text, depth + 1)
+                    analyse_new_shell(a, text, depth + 1, stdin, fed)
         # ... and every shell whose commands come from a file: a script operand, standard input the line does not spell,
         # an xargs string from such input, a HOME of the line's own (shell/script_files, refused a member in bash_rule)
         script_files.read_shell(words, a, dash_c, string, xargs_input, stdin, fed)
@@ -421,7 +428,8 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         before = a.cwds
         a.alias_scope += 1  # an alias the line defined is expanded where eval parses its words again
         try:
-            analyse_command(prepare.deglob(" ".join(words[1:])), a, depth + 1)  # eval reads its words again, their quotes gone
+            # eval reads its words again, their quotes gone, and runs them on its own standard input (SPD-210)
+            analyse_command(prepare.deglob(" ".join(words[1:])), a, depth + 1, stdin, fed)
         finally:
             a.alias_scope -= 1
         a.cwds = directories.settle(effect, before, a.cwds)
