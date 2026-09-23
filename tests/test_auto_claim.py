@@ -72,6 +72,8 @@ class PromptMatchTest(unittest.TestCase):
         self.assertTrue(skill.startswith("---\nname: spud\n"), skill)
         self.assertIn("You are becoming Spud in this session.\n\n1. Read /Users/Someone/SpudHome/CLAUDE.md in full", skill)
         self.assertIn("/Users/Someone/Spud/bin/spud --as spud session claim", skill)
+        # SPD-169: a session that cats the two files loses the end of them to the Bash tool's 30,000-character cut
+        self.assertIn("/spud.config.json, with the Read tool: never cat or another shell command", skill)
         hook = numbered(spud.skill_steps(home, spud.HOOK_CLAIM.format(launcher=launcher), "BAD-006 - <what this session does>"))
         steps = numbered(skill)
         self.assertEqual((len(steps), len(hook)), (4, 4))

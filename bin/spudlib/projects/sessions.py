@@ -102,7 +102,8 @@ disable-model-invocation: true
 You are becoming Spud in this session.
 """
 SKILL_STEPS = (
-    "Read {home}/CLAUDE.md in full, then {home}/spud.config.json. They bind you from now on, with the rule in step 3.",
+    "Read {home}/CLAUDE.md in full, then {home}/spud.config.json, with the Read tool: never cat or another shell command, because the Bash tool cuts its output at about 30,000 characters."
+    " They bind you from now on, with the rule in step 3.",
     "{claim}",
     "The claim names the project. This repository's own CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed. Spud's laws govern delegation, the ledger, and who writes what. In a conflict about the first, the project wins; about the second, Spud's laws win."
     " A code ticket is built in the linked worktree it is bound to: `member new` refuses from the main checkout, so enter a worktree first.",

@@ -5,13 +5,20 @@ description: The detail behind the home's CLAUDE.md - the ledger's schema and hi
 
 # Spud reference
 
-Everything here was once in the home's `CLAUDE.md` and was moved out so that file stays under Claude Code's memory limit (one file over about 40,000 characters is skipped). Nothing here overrides `CLAUDE.md`; it explains it. Section names follow that file.
+Everything here was once in the home's `CLAUDE.md` and was moved out so that file stays small. Two limits bind it: Claude Code skips a memory file over about 40,000 characters, and the Bash tool cuts a command's output at about 30,000, so a session that reads `CLAUDE.md` and `spud.config.json` with one shell command loses the end of them. The tool's suite keeps the rendered `CLAUDE.md` at 24,000 characters or fewer, and it plus the rendered config at 29,000 or fewer; a section that grows past that moves its detail here. Read both files with the Read tool in any case. Nothing here overrides `CLAUDE.md`; it explains it. Section names follow that file.
+
+## The generated files and this machine
+
+- `CLAUDE.md` and the seven other files the tool owns in a home — `ledger/Home.md`, `ledger/Spud.md`, `ledger/Board.base`, `ledger/Fleet.base`, `ledger/_templates/ticket.md`, `ledger/_templates/spudagent.md` and `.claude/skills/spud-reference/SKILL.md` — come from `{{tool}}/share/`. `spud init` writes them into a new home; `spud --as spud home sync` writes them again, replacing whatever a hand has done since and keeping a copy under `.spud/backups/home-sync/<when>/`; `spud doctor` notes each one that differs. A change that should last is a ticket in the tool repository, landed by merge, after which every home gets it at its next sync. Everything else in the home — the rendered notes, `reports/`, `docs/`, the database and `spud.config.json` — is the home's own and no sync touches it.
+- `CLAUDE.md`'s This machine section carries only derivable facts, because a sync takes back anything written into it: whose machine it is, which other machines hold a ledger, why the prefixes are what they are, belong in `docs/`, or in the tool's own `share/CLAUDE.md` by ticket if every home should read them.
+- Precedence: the depth and concurrency env vars live in the home's `.claude/settings.json`; the memory directory is under `~/.claude/projects/`; the daily backup and the render watcher need no session, so they are macOS LaunchAgents. Superpowers skills (brainstorming, TDD, systematic debugging) apply to spudagents doing the work.
 
 ## The ledger CLI
 
 - `bin/spud` is a launcher for `bin/spud_ledger.py`, the entry of the package `bin/spudlib/`. It caches every module's bytecode under the home's `.spud/pycache/`, and the entry run directly refuses.
 - The CLI finds the home through `SPUD_HOME`, then the pointer `~/.config/spud/home`, and never through the checkout it runs from. The tests point `SPUD_HOME` at scratch homes; nothing else ever should.
 - The actor of every writing command is checked by the hooks installed by `spud settings sync` and `spud project install` against the harness's own `agent_id`, so `--as` cannot be spoofed. Exit codes: 3 the actor does not own what it writes, 4 a limit would be exceeded, 5 an illegal status move or a worktree binding refusal, 6 a manual `spud render` that met a hand edit.
+- A spudagent's actor is the 17-character `agent_id` the harness gives it, which the `SubagentStart` hook tells it at birth. The launcher works the same from any directory, and a worktree's own copy of it dies with the worktree when its ticket lands, so always the main checkout's.
 - `spud member resum --all` adds the per-model token breakdown to a sum stored before cost was priced at render, so an old run can be priced.
 
 ## The hooks
@@ -48,18 +55,25 @@ Its `hook.denied` data lists `returned`, `planned`, `unbound`, `running` and `se
 1. **Own files.** The edit hook refuses {{identity_name}} every path in the home other than `spud.config.json`, `CLAUDE.md`, `.claude/`, `docs/superpowers/specs/`, `ledger/Home.md`, `ledger/Spud.md`, the `.base` files and `ledger/_templates/`, and every path in every registered project. The ledger is written only through `spud`. The Bash hook refuses a member an interpreter run whose program the line spells rather than reads from a file — python's `-c`, node's (bun's, deno's) `-e`/`--eval`/`-p`/`--print`, perl's `-e`/`-E`, ruby's `-e`, or standard input under `-` or no script (a here-document, a pipe, `<`, `<<<`) — since the hook reads no such program, and a member once used one to write a file outside its globs; a deliverable is edited with the Edit or Write tool, which the edit hook checks, and a program from a file or a module is unchanged. The same refusal reaches the shapes that table would otherwise leave open: the interpreter families outside it (osascript, whose `do shell script` is any shell command, php, lua, Rscript, swift, tsx and ts-node), a program a subcommand carries rather than an option (`deno eval <code>`, `deno repl --eval`, `deno run -`), a word the line cannot settle where an option may stand (`node $FLAG code`, refused the same way, while a `$NAME` the line settled is read as its value), and an option an xargs reads out of its input (`xargs node <<< '-e code'`, and an input the line does not spell at all). {{identity_name}} keeps {{pronoun_possessive}} own: the law binds {{pronoun_object}} where the hook cannot see.
 2. **Planned before spawned.** The CLI refuses a plan with no brief; the `PreToolUse(Agent)` hook refuses a spawn whose description matches no planned member of the caller's.
 3. **Explicit model.** The native `subagent_type: "fork"` inherits the caller's model and skips the depth cap, which is why it is refused. Contractors: `claude-code-guide` and `Explore` are the usual ones.
-4. **Limits.** `member new` refuses with exit 4, and the hook recomputes the count before every spawn.
-5. **Rendered files.** Ticket fields, a member's Brief and Outcome, status and finished are {{identity_name}}'s; Log, Sub-agents, proposals, Result and Blocked are the member's. The edit hook refuses `ledger/tickets/`, `ledger/teams/` and `reports/` for everyone.
-6. **Tickets.** The CLI refuses `ticket new` to members; the Bash hook refuses `--as spud` inside a subagent.
+4. **Limits.** `member new` refuses with exit 4, and the hook recomputes the count before every spawn. A finished, blocked or failed child frees its slot.
+5. **Rendered files.** Ticket fields, a member's Brief and Outcome, status and finished are {{identity_name}}'s; Log, Sub-agents, proposals, Result and Blocked are the member's. The files are rendered within seconds of every write. The edit hook refuses `ledger/tickets/`, `ledger/teams/`, `ledger/Projects.md` and `reports/` for everyone; the accepted exception is `spud import --file <path>`, for the narrow list its help names.
+6. **Tickets.** Proposals climb the tree (`spud proposal file`, then `proposal decide --decision escalate`). The CLI refuses `ticket new` to members; the Bash hook refuses `--as spud` inside a subagent.
 7. **Git.** For any caller with an `agent_id` the Bash hook allows `status`, `log`, `diff`, `show`, `blame`, `grep`, `fetch`, `stash list`, `worktree list`, a `branch` or `tag` listing, and `config get`, and refuses every other name git answers to: the verbs that write the repository (`commit`, `add`, `checkout`, `switch`, `rebase`, `reset`, `push`, `merge`, `cherry-pick`, `worktree` ...), git's own spellings of them (`stage` is `add`, `init-db` is `init`), and the plumbing that writes the index, the object database or the working tree (`read-tree`, `checkout-index`, `update-index`, `write-tree`, `hash-object`, `repack` ...). A verb a later git adds is refused until someone reads it. The fence reaches a shell whose commands come from a file, which the hook cannot read, failing closed: a member is refused a shell given a script (`sh x.sh`, `bash ./x.sh`, through any wrapper), `source` and `.`, a shell reading standard input the line does not spell (`sh < x.sh`, `cat x.sh | sh`, `curl … | sh`, `bash <(curl …)`), a command run by its path (`./x.sh`, `scripts/foo.sh`) where that path lies in a checkout the ledger knows or in the scratchpad or temp roots, and a `BASH_ENV`, `ENV` or `ZDOTDIR` (or a `HOME` before a shell) of the line's own; the reason names the readable forms, `sh -c '…'` and a here-document. A repository script the project allows — `spud --as spud project edit <key> --allow-script <path>`, listed by `project show` — runs from that project's checkout or the ticket's bound worktree while it lies outside the member's deliverables and the line writes none of it. {{identity_name}} keeps {{pronoun_possessive}} own.
 8. **Answering from memory.** No hook enforces this: `spud board` at answer time is the only source of truth.
-9. **Recording.** See What `Stop` holds above.
-10. **Worktrees.** The standing call to land without asking, PR-only projects included, dates to 2026-09-14. Enforced by the hooks; see Worktrees below.
+9. **Recording.** Nothing about a recorded return is committed. See What `Stop` holds above: the law binds every parent, not only {{identity_name}}, which is why `SubagentStop` holds a spudagent whose child returned without a verdict or is still alive.
+10. **Worktrees.** The standing call to land without asking, PR-only projects included, dates to 2026-09-14 and is {{owner_name}}'s. Enforced by the hooks; see Worktrees below.
 
-**Module size** (2026-09-15): ~250 lines is a look-again point, never a cap; application code only, never tests or stylesheets. The rules the tool's `bin/spudlib/` was built on are its project skill `spudlib-modules` (`.claude/skills/spudlib-modules/SKILL.md` in the tool repository); `tests/probes/module_sizes.py` reports the sizes and is advisory, never a gate.
+**Module size** ({{owner_name}}, 2026-09-15): ~250 lines is a look-again point, never a cap; application code only, never tests or stylesheets. A module may be as large as it needs to be, and the larger it gets the more it must justify itself; no cohesive function, class or region is ever cut to fit a number. The rules the tool's `bin/spudlib/` was built on are its project skill `spudlib-modules` (`.claude/skills/spudlib-modules/SKILL.md` in the tool repository); `tests/probes/module_sizes.py` reports the sizes and is advisory, never a gate.
 
 ## The protocol: detail
 
+- `ticket new` takes the brief on stdin (`@-`) or from `@file`. The project defaults to the working directory's, and from a directory in no project to project 1's.
+- The project 1 a ticket filed from the home defaults to is `{{project_key}}`.
+- `proposal decide --decision create` records the ticket's origin (`proposal`) and the proposer.
+- A code ticket's session enters a worktree named for the ticket before planning anyone; a session in the home files the ticket and hands it over.
+- `member new` draws the name at random from `naming.pool` (`--name` forces one), computes the lineage (`01`, `01.02`), and sets the first root member as the ticket's lead.
+- The spawn: `PreToolUse(Agent)` checks the description against the planned row and reserves it; `PostToolUse(Agent)` binds the child's `agent_id` and moves it to `active`. `run_in_background: true` keeps {{identity_name}} free to talk to {{owner_name}} and lands the binding before the child's first tool call.
+- There is no ledger commit. Code deliverables are committed on the worktree branch and pushed; every commit names the ticket.
 - `member new` records the session it runs in (`CLAUDE_CODE_SESSION_ID`), which is why a plan must be made in the session that spawns: a row left planned holds that session's `Stop`.
 - Report entries write themselves: `member finish` of {{identity_name}}'s own child, `proposal decide`, `ticket new`, `ticket move` and a priority change in `ticket edit` each add one, titled from the record, with the `--next` line {{identity_name}} types. `report add "<title>" --next "…"` is for what no command records, such as a merge or an install.
 - Landing without asking dates to 2026-09-14. The suite rule (2026-09-16): the full suite must be green on the branch, a member's recorded green run counts, and it is rerun only when the branch changed after that run or the default branch moved since the branch was cut. In the tool, `python3.14 -I -S tests/suite.py --digest` says whether the tree changed.
@@ -70,11 +84,12 @@ Its `hook.denied` data lists `returned`, `planned`, `unbound`, `running` and `se
 ## Teams and identity: history
 
 - Names are drawn by `member new` from `naming.pool` in `spud.config.json`: characters from fiction, in canon spelling, and beside every name with a natural feminine form that form too (Charles and Charlotte, Oliver and Olivia, Pete and Petra), so a fork may come back as either. The character {{owner_name}} is a fork of is not in the pool: that name is {{owner_possessive}}. A home that wants other names replaces the pool, which is its own to choose, and members named before a replacement keep the names they were given. `spud --as spud config sync` mirrors the pool into `name_pool`, which is what `member new` draws from.
-- The team key's prefix comes from `teams.prefix` in `spud.config.json`, the ticket key's from `tickets.prefix`.
+- The team key's prefix comes from `teams.prefix` in `spud.config.json`, the ticket key's from `tickets.prefix`. The team is the parent's direct children on the ticket and all their descendants; the ticket note renders to `ledger/tickets/`, the team to `ledger/teams/{{team_prefix}}-nnn/`.
+- A lineage counts every child ever planned under a parent, finished ones included. A name is unique within its team and free to repeat on other teams, which is why the `Agent` description puts the team key first: the hook matches on it. The pool is extended by ticket if a team ever needs more names.
 
 ## Proposals: inheritance
 
-A holder that has returned decides nothing more, so its open proposals fall to the nearest ancestor that can still act, and to {{identity_name}} at the root: the climb is computed when somebody decides and written then, `proposal list` reads `{{identity_name}} (was {{team_prefix}}-nnn/Name)`, the `proposal.decided` event names the member it was inherited from, and `member finish` says what a returning member leaves held and who must decide it. So a member that dies mid-flight strands nothing.
+A holder that has returned decides nothing more, so its open proposals fall to the nearest ancestor that can still act, and to {{identity_name}} at the root: the climb is computed when somebody decides and written then, `proposal list` reads `{{identity_name}} (was {{team_prefix}}-nnn/Name)`, the `proposal.decided` event names the member it was inherited from, and `member finish` says what a returning member leaves held and who must decide it. So a member that dies mid-flight strands nothing. A proposal's `create` makes the ticket with `origin: proposal` and the proposer recorded, and every decision renders under the ticket's Proposals received. A spudagent lists the proposals it filed in its return.
 
 ## Ledger v1
 
@@ -105,9 +120,19 @@ Three kinds, and the difference decides who may change one. **Rendered** files c
 
 ### Render conflicts
 
-A hand edit of a rendered file is detected at the next render (exit 6 for a manual one; the render logs its conflict event once per path and on-disk hash, and `spud doctor` lists open conflicts with the commands that settle them). A file matching neither its last render nor the new one byte for byte is compared with both as a note, frontmatter as parsed values and the rest byte for byte. A difference of YAML style alone (quoting, block lists, key order, bare empty values: what Obsidian writes over a note it has open) is no hand edit; the render goes over it and its `render` event keeps the replaced text with `style_only: true`. A changed value or body, or frontmatter the parser cannot read, is one: accept it, when it is one of the fields `spud import --file` allows, or overwrite it with `spud render --discard <path>`, which keeps the discarded text in the event. A report has no frontmatter and keeps the byte check. A hand edit of `pr`, `pr_state` or the Landing section is refused by name by `spud import --file` and settled with `spud render --discard <path>`.
+A hand edit of a rendered file is detected at the next render (exit 6 for a manual one; the render logs its conflict event once per path and on-disk hash, and `spud doctor` lists open conflicts with the commands that settle them). A file matching neither its last render nor the new one byte for byte is compared with both as a note, frontmatter as parsed values and the rest byte for byte. A difference of YAML style alone (quoting, block lists, key order, bare empty values: what Obsidian writes over a note it has open) is no hand edit; the render goes over it and its `render` event keeps the replaced text with `style_only: true`. A changed value or body, or frontmatter the parser cannot read, is one: accept it, when it is one of the fields `spud import --file` allows, or overwrite it with `spud render --discard <path>`, which keeps the discarded text in the event. A report has no frontmatter and keeps the byte check. A hand edit of `pr`, `pr_state` or the Landing section is refused by name by `spud import --file` and settled with `spud render --discard <path>`. Never write a property value shaped like `word:text`; Obsidian reads it as a URL scheme.
+
+### Parked tickets and reports
+
+A ticket that is important but deliberately not-now is parked: `spud --as spud ticket move <key> --status parked --reason "…" [--until YYYY-MM-DD]`, and `spud board --parked` lists them. Each recorded outcome and each ticket decision gets a report entry, titled from the record; `spud render` writes them into `reports/YYYY-MM-DD.md`. "What are you working on?" is answered by `spud board`, every time.
 
 ## Worktrees: enforcement
+
+`EnterWorktree` with name `<ticket key>-<slug>` — the key lower-cased, the slug a few words of the title — creates `.claude/worktrees/<name>` on branch `worktree-<name>` from `origin/<default branch>` and moves the session there. Spudagents inherit that working directory, so their bare deliverable globs are relative to it, and they share it: never pass `isolation: worktree`. Code lives in a project's checkout and never on its default branch; the home holds no code and takes no branch.
+
+The tool checkout's `main` is the running copy: every hook line and both LaunchAgents run `{{launcher}}`, so a merge into that `main` changes the CLI and every hook for every session at once. The full suite passes on the branch before every merge, without exception, and `bin/` is never edited on `main`.
+
+One code ticket, one worktree and branch. A session already in a worktree stays there for its ticket; for a second code ticket it leaves with `ExitWorktree` (`keep`) and enters a new one, but only once no spudagent is working in the current worktree.
 
 The first `member new` (or `member edit --deliverable`) whose deliverables land in a project checkout binds the ticket to the caller's linked worktree, recorded in `tickets.worktree` with a `ticket.worktree` event. It refuses with exit 5 from the project's main checkout (naming the `EnterWorktree` step), from outside the project (naming its root), from another worktree while the bound one is still listed, and for a glob naming another project, since a ticket binds one worktree of its own project. A worktree may carry several tickets sharing one batch of work. A binding whose worktree is gone is stale: {{identity_name}}'s next plan from a worktree rebinds it, and a member never does. The edit hook and the Bash hook's write targets refuse a bound ticket's members the same paths anywhere but its worktree; a ticket still unbound keeps the old rule. `spud card` and `spud board` show the worktree and its branch.
 
@@ -116,6 +141,14 @@ Switching worktrees while a spudagent works in the current one: after the switch
 A landed worktree is deleted once its branch is merged and nothing needs it: no spudagent working in it, no session inside it, nothing uncommitted. Never `--force`: `worktree remove` refuses modified or untracked files and `branch -d` an unmerged branch, and either refusal means the work is still needed. The pushed branch stays on `origin`. A worktree whose code never merged (a blocked, failed or declined ticket) stays until {{owner_name}} says to drop it.
 
 ## Projects: claims and landing
+
+A project is a repository registered with `spud --as spud project add` and installed with `spud --as spud project install <key>`; `spud project list` names them and `ledger/Projects.md` renders them. The tool repository is a project like any other, registered when you develop `spud` itself. The home is not a project.
+
+**Opt-in by claim.** A session launched in a `claim` project is {{owner_name}}'s own, a plain session, until {{owner_name}} types `/spud`, which runs `spud --as spud session claim`. The ledger stays out of a plain session's way, apart from a one-line notice at start and refusing its writes into the home. A claim survives resume and compaction; `spud --as spud session release` ends it.
+
+**Paths.** A member's bare globs are relative to its ticket's project checkout, or to the worktree the ticket is bound to; `<key>:<glob>` names another project's checkout and `home:<glob>` the home, as `home:docs/…` puts a spike note in the vault.
+
+**The recipe.** `ticket new` (the project defaults to the working directory's). `EnterWorktree` with name `<key>-nnn-<slug>`, then name the branch as the project requires. Plan and spawn with bare globs, the brief naming the project's setup and verification. At return: record the outcome, commit the code on the branch by the project's rules, push, land, `ExitWorktree` (`keep`), delete the worktree and its local branch.
 
 **Auto-claim.** A plain session whose prompt names an existing ticket of its launch project (`Work on {{ticket_prefix}}-098` in the tool repository, or the equivalent in another registered project) is claimed by the `UserPromptSubmit` hook exactly as `session claim` would claim it, with `how: hook` and the ticket on the `session.claimed` event, and the hook hands the model the `/spud` skill's steps (the same source as `/spud`'s own SKILL.md) and the claim card, including the step that sets the title to `<KEY>-nnn - <what this session does>`. It matches only the project's own prefix in the ledger's spelling (three digits), so a declined ticket, another project's key, a prompt in the home or an `always` project, a subagent, or `/spud` itself never claim; a done ticket does claim. A session released with `session release` stays released: the hook never claims it again, and only `/spud` does.
 
@@ -130,6 +163,9 @@ A landed worktree is deleted once its branch is merged and nothing needs it: no 
 - `spud session show` names the home (`{{home}}`), the project of the working directory (none in the home), the checkout (the home, a project's main checkout, or a worktree and its branch) and the session's mode.
 - If `spud doctor` reports no database, the pointer and the home disagree: stop and ask {{owner_name}}.
 - A session launched in the home builds no code because `EnterWorktree` needs the session's launch directory to be a repository.
+- The `SessionStart` hook injects the board again on `compact` and on `/clear`, and its `--brief` says when the render watcher is down. The row order of a Bases view is {{owner_name}}'s display preference and says nothing about priority.
+- The `Stop` hold the ritual mentions is the one in What `Stop` holds: a returned spudagent unrecorded, a planned row never spawned or whose spawn was allowed and never bound for ten minutes, or a child running under a finished parent.
+- Blocked questions go to {{owner_name}} batched, related ones together in one `AskUserQuestion`; `member start <ref>` moves a re-briefed member back to active.
 
 ## Memory
 
@@ -137,9 +173,43 @@ A session launched in the home reads `{{memory_dir}}`; a session launched in a p
 
 ## Obsidian
 
-Open `{{home}}` as the vault and start at `ledger/Home.md`. Frontmatter and wikilinks are the interface: graph view shows {{identity_name}}, the team leads, and their children; each ticket note shows its Team card; `ledger/Fleet.base` and `ledger/Board.base` are Bases views. The watcher keeps every note within a few seconds of the database. Rendered notes carry the generated marker after the frontmatter and are read-only for humans; a change is a `spud` command away.
+Open `{{home}}` as the vault and start at `ledger/Home.md`. Frontmatter and wikilinks are the interface: graph view shows {{identity_name}}, the team leads, and their children; each ticket note shows its Team card; `ledger/Fleet.base` and `ledger/Board.base` are Bases views, some of them view types the extended-base plugin adds. The watcher keeps every note within a few seconds of the database. Rendered notes carry the generated marker after the frontmatter and are read-only for humans; a change is a `spud` command away.
+
+The vault's own setup is the tool's too. `spud init` writes `.obsidian/` from `<tool>/share/obsidian/` and downloads every plugin and theme `<tool>/share/obsidian.lock.json` pins, checking each file's SHA-256; `spud --as spud vault install` does it again at any time, `spud --as spud home sync` does it with the eight generated files, and `--no-vault` at init leaves it out. Obsidian asks once whether it trusts the author of a vault with community plugins, and keeps that answer in its own app storage rather than in the vault: choose **Trust author and enable plugins** the first time, which no tool can do for you. `spud doctor` notes each shipped settings file, view or plugin version this vault has changed since the last capture.
 
 ## Commands not in CLAUDE.md
+
+```bash
+python3.14 -I -S {{launcher}} session show   # the home, this checkout's project, the checkout, and whether this session is claimed
+```
+
+```bash
+python3.14 -I -S {{launcher}} card {{ticket_prefix}}-001   # a ticket's team tree and its bound worktree
+```
+
+```bash
+python3.14 -I -S {{launcher}} events --ticket {{ticket_prefix}}-001 --limit 50   # what happened, in order
+```
+
+```bash
+python3.14 -I -S {{launcher}} --as spud home sync --check   # what a sync would write, replace and keep a copy of; writes nothing
+```
+
+```bash
+python3.14 -I -S {{launcher}} project list   # registered projects: prefixes, root, landing, sessions, install state
+```
+
+```bash
+python3.14 -I -S {{launcher}} render         # bring the vault up to date by hand; the watcher does it within seconds
+```
+
+```bash
+python3.14 -I -S {{launcher}} --as spud schedule show   # the two LaunchAgents: their plists, and whether they are loaded
+```
+
+```bash
+git -C {{tool}} log --oneline -20   # what has landed in the tool, by ticket
+```
 
 ```bash
 python3.14 -I -S -m unittest discover -s tests -t tests   # in the tool repository: the serial fallback, about eleven minutes, one run at a time per checkout
