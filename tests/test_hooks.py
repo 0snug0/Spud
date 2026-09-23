@@ -1453,10 +1453,12 @@ class PreBashTest(BashHookCase):
             "echo hi >&2",
             "ls > /dev/null",
             "cat < bin/spud",
-            "echo x > \"$TMPDIR/x\"",
+            "T=/tmp; echo x > \"$T/x\"",  # a value the line settles is read (SPD-127)
         ):
             self.assertSilent(ok, agent_id=None)
-        self.assertEqual(len(self.denied()), 10)
+        # SPD-091: a target the line does not settle, the environment's TMPDIR included, refuses Spud as it does a member
+        self.assertRefused("echo x > \"$TMPDIR/x\"", "spell the path out", agent_id=None)
+        self.assertEqual(len(self.denied()), 11)
         self.assertEqual(self.denied()[0]["data"]["tool_name"], "Bash")
 
     def test_member_redirections_follow_the_deliverables(self):
@@ -2311,11 +2313,12 @@ class GlobRedirectTest(BashHookCase):
     def test_a_variable_in_a_glob_target(self):
         # SPD-127: a value the line itself settled is put in the target's place, and the glob it spells is expanded and
         # checked as a spelled one is -- the refusal is the path rule's, not the unresolvable-target one.  A variable the
-        # line does not settle keeps that refusal, for a member, and stays unread for Spud.
+        # line does not settle keeps that refusal, for a member and, since SPD-091, for Spud.
         self.assertRefused("X=ledger; echo x > $X/tickets/SPD-00?.md", "generated", AGENT_C)
         self.assertRefused("X=ledger; echo x > $X/tickets/SPD-001.md", "Law 1", agent_id=None)
         self.assertRefused("echo x > $X/tickets/SPD-00?.md", "spell the path out", AGENT_C)
-        self.assertSilent("echo x > $X/tickets/SPD-001.md", agent_id=None)
+        self.assertRefused("echo x > $X/tickets/SPD-001.md", "spell the path out", agent_id=None)
+        self.assertRefused("echo x > $X/tickets/SPD-00?.md", "spell the path out", agent_id=None)
 
     def test_tilde_before_a_glob(self):
         home = self.home.path
@@ -2996,7 +2999,8 @@ class ReadWriteRedirectTest(BashHookCase):
                 # `>.spud/` escapes DB_PATH_RE (a `>` before `.spud`), so the target itself is what refuses it
                 self.assertRefused("echo x 1<>.spud/pycache/x", "ledger database", agent_id)
                 self.assertRefused("cd .spud && echo x <>backups/x", "ledger database", agent_id)
-        self.assertRefused("echo x 1<>$T", "spell the path out", AGENT_A)
+                # SPD-091: a target the line does not settle refuses Spud too, as SPD-035's unfollowable one does
+                self.assertRefused("echo x 1<>$T", "spell the path out", agent_id)
 
     def test_a_spud_call_with_a_read_write_redirection_is_not_allowed(self):
         # The allow needs every redirection quiet (SPD-032): a `<>` into a file is a write the prompt would ask about.
@@ -6365,10 +6369,10 @@ class ShellSnapshotTest(ShellSnapshotCase):
                     "take $HOME/planted", "md `echo x`", "md $(echo x)"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd, "spell the path out")
-        # Spud keeps the answer he had: an unresolvable target refuses a member alone, behind an alias exactly as spelled out
+        # Spud meets the same refusal (SPD-091), behind an alias exactly as spelled out
         for cmd in ("md $HOME/planted", "mkdir -p $HOME/planted", "take $HOME/planted"):
             with self.subTest(cmd):
-                self.assertSilent(cmd, agent_id=None)
+                self.assertRefused(cmd, "spell the path out", agent_id=None)
 
     def test_the_narrowing_keeps_a_resolvable_write_and_the_shadowed_commands(self):
         """What the prune is for is untouched: the `$_cc_bin` and `$data` shaped targets a body of its own writes.  A
@@ -7840,12 +7844,15 @@ class SubscriptAssignmentTest(BashHookCase):
         cases = (("GIT_DIR[1]=/tmp/x git status", "GIT_DIR+=/tmp/x git status", "cannot resolve"),
                  ("GIT_CONFIG_GLOBAL[1]=/tmp/x git status", "GIT_CONFIG_GLOBAL+=/tmp/x git status", "config"),
                  ("HOME[1]=/tmp/x git status", "HOME+=/tmp/x git status", "config"),
-                 ("GIT_PAGER[1]=less git log", "GIT_PAGER+=less git log", "program"),
-                 ("GIT_TRACE[1]=/tmp/t git status", "GIT_TRACE+=/tmp/t git status", "holds a variable"))
+                 ("GIT_PAGER[1]=less git log", "GIT_PAGER+=less git log", "program"))
         for subscripted, appended, needle in cases:
             with self.subTest(subscripted):
                 r = self.refused_for_members(subscripted, needle)
                 self.assertEqual(r.reason, self.bash(appended).reason)
+        # a trace file the line does not settle is a write target, which refuses Spud too (SPD-091)
+        for agent_id in (AGENT_C, AGENT_A, None):
+            r = self.assertRefused("GIT_TRACE[1]=/tmp/t git status", "holds a variable", agent_id)
+            self.assertEqual(r.reason, self.bash("GIT_TRACE+=/tmp/t git status", agent_id).reason)
         # CDPATH: the hook cannot read it, so a relative target after the cd cannot be placed -- for everyone, as an append
         for agent_id in (AGENT_A, None):
             r = self.assertRefused("CDPATH[1]=/tmp; cd ledger; echo x > note.txt", "cannot follow", agent_id)
@@ -8845,7 +8852,7 @@ class GitFileWriteTest(BashHookCase):
                         "export GIT_TRACE2=$T; git status"):
             with self.subTest(command):
                 self.assertRefused(command, "cannot resolve", AGENT_A)
-                self.assertSilent(command, agent_id=None)
+                self.assertRefused(command, "cannot resolve", agent_id=None)  # SPD-091: Spud too
 
     def test_a_trace_variable_without_a_git_call_is_silent(self):
         home = self.home.path
@@ -8992,10 +8999,13 @@ class GitFileWriteTest(BashHookCase):
                         "git format-patch -o $D -1", "git mailinfo $M $P"):
             with self.subTest(command):
                 self.assertRefused(command, "cannot resolve", AGENT_A)
-                self.assertSilent(command, agent_id=None)
-        # a verb SPD-087 refuses whole earns Law 7's reason first; Spud's own call keeps this one
+                self.assertRefused(command, "cannot resolve", agent_id=None)  # SPD-091: Spud too
+        # a verb SPD-087 refuses whole earns Law 7's reason first; Spud, whom Law 7 does not bind, meets the target's
         self.assertRefused("git bundle create $F HEAD", "Law 7", AGENT_A)
-        self.assertSilent("git bundle create $F HEAD", agent_id=None)
+        self.assertRefused("git bundle create $F HEAD", "cannot resolve", agent_id=None)
+        # a value the line settles is read, for Spud as for a member (SPD-127)
+        self.assertRefused("T=%s/docs/a.tar; git archive -o $T HEAD" % self.home.path, "Law 1", agent_id=None)
+        self.assertSilent("T=/tmp/spd-091.tar; git archive -o $T HEAD", agent_id=None)
 
     # -- a glob or an expansion that becomes one of the options (SPD-089) -------------------
 
@@ -9669,13 +9679,16 @@ class ArgumentWriteTest(BashHookCase):
                 r = self.bash(command)
                 self.assertEqual((r.code, r.decision), (0, "deny"), (command, r))
 
-    def test_a_target_the_hook_cannot_resolve_is_refused_for_a_member_alone(self):
+    def test_a_target_the_hook_cannot_resolve_is_refused(self):
         for command in ("cp tests/src.txt $D", "rm \"$F\"", "touch $(date).log", "mkdir -p \"$D\"/x", "sed -i '' s/a/b/ $F",
                         "for f in a b; do touch tests/$f; done", "ln -s /tmp/x `pwd`/x", "cp -t \"$D\" tests/src.txt",
                         "cp \"$SRC\" tests/out/", "mv \"$SRC\" tests/out/"):  # the name a source takes inside a directory
             with self.subTest(command):
                 self.assertRefused(command, VARIABLE_WORDING)
-                self.assertSilent(command, agent_id=None)  # Spud: the hook cannot read it, as for a redirection
+                self.assertRefused(command, VARIABLE_WORDING, agent_id=None)  # Spud too, as for a redirection (SPD-091)
+        # Spud's own settled value is read, as a member's is below: outside every project it passes, in one Law 1 holds
+        self.assertSilent("S=/tmp/spd-121-x; mkdir -p $S/y && rm -rf $S", agent_id=None)
+        self.assertRefused("S=docs; touch $S/x.md", "Law 1", agent_id=None)
         for command in ("cp \"$SRC\" tests/out.txt", "cp \"$D\"/src.txt tests/out/", "sed -n \"$N\"p docs/x.md", "cat \"$F\""):
             with self.subTest(command):
                 self.assertSilent(command)
@@ -10656,9 +10669,11 @@ class SpelledWriteTest(TreeWriteCase):
         self.assertSilent("mktemp .claude/x.XXXX", agent_id=None)
         self.assertRefused("mktemp docs/x.XXXX", "Law 1", agent_id=None)
         self.assertRefused("split -l 1 a.tar ledger/x", "generated", agent_id=None)
-        for command in ("wget https://example.com/x -P /tmp/spd-126-x", "sort -u \"$(cat list)\"", "curl -o \"$n\" https://example.com/x"):
+        for command in ("wget https://example.com/x -P /tmp/spd-126-x", "sort -u \"$(cat list)\""):
             with self.subTest(command):
                 self.assertSilent(command, agent_id=None)  # outside every project, or a target Spud's reading leaves unread
+        # a file the line names through an expansion it does not settle refuses Spud too (SPD-091)
+        self.assertRefused("curl -o \"$n\" https://example.com/x", "spell the path out", agent_id=None)
         r = self.assertRefused("dd if=/dev/zero of=tests/fake/.git/hooks/pre-commit", "Law 1", agent_id=None)
         self.assertNotIn(GIT_DIR_WORDING, r.reason)  # SPD-066's rule is a caller's with an agent_id
 
@@ -10880,7 +10895,7 @@ class ScriptTextTest(TreeWriteCase):
                         'sed -n "w $(cat list)" a.tar'):
             with self.subTest(command):
                 self.assertRefused(command, VARIABLE_WORDING, agent_id=AGENT_G)
-                self.assertSilent(command, agent_id=None)  # Spud's own unresolvable target, as for a redirection
+                self.assertRefused(command, VARIABLE_WORDING, agent_id=None)  # Spud too, as for a redirection (SPD-091)
         r = self.assertRefused('D=docs; sed -n "w $D/f" a.tar', "deliverables", agent_id=AGENT_G)
         self.assertIn("docs/f", r.reason)
 
@@ -11065,7 +11080,30 @@ class TargetResolutionTest(BashHookCase):
                         "for S in docs tests; do echo x > $S/x.md; done", "S=$OTHER; echo x > $S/x.md"):
             with self.subTest(command):
                 self.assertRefused(command, VARIABLE_WORDING)
-                self.assertSilent(command, agent_id=None)  # Spud: the hook cannot read it, as before
+                self.assertRefused(command, VARIABLE_WORDING, agent_id=None)  # Spud too, since SPD-091
+
+    def test_spud_is_refused_an_unsettled_target_and_reads_a_settled_one(self):
+        """SPD-091 (Eric's call): a redirection, a tee or a git call's own file whose word holds an expansion the line does
+        not settle refuses Spud as it refuses a member -- the hook cannot tell whether it lands on a rendered ledger note or
+        another project's file, and Laws 1 and 5 hold for him -- while a value the line settles (SPD-127) is read, so it
+        passes where the path it names is his to write.  Probed with tests/probes/shell_probe.py (zsh 5.9 -f -o
+        nobareglobqual, zsh -f, bash 3.2): `T=d; echo x > $T/f` and `echo y | tee $T/g` wrote under the value the line
+        assigned, `tee $(cat list)` and `` tee `cat list`2 `` wrote the paths the file named, which no reading of the line
+        can know, and `S=d > $S/k` wrote d/k in bash and tried /k in both zshes.  git runs in no probe sandbox, so its own
+        write options rest on SPD-049's probes."""
+        for command in ("echo x > $T", "echo x >> \"$T\"/f", "echo x | tee $(cat f)", "printf x | tee -a `cat f`",
+                        "echo x | tee ${T}", "git archive -o $T HEAD", "git diff --output=$(cat f)"):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING)
+                r = self.assertRefused(command, VARIABLE_WORDING, agent_id=None)
+                self.assertNotIn("Law 1", r.reason)  # not a Law 1 path: a path the hook cannot read at all
+        for command in ("S=%s; echo hi > $S/f" % self.scratchpad, "S=%s; echo hi | tee $S/f" % self.scratchpad,
+                        "S=%s; git archive -o $S/a.tar HEAD" % self.scratchpad, "S=.claude; echo x > $S/x"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)
+        for command in ("S=docs; echo x > $S/x.md", "S=docs; printf x | tee $S/x.md"):
+            with self.subTest(command):
+                self.assertRefused(command, "Law 1", agent_id=None)
 
     def test_a_prefix_assignment_moves_no_write(self):
         """The value before the command is the one both shells open: a prefix assignment neither launders a write into the
@@ -11079,7 +11117,8 @@ class TargetResolutionTest(BashHookCase):
         self.assertRefused("S=docs; S=%s > $S/x.md" % self.scratchpad, "deliverables")  # zsh's reading
         self.assertSilent("S=%s; S=%s/b > $S/f" % (self.scratchpad, self.scratchpad))   # both inside the scratchpad
         self.assertRefused("S=docs > $S/x.md", VARIABLE_WORDING)                        # zsh's reading is unresolvable
-        self.assertRefused("S=docs > $S/x.md", "Law 1", agent_id=None)                  # Spud: bash's reading is checked
+        self.assertRefused("S=docs > $S/x.md", VARIABLE_WORDING, agent_id=None)         # Spud too, since SPD-091
+        self.assertSilent("S=%s; S=%s/b > $S/f" % (self.scratchpad, self.scratchpad), agent_id=None)  # both settled
 
     def test_a_git_calls_own_write_option_and_trace_variable(self):
         home = self.home.path
@@ -11784,11 +11823,11 @@ class OutsideProjectTest(PathAliasAsserts, HookCase):
         self.assertBashRefused("echo x > ~/.zshrc", OUTSIDE)
         self.assertRefused("~/.zshrc", OUTSIDE)
         # A variable the line did not assign stays SPD-043's unresolvable-target refusal, not this one.
-        r = self.home.hook("PreToolUse", self.pre_bash("echo x > $HOME/.zshrc", agent_id=AGENT_A))
-        self.assertEqual((r.code, r.decision), (0, "deny"), r)
-        self.assertIn("spell the path out", r.reason)
-        self.assertNotIn(OUTSIDE, r.reason)
-        self.assertBashSilent("echo x > $HOME/.zshrc", agent_id=None)
+        for agent_id in (AGENT_A, None):  # Spud too, since SPD-091
+            r = self.home.hook("PreToolUse", self.pre_bash("echo x > $HOME/.zshrc", agent_id=agent_id))
+            self.assertEqual((r.code, r.decision), (0, "deny"), r)
+            self.assertIn("spell the path out", r.reason)
+            self.assertNotIn(OUTSIDE, r.reason)
 
     def test_the_scratchpad_and_the_system_temp_directories_stay_open(self):
         for p in self.open_paths():
