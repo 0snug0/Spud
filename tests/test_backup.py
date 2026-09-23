@@ -98,7 +98,7 @@ class DailyBackupTest(BackupCase):
         self.assertRegex(path.name, r"^ledger-\d{8}T\d{6}-daily\.db$")
         self.assertEqual(out, {"ok": True, "path": str(path), "written": True, "pruned": [], "kept": 1})
         self.assertEqual(self.listing(), [path.name])  # the check leaves no -wal, -shm or -journal beside the copy
-        self.assertEqual(user_version(path), 7)  # schema v7 since SPD-145
+        self.assertEqual(user_version(path), 8)  # schema v8 since SPD-168
         code, again, proc = self.backup_daily()
         text = self.home.run("backup", "--daily", actor="spud").stdout
         if datetime.now().strftime("%Y%m%d") != path.name[7:15]:
@@ -201,7 +201,7 @@ class DailyBackupTest(BackupCase):
         for path in outside + live:
             self.assertTrue(path.is_file(), path)
         self.assertEqual(con.execute("SELECT count(*) FROM projects").fetchone()[0], 1)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 7)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), 8)
 
     def test_plain_backup_writes_a_manual_copy_and_prunes_nothing(self):
         seeds = earlier_days(20)

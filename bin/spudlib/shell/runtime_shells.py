@@ -36,7 +36,8 @@ pnpm nor yarn, whose rows rest on their documentation alone as shell/syntax's wg
 
 Not shells, and not read here: `bun x`/`bunx`, `pnpm dlx` without `-c` and `yarn dlx`, which run a package's own
 binary, and `yarn <name>`, which runs a script or a dependency's binary.  A command a file holds -- `npm run <name>`,
-`deno task <name>`, `bun run <script>`, `pnpm run`, `yarn <script>` -- is SPD-145's class, as shell/inline_programs says.
+`deno task <name>`, `bun run <script>`, `pnpm run`, `yarn <script>` -- is a script runner, read by shell/script_runners
+(SPD-168) against its project's allow-list of names.
 
 Each tool's option grammar is tabled as far as the reading needs it.  An option the table does not know may or may not
 take the next word as its value (nopt and npx-cli.js take it unless it starts with `-`), so both readings are made and
@@ -128,6 +129,8 @@ PNPM_BUILTINS = frozenset((
 def _npm_command(word):
     """npm's command for the word, resolving its alias and abbreviation for the two that run a shell (cmd-list.js):
     `x` and any prefix of `exec` from `exe`, any prefix of `explore` from `explo`."""
+    if word is None:
+        return None  # `npm --version`, `npm`: no command at all (a run with no operand crashed the hook before SPD-168)
     if word == "x" or (len(word) >= 3 and "exec".startswith(word)):
         return "exec"
     if len(word) >= 5 and "explore".startswith(word):

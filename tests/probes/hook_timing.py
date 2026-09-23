@@ -97,7 +97,8 @@ def setup(launcher):
     # each hook reads the same row and lists the same worktrees as before.
     env["SPUD_TOOL_DIR"] = home
     os.symlink(os.path.join(checkout_of(launcher), "share"), os.path.join(home, "share"), target_is_directory=True)
-    subprocess.run([PY, "-I", "-S", launcher, "init"], env=env, check=True, capture_output=True)
+    # --no-schedule: a scratch home installs no LaunchAgent, which init refuses to reach for any home but the machine's own
+    subprocess.run([PY, "-I", "-S", launcher, "init", "--no-schedule"], env=env, check=True, capture_output=True)
     seed_project_one(home, config, os.path.dirname(os.path.dirname(launcher)))
     return home, env
 

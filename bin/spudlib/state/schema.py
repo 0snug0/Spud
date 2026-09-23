@@ -471,6 +471,17 @@ ALTER TABLE projects ADD COLUMN scripts TEXT NOT NULL DEFAULT '[]'
   CHECK (CASE WHEN json_valid(scripts) THEN json_type(scripts) = 'array' ELSE 0 END);  -- repository paths, relative to the checkout
 """
 
+# A project's allow-list of runner names (SPD-168): the Bash rule refuses a member every script runner -- `npm run <name>`,
+# `npm test`, `deno task <name>`, `bun run`, `pnpm run`, `yarn <script>`, `make <target>` -- that runs a name the project
+# does not allow, and lets through only the names listed here while the file that defines them is outside the member's
+# reach (shell/script_runners).  A JSON list of names, set by `spud --as spud project edit --allow-runner/--drop-runner`.
+# A plain ADD COLUMN, as 0007's.
+DDL_0008 = """
+ALTER TABLE projects ADD COLUMN runners TEXT NOT NULL DEFAULT '[]'
+  CHECK (CASE WHEN json_valid(runners) THEN json_type(runners) = 'array' ELSE 0 END);  -- script, task and target names
+"""
+
 MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003), ("0004_ticket_worktree", DDL_0004),
-              ("0005_pull_requests", DDL_0005), ("0006_owner_origin", DDL_0006), ("0007_project_scripts", DDL_0007)]
+              ("0005_pull_requests", DDL_0005), ("0006_owner_origin", DDL_0006), ("0007_project_scripts", DDL_0007),
+              ("0008_project_runners", DDL_0008)]
 SCHEMA_VERSION = len(MIGRATIONS)

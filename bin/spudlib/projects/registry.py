@@ -131,7 +131,7 @@ def project_dict(ctx, con, p):
         "settings_file": settings, "installed": settings_sync.settings_hold_hooks(ctx, settings, p["key"]),
         "install_record": None if record is None else {k: v for k, v in record.items() if k != "original"},
         "created_at": p["created_at"], "archived_at": p["archived_at"],
-        "scripts": json.loads(p["scripts"] or "[]"),
+        "scripts": json.loads(p["scripts"] or "[]"), "runners": json.loads(p["runners"] or "[]"),
     }
 
 
@@ -146,6 +146,7 @@ def format_project(d):
         "remote          %s" % (d["remote"] or "-"),
         "installed       %s (%s)" % ("yes" if d["installed"] else "no", d["settings_file"]),
         "scripts         %s" % (", ".join(d["scripts"]) or "-"),
+        "runners         %s" % (", ".join(d["runners"]) or "-"),
     ]
     return "\n".join(lines)
 
@@ -193,10 +194,10 @@ def cmd_project_list(ctx, args):
     finally:
         con.close()
     shown = [dict(r, installed_text="yes" if r["installed"] else "no", archived=kernel.fm_date(r["archived_at"]),
-                  scripts_text=", ".join(r["scripts"])) for r in rows]
+                  scripts_text=", ".join(r["scripts"]), runners_text=", ".join(r["runners"])) for r in rows]
     return kernel.Result({"projects": rows}, kernel.table(shown, [("key", "key"), ("name", "name"), ("tickets", "ticket_prefix"), ("teams", "team_prefix"), ("root", "root"),
                                                     ("branch", "default_branch"), ("landing", "landing"), ("sessions", "sessions"), ("installed", "installed_text"),
-                                                    ("archived", "archived"), ("scripts", "scripts_text")]))
+                                                    ("archived", "archived"), ("scripts", "scripts_text"), ("runners", "runners_text")]))
 
 
 def cmd_project_show(ctx, args):
@@ -238,6 +239,28 @@ def edited_scripts(ctx, project, allow, drop):
     return json.dumps(sorted(scripts))
 
 
+# A runner name as the allow-list keeps it (SPD-168): an npm script's, a deno task's or a make target's name as the
+# project's file spells it (`test`, `check:functions`, `web:build`), with nothing a shell or a runner would read as more
+# than one literal name -- no blank, comma, quote, `$`, backquote, backslash or glob character -- and no leading `-`.
+RUNNER_NAME_RE = re.compile(r"[^\s,\-*?\[\]{}$`'\"\\][^\s,*?\[\]{}$`'\"\\]*")
+
+
+def edited_runners(project, allow, drop):
+    """The project's runner allow-list as JSON text after adding `allow` and removing `drop`, sorted; a name to drop that
+    the list does not hold is an error, as a script's is."""
+    runners = set(json.loads(project["runners"] or "[]"))
+    for name in drop:
+        if name not in runners:
+            raise kernel.SpudError(kernel.EXIT_ERROR, "project %s allows no runner name %s (it allows: %s)" % (project["key"], name, ", ".join(sorted(runners)) or "none"))
+        runners.discard(name)
+    for name in allow:
+        if not RUNNER_NAME_RE.fullmatch(name):
+            raise kernel.SpudError(kernel.EXIT_USAGE, "%r is not a runner name: name the script, task or target as the project's file spells it"
+                                   " (`test`, `check:functions`), with no blank, comma, quote, `$`, backquote, backslash, glob character or leading `-`" % name)
+        runners.add(name)
+    return json.dumps(sorted(runners))
+
+
 def cmd_project_edit(ctx, args):
     con = ledgerdb.connect(ctx)
     try:
@@ -266,6 +289,8 @@ def cmd_project_edit(ctx, args):
                 updates["root_path"] = root
             if args.allow_script or args.drop_script:
                 updates["scripts"] = edited_scripts(ctx, p, args.allow_script or [], args.drop_script or [])
+            if args.allow_runner or args.drop_runner:
+                updates["runners"] = edited_runners(p, args.allow_runner or [], args.drop_runner or [])
             if args.ticket_prefix is not None or args.team_prefix is not None:
                 if project_one:
                     raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is project 1, whose prefixes come from spud.config.json"

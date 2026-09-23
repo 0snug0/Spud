@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, inline_programs, interpreter_words, prepare, runtime_shells, script_files, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, inline_programs, interpreter_words, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -246,6 +246,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 moved.append(chdir)
             for aname, avalue in env_assignments:
                 script_files.read_assignment(a, aname)  # `env BASH_ENV=x ...`: a file of commands a shell under it runs
+                script_runners.read_runner_assignment(a, aname)  # `env npm_config_script_shell=x npm test`: a runner's shell
                 if aname.startswith(assignment_words.ENV_FUNCTION_PREFIX):
                     a.findings.append(("env-function", prepare.deglob(aname)))  # a function bash and sh import
                 # `env GIT_CONFIG_*/HOME/GIT_PAGER/GIT_SSH_COMMAND/GIT_DIR/PATH/GIT_TRACE=... git ...`
@@ -331,6 +332,10 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 analyse_new_shell(a, body.replace(syntax.INPUT_OPERAND, input_string or ""), depth + 1)
             else:
                 a.findings.append(("var", body))
+    if base in script_runners.RUNNER_BASES:
+        # A script runner runs commands a project file holds (`npm run <name>`, `deno task <name>`, `make <target>`),
+        # refused a member in bash_rule unless its project allows every name it runs (shell/script_runners)
+        script_runners.read_runner(base, words + unspelled, a)
     if base == "git":
         if not read_points(expansions.git_read_point):
             return
@@ -635,6 +640,7 @@ def record_assignment(a, found):
     outright."""
     name, subscript, append, value = found
     script_files.read_assignment(a, name)  # BASH_ENV, ENV, ZDOTDIR: a file of commands a shell started later runs
+    script_runners.read_runner_assignment(a, name)  # npm_config_*, MAKEFLAGS ...: a runner's configuration, its shell among it
     if name.startswith(assignment_words.ENV_FUNCTION_PREFIX):
         a.findings.append(("env-function", name))
     special = assignment_words.special_bindings(name, subscript, append, value)

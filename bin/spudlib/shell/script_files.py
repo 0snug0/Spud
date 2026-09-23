@@ -43,9 +43,9 @@ slash in its operand for that, since bash's `source name` looks on PATH first; a
 names it, since `sh name` looks on PATH when it does not.  Standard input, an xargs string and a startup variable are never
 let through: the readable forms are the way.
 
-What stays open: a script runner -- `npm run`, `npm test`, `deno task <name>`, `bun run`, `pnpm run`, `yarn <script>`,
-`make` -- runs a command a file of the project's holds, and is left as it was; that is a proposal of its own.  An
-interpreter's program from a file (`python3 x.py`, `node x.js`) is SPD-150's rule and unchanged.
+A script runner -- `npm run`, `npm test`, `deno task <name>`, `bun run`, `pnpm run`, `yarn <script>`, `make` -- runs a
+command a file of the project's holds: SPD-168's, the same shape with an allow-list of names (shell/script_runners).
+What stays open: an interpreter's program from a file (`python3 x.py`, `node x.js`) is SPD-150's rule and unchanged.
 """
 
 import json

@@ -2,7 +2,7 @@
 
 import os
 
-from . import analyse, arg_writes, git_config, prepare, redirect_globs, script_files, spud_calls, syntax
+from . import analyse, arg_writes, git_config, prepare, redirect_globs, runner_files, script_files, spud_calls, syntax
 from ..hooks import hookio, pathrule, worktrees
 from ..state import lookup
 
@@ -467,12 +467,21 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         # what the readings of perl and sed as writers still answer with.
         # A shell whose commands come from a file (shell/script_files) is read here too, for the same reason; an
         # allow-listed repository script is let through only where the line writes none of it first.
-        allow, line_writes = [], None
+        # A script runner (shell/script_runners, shell/runner_files) the same way: a name its project allows, from a file
+        # the line writes none of, and no shell of the line's own.
+        allow, line_writes, runner_cache = [], None, {}
         for kind, detail in analysis.findings:
             if kind == "script":
                 if line_writes is None:
                     line_writes = written_targets(analysis, written)
                 reason = script_files.script_reason(ctx, con, caller_agent_id, caller_member, cwd, mode, detail, line_writes, allow)
+                if reason:
+                    return reason, analysis
+                continue
+            if kind == "runner":
+                if line_writes is None:
+                    line_writes = written_targets(analysis, written)
+                reason = runner_files.runner_reason(ctx, con, caller_agent_id, caller_member, cwd, mode, detail, line_writes, runner_cache)
                 if reason:
                     return reason, analysis
                 continue
