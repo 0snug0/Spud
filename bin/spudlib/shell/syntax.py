@@ -104,8 +104,11 @@ _LITERAL_EQUALS = chr(0xE020)  # a word's leading `=` that zsh's EQUALS is not t
 # the quotes away.  `$` then _LITERAL_DOLLAR: single-quoted or escaped, no expansion.  `$` then _QUOTED_DOLLAR: `$'...'` (ANSI-C
 # quoting, both shells) or `$"..."` (bash's locale string), whose text the hook does not decode.  _NAME_END: a quote or an escape
 # right after `$name` ends the name (`$X"t"` is $X then t, which shlex joins as $Xt).  _ARRAY_VALUE opens the value ShellWalk
-# joins for `name=(a b)`: bash reads `$name` as its first element, zsh as all of them.  deglob removes all four.
+# joins for `name=(a b)`: bash reads `$name` as its first element, zsh as all of them.  _QUOTED_NAME follows the name of a
+# `$name` that stands in double quotes (`"$X"`, `"git $X"`), whose value neither shell splits, where bash splits the value
+# of an unquoted one at its blanks (SPD-167); it ends the name as _NAME_END does.  deglob removes all five.
 _LITERAL_DOLLAR, _QUOTED_DOLLAR, _ARRAY_VALUE, _NAME_END = chr(0xE021), chr(0xE022), chr(0xE023), chr(0xE024)
+_QUOTED_NAME = chr(0xE025)
 # The characters of an arithmetic command `(( ... ))` and of an arithmetic expansion `$(( ... ))`.  Both shells
 # evaluate what stands between the parentheses as arithmetic -- the `>` of `(( n > 2 ))` is a comparison and opens no file,
 # `|` is a bitwise or and not a pipeline, `;` separates a `for` header's three expressions and no commands -- so
@@ -127,7 +130,8 @@ _PUNCT_CHARS = ";&|<>()"
 _PUNCT_SENTINELS = {c: chr(0xE040 + i) for i, c in enumerate(_PUNCT_CHARS)}
 _PUNCT_UNSENTINEL = {v: k for k, v in _PUNCT_SENTINELS.items()}
 _SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **_ARITH_UNSENTINEL, **_PUNCT_UNSENTINEL,
-                      **{_LITERAL_EQUALS: "=", _LITERAL_DOLLAR: "", _QUOTED_DOLLAR: "", _ARRAY_VALUE: "", _NAME_END: ""})
+                      **{_LITERAL_EQUALS: "=", _LITERAL_DOLLAR: "", _QUOTED_DOLLAR: "", _ARRAY_VALUE: "", _NAME_END: "",
+                         _QUOTED_NAME: ""})
 # The operands a line does not spell.  FIND_PATH stands where find's -exec, -execdir, -ok and -okdir put `{}`: a path
 # under find's starting points, which shell/find_xargs turns into a whole-subtree write of each starting point.  INPUT_OPERAND
 # stands for what xargs reads from its input -- appended after the words the line spells, or where -I or -J put it -- which
@@ -172,7 +176,7 @@ SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"}
 PYTHON_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?$")
 JS_RUNTIMES = {"node", "nodejs", "bun", "deno"}
 ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-VARREF_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})\Z")  # a bare `$X` or `${X}`, whole
+VARREF_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})" + _QUOTED_NAME + r"?\Z")  # `$X` or `${X}`, whole
 # A `$` that expands (not one neutralize_quoted_globs marked literal, and not the last character of the word).
 _EXPANDING_DOLLAR_RE = re.compile("\\$(?!" + _LITERAL_DOLLAR + ")")  # a word-final `$` too: `$((1))` reaches a word as `$` alone
 # `${X=v}`, `${X:=v}` and zsh's `${X::=v}` (flags and a subscript allowed) assign X wherever they are expanded.

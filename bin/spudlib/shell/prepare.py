@@ -142,7 +142,9 @@ def neutralize_quoted_globs(text):
     Beside a `$` it leaves the marks the expansion check reads once shlex has removed the quotes: _LITERAL_DOLLAR after a
     `$` that is single-quoted, escaped, or last in double quotes (no expansion in either shell), _QUOTED_DOLLAR after the `$` of
     `$'...'` and `$"..."` (text the hook does not decode), and _NAME_END where a quote or an escape continues a word right after a
-    bare `$name` (`$X"t"` and `$X\\t` read $X, then t)."""
+    bare `$name` (`$X"t"` and `$X\\t` read $X, then t).  After the name of a `$name` in double quotes it leaves
+    _QUOTED_NAME (SPD-167): bash splits an unquoted expansion's value at its blanks and never a quoted one's, and zsh splits
+    neither, so a reader of the words the shell passes (shell/stdin_text) knows which shell reads a word as one."""
     out = []
     i, n = 0, len(text)
     state = None  # None, "'" or '"'
@@ -176,6 +178,10 @@ def neutralize_quoted_globs(text):
             if nxt == "$":
                 out.append(syntax._LITERAL_DOLLAR)
             i += 2
+        elif state == '"' and c == "$" and i + 1 < n and syntax._NAME_RE.match(text, i + 1):
+            name = syntax._NAME_RE.match(text, i + 1).group()
+            out.append("$" + name + syntax._QUOTED_NAME)  # `"$X"`: one word in both shells, whatever X holds
+            i += 1 + len(name)
         elif state == '"':
             if c == '"':
                 if out and out[-1] == "$":
