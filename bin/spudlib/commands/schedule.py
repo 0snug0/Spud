@@ -83,7 +83,8 @@ def daily_backup(ctx, con, keep):
 # labels and plist paths are core/launchagents'.
 SCHEDULE_AT = "03:00"
 SCHEDULE_LOG = "~/Library/Logs/spud-backup.log"
-RENDER_LOG = ".spud/logs/render.log"  # under the home; the watcher truncates it at each start
+RENDER_LOG = ".spud/logs/render.log"  # under the home; each watcher start moves the last run's log to render.log.1
+RENDER_LOG_KEEP = 256 * 1024  # render.log.1 keeps at most this many bytes of the last run's log: its tail
 # Seconds slept before each bootstrap retry: launchd can refuse a bootstrap while the job it has just booted
 # out is still going away, so five attempts over about two seconds.
 BOOTSTRAP_RETRY_DELAYS = (0.25, 0.5, 0.5, 0.75)
@@ -131,7 +132,7 @@ def schedule_plist(ctx, at):
 
 def render_plist(ctx):
     """The watcher's LaunchAgent:`spud --as spud render --watch` under the tool's bin/spud with SPUD_HOME set,
-    started at load and restarted by launchd whenever it exits (KeepAlive), its output in <home>/.spud/logs/render.log."""
+    started at load and restarted by launchd whenever it exits (KeepAlive), its output in <home>/.spud/logs/render.log, the previous run's in render.log.1."""
     if not sys.executable:
         raise kernel.SpudError(kernel.EXIT_ERROR, "cannot tell which Python runs spud: sys.executable is empty")
     log = str(ctx.home / RENDER_LOG)
@@ -278,7 +279,7 @@ def cmd_schedule_install(ctx, args):
             "launchctl bootstrap %s %s: loaded%s" % (domain, record["path"], "" if record["attempts"] == 1 else " on attempt %d" % record["attempts"]),
         ]
     lines.append("%s runs `spud backup --daily` at load and daily at %s; its output goes to %s" % (launchagents.SCHEDULE_LABEL, at, os.path.abspath(os.path.expanduser(SCHEDULE_LOG))))
-    lines.append("%s runs `spud render --watch` at load and again whenever it exits; its output goes to %s" % (launchagents.RENDER_LABEL, ctx.home / RENDER_LOG))
+    lines.append("%s runs `spud render --watch` at load and again whenever it exits; its output goes to %s, the previous run's to %s.1" % (launchagents.RENDER_LABEL, ctx.home / RENDER_LOG, ctx.home / RENDER_LOG))
     return kernel.Result(data, "\n".join(lines), stderr=settings_sync.tool_warning(ctx) or "")
 
 

@@ -138,7 +138,7 @@ SCHEDULE_DESCRIPTION = """\
 Two macOS LaunchAgents.  local.spud.backup runs `spud --as spud backup --daily` at load and daily at
 the --at time; launchd fires a run missed during sleep at wake, and backup --daily writes one copy a day however often
 it runs.  local.spud.render runs `spud --as spud render --watch` at load and again whenever it exits (KeepAlive), so
-the vault follows the database within seconds; its log is <home>/.spud/logs/render.log, started afresh at each start.
+the vault follows the database within seconds; its log is <home>/.spud/logs/render.log, started afresh at each start with the previous run's kept in render.log.1.
 The plists are $SPUD_LAUNCH_AGENTS_DIR/<label>.plist (default ~/Library/LaunchAgents), launchctl is $SPUD_LAUNCHCTL
 (default /bin/launchctl), and the backup's output goes to ~/Library/Logs/spud-backup.log.  Every verb is Spud's
 (--as spud) and handles both agents.
