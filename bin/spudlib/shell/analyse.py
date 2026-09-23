@@ -332,7 +332,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             else:
                 a.findings.append(("var", body))
     if base == "git":
-        if not read_points(lambda ws, start: expansions.option_point(expansions.git_read_index(ws, start))):
+        if not read_points(expansions.git_read_point):
             return
         a.kinds.append("git")
         alias = git_programs.git_line_defines_alias(words) or git_programs.git_env_defines_alias(a.vars)

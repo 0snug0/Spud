@@ -4,7 +4,7 @@ import functools
 import os
 import re
 
-from . import analyse, directories, prepare, redirect_globs, spud_calls, syntax
+from . import analyse, directories, git_verbs, prepare, redirect_globs, spud_calls, syntax
 from ..hooks import hookio
 
 
@@ -29,6 +29,10 @@ GLOB_SAMPLES = frozenset(
     | set(syntax.GIT_VERB_PROGRAM_OPTIONS)
     | {o for longs, _ in syntax.GIT_VERB_PROGRAM_OPTIONS.values() for o in longs}
     | {"-" + c for _, shorts in syntax.GIT_VERB_PROGRAM_OPTIONS.values() for c in shorts}
+    # ... and the same for the verbs and options that name a path git writes (SPD-089: `git archive --outpu? <path>`)
+    | set(syntax.GIT_VERB_FILE_OPTIONS) | set(syntax.GIT_FILE_OPTIONS)
+    | {o for longs, _ in syntax.GIT_VERB_FILE_OPTIONS.values() for o in longs}
+    | {"-" + c for _, shorts in syntax.GIT_VERB_FILE_OPTIONS.values() for c in shorts}
     | {"-c", "-lc", "-ic", "-m", "-", "-X", "-W", "-Q", "-I", "-S", "--as", "--as=spud", "--json", "--help", "-h", "--version"}
     | set(hookio.SPUD_COMMANDS) | {w for pair in hookio.SPUD_ONLY_SUBCOMMANDS + hookio.MEMBER_OWN_COMMANDS for w in pair}
     | syntax.ARG_WRITE_OPTIONS)  # `sed -? '' s/a/b/ f` is `sed -i` when a file named -i is there
@@ -150,7 +154,7 @@ def command_path(name):
     return "/usr/bin/" + name
 
 
-def glob_readings(word, a, command=False, script=False, dash=False, shift=False):
+def glob_readings(word, a, command=False, script=False, dash=False, shift=False, options=None):
     """(readings, ambiguous) for a masked word the shell expands before it runs the command (probed in zsh 5.9 -f, zsh
     -f -o nobareglobqual as the Bash tool runs it, and bash 3.2 with a fake git on a scratch PATH).  Each reading is the list of
     words the word may become:
@@ -165,9 +169,15 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False)
       option (GLOB_OPTION); `shift`: a word at a place the command may skip as an option's value is also read with each name
       after it, since a glob matching two files is two words; `script` and a command word with a `/`: each existing file it
       matches that runs the spud launcher, whatever its name.
+    - `options`, at a git verb's option: its (long options, short letters) that name a path git writes
+      (git_verbs.git_file_options).  A glob whose key before its first `=` is itself a glob is also read as each option
+      that key can match with the rest after it (`--outp?t=/etc/x` became `--output=/etc/x` with a directory `--output=`
+      holding etc/x, probed), a program-naming one too (`git archive --ex?c=cmd`).
 
     Ambiguous: it can match two names the hook checks (both files may exist, and the shell passes both: `* x` ran `git push x`
-    with files git and push), it is too complex to match, or its files reach the scan budget."""
+    with files git and push), it is too complex to match, its files reach the scan budget, or, with `options`, it may become
+    one of those options at all (git_verbs.may_become_file_option): which option, with which value attached or following,
+    is the files' to decide, since a `?` or `*` can be the `=` itself (`--outp?t=y` matched a file `--outp=t=y`, probed)."""
     m = _EQUALS_RE.match(word)
     if m:
         return [[literalize(word)], [literalize(command_path(m.group(1)))]], False
@@ -187,6 +197,11 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False)
             continue
         names.update(matched)
         readings += [[literalize(head + sep) + s] for s in sorted(matched & GLOB_COMMAND_SAMPLES if command else matched)]
+    if options is not None:
+        key, sep, rest = word.partition("=")
+        matched = glob_sample_matches(key, False) if sep and active_glob_word(key) else None
+        readings += [[s + sep + rest] for s in sorted(matched or ()) if s.startswith("-")]
+        ambiguous = ambiguous or git_verbs.may_become_file_option(word, *options)
     span = trailing_group(word)
     if span is not None and "N" in word[span[0] :]:
         readings.append([])
