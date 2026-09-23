@@ -2554,7 +2554,7 @@ class ZshGlobOperatorTest(BashHookCase):
         self.assertSilent("echo x > tests/(keep|other).py")
         self.assertRefused("echo x > tests/(keep|other).py", "Law 1", agent_id=None)
         self.assertSilent("make 2>&1", agent_id=None)
-        self.assertSilent("make > /dev/null 2>&1")
+        self.assertSilent("cc --version > /dev/null 2>&1")
         self.assertSilent("ls > /dev/null")
         for ok in ("f() { echo hi; }; f", "arr=(a b); echo $arr", "typeset -a arr=(a b)", "x=$(( 1<2 )); (( 3 < 2 )) && echo y",
                    "[[ -n x && ( -d tests ) ]] && echo y", "case x in (x|y) echo y;; esac", "for f in tests/(keep|other).py; do echo $f; done",
@@ -3012,7 +3012,7 @@ class ReadWriteRedirectTest(BashHookCase):
     def test_input_redirections_are_unchanged(self):
         for ok in ("cat <ledger/tickets/SPD-001.md", "cat < docs/x.md", "cat 0<docs/x.md", "wc -l <ledger/tickets/SPD-001.md",
                    "cat <<<ledger/tickets/SPD-001.md", "cat <<EOF\nledger/tickets/SPD-001.md\nEOF", "cat <<-EOF\n\tx\n\tEOF",
-                   "cat <&0", "cat 3<&0", "cat <&-", "diff <(cat docs/x.md) docs/x.md", "make 2>&1", "ls > /dev/null",
+                   "cat <&0", "cat 3<&0", "cat <&-", "diff <(cat docs/x.md) docs/x.md", "cc --version 2>&1", "ls > /dev/null",
                    "exec 3<&0", "echo x >&2", "sh -c 'cat <docs/x.md'"):
             with self.subTest(ok):
                 self.assertSilent(ok)
@@ -5620,6 +5620,240 @@ class ScriptFileTest(BashHookCase):
                 self.assertSilent(command)
 
 
+RUNNER_WORDING = "is a script runner, which runs commands a project file holds"
+
+PACKAGE_JSON = {"name": "x", "scripts": {
+    "pretest": "echo pre", "test": "node --test", "posttest": "echo post", "build": "node build.js", "lint": "eslint .",
+    "prelint": "echo x", "web": "npm run build", "check:functions": "deno check x.ts", "dep": "echo dep"}}
+DENO_JSONC = """{
+  // the tasks deno runs
+  "tasks": {
+    "fmt": "deno fmt",
+    "check": {"command": "deno check x.ts", "dependencies": ["build", "gen",],}, /* trailing commas, as deno allows */
+    "gen": "echo gen",
+  },
+}
+"""
+MAKEFILE = "include mk/common.mk\n\ntest: build\n\tpython3 -m unittest\n\nbuild:\n\techo build\n"
+
+
+class ScriptRunnerTest(BashHookCase):
+    """SPD-168: a member's script runner -- `npm run`, `npm test` and npm's lifecycle verbs, `pnpm`, `yarn`, `bun run`,
+    `node --run`, `deno task`, `make` -- runs commands a project file holds, which main (e49fe91) left silent: a member that
+    could edit package.json could put `git push` in a script and run `npm run x`.
+
+    Eric's call: SPD-145's shape.  A member is refused a runner unless every name it runs -- the one it asks for, the
+    `pre`/`post` scripts and deno dependencies the file defines for it, a verb's lifecycle scripts -- is on its project's
+    allow-list (`spud --as spud project edit <key> --allow-runner <name>`), every file the runner reads its commands or its
+    configuration from lies outside the member's deliverables and the line writes none of them, and the line sets no shell
+    of the runner's own.  Spud keeps every one.
+
+    The home is project spud's checkout, with a package.json, a deno.jsonc and a Makefile at its root (the members'
+    tests/** is theirs to write); AGENT_A and AGENT_B hold home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        home = self.home.path
+        (home / "package.json").write_text(json.dumps(PACKAGE_JSON), encoding="utf-8")
+        (home / "deno.jsonc").write_text(DENO_JSONC, encoding="utf-8")
+        (home / "Makefile").write_text(MAKEFILE, encoding="utf-8")
+        (home / "mk").mkdir()
+        (home / "mk" / "common.mk").write_text("X = 1\n", encoding="utf-8")
+        (home / "tests" / "sub").mkdir(parents=True, exist_ok=True)
+        (home / "tests" / "own.mk").write_text("test:\n\tgit push\n", encoding="utf-8")
+        (home / "other.mk").write_text("include tests/own.mk\n", encoding="utf-8")
+
+    def allow(self, *names):
+        args = ["project", "edit", "spud"]
+        for n in names:
+            args.append("--allow-runner=" + n)
+        return self.home.run(*args, actor="spud")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def plans(self, command):
+        return [plan for kind, detail in self.analysis(command).findings if kind == "runner" for plan in detail[0]]
+
+    # Each runs a name the file defines, and is refused a member until the project allows every name it runs
+    RUNS = {
+        "npm test": ["pretest", "test", "posttest"], "npm run build": ["build"], "npm run-script build": ["build"],
+        "npm run lint": ["prelint", "lint"], "npm tes": ["pretest", "test", "posttest"], "npm t": ["pretest", "test", "posttest"],
+        "npm run check:functions": ["check:functions"], "npm --prefix . run build": ["build"], "npm run build -- --watch": ["build"],
+        "npm run nonesuch": ["nonesuch"], "npm --silent run build": ["build"], "npm run build --if-present": ["build"],
+        "pnpm run build": ["build"], "pnpm build": ["build"], "pnpm test": ["pretest", "test", "posttest"], "pnpm -C . build": ["build"],
+        "yarn build": ["build"], "yarn run build": ["build"], "yarn test": ["pretest", "test", "posttest"],
+        "yarn --cwd . build": ["build"], "bun run build": ["build"], "bun lint": ["prelint", "lint"],
+        "bun run --cwd=. build": ["build"], "node --run build": ["build"], "node --run=build": ["build"],
+        "deno task fmt": ["fmt"], "deno task check": ["check", "build", "gen"], "deno task dep": ["dep"],
+        "deno task --cwd . fmt": ["fmt"], "deno task -c deno.jsonc fmt": ["fmt"],
+        "make test": ["test"], "make build test": ["build", "test"], "make -s -j4 test": ["test"], "make -j 4 test": ["test"],
+        "make -C . test": ["test"], "make --directory=. test": ["test"], "gmake test": ["test"], "make -k -- test": ["test"],
+        "cd tests && npm --prefix .. run build": ["build"], "(cd mk; make -C .. build)": ["build"],
+        "sh -c 'npm run build'": ["build"], "npx npm run build": ["build"], "env CI=1 npm run build": ["build"],
+        "SMOKE_SCOPE=home npm run build": ["build"], "nice make test": ["test"], "true && npm run build | tee /dev/null": ["build"],
+    }
+
+    def test_each_run_is_refused_a_member_until_its_project_allows_every_name_it_runs(self):
+        for command, names in self.RUNS.items():
+            with self.subTest(command):
+                r = self.assertRefused(command, RUNNER_WORDING)
+                self.assertIn("Law 7", r.reason)
+                self.assertIn("runner allow-list", r.reason)
+                self.assertIn(", ".join("`%s`" % n for n in names), r.reason)
+                self.assertSilent(command, agent_id=None)
+        self.allow("pretest", "test", "posttest", "build", "prelint", "lint", "check:functions", "nonesuch", "fmt", "check", "gen", "dep")
+        for command in self.RUNS:
+            with self.subTest(command=command, allowed=True):
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=AGENT_B)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_pre_or_post_script_and_a_dependency_must_be_allowed_too(self):
+        self.allow("test", "lint", "check")
+        for command, missing in (("npm test", "`pretest`, `posttest` are not"), ("npm run lint", "`prelint` is not"),
+                                 ("bun run lint", "`prelint` is not"), ("deno task check", "`build`, `gen` are not")):
+            with self.subTest(command):
+                self.assertIn(missing, self.assertRefused(command, RUNNER_WORDING).reason)
+        self.allow("pretest", "posttest")
+        self.assertSilent("npm test")
+        self.assertSilent("node --run test")  # node runs no pre or post script (node(1): --run)
+
+    def test_the_reason_names_the_run_the_file_and_how_spud_allows_a_name(self):
+        r = self.assertRefused("npm run build", RUNNER_WORDING)
+        for needle in ("Law 7: `npm run build` is a script runner", "package.json's scripts", "Law 6", "Law 5",
+                       "`build` is not on project spud's runner allow-list", "`spud project show spud`",
+                       "`spud --as spud project edit spud --allow-runner <name>`"):
+            self.assertIn(needle, r.reason)
+        self.assertIn("the makefile's recipes", self.assertRefused("make test", RUNNER_WORDING).reason)
+        self.assertIn("deno.json's tasks", self.assertRefused("deno task fmt", RUNNER_WORDING).reason)
+        events = self.denied()
+        self.assertTrue(events and all(RUNNER_WORDING in e["data"]["reason"] for e in events))
+
+    def test_a_verbs_lifecycle_scripts_are_its_names(self):
+        """npm install runs the root package's install scripts, and pack, publish and version theirs, each only where the
+        file defines it: none here, so each runs no name of the project's -- until package.json defines one."""
+        for command in ("npm install", "npm ci", "npm i", "npm pack", "npm version patch", "yarn", "yarn install", "pnpm install",
+                        "bun install", "npm run", "deno task", "npm ls", "npm view x", "yarn why x", "pnpm dlx x", "bun build x.ts"):
+            with self.subTest(command):
+                self.assertSilent(command)
+        data = dict(PACKAGE_JSON, scripts=dict(PACKAGE_JSON["scripts"], prepare="husky", postinstall="node x.js"))
+        (self.home.path / "package.json").write_text(json.dumps(data), encoding="utf-8")
+        for command, missing in (("npm install", "`postinstall`, `prepare` are not"), ("npm ci", "`postinstall`, `prepare`"),
+                                 ("npm pack", "`prepare` is not"), ("yarn", "`postinstall`, `prepare`"),
+                                 ("pnpm add x", "`postinstall`, `prepare`"), ("npm install-test", "`pretest`")):
+            with self.subTest(command):
+                self.assertIn(missing, self.assertRefused(command, RUNNER_WORDING).reason)
+        self.assertSilent("npm install --ignore-scripts")
+        self.assertIn("`build` is not", self.assertRefused("npm run build --ignore-scripts", RUNNER_WORDING).reason)
+        self.allow("build")
+        self.assertSilent("npm run build --ignore-scripts")  # the named script alone, with no hooks
+
+    def test_a_shell_or_configuration_of_the_lines_own_is_refused_even_for_an_allowed_name(self):
+        self.allow("pretest", "test", "posttest", "build")
+        for command, needle in (
+                ("npm run build --script-shell /tmp/x", "`--script-shell` sets the shell"),
+                ("npm run build --script-shell=/tmp/x", "`--script-shell` sets the shell"),
+                ("npm --script-sh=/tmp/x test", "abbreviation"), ("npm --userconfig /tmp/rc test", "configuration file"),
+                ("npm_config_script_shell=/tmp/x npm test", "`npm_config_script_shell` sets a runner's configuration"),
+                ("NPM_CONFIG_SCRIPT_SHELL=/tmp/x npm test", "sets a runner's configuration"),
+                ("env npm_config_script_shell=/tmp/x npm test", "sets a runner's configuration"),
+                ("export npm_config_script_shell=/tmp/x; npm test", "sets a runner's configuration"),
+                ("pnpm --script-shell=/tmp/x build", "sets the shell"), ("pnpm --config.script-shell=/tmp/x build", "configuration file"),
+                ("bun run --shell=system build", "sets the shell"), ("bun -c /tmp/bunfig.toml run build", "configuration file"),
+                ("yarn --use-yarnrc /tmp/rc build", "configuration file"),
+                ("make test SHELL=/tmp/x", "sets a make variable"), ("make -e test", "`-e`"), ("make --eval='x:' test", "`--eval`"),
+                ("make -I /tmp test", "`-I`"), ("make -t test", "`-t`"), ("MAKEFLAGS=-e make test", "`MAKEFLAGS` sets"),
+                ("MAKEFILES=/tmp/x.mk make test", "`MAKEFILES` sets"), ("make --no-such-option test", "does not read"),
+        ):
+            with self.subTest(command):
+                self.assertIn(needle, self.assertRefused(command, RUNNER_WORDING).reason)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_run_the_hook_cannot_settle_is_refused(self):
+        self.allow("pretest", "test", "posttest", "build", "fmt")
+        for command, needle in (
+                ("npm run $X", "does not settle"), ("make $T", "does not settle"), ("npm --prefix $D test", "does not settle"),
+                ("cat list | xargs npm run", "xargs"), ("cat list | xargs make", "xargs"), ("make", "default goal"),
+                ("make -s", "default goal"), ("deno task 'b*'", "every task it matches"),
+                ("npm run build -w x", "other packages"), ("npm run build --workspaces", "other packages"),
+                ("npm -g run build", "global"), ("pnpm -r run build", "other packages"), ("pnpm --filter x build", "other packages"),
+                ("yarn workspace x build", "other packages"), ("bun run --filter x build", "other packages"),
+                ("deno task -r fmt", "other packages"), ("cd $D && npm test", "cannot follow"),
+        ):
+            with self.subTest(command):
+                self.assertIn(needle, self.assertRefused(command, RUNNER_WORDING).reason)
+                self.assertSilent(command, agent_id=None)
+        self.assertSilent("X=build; npm run $X")  # a value the line settles is read (SPD-148)
+
+    def test_a_file_the_member_may_write_is_refused_wherever_the_runner_would_read_it(self):
+        """tests/** is the members' own: a package.json there -- existing or not, since the runner reads the nearest --
+        a makefile named there, or one an include names there, is text the member writes."""
+        self.allow("pretest", "test", "posttest", "build")
+        sub = self.home.path / "tests" / "sub"
+        for command, cwd in (("npm test", sub), ("npm run build", sub), ("deno task fmt", sub), ("make test", sub),
+                             ("npm --prefix tests/sub test", None), ("make -f tests/own.mk test", None),
+                             ("make -f other.mk test", None), ("make -C tests test", None)):
+            with self.subTest(command=command, cwd=cwd):
+                r = self.assertRefused(command, RUNNER_WORDING, cwd=str(cwd) if cwd else None)
+                self.assertIn("a file you may write", r.reason)
+                self.assertSilent(command, agent_id=None, cwd=str(cwd) if cwd else None)
+        # the home's own Makefile includes mk/common.mk, outside the members' globs: read, and allowed
+        self.assertSilent("make test")
+
+    def test_a_file_in_the_temp_roots_or_another_checkout_is_refused(self):
+        self.allow("pretest", "test", "posttest", "build")
+        scratch = Path(tempfile.mkdtemp(prefix="spud-runner-")).resolve()
+        self.addCleanup(shutil.rmtree, scratch, True)
+        (scratch / "package.json").write_text(json.dumps(PACKAGE_JSON), encoding="utf-8")
+        for command in ("npm --prefix %s run build" % scratch, "cd %s && npm test" % scratch):
+            with self.subTest(command):
+                self.assertIn("a file you may write", self.assertRefused(command, RUNNER_WORDING).reason)
+
+    def test_a_line_that_writes_a_file_the_runner_reads_is_refused(self):
+        self.allow("pretest", "test", "posttest", "build")
+        for command, needle in (("echo '{}' > package.json; npm test", "deliverables"),
+                                ("cp /tmp/x .npmrc && npm run build", "deliverables"), ("rm -f Makefile; make test", "deliverables")):
+            with self.subTest(command):
+                self.assertRefused(command, needle)
+        m = load_spud_module()
+        analysis = self.analysis("echo x > /tmp/y; npm test")
+        written = m.written_targets(analysis, m.written_paths(analysis.arg_writes)[0])
+        self.assertTrue(written)
+
+    def test_an_earlier_reason_on_the_line_is_kept(self):
+        self.assertNotIn(RUNNER_WORDING, self.assertRefused("git push; npm test", "Law 7").reason)
+        self.assertNotIn(RUNNER_WORDING, self.assertRefused("npm test; echo x > docs/y.md", "deliverables").reason)
+        self.assertNotIn(RUNNER_WORDING, self.assertRefused("%s ticket new --title x; make test" % self.spud_cli, "Law 6").reason)
+
+    def test_an_unbound_agent_in_a_spud_session_has_no_allow_list(self):
+        self.allow("pretest", "test", "posttest", "build")
+        for command in ("npm test", "make build"):
+            with self.subTest(command):
+                self.assertRefused(command, RUNNER_WORDING, agent_id=AGENT_D)
+                self.assertSilent(command, agent_id=None)
+
+    def test_what_runs_no_project_script_is_unchanged(self):
+        """A package's own binary, a runtime's own subcommand, a file run by an interpreter, and a runner's own listing."""
+        for command in ("npx tsc --noEmit", "npm exec -- tsc", "bunx prettier .", "pnpm dlx create-vite x", "yarn exec 'ls'",
+                        "bun test", "bun build x.ts", "deno run x.ts", "deno test", "deno fmt", "node x.js", "node --test",
+                        "node -r ./r.js x.js --run y", "npm --version", "make --version", "yarn tsc", "pnpm tsc", "bun x.ts",
+                        "npm run", "deno task", "npm ls"):
+            with self.subTest(command):
+                self.assertSilent(command)
+        self.assertEqual(self.plans("bun x.ts")[0][3], (("x.ts", True, False),))  # a script only where the file defines one
+
+    def test_the_analysis_records_every_reading(self):
+        self.assertEqual(self.plans("npm run build"), [("check", "npm", "npm run build", (("build", True, True),), (), ())])
+        self.assertEqual(self.plans("make -C sub -f x.mk a b"),
+                         [("check", "make", "make a b", (("a", False, True), ("b", False, True)), ("sub",), ("x.mk",))])
+        # deno's --cwd: the configuration is read from either directory
+        self.assertEqual([p[4] for p in self.plans("deno task --cwd sub fmt")], [("sub",), ()])
+        self.assertEqual(self.plans("npm ls"), [])
+        self.assertEqual(self.plans("npm run build --script-shell x")[0][0], "refuse")
+
+
 INLINE_WORDING = "the hook reads no inline program"
 
 
@@ -5666,7 +5900,7 @@ class InlineProgramTest(BashHookCase):
         "python3", "python3 -i", "python3 -", "python3 --version", "python3 -- tests/x.py",
         "python3 --check-hash-based-pycs always tests/x.py", "python3 -X importtime tests/x.py",
         "node scripts/x.js", "node --require ./r.js scripts/x.js", "node", "node --version", "node -c scripts/x.js",
-        "npm test", "npx tsc --noEmit", "deno run scripts/x.ts",
+        "npx tsc --noEmit", "deno run scripts/x.ts",  # `npm test` runs a command package.json holds: ScriptRunnerTest (SPD-168)
         # perl's -i writes, and the two here write in the temp root, which is open to Spud and to a member alike
         "perl tests/x.pl", "perl -i tests/x.pl /tmp/y.txt", "perl -pie s/a/b/ /tmp/x.txt", "perl -v",
         "ruby tests/x.rb", "ruby -I lib tests/x.rb", "ruby -v",
@@ -5811,10 +6045,11 @@ class UntabledInterpreterTest(BashHookCase):
         "tsx -e 'console.log(1)'", "tsx --eval 'x'", "ts-node -p 'x'", "ts-node --eval 'x'", "echo 'x' | ts-node",
         "swift -e 'print(1)'", "swift -O -e 'print(1)'", "swift - <<'S'\nprint(1)\nS", "swift - < tests/x.swift",
     )
-    # ... and each of these runs a program from a file, a task, or none at all: unchanged, for every caller.
+    # ... and each of these runs a program from a file or none at all: unchanged, for every caller (`deno task <name>` runs a
+    # task a file holds, ScriptRunnerTest's since SPD-168).
     READS_A_FILE = (
         "deno run scripts/x.ts", "deno run --allow-net scripts/x.ts", "deno test", "deno test scripts/x_test.ts",
-        "deno task dev", "deno check scripts/x.ts", "deno fmt", "deno lint", "deno --version", "deno repl",
+        "deno check scripts/x.ts", "deno fmt", "deno lint", "deno --version", "deno repl",
         "deno repl --eval-file scripts/x.ts", "deno main.ts", "deno install", "deno run --allow-read -",
         "osascript scripts/x.scpt", "osascript -l JavaScript scripts/x.js", "osascript scripts/x.scpt world",
         "php scripts/x.php", "php -f scripts/x.php", "php -l scripts/x.php", "php --version",
@@ -6021,7 +6256,12 @@ class RuntimeShellTest(BashHookCase):
     `deno task --eval` (deno task --help), `pnpm exec`, `pnpm dlx -c` and the implicit `pnpm CMD` (pnpm.io), and
     `yarn exec` (yarnpkg.com, berry's executePackageShellcode) -- and analyse reads the text with analyse_new_shell and
     the words as a wrapper's command.  A command a file holds (`npm run`, `deno task <name>`, `bun run`, `pnpm run`,
-    `yarn <script>`) is SPD-145's and unchanged."""
+    `yarn <script>`) is a script runner, read by shell/script_runners since SPD-168 (ScriptRunnerTest): here the home holds
+    a package.json that defines no script, so a runner that names none runs nothing of the project's."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "package.json").write_text('{"name": "x"}\n', encoding="utf-8")
 
     # Each runs a git write verb through the subcommand: Law 7 for a member, Spud's own for him.
     WRITES = (
@@ -6051,10 +6291,12 @@ class RuntimeShellTest(BashHookCase):
     )
     # A command a file holds, a package's own binary, or no shell at all: unchanged, for every caller.
     UNCHANGED = (
-        "npm test", "npm run build", "npm install", "npm run-script build", "npx tsc --noEmit", "npm exec", "npm explore x",
-        "deno task dev", "deno task", "bun run build", "bun run scripts/x.ts", "bun exec", "bun install", "bunx prettier .",
-        "pnpm run build", "pnpm install", "pnpm test", "pnpm dlx create-vite x", "yarn build", "yarn install", "yarn exec",
+        "npm test", "npm install", "npx tsc --noEmit", "npm exec", "npm explore x", "npm --version", "npm",
+        "deno task", "bun run build", "bun run scripts/x.ts", "bun exec", "bun install", "bunx prettier .",
+        "pnpm install", "pnpm test", "pnpm dlx create-vite x", "yarn build", "yarn install", "yarn exec",
     )
+    # ... and a runner that names a script is SPD-168's: refused a member whose project allows no name, git or no git
+    NAMES_A_SCRIPT = ("npm run build", "npm run-script build", "pnpm run build", "deno task dev")
 
     def analysis(self, command):
         m = load_spud_module()
@@ -6078,6 +6320,11 @@ class RuntimeShellTest(BashHookCase):
             with self.subTest(command):
                 self.assertNotIn("git", self.analysis(command).kinds)
                 self.assertSilent(command)
+                self.assertSilent(command, agent_id=None)
+        for command in self.NAMES_A_SCRIPT:
+            with self.subTest(command):
+                self.assertNotIn("git", self.analysis(command).kinds)
+                self.assertRefused(command, RUNNER_WORDING)
                 self.assertSilent(command, agent_id=None)
 
     def test_text_the_hook_cannot_read_is_unknown_as_for_sh_c(self):
@@ -8019,7 +8266,7 @@ class FunctionShadowTest(BashHookCase):
         self.assertIn(("function", "sqlite3"), self.finding("sqlite3() { true; }; sqlite3 x.db"))
 
     def test_a_name_the_hook_does_not_dispatch_on_changes_nothing(self):
-        for ok in ("ls() { true; }; ls", "make() { true; }; make all", "cat() { true; }; cat f",
+        for ok in ("ls() { true; }; ls", "cc() { true; }; cc all", "cat() { true; }; cat f",
                    "grep() { true; }; grep x f"):
             with self.subTest(ok):
                 self.silent_for_everyone(ok)
@@ -8154,7 +8401,7 @@ class FunctionShadowTest(BashHookCase):
         # the unread name may be the bypassing wrapper's own, which a function of that name shadows in turn
         self.assertEqual(self.finding("functions[$k]=true; command git status")[-1], ("function", "command"))
         # ... and a name the hook grants nothing for is still silent, as is a call by path
-        for ok in ("functions[$k]=true; ls", "functions[$k]=true; /usr/bin/git status", "functions[$k]=true; make all"):
+        for ok in ("functions[$k]=true; ls", "functions[$k]=true; /usr/bin/git status", "functions[$k]=true; cc all"):
             with self.subTest(ok):
                 self.silent_for_everyone(ok)
 
@@ -9350,7 +9597,7 @@ class DescriptorRedirectTest(BashHookCase):
 
     def test_the_dup_operator_keeps_its_descriptor_and_its_close(self):
         for ok in ("echo x >& 3", "echo x >&3", "echo x 1>&3", "echo x 2>&1", "echo x >&-", "echo x >& -",
-                   "echo x >&2", "make 2>&1", "exec 3>&1", "cd docs && echo x >& 3", "cd docs && echo x >&-"):
+                   "echo x >&2", "cc --version 2>&1", "exec 3>&1", "cd docs && echo x >& 3", "cd docs && echo x >&-"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
@@ -12605,7 +12852,7 @@ class SqlTest(SpudTestCase):
             proc = self.home.run("sql", "--readonly", stmt, check=False)
             self.assertEqual(proc.returncode, EXIT_ERROR, stmt)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM name_pool WHERE name = 'X'"), 0)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 7)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), 8)
 
     def test_one_statement_no_flag_no_actor_needed(self):
         proc = self.home.run("sql", "SELECT 1", check=False)

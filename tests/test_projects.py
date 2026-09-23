@@ -291,9 +291,11 @@ class ProjectScriptsTest(RepoMixin, SpudTestCase):
     def test_a_projects_md_from_before_the_list_imports_with_none(self):
         self.home.json("render", actor="spud")
         path = self.home.path / "ledger" / "Projects.md"
-        # every table line without its last cell, the Scripts column 0007_project_scripts added
-        old = "\n".join(line[: line[:-1].rstrip().rfind("|") + 1] if line.startswith("|") else line
-                        for line in path.read_text(encoding="utf-8").split("\n"))
+        # every table line without its last two cells, the Scripts column 0007_project_scripts added and the Runners
+        # column 0008_project_runners added
+        old = path.read_text(encoding="utf-8")
+        for _ in range(2):
+            old = "\n".join(line[: line[:-1].rstrip().rfind("|") + 1] if line.startswith("|") else line for line in old.split("\n"))
         self.assertIn("| Remote | Archived |\n", old)
         legacy = self.home.path / "legacy-Projects.md"
         legacy.write_text(old, encoding="utf-8")
@@ -307,6 +309,86 @@ class ProjectScriptsTest(RepoMixin, SpudTestCase):
         finally:
             con.close()
         self.assertEqual(fresh.scalar("SELECT scripts FROM projects WHERE key = 'badtakes'"), "[]")
+
+
+class ProjectRunnersTest(RepoMixin, SpudTestCase):
+    """SPD-168: a project's allow-list of runner names -- npm scripts, deno tasks, make targets -- which the Bash hook lets
+    a member of that project's tickets run through a script runner (tests/test_hooks.py ScriptRunnerTest): set by Spud with
+    `project edit --allow-runner/--drop-runner`, kept in projects.runners, printed by `project show` and `project list`,
+    and carried by Projects.md."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = self.make_repo("badtakes-")
+        self.add_project(self.other)
+
+    def runners(self):
+        return json.loads(self.home.scalar("SELECT runners FROM projects WHERE key = 'badtakes'"))
+
+    def test_a_new_project_allows_no_name(self):
+        self.assertEqual(self.runners(), [])
+        self.assertEqual(self.cli_json("project", "show", "badtakes")["project"]["runners"], [])
+        self.assertIn("runners         -", self.cli("project", "show", "badtakes").stdout)
+
+    def test_spud_allows_and_drops_names(self):
+        out = self.cli_json("project", "edit", "badtakes", "--allow-runner", "test", "--allow-runner", "check:functions", actor="spud")
+        self.assertEqual(out["changed"], ["runners"])
+        self.assertEqual(out["project"]["runners"], ["check:functions", "test"])
+        self.assertEqual(self.runners(), ["check:functions", "test"])
+        self.assertIn("runners         check:functions, test", self.cli("project", "show", "badtakes").stdout)
+        listing = self.cli("project", "list").stdout
+        self.assertIn("runners", listing.splitlines()[0])
+        self.assertIn("check:functions, test", listing)
+        self.assertEqual(self.cli_json("project", "edit", "badtakes", "--allow-runner", "test", actor="spud")["changed"], [])
+        out = self.cli_json("project", "edit", "badtakes", "--drop-runner", "check:functions", "--allow-runner", "web:build", actor="spud")
+        self.assertEqual(out["project"]["runners"], ["test", "web:build"])
+        events = self.home.json("events", "--kind", "project.edited")["events"]
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1]["data"]["fields"], ["runners"])
+
+    def test_a_name_no_runner_would_read_as_one_name_is_refused(self):
+        for name in ("", "-x", "a b", "a,b", "build-*", "t?", "[x]", "$X", "a`b`", "a'b", 'a"b', "a\\b", "{a,b}"):
+            with self.subTest(name):
+                proc = self.cli("project", "edit", "badtakes", "--allow-runner=" + name, actor="spud", check=False)
+                self.assertEqual(proc.returncode, EXIT_USAGE, proc)
+                self.assertIn("not a runner name", proc.stderr)
+        proc = self.cli("project", "edit", "badtakes", "--drop-runner", "test", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("allows no runner name test", proc.stderr)
+        self.assertEqual(self.runners(), [])
+
+    def test_a_member_may_not_set_the_list(self):
+        t = self.new_ticket("Home", status="active")
+        m = self.new_member(t["key"])
+        proc = self.cli("project", "edit", "badtakes", "--allow-runner", "test", actor=m["ref"], check=False)
+        self.assertEqual(proc.returncode, EXIT_OWNERSHIP, proc)
+        self.assertEqual(self.runners(), [])
+
+    def test_projects_md_carries_the_list_and_imports_it_back(self):
+        self.cli("project", "edit", "badtakes", "--allow-runner", "test", "--allow-runner", "lint", actor="spud")
+        self.home.json("render", actor="spud")
+        path = self.home.path / "ledger" / "Projects.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("| Archived | Scripts | Runners |", text)
+        self.assertIn("|  | lint, test |", text)
+        # and a Projects.md from before 0008, with no Runners column, imports with none allowed
+        v7 = "\n".join(line[: line[:-1].rstrip().rfind("|") + 1] if line.startswith("|") else line for line in text.split("\n"))
+        self.assertIn("| Archived | Scripts |\n", v7)
+        for source, expected in ((path, ["lint", "test"]), (v7, [])):
+            fresh = Home()
+            self.addCleanup(fresh.cleanup)
+            fresh.init()
+            if isinstance(source, str):
+                legacy = fresh.path / "legacy-Projects.md"
+                legacy.write_text(source, encoding="utf-8")
+                source = legacy
+            con = fresh.connect()
+            try:
+                with con:
+                    self.assertEqual(spud.import_projects_file(con, "2026-09-22T10:00:00-07:00", source, "ledger/Projects.md"), 1)
+            finally:
+                con.close()
+            self.assertEqual(json.loads(fresh.scalar("SELECT runners FROM projects WHERE key = 'badtakes'")), expected)
 
 
 class TicketProjectTest(RepoMixin, SpudTestCase):

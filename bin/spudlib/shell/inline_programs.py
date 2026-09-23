@@ -43,9 +43,10 @@ What stays open, none of it this module's to close:
   library the interpreter runs before the program: perl's `-M`, ruby's `-r`, node's `--require`, deno's `--preload`
   and `deno repl --eval-file`.  Each names a file, so each is that same question and not this one.
 - **A subcommand that runs a command a file holds**: `npm run <name>`, `deno task <name>`, `bun run <script>`,
-  `pnpm run` and `yarn <script>`, whose command comes from package.json or deno.json.  That is SPD-145's class (Eric's
-  call: a member's shell whose commands come from a file is refused, with a project allow-list, shell/script_files), not
-  this module's; SPD-145 refused the shells themselves and left the runners to a proposal of their own.
+  `pnpm run`, `yarn <script>` and `make <target>`, whose command comes from package.json, deno.json or a makefile.  That
+  is SPD-145's class (Eric's call: a member's shell whose commands come from a file is refused, with a project allow-list,
+  shell/script_files), not this module's; since SPD-168 shell/script_runners refuses a member such a run unless its
+  project allows every name it runs (`project edit --allow-runner`), from a file outside the member's reach.
   The inline half of the same shape -- a subcommand that hands a shell text the line spells, `bun exec`, `npm exec -c`,
   `npx`, `npm explore`, `deno task --eval`, `pnpm exec`, `yarn exec` -- is read since SPD-154, where an `sh -c` string
   is, by shell/runtime_shells; `deno task` is tabled "shell" below so its `--eval` is no program of deno's.
