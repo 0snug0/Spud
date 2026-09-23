@@ -143,10 +143,11 @@ def alias_substitution(name, a):
 # status.  hooks/snapshots holds the table; these two read a command word against it.  An alias the line itself defines is
 # a different thing and read by the alias table: it reaches only text the line parses again, which is `eval`.
 def shell_aliased(words, a):
-    """(the text the shell's own aliases put in place of `words`, the member's own words that follow that expansion,
-    [(the name, what it runs)] for each one expanded, the first name whose body the hook cannot read), or
-    (None, [], [], None) when the command word is none of them.  The own words are kept apart because a write a body
-    makes into one of them is the member's write, which analyse_shell_text never prunes.
+    """(the text the shell's own aliases put in place of `words`, the member's own words that follow that expansion, as
+    the line's reading tokenized them, [(the name, what it runs)] for each one expanded, the first name whose body the hook
+    cannot read), or (None, [], [], None) when the command word is none of them.  The own words are kept apart because a
+    write a body makes into one of them, and a finding that spells one the hook cannot read, is the member's, which
+    analyse_shell_text never prunes.
 
     A shell expands an alias where it parses the command word, textually and before any rule reads it, so the body and
     the words after it are analysed as the text the shell would have parsed -- `gc -m x` is `git commit --verbose -m x`
@@ -176,15 +177,13 @@ def shell_aliased(words, a):
     if not expanded:
         return None, [], [], None
     text = " ".join(out + [prepare.requoted(w) for w in words[i:]])
-    return text, [prepare.deglob(w) for w in words[i:]], expanded, None
+    return text, list(words[i:]), expanded, None
 
 
 def shell_function(name, a):
-    """The shell text a function the shell already defines runs for this command word, or None.  Read once per name per
-    line, so a line that names it twice -- or a body that calls itself -- reads it no further; an alias of the same name
-    is expanded first, as the shell does it (shell_aliased runs before this)."""
-    if name in a.bodies_read:
-        return None
+    """The shell text a function the shell already defines runs for this command word, or None; an alias of the same name
+    is expanded first, as the shell does it (shell_aliased runs before this).  analyse.read_shell_name reads it once per
+    call's words, so a body that calls itself with them reads it no further."""
     found = snapshots.shell_table(a.home)
     return found.body(name) if name in found.functions else None
 

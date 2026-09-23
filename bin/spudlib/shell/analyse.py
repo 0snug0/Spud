@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, heredocs, inline_programs, interpreter_words, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, heredocs, inline_programs, interpreter_words, positional, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -554,7 +554,14 @@ def read_shell_name(words, a, depth):
     """A command word the shell the Bash tool starts already defines, read for what it actually runs: an alias,
     whose body and the words after it are analysed as the text the shell put there -- and True, since that text is the
     command now -- or a function, whose body is read as an `eval` string is while the call's own words go on to be
-    dispatched for what they name.  An alias shadows a function of the same name, as the shell resolves them."""
+    dispatched for what they name.  An alias shadows a function of the same name, as the shell resolves them.
+
+    The call's words reach a function's body as its positional parameters, so the body is read with them set where it
+    reads those (shell/positional, SPD-203): `gitfn push`, whose body is `command git "$@"`, is `git push`.  It is read
+    once per call's words, not once per name, so the second call of `gitfn status; gitfn push` is read too, and a body
+    that calls itself with the same words reads it no further.  Past positional.READINGS_PER_NAME readings of one name on
+    a line, a call with other words reads the body as it stands, once, whose findings the member's words keep: a profile
+    whose functions call one another with ever other words cannot multiply one line's readings without bound."""
     cmd = prepare.deglob(words[0])
     text, own_words, expanded, unreadable = expansions.shell_aliased(words, a)
     a.shell_expanded.extend(expanded)
@@ -571,18 +578,25 @@ def read_shell_name(words, a, depth):
         return True
     body = expansions.shell_function(cmd, a)
     if body is not None:
-        a.shell_expanded.append((cmd, "a shell function"))
-        a.bodies_read.add(cmd)
-        # the call's own words reach the body as its positional parameters, which member_supplied reads there
-        analyse_shell_text(a, body, depth + 1, [prepare.deglob(w) for w in words[1:]], own_process=True)
+        text, sound = positional.substituted(body, words[1:])
+        read, reads = (text, tuple(words[1:])), a.bodies_read.setdefault(cmd, set())
+        if read not in reads and len(reads) >= positional.READINGS_PER_NAME:
+            text, sound = body, False
+            read = (body, bool(words[1:]) and (a.shell_reading == 0 or bool(a.shell_words)))
+        if read not in reads:
+            a.shell_expanded.append((cmd, "a shell function"))
+            reads.add(read)
+            analyse_shell_text(a, text, depth + 1, words[1:], own_process=True, substituted=sound)
     return False
 
 
-def analyse_shell_text(a, text, depth, own_words, own_process=False):
+def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted=None):
     """Read text the shell itself holds: an alias's body, which is the line's own text once the shell has parsed it, or a
     function's, whose directory changes and assignments stay its own (own_process).  `own_words` are the member's own
-    words of the line that reach this text -- the words after the alias the shell expanded, or the call's arguments, which
-    a function receives as its positional parameters.
+    words of the line that reach this text, as the line's reading tokenized them -- the words after the alias the shell
+    expanded, or the call's arguments, which a function receives as its positional parameters.  `substituted`, for a
+    function's body: whether shell/positional set those words where the body reads them (True), or left it as it stands
+    because it cannot follow them there (False).
 
     The findings are the findings the text would earn on the line, minus two kinds that would fall on a member for text it
     did not write and cannot change: the ones that say only that the hook cannot read a word (syntax.SHELL_TEXT_TOLERATED)
@@ -590,33 +604,82 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False):
     dispatch through `"$_cc_bin"` and write through `$data`-shaped names of their own; without both prunes a member would
     be refused every `grep` it runs.
 
-    A target the member supplied is never pruned (member_supplied): an alias's expansion is its body followed by the
-    member's own words, and a function's `$@` is them, so pruning on the target's spelling alone let an alias launder
-    exactly what the unresolvable-target rule exists to refuse -- `md $HOME/planted` recorded no write while
-    `mkdir -p $HOME/planted` was refused.  A concrete file the text writes is held to the path rule for the caller, as an
-    alias's redirection is anywhere else.  Only the outermost of these readings prunes, so a nested one never drops what
-    the reading closest to the member's words keeps.
+    What the member's own words earn is never pruned, since the member wrote those and can spell them out (SPD-203):
+
+    - a target the member supplied (member_supplied): an alias's expansion is its body followed by the member's own words,
+      and a function's `$@` is them, so pruning on the target's spelling alone let an alias launder exactly what the
+      unresolvable-target rule exists to refuse -- `md $HOME/planted` recorded no write while `mkdir -p $HOME/planted`
+      was refused;
+    - a finding that spells one of the member's words the hook cannot read (spells_member_word): `_ $(echo git) push`
+      (`_='sudo '`) is `sudo $(echo git) push`, whose command word refuses a member as it does spelled out;
+    - for a call with words, every finding of a function's body the substitution could not set them into
+      (substituted=False), and one that spells a reference to them the substitution left where another reading takes
+      it (`sh -c 'git "$@"' _ "$@"`): the member's words reach those where the hook does not follow them.
+
+    A concrete file the text writes is held to the path rule for the caller, as an alias's redirection is anywhere else.
+    Only the outermost of these readings prunes, so a nested one never drops what the reading closest to the member's
+    words keeps; a function's body nested in it marks its own findings to keep while the outermost reading has words.
 
     A target the text's own line settles is resolved before this sees it, so it is a concrete file and the prune
     does not reach it: a body that writes `$data` after assigning it goes to the path rule like any spelled path, while the
     harness's `"$_cc_bin"` and the environment it reads, which no line settles, stay as unresolvable as they were."""
     outermost = a.shell_reading == 0
+    if outermost:
+        a.shell_words = list(own_words)
     marks = (len(a.findings), len(a.redirects), len(a.git_writes), len(a.arg_writes))
     a.shell_reading += 1
     try:
         if own_process:
-            analyse_isolated(a, text, depth)
+            # not analyse_isolated's cache: a body read before without the member's words had its findings pruned, and
+            # read_shell_name reads each call's once
+            isolated(a, lambda: analyse_command(text, a, depth))
         else:
             analyse_command(text, a, depth)
     finally:
         a.shell_reading -= 1
+    if substituted is not None and own_words and a.shell_words:
+        a.shell_kept.update(i for i in range(marks[0], len(a.findings)) if a.findings[i][0] in syntax.SHELL_TEXT_TOLERATED
+                            and (not substituted or positional.REFERENCE_RE.search(a.findings[i][1])))
     if not outermost:
         return
-    supplied = frozenset(own_words)
-    a.findings[marks[0]:] = [f for f in a.findings[marks[0]:] if f[0] not in syntax.SHELL_TEXT_TOLERATED]
+    unread = [member_spelling(w) for w in own_words if unreadable_word(w)]
+    kept, a.shell_kept, a.shell_words = a.shell_kept, set(), []
+    a.findings[marks[0]:] = [f for i, f in enumerate(a.findings[marks[0]:], marks[0])
+                             if f[0] not in syntax.SHELL_TEXT_TOLERATED or i in kept
+                             or any(spells_member_word(f[1], spelled) for spelled in unread)]
+    supplied = frozenset(prepare.deglob(w) for w in own_words)
     a.redirects[marks[1]:] = [e for e in a.redirects[marks[1]:] if keeps_write(e[0], supplied)]
     a.git_writes[marks[2]:] = [e for e in a.git_writes[marks[2]:] if keeps_write(e[1], supplied)]
     a.arg_writes[marks[3]:] = [e for e in a.arg_writes[marks[3]:] if keeps_write(e[1], supplied)]
+
+
+def unreadable_word(word):
+    """Whether the hook cannot read this word of the member's as a fixed string: it holds an expansion, a substitution or
+    a glob the shell expands."""
+    return expansions.expansion_word(word) or globbing.active_glob_word(word)
+
+
+def member_spelling(word):
+    """How a finding spells a word of the member's that the hook cannot read: a substitution as `$(...)`, as
+    resolve_expansion shows every word that holds one, and anything else as the line spells it."""
+    return "$(...)" if hookio.SUBST in word else prepare.deglob(word)
+
+
+def spells_member_word(detail, spelled):
+    """Whether a finding's detail is the member's word the hook cannot read: the word itself, or -- for an expansion,
+    which a body may glue to text of its own (`--author=$1`) -- a longer word that holds it, not followed by a character
+    that would lengthen its name.  A glob of the member's is its whole word: `*` is not the body's own `-*-config*`."""
+    if detail == spelled:
+        return True
+    if "$" not in spelled:
+        return False
+    at = detail.find(spelled)
+    while at >= 0:
+        after = detail[at + len(spelled) : at + len(spelled) + 1]
+        if not (after and (after.isalnum() or after == "_") and (spelled[-1].isalnum() or spelled[-1] == "_")):
+            return True
+        at = detail.find(spelled, at + 1)
+    return False
 
 
 def keeps_write(target, supplied):

@@ -9909,6 +9909,18 @@ class RealShellSnapshotTest(BashHookCase):
         # ... and one a member ran all day until SPD-150, refused now whatever this Mac's profile says (InlineProgramTest)
         self.assertIn(INLINE_WORDING, self.real_bash("python3 -c pass").reason)
 
+    def test_a_function_that_hands_its_words_to_git_reads_them(self):
+        """SPD-203: oh-my-zsh defines `__git_prompt_git () { GIT_OPTIONAL_LOCKS=0 command git "$@" }`, which ran a
+        member's push past Law 7 until the body was read with the call's words (FunctionWordsTest)."""
+        name = "__git_prompt_git"
+        if name not in self.table.functions:
+            self.skipTest("this profile defines no %s" % name)
+        r = self.real_bash(name + " push")
+        self.assertEqual(r.decision, "deny", r)
+        self.assertIn("Law 7", r.reason)
+        r = self.real_bash(name + " status")
+        self.assertNotEqual(r.decision, "deny", r.reason)
+
 
 class NamedCoprocTest(BashHookCase):
     """SPD-060: bash 4 and later accept a name before a coproc's compound command, `coproc NAME compound_command`, and run
@@ -15130,6 +15142,269 @@ class AnsiCQuotingTest(ShellSnapshotCase):
                             "alias -- nlp=$'echo a\\ngit push'\nalias -- crp=$'git push\\C-M'\n")
         self.refused_for_members("nlp", "Law 7")
         self.assertIn("crp", self.refused_for_members("crp", "alias your shell already defines").reason)
+
+
+# SPD-203: functions of the shell's that hand their call's words on, one per shape of reference to them.  `gitfn` is this
+# Mac's oh-my-zsh `__git_prompt_git`, and `ccgrep` the shape of Claude Code's own grep shadow on this Mac, whose loop over
+# the words and case patterns earn findings of the body's own that the prune drops.
+FUNCTION_WORDS_SNAPSHOT = """\
+gitfn () {
+\tGIT_OPTIONAL_LOCKS=0 command git "$@"
+}
+gitone () {
+\tgit $1
+}
+gitdq () {
+\tgit "$1" "${2}"
+}
+gitstar () {
+\tgit "$*"
+}
+gitplus () {
+\tgit ${1+"$@"}
+}
+gitdefault () {
+\tgit "${1:-status}"
+}
+gitlast () {
+\tgit ${@:$#}
+}
+gitsub () {
+\techo "$(git "$@")"
+}
+gitsh () {
+\tsh -c 'git "$@"' _ "$@"
+}
+gitshift () {
+\tshift
+\tcommand git "$@"
+}
+gitvar () {
+\tlocal verb=$1
+\tshift
+\tgit $verb "$@"
+}
+gitloop () {
+\tfor a
+\tdo
+\t\tgit $a
+\tdone
+}
+gitmod () {
+\tgit $1:t
+}
+gitten () {
+\tgit $10
+}
+mk () {
+\tmkdir -p "$@"
+}
+selfcall () {
+\tgit "$@"
+\tselfcall "$@"
+}
+grow () {
+\tgrow x "$@"
+\tgrow y "$@"
+}
+function ccgrep {
+  local _cc_a
+  for _cc_a in ${1+"$@"}; do
+    case "$_cc_a" in -*-filter*|-*-config*|---*|-@*|-[Zz]*|-[!-]*[Zz]*|--null) command grep ${1+"$@"}; return ;; esac
+  done
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  ARGV0=ugrep "$_cc_bin" -G --hidden ${1+"$@"}
+}
+"""
+
+
+class FunctionWordsTest(ShellSnapshotCase):
+    """SPD-203, filed by SPD-201's engineer: analyse_shell_text dropped every finding that says only "the hook cannot read
+    this word" from the text a function or an alias of the shell's runs, whatever made it -- the member's own words
+    included.  A function receives its call's words as its positional parameters, so this Mac's oh-my-zsh
+    `__git_prompt_git () { GIT_OPTIONAL_LOCKS=0 command git "$@" }` pushes for `__git_prompt_git push`; the hook read the
+    body as it stands, `git "$@"`, recorded only ('git', ('$@', None)), which Law 7 does not refuse (git_not_allowed leaves
+    an unresolvable verb to the expansion's own finding), and dropped the expansion's finding: `gitfn push` and `gitfn
+    commit -m x` passed a member.  After an alias the member's words are the line's own: `_ $(echo git) push` (`_='sudo
+    '`) recorded no finding at all, where `sudo $(echo git) push` records ('var', '$(...)').
+
+    The rule now (shell/positional, analyse.analyse_shell_text):
+
+    - a function's body is read with the call's words set where it reads its parameters, each quoted again as the line
+      spelled it, so `gitfn push` reads as `git push` and `gitfn status` as `git status`;
+    - where the substitution cannot follow the words (`shift`, `set`, a loop with no list, a function defined in the body,
+      zsh's modifiers and subscripts, `$10`), the body is read as it stands and, for a call with words, keeps every
+      finding it earns, as does a reference left in a string another reading takes (`sh -c '... "$@"' _ "$@"`);
+    - a finding that spells a word of the member's the hook cannot read (a substitution, a `$NAME`, a glob) is kept
+      in the text an alias or a function runs, as a write target the member supplied already was.
+
+    What the shells do with each reference is probed in shell/positional's docstring.  AGENT_A and AGENT_B plan
+    home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000005-ffffff.sh", FUNCTION_WORDS_SNAPSHOT)
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def reading(self, command):
+        """What a refusal rests on (AliasWordsTest.reading): whether the line tokenized, the findings past "the hook
+        cannot read a word", and the files it writes."""
+        a = self.analysis(command)
+        return (a.unparseable, [f for f in a.findings if f[0] not in self.m.SHELL_TEXT_TOLERATED],
+                [(e[0], e[1]) for e in a.arg_writes], [r[0] for r in a.redirects], [(g[0], g[1]) for g in a.git_writes])
+
+    def spud_silent(self, *lines):
+        """Law 7 and the expansion findings bind members alone: Spud reads on."""
+        for line in lines:
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertSilent(line, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence(self):
+        for line, verb in (("gitfn push", "git push"), ("gitfn commit -m x", "git commit"), ("gitfn push origin main", "git push")):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, "Law 7")
+                self.assertIn(verb, r.reason)
+                self.assertIn("`gitfn` as a shell function", r.reason)
+        self.assertIn(("git", ("push", "push")), self.analysis("gitfn push").findings)
+        self.refused_for_members("_ $(echo git) push", "comes from a variable or a substitution")
+        self.silent_for_everyone("gitfn status")
+        self.silent_for_everyone("gitfn log --oneline -5")
+        self.spud_silent("gitfn push", "gitfn commit -m x", "_ $(echo git) push")
+
+    # -- each reference the substitution reads ------------------------------------------------------------------------
+    def test_each_reference_reads_the_call_s_words(self):
+        for line in ("gitone push", "gitdq push", "gitdq push status", "gitstar push", "gitplus push", "gitdefault push",
+                     "gitlast status push", "gitsub push", "gitfn \"push\"", "gitfn 'push'", "gitfn --no-pager push",
+                     "gitfn push \"don't\"", "gitdq \"push\""):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "Law 7")
+        for line in ("gitone status", "gitdq status", "gitdq status push", "gitstar status", "gitplus", "gitplus status",
+                     "gitdefault", "gitdefault log", "gitlast push status", "gitsub status", "gitfn", "gitfn \"don't\" status"):
+            with self.subTest(line=line):
+                self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+        for line in ("gitone status", "gitdq status push", "gitstar status", "gitplus", "gitdefault", "gitlast push status",
+                     "gitsub status", "gitfn"):
+            self.silent_for_everyone(line)
+        self.spud_silent("gitone push", "gitstar push", "gitplus push", "gitdefault push", "gitlast status push", "gitsub push")
+
+    def test_the_substitution_s_text(self):
+        """The text shell/positional makes of a body for a call's words (masked words, as the line's reading gives them),
+        each as the shells read the reference (probed in shell/positional's docstring); False where it cannot follow."""
+        sub = self.m.substituted
+        words = ["x", "", "y"]
+        for body, expected in (("git \"$@\"", "git x '' y"), ("git $@", "git x y"), ("git \"$*\"", "git x\\ \\ y"),
+                               ("git \"[$1]\"", "git \"[\"x\"]\""), ("git \"$2\"", "git ''"), ("git $#", "git 3"),
+                               ("git ${1+\"$@\"}", "git x '' y"), ("git ${@:$#}", "git y"), ("git \"${@:2}\"", "git '' y"),
+                               ("git \"${@:2:1}\"", "git ''"), ("echo '$1' \"$1\"", "echo '$1' x"),
+                               ("echo \"$(git \"$@\")\"", "echo \"$(git x '' y)\""), ("# $1 x\ngit $1", "# $1 x\ngit x"),
+                               ("git \"a $@ b\"", "git \"a \"x '' y\" b\""), ("git ${@:$#} ${0} $$", "git y ${0} $$"),
+                               ("(( $# > 1 )) && git $3", "(( 3 > 1 )) && git y"), ("echo $(( $# + 1 ))", "echo $(( 3 + 1 ))"),
+                               ("echo ${X:-a} $X", "echo ${X:-a} $X")):
+            with self.subTest(body=body):
+                self.assertEqual(sub(body, words), (expected, True))
+        for body, call, expected in (("git ${1+\"$@\"}", [], "git "), ("git \"${1:-status}\"", [], "git \"status\""),
+                                     ("git \"${1:-status}\"", ["push"], "git push"), ("git ${@:-.}", [], "git ."),
+                                     ("git \"${@:-.}\"", ["a", "b"], "git a b"), ("git \"$@\"", ["*"], "git *"),
+                                     ("git \"$1\"", ["a b"], "git a\\ b"), ("git ${2:+z} ${2-w}", ["a"], "git  w")):
+            with self.subTest(body=body, call=call):
+                self.assertEqual(sub(body, call), (expected, True))
+        for body, call in (("git $1", ["a b"]), ("git x$@", ["", "b"]), ("git x\"$@\"", ["*"]), ("git $1:t", ["a"]),
+                           ("git $10", ["a"]), ("git $@[1]", ["a"]), ("git $#x", ["a"]), ("shift; git \"$@\"", ["a"]),
+                           ("set -- q; git \"$@\"", ["a"]), ("for a; do git $a; done", ["a"]), ("getopts ab o", ["a"]),
+                           ("f () { git \"$@\"; }", ["a"]), ("git ${@:0}", ["a"]), ("git ${@:-.}", [""]),
+                           ("git ${(q)1}", ["a"]), ("git ${#1}", ["a"]), ("git ${x:-$1}", ["a"]), ("echo `echo $1`", ["a"]),
+                           ("cat <<E\n$1\nE", ["a"]), ("echo $(( $1 + 1 ))", ["a"]), ("git $argv", ["a"])):
+            with self.subTest(body=body, call=call):
+                self.assertEqual(sub(body, call), (body, False))
+
+    def test_the_words_read_as_they_do_spelled_after_the_body(self):
+        """`mk () { mkdir -p "$@" }` with each word AliasWordsTest reads after an alias: the reading of `mk <words>` is the
+        reading of `mkdir -p <words>`, quotes, globs, expansions and substitutions as the line spelled them."""
+        for words in AliasWordsTest.WORDS:
+            with self.subTest(words=words):
+                self.assertEqual(self.reading("mk " + words), self.reading("mkdir -p " + words))
+        for line in ("mk tests/a", "mk \"tests/a b\"", "mk tests/a tests/b"):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A)
+                self.assertSilent(line, AGENT_B)
+        self.refused_for_members("mk note", "deliverables")
+        self.refused_for_members("mk $HOME/planted", "spell the path out")
+
+    def test_a_function_named_twice_reads_each_call(self):
+        """Each call is read with its own words: the body was read once per name per line, which let the second call
+        of `gitfn status; gitfn push` go unread."""
+        for line in ("gitfn status; gitfn push", "gitfn push; gitfn status", "gitfn status && gitfn commit -m x",
+                     "gitone status | gitone push"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "Law 7")
+        self.silent_for_everyone("gitfn status; gitfn log")
+        self.assertEqual(self.analysis("gitfn status; gitfn push").shell_expanded,
+                         [("gitfn", "a shell function"), ("gitfn", "a shell function")])
+
+    def test_one_name_s_readings_have_a_bound(self):
+        """Past READINGS_PER_NAME calls of one name with other words, the body is read once more as it stands, and the
+        member's words keep what it earns: refused on doubt, never read short.  A body that calls itself -- with the same
+        words, or with more each time -- ends."""
+        cap = self.m.READINGS_PER_NAME
+        reads = "; ".join("gitfn log -%d" % k for k in range(1, cap + 1))
+        self.silent_for_everyone(reads)
+        self.refused_for_members(reads + "; gitfn push", "cannot resolve")
+        self.refused_for_members(reads + "; gitfn log -%d" % (cap + 1), "cannot resolve")
+        self.spud_silent(reads + "; gitfn push")
+        for line in ("selfcall push", "grow push", "grow status"):
+            with self.subTest(line=line):
+                self.assertLessEqual(len(self.analysis(line).shell_expanded), cap + 2)
+        self.refused_for_members("selfcall push", "Law 7")
+
+    # -- where the substitution cannot follow the words ---------------------------------------------------------------
+    def test_a_body_the_substitution_cannot_follow_keeps_its_findings(self):
+        """`shift`, a loop with no list, a variable the body fills from a word it then shifts past, zsh's `:t` and `$10`:
+        the body is read as it stands, and for a call with words every finding it earns stands, so the member is
+        refused on doubt -- a readable verb too -- and spells the command out."""
+        for line in ("gitshift x push", "gitshift x status", "gitvar push", "gitvar status", "gitloop push", "gitmod d/push",
+                     "gitten 1 2 3 4 5 6 7 8 9 push"):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, "cannot resolve")
+                self.assertIn("as a shell function", r.reason)
+        self.spud_silent("gitshift x push", "gitvar push", "gitloop push", "gitmod d/push")
+        # with no words there is nothing of the member's for the body to read, and it reads as it did before
+        for line in ("gitshift", "gitvar", "gitloop", "gitmod"):
+            self.silent_for_everyone(line)
+
+    def test_a_reference_another_reading_takes_is_kept(self):
+        """`sh -c 'git "$@"' _ "$@"` hands the words to a shell whose string the substitution does not reach (a single-quoted
+        string is its reading's, not the body's): the reference the string reads is kept for a call with words."""
+        self.refused_for_members("gitsh push", "cannot resolve")
+        self.refused_for_members("gitsh status", "cannot resolve")
+        self.spud_silent("gitsh push")
+        self.silent_for_everyone("gitsh")
+
+    # -- the member's own words the hook cannot read ------------------------------------------------------------------
+    def test_a_word_of_the_member_s_the_hook_cannot_read_keeps_its_finding(self):
+        for line in ("gitfn $(echo push)", "gitfn $X", "gitfn \"$X\"", "gitone $X", "gitfn `echo push`", "gitplus $X",
+                     "g $(echo push)", "g $X", "g \"$X\"", "_ $X push", "_ \"$(echo git)\" push", "_ g$X push"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "cannot resolve")
+        self.spud_silent("gitfn $(echo push)", "g $X", "_ $X push", "_ $(echo git) push")
+        # a value the line settles is read as the word it is
+        self.refused_for_members("X=push; gitfn $X", "Law 7")
+        self.silent_for_everyone("X=status; gitfn $X")
+
+    def test_what_the_body_itself_cannot_read_stays_dropped(self):
+        """The harness's shadows walk the words and dispatch through `"$_cc_bin"`: the findings of the body's own text stay
+        dropped whatever the member's words are, a glob, an expansion or a substitution among them."""
+        for line in ("ccgrep -rn x .", "ccgrep x *", "ccgrep x $(echo f)", "ccgrep $X f", "ccgrep -e 'a b' f", "ccgrep",
+                     "shadowed x *", "shadowed $(echo x)", "grep -rn x .", "grep x *", "grep x $HOME", "_ ls $X", "ll $X",
+                     "_ echo $(echo git) push", "gitfn status $X"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
 
 
 # =============================================================================

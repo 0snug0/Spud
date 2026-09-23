@@ -187,7 +187,8 @@ ALIAS_KEY = "\x00alias\x00"
 # cannot spell it differently and cannot write the file it comes from, and Claude Code's own shadows for find, grep,
 # pkill and rg each dispatch through `"$_cc_bin"`, so reading those as refusals would refuse every `grep` a member runs.
 # Everything the hook *can* read there -- a git verb, a program git runs, a database call, a spud call, a file the text
-# names and writes -- is the finding it would be on the line.
+# names and writes -- is the finding it would be on the line, and so is one the member's own words there earn: a word
+# after the alias's name, or a call's words in a function's body (analyse.analyse_shell_text, SPD-203).
 SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias", "eval-flag"})
 # A positional parameter, which is how a function receives the words the member wrote (`mkdir -p $@` in a body is
 # the member's own path).  A write target holding one is never pruned from text the shell holds, whatever else is: `$@`,
@@ -521,11 +522,14 @@ class ShellAnalysis:
         # command word may already be one of that profile's aliases or functions before anything on the line runs.
         # `shell_expanded`, (the name, what the shell runs for it) per expansion on this line, in order, so a reason can
         # say what the word it names actually was; `expanding`, the alias names whose expansion is in flight, which zsh
-        # does not expand again inside their own body (`alias ls='ls -G'` terminates); `bodies_read`, the function names
-        # whose body this line has already read, once each however often the line names them; `shell_reading`, how deep
-        # inside such text the reading is, so the outermost of them prunes once, against the member's own words.
-        self.shell_expanded, self.expanding, self.bodies_read = [], [], set()
-        self.shell_reading = 0
+        # does not expand again inside their own body (`alias ls='ls -G'` terminates); `bodies_read`, each function name ->
+        # the (text, call's words) its body was read as on this line, once each however often the line names it with those
+        # words; `shell_reading`, how deep inside such text the reading is, so the outermost of them prunes once, against
+        # the member's own words; `shell_words`, those words, while the outermost reading is under way; `shell_kept`, the
+        # indices of the findings a function's body earned that the member's words reach where the hook cannot follow them
+        # (SPD-203), which that prune keeps.
+        self.shell_expanded, self.expanding, self.bodies_read = [], [], {}
+        self.shell_reading, self.shell_words, self.shell_kept = 0, [], set()
         # The command names a `hash` line put in the shell's own command table, so a later bare call of one of them
         # runs the file the line chose whatever PATH holds.  Never cleared: a `hash` in a branch, a subshell or a loop body
         # still leaves the hook unable to say which program a name finds, and the refusal is the safe answer.  zsh's
