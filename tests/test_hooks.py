@@ -13087,6 +13087,66 @@ class WrapperDirectoryTest(BashHookCase):
                     self.assertSilent(command, agent_id, cwd=scratch)
 
 
+class SettledCdTargetTest(BashHookCase):
+    """SPD-147: directories.cd_target returned None for any word holding an expansion, so after `S=<dir>; cd "$S/x"` the
+    hook knew no directory and refused every relative write on the line, Spud's too (SPD-035), while SPD-127 already put
+    that very value in a redirection target, a tee operand, a git write option and a write by argument through
+    arg_writes.resolved.  SPD-126's differential over 945 member commands found a member editing a copy in its own
+    scratchpad refused with "cannot follow".  One reading of a variable holds for the directory a write is relative to as
+    well: a cd, pushd or chdir target, and an `env -C`/`sudo -D` value, are resolved as a write target is, and only a
+    value the line cannot settle (not assigned, doubted, a loop's, holding a blank, a glob or a `~` the expansion does not
+    expand, appended, a substitution) keeps the refusal."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.scratch = str(Path(tempfile.mkdtemp(prefix="spd-147-")).resolve())
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        (Path(self.scratch) / "perturb" / "collab").mkdir(parents=True)
+        (Path(self.scratch) / "perturb" / "collab" / "index.ts").write_text("a\n", encoding="utf-8")
+        (self.home.path / "ledger" / "tickets").mkdir(parents=True, exist_ok=True)
+
+    def test_the_differentials_line_is_followed(self):
+        line = "set -e\nS=%s\ncd \"$S/perturb/collab\"\nperl -i -pe 's/a/b/' index.ts" % self.scratch
+        self.assertSilent(line, agent_id=None, cwd=self.scratch)
+        # A member's in-place perl program is refused on its own since SPD-175 (its text writes), not for the directory
+        r = self.bash(line, AGENT_A, cwd=self.scratch)
+        self.assertNotIn("cannot follow", r.reason)
+        self.assertIn("runs a program `-e` carries", r.reason)
+        for agent_id in (AGENT_A, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent(line.replace("perl -i -pe 's/a/b/' index.ts", "echo x > index.ts"), agent_id, cwd=self.scratch)
+                self.assertSilent(line.replace("perl -i -pe 's/a/b/' index.ts", "sed -i '' s/a/b/ index.ts"), agent_id, cwd=self.scratch)
+                self.assertSilent(line.replace("perl -i -pe 's/a/b/' index.ts", "perl -pe 's/a/b/' index.ts > out.ts"), agent_id,
+                                  cwd=self.scratch)
+
+    def test_a_settled_directory_is_read_where_it_leads(self):
+        home = self.home.path
+        for cd in ('S=%s; cd "$S/ledger/tickets"', 'S=%s/ledger; cd ${S}/tickets', "S=%s/ledger/tickets; cd $S",
+                   'S=%s/ledger; pushd "$S/tickets"', 'S=%s; cd -P "$S/ledger/tickets"'):
+            cd = cd % home
+            with self.subTest(cd):
+                self.assertRefused(cd + "; echo x > SPD-001.md", "generated", AGENT_C)
+                self.assertRefused(cd + "; perl -i -pe s/a/b/ SPD-001.md", "generated", AGENT_C)
+                self.assertRefused(cd + "; echo x > SPD-001.md", "Law 1", agent_id=None)
+        self.assertRefused('S=%s/ledger/tickets; env -C "$S" touch SPD-001.md' % home, "generated", AGENT_C)
+        # the value in force where the cd runs, not the line's last
+        self.assertRefused('S=%s/ledger/tickets; cd "$S"; S=%s; echo x > SPD-001.md' % (home, self.scratch), "generated", AGENT_C)
+
+    def test_an_unsettled_value_stays_unfollowable(self):
+        s = self.scratch
+        for cd in ('cd "$S/perturb"', 'true && S=%s; cd "$S"' % s, '(S=%s); cd "$S"' % s, 'for S in %s; do :; done; cd "$S"' % s,
+                   'for i in 1; do S=%s; cd "$S"; done' % s, 'S="%s/a b"; cd "$S"' % s, "S='%s/*'; cd $S" % s, "S='~'; cd \"$S\"",
+                   'S=%s; S+=/perturb; cd "$S"' % s, 'S=; cd "$S"', 'cd "$(pwd)"', 'S=%s; cd "$S$T"' % s, "S=-; cd \"$S\""):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(cd=cd, agent_id=agent_id):
+                    self.assertRefused(cd + "; echo x > note.txt", "cannot follow", agent_id, cwd=s)
+        # a wrapper's directory: Spud hears the directory's reason, a member SPD-043's var-word one first
+        self.assertRefused('S=%s; env -C "$S$T" touch f' % s, "cannot follow", agent_id=None, cwd=s)
+        self.assertRefused('S=%s; env -C "$S$T" touch f' % s, WORD_WORDING, cwd=s)
+        self.assertSilent('S=%s; env -C "$S/perturb" touch f' % s, agent_id=None, cwd=s)
+
+
 class GitVerbProgramOptionTest(BashHookCase):
     """SPD-051: SPD-046's table of verb options that name a program git runs listed only ls-remote/fetch --upload-pack,
     grep -O/--open-files-in-pager, difftool -x/--extcmd and archive --exec.  The same class lives on other verbs Law 7

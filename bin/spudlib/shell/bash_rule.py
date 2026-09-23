@@ -13,8 +13,8 @@ from ..state import lookup
 # earns a member ("capped", "nomatch").  A target holding an operand the line does not spell (syntax.unknown_operand)
 # earns a member "input" -- what xargs reads from its input, what find hands its command -- or "anywhere", files a command
 # places where the line cannot say.
-_UNFOLLOWABLE = ("a cd into a variable, `cd -`, popd, a directory stack entry or ~name, an option or a CDPATH it cannot"
-                 " read, a relative cd in a loop, a sourced file)")
+_UNFOLLOWABLE = ("a cd into a variable the line does not settle, `cd -`, popd, a directory stack entry or ~name, an option"
+                 " or a CDPATH it cannot read, a relative cd in a loop, a sourced file)")
 _INPUT = (" names a file xargs reads from its input (or find hands its command as {}), which the hook cannot know; spell the"
           " paths out, or give find the files to change as its own starting points")
 _ANYWHERE = (" places files where the line cannot say -- an archive tar extracts with -P (it keeps absolute paths and `..`) or"
