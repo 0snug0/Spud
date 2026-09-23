@@ -7349,7 +7349,7 @@ class HereDocumentBodyTest(BashHookCase):
         self.law_7("cat <<EOF $(echo ledger/tickets/SPD-001.md\ngit push\n) > /dev/null\nbody12\nEOF")
         self.refused_everywhere("cat <<EOF > $(echo a\ntee ledger/tickets/SPD-001.md < /dev/null\n)\nbody12\nEOF")
         self.assertEqual(self.m.strip_heredocs("cat <<EOF > $(echo ledger/tickets/SPD-001.md\n)\nbody12\nEOF"),
-                         ("cat <<EOF > $(echo ledger/tickets/SPD-001.md\n)\n", ["body12"]))
+                         ("cat <<EOF > $(echo ledger/tickets/SPD-001.md\n)\n", ["body12"], [True]))
 
     # -- the hole -----------------------------------------------------------------------------------------------------
     def test_every_spanning_word_keeps_the_command_going(self):
@@ -7401,11 +7401,11 @@ class HereDocumentBodyTest(BashHookCase):
 
     def test_bodies_follow_in_operator_order(self):
         self.assertEqual(self.m.strip_heredocs("cat <<A <<-B\nbodyA\nA\n\tbodyB\n\tB\nnext"),
-                         ("cat <<A <<-B\nnext", ["bodyA", "\tbodyB"]))
+                         ("cat <<A <<-B\nnext", ["bodyA", "\tbodyB"], [True, True]))
         self.assertEqual(self.m.strip_heredocs("cat <<A - <(cat <<B\nbodyB\nB\n) > f\nbodyA\nA"),
-                         ("cat <<A - <(cat <<B\n) > f\n", ["bodyA", "bodyB"]))
+                         ("cat <<A - <(cat <<B\n) > f\n", ["bodyA", "bodyB"], [True, True]))
         self.assertEqual(self.m.strip_heredocs("cat <<'A' \"a\nb\" <<B\nbodyA\nA\nbodyB\nB"),
-                         ("cat <<'A' \"a\nb\" <<B\n", ["bodyA", "bodyB"]))
+                         ("cat <<'A' \"a\nb\" <<B\n", ["bodyA", "bodyB"], [False, True]))
         self.law_7("cat <<A <<B | sh\necho a\nA\ngit push\nB")
 
     def test_the_delimiter_line(self):
@@ -7435,6 +7435,194 @@ class HereDocumentBodyTest(BashHookCase):
                 started = time.monotonic()
                 self.analysis(line)
                 self.assertLess(time.monotonic() - started, 5.0)
+
+
+# SPD-192: the places an unquoted here-document's body is fed to a command, `%s` standing for one line of the body.  zsh
+# and bash expand the body wherever it is fed, before the command reads it: with `$(echo RAN > <file>)` for %s each made
+# its file (HereDocumentExpansionTest has the probes).
+HEREDOC_EXPANDED_FEEDS = (
+    "cat <<EOF > /dev/null\n%s\nEOF",
+    "cat <<-EOF > /dev/null\n\t%s\n\tEOF",
+    "cat <<$Z > /dev/null\n%s\n$Z",  # an unquoted `$` in the delimiter is no quoting: the delimiter is the line `$Z`
+    ": <<EOF\n%s\nEOF",
+    "true <<EOF\n%s\nEOF",
+    "nosuchcmd <<EOF\n%s\nEOF",
+    "<<EOF\n%s\nEOF",
+    "exec 3<<EOF\n%s\nEOF",
+    "cat <<EOF | wc -l > /dev/null\n%s\nEOF",
+    "cat <(cat <<EOF\n%s\nEOF\n) > /dev/null",
+    "x=$(cat <<EOF\n%s\nEOF\n)",
+    "{ cat <<EOF > /dev/null\n%s\nEOF\n}",
+    "if true; then cat <<EOF > /dev/null\n%s\nEOF\nfi",
+    "sh -c 'cat <<EOF > /dev/null\n%s\nEOF'",
+    "eval 'cat <<EOF > /dev/null\n%s\nEOF'",
+    "cat <<A > /dev/null\n$(cat <<B\n%s\nB\n)\nA",  # a body in a substitution of a body
+)
+# the spellings of one body line whose substitution runs, `%s` standing for its command: each made its file
+HEREDOC_EXPANDED_SPELLINGS = (
+    "$(%s)",
+    "`%s`",
+    "'$(%s)'",  # quotes are text in a body
+    '"$(%s)"',
+    "\\\\$(%s)",  # an escaped backslash, then the substitution
+    "${u:-$(%s)}",  # a default word
+    "$((1 + $(%s)))",  # arithmetic
+    "$[1 + $(%s)]",
+    "a\\\n$(%s)",  # a backslash-newline joins the lines first
+    "$(%s\n)",  # a substitution spanning the body's lines
+    "$(%s)\\\nEOF",  # a line joined to the next is no delimiter: the body goes on to the next EOF
+)
+# a delimiter any character of which is quoted: the body is text, never expanded, and ran nothing
+HEREDOC_QUOTED_OPERATORS = ("<<'EOF'", '<<"EOF"', "<<\\EOF", '<<E"O"F', "<<E\\OF", "<<$'EOF'", "<<-'EOF'")
+
+
+class HereDocumentExpansionTest(BashHookCase):
+    """SPD-192, filed by SPD-188's engineer: zsh and bash expand an unquoted here-document's body before its command reads
+    it, running every `$( )` and backtick substitution in it, and the hook read a body only where a shell is fed it, as
+    that shell's commands.  The ticket's evidence, on the SPD-188 tree and on main before it: `cat <<EOF<newline>$(git
+    push)<newline>EOF` and the same in backticks recorded no finding, so a member was allowed the push.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory,
+    each substitution an `echo RAN > <file>`:
+
+    - an unquoted body's substitution ran wherever the body was fed (HEREDOC_EXPANDED_FEEDS: cat, `<<-` with its tabs,
+      `<<$Z`, `:`, true, a command that does not exist, a bare redirection, `exec 3<<`, a pipeline element, a `<( )`, a
+      `$( )`, a group, an if, `sh -c` and eval strings, a body in a body's own substitution), in every spelling of
+      HEREDOC_EXPANDED_SPELLINGS: quotes are text there, `\\\\` is one backslash, a default word's and an arithmetic
+      expansion's substitutions run, and a backslash-newline joins two lines first;
+    - zsh's `${(e)x}` in a body ran x's substitution (bash: bad substitution);
+    - a body whose delimiter has any character quoted (HEREDOC_QUOTED_OPERATORS) ran nothing, and neither did `\\$( )` or
+      an escaped backtick in an unquoted one, a `\\$( )` in an unquoted body inside a body's `$( )`, nor a `$( )` in a quoted
+      one there;
+    - the body is expanded when its command runs, in its directory and with the values the line holds then: `cd d; cat
+      <<EOF` and `cd d && cat <<EOF` wrote into d, `cat <<EOF > /dev/null; cd d` where the line stood before the cd, `x=a;
+      cat <<EOF > /dev/null; x=b` into a, `false && cat <<EOF` ran nothing, and a function's body ran it once called; a
+      command's prefix assignment does not reach its body (`x=a; x=b cat <<EOF` and `x=a; x=b : <<EOF` wrote into a);
+    - `${u:=v}` in a body fed to cat left u unset, fed to `:` set it: the hook doubts u either way, as on the line;
+    - a here-string's word is expanded as any word is (`cat <<< "$(...)"` and `cat <<< $(...)` ran), which the hook read
+      already.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans home:**."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for rel in (self.TARGET, "docs/x.md"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "generated", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """A body the line only reads as text: silent for every caller, and no push found."""
+        with self.subTest(line=line):
+            self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+            for agent_id in (AGENT_A, AGENT_C, None):
+                self.assertSilent(line, agent_id)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_the_shells_run_it(self):
+        self.law_7("cat <<EOF\n$(git push)\nEOF")
+        self.law_7("cat <<EOF\n`git push`\nEOF")
+
+    def test_a_write_in_a_body_substitution_is_checked(self):
+        for spelling in ("$(%s)", "`%s`"):
+            self.refused_everywhere("cat <<EOF > /dev/null\n%s\nEOF" % (spelling % "echo x > ledger/tickets/SPD-001.md"))
+            line = "cat <<EOF > /dev/null\n%s\nEOF" % (spelling % "echo x > docs/x.md")
+            with self.subTest(line=line):
+                self.assertRefused(line, "deliverables")
+                self.assertSilent(line, AGENT_C)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_place_a_body_is_fed(self):
+        for feed in HEREDOC_EXPANDED_FEEDS:
+            self.law_7(feed % "$(git push)")
+            self.law_7(feed % "`git push`")
+            self.refused_everywhere(feed % "$(echo x > ledger/tickets/SPD-001.md)")
+
+    def test_every_spelling_that_runs_a_substitution(self):
+        for spelling in HEREDOC_EXPANDED_SPELLINGS:
+            self.law_7("cat <<EOF > /dev/null\n%s\nEOF" % (spelling % "git push"))
+        self.law_7("x='$(git push)'; cat <<EOF > /dev/null\n${(e)x}\nEOF")  # zsh's (e) evaluates x's value there too
+
+    def test_a_quoted_delimiter_keeps_the_body_text(self):
+        body = "$(git push)\n`git push`\n${u:-$(git push)}\n$((1 + $(git push)))\n${(e)x}\n$(echo x > ledger/tickets/SPD-001.md)"
+        for operator in HEREDOC_QUOTED_OPERATORS:
+            self.data("x='$(git push)'; cat %s > /dev/null\n%s\nEOF" % (operator, body))
+            self.assertEqual(self.m.strip_heredocs("cat %s\nbody\nEOF" % operator)[2], [False])
+        for operator in ("<<EOF", "<<-EOF", "<< EOF"):
+            self.assertEqual(self.m.strip_heredocs("cat %s\nbody\nEOF" % operator)[2], [True])
+        self.assertEqual(self.m.strip_heredocs("cat <<'A' <<B <<\\C\nbodyA\nA\nbodyB\nB\nbodyC\nC"),
+                         ("cat <<'A' <<B <<\\C\n", ["bodyA", "bodyB", "bodyC"], [False, True, False]))
+
+    def test_an_escaped_substitution_runs_nothing(self):
+        for line in ("cat <<EOF > /dev/null\n\\$(git push)\n\\`git push\\`\nEOF",
+                     "cat <<A > /dev/null\n$(cat <<B\n\\$(git push)\nB\n)\nA",
+                     "cat <<A > /dev/null\n$(cat <<'B'\n$(git push)\nB\n)\nA"):
+            self.data(line)
+
+    def test_the_body_is_expanded_where_and_when_its_command_runs(self):
+        # the command's directory: a cd before it on the line, not one after its operator
+        self.refused_everywhere("cd ledger && cat <<EOF > /dev/null\n$(echo x > tickets/SPD-001.md)\nEOF")
+        self.refused_everywhere("cd ledger; cat <<EOF > /dev/null; cd ..\n$(echo x > tickets/SPD-001.md)\nEOF")
+        line = "cat <<EOF > /dev/null; cd ledger\n$(echo x > tickets/SPD-001.md)\nEOF"
+        with self.subTest(line=line):
+            self.assertSilent(line, AGENT_C)
+            self.assertRefused(line, "deliverables")
+        # the values the line holds then; a command's prefix assignment does not reach its body
+        for line in ("x=docs/x.md; cat <<EOF > /dev/null; x=%s\n$(echo y > $x)\nEOF",
+                     "x=docs/x.md; x=%s cat <<EOF > /dev/null\n$(echo y > $x)\nEOF",
+                     "x=docs/x.md; x=%s : <<EOF\n$(echo y > $x)\nEOF"):
+            with self.subTest(line=line):
+                self.assertSilent(line % self.TARGET, AGENT_C)
+                self.assertRefused(line.replace("docs/x.md", self.TARGET) % "docs/x.md", "generated", AGENT_C)
+
+    def test_what_stays_as_it_was(self):
+        """A body whose substitutions write nothing and run no verb is allowed to every caller; a shell fed an unquoted body
+        still reads it as its commands, and a body with no substitution is text."""
+        line = "cat <<EOF > /dev/null\nDate: $(date)\nUser: `whoami`\nHome: ${HOME:-x}\nEOF"
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+        self.law_7("sh <<EOF\n$(git push)\nEOF")
+        self.law_7("sh <<EOF\ngit push\nEOF")
+        self.data("cat <<EOF > /dev/null\ngit push\nEOF")
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("cat <<EOF\n" + "$(" * 3000 + ")" * 3000 + "\nEOF\ngit push",
+                     "cat <<EOF\n" + "`x`" * 3000 + "\nEOF\ngit push",
+                     "cat <<EOF\n" + "${(e)x}" * 3000 + "\nEOF\ngit push",
+                     "cat <<EOF\n" + "a" * 200000 + "$\nEOF\ngit push",
+                     "cat " + "<<EOF " * 500 + "\n" + "$(true)\nEOF\n" * 500 + "git push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                findings = self.analysis(line).findings
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), findings)
 
 
 # SPD-184: the process substitutions zsh runs in a case's word and its patterns, `%s` standing for the list.  With a file

@@ -106,8 +106,9 @@ class ShellWalk:
       bash does not, so `glued` says which reading this walk is, and `split_brace` whether zsh's split one off this line:
       analyse_command then walks the line again the other way and keeps both readings, as it does for zsh's globs."""
 
-    def __init__(self, a, inner, bodies, depth, glued=True):
+    def __init__(self, a, inner, bodies, expanded, depth, glued=True):
         self.a, self.inner, self.bodies, self.depth = a, list(inner), list(bodies), depth
+        self.expanded = list(expanded)  # whether the shell expands each body (heredocs.strip_heredocs)
         self.glued = glued  # zsh's reading: a brace glued to a word opens or closes a group where a lone one would
         self.split_brace = False  # ... and it did on this line, so the reading differs from bash's
         self.words, self.stack = [], []
@@ -404,7 +405,12 @@ class ShellWalk:
     def consume(self, words):
         """Analyse the substitutions in these words (expanded before the command runs, each in its own process), and the
         text zsh's (e) flag evaluates in them with the variables the line holds here (shell/reevaluation), and take the
-        here-document bodies their `<<` operators read; return the words without the operators and their delimiters."""
+        here-document bodies their `<<` operators read; return the words without the operators and their delimiters.
+
+        A body whose delimiter is unquoted is expanded here too, before the command reads it, wherever it is fed
+        (SPD-192): its substitutions run in the command's directory with the values the line holds when the command runs,
+        which its own prefix assignments do not reach (probed: `x=a; x=b cat <<EOF` and `cat <<EOF ...; x=b` wrote into
+        a, `cat <<EOF ...; cd d` where the line stood before the cd; tests/test_hooks.py HereDocumentExpansionTest)."""
         reevaluation.read_eval_words(words, self.a, self.depth)
         for w in words:
             for _ in range(w.count(hookio.SUBST) - w.count(PROCSUB_FILE)):  # a `<( )`'s file name lifted no body
@@ -424,7 +430,10 @@ class ShellWalk:
         while k < len(words):
             if words[k] in ("<<", "<<-"):
                 if self.bodies:
-                    bodies.append(self.bodies.pop(0))
+                    body = self.bodies.pop(0)
+                    if self.expanded.pop(0):
+                        reevaluation.read_expanded_body(body, self.a, self.depth + 1)
+                    bodies.append(body)
                 k += 2
                 continue
             cleaned.append(words[k])

@@ -20,7 +20,10 @@ the lines): (e) alone, repeated or beside `@` evaluates the value as it is; (P) 
 evaluated; every other flag may change the text first -- `(Le)` lowercased `$(TOUCH R9)` before it ran, `(l(10)(x)e)` cut
 its `$` off and ran nothing, `${(e)x#\\\\}` took a backslash away and ran what the value only spelled -- and so may a
 modifier or a subscript.  zsh.flag_group reads the group, whose delimited arguments are no flags (`(j:e:)` runs nothing).
-bash fails every one of these with "bad substitution"."""
+bash fails every one of these with "bad substitution".
+
+zsh and bash expand an unquoted here-document's body before its command reads it as (e) evaluates a value, so
+ShellWalk.consume hands such a body to read_expanded_body, which reads it with read_evaluated_text (SPD-192)."""
 
 from . import analyse, assignment_words, prepare, syntax, zsh
 from ..hooks import hookio
@@ -142,6 +145,17 @@ def read_evaluated_text(text, reading, depth):
     finally:
         reading.open.discard(text)
     reading.done.add((text, depth))
+
+
+def read_expanded_body(body, a, depth):
+    """Read an unquoted here-document's body as zsh and bash expand it before its command reads it, at analysis depth
+    `depth` (SPD-192): as read_evaluated_text reads a value, since the body is expanded as that text is -- its quotes
+    are text, a backslash escapes `$`, a backtick, a backslash or a newline, and each `$( )`, backtick, default word,
+    arithmetic expansion and zsh (e) expansion in it runs (probed through tests/probes/shell_probe.py in zsh 5.9 -f,
+    -f -o nobareglobqual and bash 3.2.57: tests/test_hooks.py HereDocumentExpansionTest).  A body with neither a `$`
+    nor a backtick expands nothing, and is not scanned."""
+    if "$" in body or "`" in body:
+        read_evaluated_text(body, _Reading(a), depth)
 
 
 def _expansion_texts(text, letters, k, end, closes, reading, assigned, outer):

@@ -9,7 +9,9 @@ out of the text, in the order its operator stands, since the walk reads the word
 meets (ShellWalk.consume); a body inside a `$( )` or backticks stays in the text, which split_substitutions hands to that
 substitution's own analysis.  A `$( )` ends where zsh ends it, past its bodies and quotes; bash 3.2 ends it at a body
 line's `)` (probed), and so does split_substitutions, which counts parentheses (proposal 299), so the text between is read
-as the outer line's commands, bash's reading.  tests/test_hooks.py HereDocumentBodyTest has the probes.
+as the outer line's commands, bash's reading.  tests/test_hooks.py HereDocumentBodyTest has the probes.  For each body it
+takes out the scan also says whether any character of its delimiter is quoted: a body whose delimiter has none is expanded
+before its command reads it, and ShellWalk.consume reads its substitutions (SPD-192, HereDocumentExpansionTest).
 
 What the scan cannot tell from characters alone is what an open `(` is: a subshell or an array assignment, whose newline
 ends a command, or zsh's glob group or an arithmetic command, whose newline does not (and whose `<<` is a shift there).
@@ -65,10 +67,11 @@ def _ansi_c_quoting(stack):
 
 
 def strip_heredocs(command):
-    """Remove the here-document bodies read at the line's own level from the command text; return (text, bodies), the
-    bodies in the order their operators stand."""
+    """Remove the here-document bodies read at the line's own level from the command text; return (text, bodies,
+    expanded), the bodies in the order their operators stand and, for each, whether the shell expands it before its
+    command reads it: a body whose delimiter has no character quoted (SPD-192, ShellWalk.consume)."""
     if "<<" not in command:
-        return command, []
+        return command, [], []
     return _Scan(command).run()
 
 
@@ -77,7 +80,7 @@ class _Scan:
 
     def __init__(self, text):
         self.text, self.n = text, len(text)
-        self.out, self.mark, self.bodies = [], 0, []
+        self.out, self.mark, self.bodies, self.expanded = [], 0, [], []
         self.readings = _READINGS
         case = _CASE_RE.search(text)
         self.case_at = case.start() if case else self.n  # where the line's first case command may stand
@@ -97,7 +100,7 @@ class _Scan:
             else:
                 i = self.arithmetic(stack, frame, i)
         self.out.append(text[self.mark :])
-        return "".join(self.out), self.bodies
+        return "".join(self.out), self.bodies, self.expanded
 
     # -- the frames ---------------------------------------------------------------------------------------------------
     def command(self, stack, frame, i):
@@ -265,6 +268,7 @@ class _Scan:
         if frame.strip:
             slot = len(self.bodies)
             self.bodies.append("")
+            self.expanded.append(not quoted)
         frame.pending.append((word, dash, quoted, slot))
         return end
 

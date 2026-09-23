@@ -8,14 +8,15 @@ from ..hooks import hookio
 
 def analyse_command(command, analysis=None, depth=0):
     """Walk every simple command the shell would run, recursing into substitutions,
-    `sh -c` strings, `eval` and here-documents fed to a shell."""
+    `sh -c` strings, `eval`, here-documents fed to a shell, and the substitutions an unquoted here-document's
+    body expands wherever it is fed (SPD-192)."""
     a = analysis or syntax.ShellAnalysis()
     if depth > 6:
         return a
     for m in syntax._ASSIGNING_EXPANSION_RE.finditer(command):  # `${X:=git}` assigns X wherever it is expanded (probed)
         a.doubt.add(m.group(1))
         a.sticky.add(m.group(1))
-    text, bodies = heredocs.strip_heredocs(command)
+    text, bodies, expanded = heredocs.strip_heredocs(command)
     text, apart = prepare.ansi_c_quotes(text)
     if apart is not None and a.unparseable is None:
         # an ANSI-C string that never closes, or a quote zsh and bash end apart (SPD-202): the words the reading finds are
@@ -36,7 +37,7 @@ def analyse_command(command, analysis=None, depth=0):
             analyse_isolated(a, sub, depth + 1)
         return a
     cwds, variables, loop_depth, aliases = a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases)
-    zsh_walk = walk.ShellWalk(a, inner, bodies, depth)
+    zsh_walk = walk.ShellWalk(a, inner, bodies, expanded, depth)
     zsh_walk.walk(tokens)
     if other == marked and not zsh_walk.split_brace:
         # one reading: the line holds no zsh pattern, or only markings both shells make (arithmetic), and no brace
@@ -50,7 +51,7 @@ def analyse_command(command, analysis=None, depth=0):
     # those of both.  The quotes are the same, so both tokenize.
     zsh_cwds, zsh_vars, zsh_aliases = a.cwds, a.vars, a.aliases
     a.cwds, a.vars, a.loop_depth, a.cd_uncertain, a.aliases = cwds, variables, loop_depth, False, aliases
-    walk.ShellWalk(a, inner, bodies, depth, glued=False).walk(tokens if other == marked else syntax.shell_tokens(other) or [])
+    walk.ShellWalk(a, inner, bodies, expanded, depth, glued=False).walk(tokens if other == marked else syntax.shell_tokens(other) or [])
     a.cwds = directories.union_dirs(zsh_cwds, a.cwds)
     a.doubt.update(set(zsh_vars) ^ set(a.vars))  # a variable only one reading assigns
     for name, value in zsh_vars.items():
