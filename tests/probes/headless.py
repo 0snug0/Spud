@@ -675,7 +675,8 @@ SPUD_INIT_SCENARIO = "spud-init"  # a scratch clone, not a scratch home; handled
 # ScheduleStepTest names it too (`out["doctor"]["problems"], [load_spud_module().WATCHER_DOWN]`).  Excused here only
 # by this exact string, so any other problem still fails the scenario.
 FAKE_LAUNCHCTL_EXCUSED_PROBLEM = ("the render watcher %s is installed but not running: the vault is stale until"
-                                  " `spud --as spud schedule install` reloads it" % "local.spud.render")
+                                  " `spud --as spud schedule install` reloads it;"
+                                  " `spud logs render` shows its log, the last run's end included" % "local.spud.render")
 
 
 def main_spud_init(root, model):
