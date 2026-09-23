@@ -487,7 +487,8 @@ class ShellAnalysis:
         self.vars = {}
         # The text the line feeds the simple command being read on its standard input -- a here-string, a
         # here-document body, or what the pipeline element before it printed -- and None where the line does not spell
-        # it.  A shell that runs what it reads there runs that text (shell/stdin_text).  analyse_segment sets it for
+        # it; a stdin_text.MultiosText where zsh, which reads every input in turn, and bash read it apart (SPD-209).  A
+        # shell that runs what it reads there runs that text (shell/stdin_text).  analyse_segment sets it for
         # each command and puts back what it found, so a body read in its own process reads its own input, not this one.
         self.stdin = None
         # Whether the line puts anything on that standard input at all (stdin_text.input_fed), which `stdin`

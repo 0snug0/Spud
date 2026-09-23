@@ -7933,6 +7933,136 @@ class HereDocumentValueTest(BashHookCase):
                 self.assertIn(("git", ("push", "push")), findings)
 
 
+class MultiosInputTest(BashHookCase):
+    """SPD-209, filed by SPD-207's engineer: zsh feeds a command every input its redirections name, one after
+    another -- its MULTIOS option, on by default -- and a pipe into the command is one of them, read first; bash feeds
+    it the last alone.  The hook read bash's way, and took a here-document's body over a `<` or a here-string wherever
+    they stood, so on the SPD-208 tree analyse_command recorded no finding for either of the proposer's lines: `cat
+    <<'A' <<'B' | sh` with `git push` in body A, where the Bash tool's zsh runs both bodies' lines, and `sh <<'EOF' <
+    x.sh`, where it runs the body and then x.sh, which SPD-145 refuses a member as `sh < x.sh`.
+
+    The rule (stdin_text.command_input, stdin_text.MultiosText): a command's standard input is read both ways, zsh's
+    -- the pipe that feeds the command itself, then each input redirection on descriptor 0 in the order it stands, `<>`
+    among them -- and bash's, the last of them.  A shell fed it reads each as its commands, and where either holds text
+    the line does not spell a member is refused it with SPD-145's reason; Spud reads on.  Both readings are taken
+    wherever the line stands, failing closed: the Bash tool's shell is zsh, but a line in a body bash or sh reads is
+    read bash's way, and zsh's text can hide in a here-document what bash's runs.  An xargs whose two readings differ
+    reads input the line does not spell.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's
+    directory, each command a `touch`, x.sh holding `touch f1`:
+
+    - zsh ran every input of `printf 'touch p1\\n' | sh <<'EOF'` (p1, then the body's h1), `sh <<'A' <<'B'`, `sh <<<
+      'touch s1' <<'EOF'`, `sh <<'EOF' <<< ...`, `sh <<'EOF' < x.sh`, `printf ... | sh < x.sh`, `sh < x.sh <<< ...`,
+      `cat <<'A' <<'B' | sh`, `cat <<'A' <<'B' | tee /dev/null | sh`, `printf ... | cat <<'EOF' | sh`, `sh <<< ...
+      <> x.sh`, `printf ... | sh <> x.sh` and `xargs -0 sh -c <<'A' <<'B'`; bash ran the last input alone in each,
+      and bodies `touch j\\` and `oined` made `joined` in zsh where bash ran `oined`;
+    - `sh <<< 'touch s1' 3< x.sh` ran s1 alone in all three, and `printf ... | { sh <<'EOF' ...; }` ran the body
+      alone: the pipe feeds the group, not the command in it;
+    - `cat <<'A' <<'B' | sh` with A `cat <<X` and B `touch h2` made nothing in zsh, B standing in cat's
+      here-document, and made h2 in bash; the same line in a body `bash <<'OUTER'` reads made h2 under all three."""
+
+    FIRST = "cat <<'A' <<'B' | sh\ngit push\nA\ntrue\nB"  # the proposer's lines: the push in body A
+    FILE = "sh <<'EOF' < x.sh\ntrue\nEOF"  # ... and the body, then x.sh
+    # zsh's text holds the push in cat's here-document; bash's runs it
+    HIDDEN = "cat <<'A' <<'B' | sh\ncat <<X\nA\ngit push\nB"
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def verbs(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "git"]
+
+    def forms(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def law_7(self, line):
+        """The analysis finds the push and nothing unread; a member is refused it, and Spud never is."""
+        with self.subTest(line=line):
+            self.assertIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def unspelled(self, line, spud=True):
+        """A "stdin" script finding, refused a member with SPD-145's reason; silent for Spud where `spud` says so."""
+        with self.subTest(line=line):
+            self.assertIn("stdin", self.forms(line))
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            if spud:
+                self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """No push, no script finding, and silent for every caller."""
+        with self.subTest(line=line):
+            self.assertNotIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertSilent(line)
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_refused_a_member(self):
+        self.law_7(self.FIRST)
+        self.assertEqual(self.verbs(self.FIRST), ["push"])
+        self.unspelled(self.FILE)
+        self.assertEqual(self.forms(self.FILE), ["stdin"])
+
+    def test_zsh_reads_every_input_in_turn(self):
+        """Each line hands a shell `git push` through an input bash's reading drops, or through two inputs zsh joins."""
+        for line in ("echo 'git push' | sh <<'EOF'\ntrue\nEOF",  # the pipe, then the body
+                     "sh <<< 'git push' <<'EOF'\ntrue\nEOF",
+                     "echo 'git push' | cat <<'EOF' | sh\ntrue\nEOF",
+                     "cat <<< 'git push' <<'EOF' | bash\ntrue\nEOF",
+                     "cat <<'A' <<'B' | tee /dev/null | sh\ngit push\nA\ntrue\nB",
+                     "{ cat <<'A' <<'B'; } | sh\ngit push\nA\ntrue\nB",
+                     "cat - <<'A' <<'B' | sh -s\ngit push\nA\ntrue\nB"):
+            self.law_7(line)
+        # zsh joins the two bodies' lines, as it made `joined`: the push neither body holds alone (body A, read alone as
+        # well, ends in a backslash that escapes nothing, which SPD-191 refuses every caller)
+        line = "sh <<'A' <<'B'\ngit \\\nA\npush\nB"
+        self.assertIn("push", self.verbs(line))
+        self.assertRefused(line, "Law 7")
+
+    def test_a_file_beside_another_input_is_refused_a_member(self):
+        """zsh reads the file too, after or before the text the line spells, so the shell reads text the line does not
+        spell -- and so does a shell fed a pipe from a file ahead of its own here-document."""
+        for line in (self.FILE, "sh < x.sh <<< 'git status'", "sh <<'EOF' 0< x.sh\ngit status\nEOF",
+                     "cat x.sh | sh <<'EOF'\ngit status\nEOF", "cat <<'EOF' < x.sh | sh\ngit status\nEOF",
+                     "cat x.sh | cat <<'EOF' | sh\ngit status\nEOF"):
+            self.unspelled(line)
+        # `<>` opens its file on standard input for reading and writing: Spud's own write of it is Law 1's, as it was
+        for line in ("sh <<< 'git status' <> tests/x.sh", "echo 'git status' | sh <> tests/x.sh"):
+            self.unspelled(line, spud=False)
+
+    def test_bash_reads_the_last_input_alone(self):
+        """Both readings are read wherever the line stands: HIDDEN's zsh text holds the push in cat's here-document,
+        which bash's runs, and a body bash reads is bash's reading; the here-string after a body is the input bash
+        reads."""
+        self.law_7(self.HIDDEN)
+        self.law_7("bash <<'OUTER'\n%s\nOUTER" % self.HIDDEN)
+        self.law_7("sh <<'EOF' <<< 'git push'\ntrue\nEOF")
+
+    def test_an_xargs_whose_readings_differ_reads_input_the_line_does_not_spell(self):
+        line = "cat <<'A' <<'B' | xargs -0 sh -c\ngit push\nA\ntrue\nB"
+        self.assertEqual(self.forms(line), ["xargs"])
+        self.assertRefused(line, "xargs reads from input the line does not spell")
+        self.assertSilent(line, agent_id=None)
+        self.law_7("echo 'git push' | xargs -0 sh -c")  # one input: one reading, as before
+
+    def test_a_single_input_reads_as_before(self):
+        for line in ("sh <<'EOF'\ngit push\nEOF", "cat <<'EOF' | sh\ngit push\nEOF", "echo 'git push' | sh",
+                     "sh <<< 'git push'", "echo 'git push' | { sh; }", "sh <<'A' <<'B'\ngit push\nA\ntrue\nB"):
+            self.law_7(line)
+        for line in ("sh < x.sh", "cat x.sh | sh", "echo 'git status' | sh < x.sh"):
+            self.unspelled(line)
+        for line in ("sh <<'EOF'\ngit status\nEOF", "cat <<'A' <<'B'\ngit push\nA\ntrue\nB",
+                     "sh <<'A' <<'B'\ngit status\nA\ntrue\nB", "sh <<< 'git status' 3< x.sh",
+                     "echo 'git push' | { sh <<'EOF'\ntrue\nEOF\n}"):  # the group's pipe is no input of sh's
+            self.data(line)
+
+
 # SPD-184: the process substitutions zsh runs in a case's word and its patterns, `%s` standing for the list.  With a file
 # touched in place of %s, zsh 5.9 made it for each (CaseSubstitutionTest has the probes).
 CASE_EQUALS_FORMS = (

@@ -185,11 +185,6 @@ class OutputBody(str):
     __slots__ = ()
 
 
-def holds_output(bodies):
-    """Whether any of a command's here-document bodies holds a command substitution's output (OutputBody)."""
-    return any(isinstance(body, OutputBody) for body in bodies)
-
-
 class _Scan:
     """One pass over a command line, as zsh's lexer reads it, splitting off the bodies (strip_heredocs)."""
 

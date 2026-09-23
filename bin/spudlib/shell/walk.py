@@ -67,8 +67,9 @@ class ShellFrame:
         # list inside this compound starts from -- all of it put back by ShellWalk.pop.  `prints`: what the commands in
         # it print reaches the enclosing element's own output -- not so for a function body, which prints when it is
         # called, nor for a process substitution, whose output goes to the file it stands for.
-        # `stdin` carries two flags beside those two texts: whether anything at all stands on that input.
-        self.printed, self.earlier, self.stdin, self.prints = "", "", (None, None, False, False), kind != "func"
+        # `stdin` carries two flags beside those two texts: whether anything at all stands on that input, and a third,
+        # whether that element's pipe fed it (ShellWalk.pipe_feeds).
+        self.printed, self.earlier, self.stdin, self.prints = "", "", (None, None, False, False, False), kind != "func"
         # an input process substitution, `<( list )`: the command around it is handed a file name it stands for
         # (/dev/fd/N), a word the line does not spell, which ShellWalk.pop puts among that command's words as PROCSUB_FILE
         # (SPD-145: `bash <(curl ...)` runs that file's text as a script; SPD-190).
@@ -126,6 +127,9 @@ class ShellWalk:
         # whether a pipe feeds the element being read at all, and whether one fed the compound command around
         # it, which the texts above cannot say (None is both "nothing" and "text the line does not spell").
         self.piped_fed, self.frame_stdin_fed = False, False
+        # whether the pipe feeds the element being read itself, a simple command's own input among its redirections in
+        # zsh's reading (stdin_text.command_input, SPD-209), and not a compound command around it
+        self.pipe_feeds = False
         self.start_list()
 
     # -- lists and pipelines ------------------------------------------------------------
@@ -145,6 +149,7 @@ class ShellWalk:
         else:
             self.frame_printed = stdin_text.joined(self.frame_printed, self.printed)
             self.piped_text, self.piped_fed = self.frame_stdin, self.frame_stdin_fed
+        self.pipe_feeds = into_pipe
         self.printed = ""
 
     def end_pipeline(self):
@@ -168,7 +173,7 @@ class ShellWalk:
         # what the element around it printed so far is kept for after the compound command, and the standard
         # input that element was given is the input every list inside it starts from
         frame.printed, frame.earlier = self.printed, self.frame_printed
-        frame.stdin = (self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed)
+        frame.stdin = (self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed, self.pipe_feeds)
         self.printed, self.frame_printed = "", ""
         self.frame_stdin, self.frame_stdin_fed = self.piped_text, self.piped_fed
         self.stack.append(frame)
@@ -184,7 +189,7 @@ class ShellWalk:
         # the compound command's own output stands where it opened, in the element that holds it
         self.printed = stdin_text.joined(frame.printed, self.frame_printed) if frame.prints else frame.printed
         self.frame_printed = frame.earlier
-        self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed = frame.stdin
+        self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed, self.pipe_feeds = frame.stdin
         if frame.kind == "sub":
             self.a.functions = frame.funcs  # a function defined in a subshell does not reach a call after it
         if frame.kind in ("loop", "func"):
@@ -474,17 +479,21 @@ class ShellWalk:
         # an assignment in a command that may not run (after && or ||) or runs in its own process may not hold after it
         unsure = unsure or self.conditional or self.piped
         a.unsure += unsure
+        # the text the command reads on standard input: the pipe's or the compound command's, and its own input
+        # redirections in the order they stand in `words`, which still hold its here-document operators, as zsh and bash
+        # each read them (stdin_text.command_input, SPD-209), with the values the line settled before it runs (SPD-148)
+        stdin = stdin_text.command_input(words, bodies, self.piped_text, self.pipe_feeds, a)
         if self.function_next:  # zsh's `name () command`: a body that runs when called, perhaps more than once
             self.function_next = False
             a.loop_depth += 1
-            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, self.piped_text, self.piped_fed)
+            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, self.piped_fed)
             a.loop_depth -= 1
             a.cwds = directories.union_dirs(before, a.cwds)
         else:
             # what this command adds to the text its pipeline element prints, which a shell after a `|` runs, read with
             # the values the line settled before it runs (SPD-148)
-            printed = stdin_text.printed_text(cleaned, bodies, self.piped_text, a)
-            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, self.piped_text, self.piped_fed)
+            printed = stdin_text.printed_text(cleaned, stdin, a)
+            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, self.piped_fed)
             self.printed = stdin_text.joined(self.printed, printed)
         a.unsure -= unsure
         if a.cd_uncertain or (a.cwds != before and self.conditional):

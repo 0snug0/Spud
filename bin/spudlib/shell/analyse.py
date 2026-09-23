@@ -100,14 +100,14 @@ def analyse_new_shell(a, command, depth):
         a.alias_scope, a.aliases, a.alias_unknown = state
 
 
-def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, piped=None, piped_fed=False):
+def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, stdin=None, piped_fed=False):
     """A simple command: its output targets, then its words.  A target is resolved here, before analyse_words reads
     the command's own prefix assignments, because those reach neither the redirection nor the arguments in either shell
     (probed 2026-09-18: `S=$D/a; S=$D/b echo hi > $S.f` made a.f, and `S=$D/a echo hi > $S.f` with S unset made `.f`).
-    `piped` is the text the pipeline element before this one printed, which with the command's own redirections
-    makes the standard input a shell here would run (stdin_text.command_input); a.stdin holds it while the words are read
-    and is put back after, so a body read in its own process reads its own input and not this one.
-    `piped_fed` says a pipe feeds this element at all, which with the same redirections says whether anything
+    `stdin` is the standard input a shell here would run: the text the pipeline element before this one printed and
+    the command's own input redirections, as ShellWalk.finish read them (stdin_text.command_input); a.stdin holds it
+    while the words are read and is put back after, so a body read in its own process reads its own input and not this
+    one.  `piped_fed` says a pipe feeds this element at all, which with the same redirections says whether anything
     stands on that input (stdin_text.input_fed), text the hook can spell or not; a.stdin_fed carries it the same way,
     for an interpreter that runs the program it reads there (shell/inline_programs)."""
     words, targets = directories.separate_redirects(tokens)
@@ -115,7 +115,7 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, pip
     settled = [arg_writes.resolved(t, a) for t in targets]
     for target in settled:
         a.redirects.append((target, cwds))
-    outer_stdin, a.stdin = a.stdin, stdin_text.command_input(tokens, bodies, piped, a)
+    outer_stdin, a.stdin = a.stdin, stdin
     outer_fed, a.stdin_fed = a.stdin_fed, stdin_text.input_fed(tokens, bodies, piped_fed)
     try:
         analyse_words(words, bodies, a, depth, [globbing.GLOB_READING_BUDGET], "shell", False)
@@ -247,8 +247,10 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 # is the command string a shell run with a `-c` and no string is handed
                 # ... and xargs gives the command it runs no standard input of its own (never an inline program)
                 # An interpreter it runs is handed every word of that input instead of one string
-                xargs_input = (stdin_text.xargs_string(words, consumed, appended, stdin), appended,
-                               stdin_text.xargs_words(words, consumed, stdin))
+                # ... and an input zsh and bash read apart (SPD-209) is one the line does not spell for either
+                whole = stdin_text.single(stdin)
+                xargs_input = (stdin_text.xargs_string(words, consumed, appended, whole), appended,
+                               stdin_text.xargs_words(words, consumed, whole))
                 input_string, stdin, fed = xargs_input[0], None, False
             if chdir is not None:
                 # Everything the wrapper runs -- its words, a string it hands a shell, a nested wrapper -- starts in the
@@ -402,13 +404,18 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             i += 1
         for body in bodies:
             analyse_new_shell(a, body, depth + 1)
-        if not bodies and not dash_c and stdin is not None and stdin_text.reads_commands(words):
+        if not dash_c and stdin_text.reads_commands(words):
             # With no -c string and no script of its own the shell runs what it reads on standard input, and
-            # the line spells that text: `echo 'git push' | sh`, `bash -s <<< 'git push'`, `cat <<'EOF' | sh`
-            analyse_new_shell(a, stdin, depth + 1)
+            # the line spells that text: `echo 'git push' | sh`, `bash -s <<< 'git push'`, `cat <<'EOF' | sh` -- zsh's
+            # reading and bash's, where a command's inputs make them differ (stdin_text.MultiosText, SPD-209).  A text
+            # that is one body alone was read above.
+            fed_bodies = {body + "\n" for body in bodies}
+            for text in stdin_text.each_reading(stdin):
+                if text not in fed_bodies:
+                    analyse_new_shell(a, text, depth + 1)
         # ... and every shell whose commands come from a file: a script operand, standard input the line does not spell,
         # an xargs string from such input, a HOME of the line's own (shell/script_files, refused a member in bash_rule)
-        script_files.read_shell(words, a, dash_c, string, xargs_input, stdin, fed, bodies)
+        script_files.read_shell(words, a, dash_c, string, xargs_input, stdin, fed)
     elif base == "eval":
         a.kinds.append("eval")
         before = a.cwds
