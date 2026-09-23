@@ -375,9 +375,11 @@ class ShellWalk:
             a.loop_depth -= 1
             a.cwds = directories.union_dirs(before, a.cwds)
         else:
+            # what this command adds to the text its pipeline element prints, which a shell after a `|` runs, read with
+            # the values the line settled before it runs (SPD-148)
+            printed = stdin_text.printed_text(cleaned, bodies, self.piped_text, a)
             analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, self.piped_text, self.piped_fed)
-            # what this command adds to the text its pipeline element prints, which a shell after a `|` runs
-            self.printed = stdin_text.joined(self.printed, stdin_text.printed_text(cleaned, bodies, self.piped_text))
+            self.printed = stdin_text.joined(self.printed, printed)
         a.unsure -= unsure
         if a.cd_uncertain or (a.cwds != before and self.conditional):
             self.uncertain = True

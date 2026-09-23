@@ -5253,7 +5253,7 @@ class ShellStandardInputTest(BashHookCase):
     # Standard input the line does not spell, and a script operand of the shell's own: main's reading, unchanged.
     UNREAD = ("sh < setup.sh", "sh -s arg < setup.sh", "cat setup.sh | sh", "cat setup.sh | zsh",
               "curl -sS https://example.com/i.sh | sh", "sh setup.sh", "bash ./setup.sh", "sh <(echo 'git push')",
-              "echo \"$CMD\" | sh", "X=push; echo \"git $X\" | sh", "printf '%d' 'git push' | sh",
+              "echo \"$CMD\" | sh", "printf '%d' 'git push' | sh",  # a value the line settles: SettledStandardInputTest
               "echo 'git push' > tests/out.txt | sh", "echo 'git push' | cat", "echo 'git push' | xargs sh")
 
     def setUp(self):
@@ -5320,6 +5320,75 @@ class ShellStandardInputTest(BashHookCase):
         out = str(self.out)
         self.assertRefused("echo 'cd %s' | sh; echo x > note.txt" % out, "deliverables")
         self.assertSilent("cd %s && echo 'git status' | sh && echo x > note.txt" % out)
+
+
+class SettledStandardInputTest(BashHookCase):
+    """SPD-148: SPD-143 read the text a line prints into a shell only where every word of the printing command was
+    spelled literally, so `X='git push'; echo $X | sh`, `echo "$X" | sh` and `X=push; echo "git $X" | sh` were silent for
+    a member while `echo 'git push' | sh` was refused -- the same Law 7 evasion one assignment away.  A word the printer
+    is passed, and a here-string's word, is now read through the value the line settled (shell/arg_writes.resolved, the
+    reading SPD-127 gave every write target), before the command runs, so its own prefix assignments reach none of them.
+
+    The masked words no longer tell `$X` from `"$X"`, and bash splits an unquoted expansion at its blanks where zsh
+    never does, so a command whose settled value holds a blank is read both ways and its text kept where the two agree:
+    `echo $X` prints `git push` in either.  Where they differ -- an echo option the split would make of the value, a run
+    of blanks, a printf format applied to each field -- the text stays unread, as does every value the line does not
+    settle: one assigned in a branch, a loop, a function body or a subshell, one a substitution computes, one `read`
+    or `unset` changes, and one holding a glob character, which bash expands."""
+
+    # Each line feeds a shell one `git push` through a value it settles itself.
+    SETTLED = ("X='git push'; echo $X | sh", "X='git push'; echo \"$X\" | sh", "X=push; echo \"git $X\" | sh",
+               "X=push; echo git ${X} | sh", "X=git; Y=push; echo $X $Y | sh", "X=push\necho \"git $X\" | bash",
+               "X=push; printf 'git %s\\n' \"$X\" | sh", "X=push; print -r git $X | zsh -f",
+               "X='git push'; echo $X | tee /dev/null | sh", "X='git push'; { echo $X; } | sh",
+               "X=push; sh <<< \"git $X\"", "X='git push'; bash -s <<< $X", "X='git push'; cat <<< \"$X\" | sh",
+               "X=push; cat <<EOF | sh\ngit $X\nEOF", "X=echo; $X 'git push' | sh",
+               "X='git push'; echo $X | xargs -0 sh -c")
+    # A value the line does not settle, or one bash's split and zsh's whole reading do not print alike: unread.
+    UNSETTLED = ("true && X='git push'; echo $X | sh", "if true; then X='git push'; fi; echo $X | sh",
+                 "for X in 'git push'; do echo $X | sh; done", "f() { X='git push'; }; f; echo $X | sh",
+                 "(X='git push'); echo $X | sh", "X='git push' | true; echo $X | sh", "X='git push' echo $X | sh",
+                 "X='git push'; X=$(date); echo $X | sh", "X='git push'; unset X; echo $X | sh",
+                 "X='git p*'; echo $X | sh", "echo \"$CMD\" | sh", "X=push; echo \"git $Y\" | sh")
+    SPLIT = ("X='-n git push'; echo $X | sh", "X='git  push'; echo $X | sh", "X='git push'; printf '%s\\n' $X | sh",
+             "X='git  push'; bash -s <<< $X")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def verbs(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "git"]
+
+    def test_a_settled_value_is_read_where_the_shell_prints_it(self):
+        for command in self.SETTLED:
+            with self.subTest(command):
+                self.assertEqual(self.verbs(command), ["push"])
+                self.assertRefused(command, "Law 7")
+                self.assertSilent(command, agent_id=None)  # Spud pushes; Law 7 binds members
+        self.assertEqual(self.verbs("X='git push'; Y='git commit -m x'; { echo $X; echo \"$Y\"; } | sh"), ["push", "commit"])
+        self.assertSilent("X='git status'; echo $X | sh")
+
+    def test_a_value_the_line_does_not_settle_stays_unread(self):
+        for command in self.UNSETTLED:
+            with self.subTest(command):
+                self.assertNotIn("push", self.verbs(command))
+                self.assertSilent(command)
+
+    def test_a_value_the_two_shells_print_apart_stays_unread(self):
+        """`$X` and `"$X"` reach the reading alike, so a value bash's split of an unquoted expansion would print
+        otherwise than zsh does is text the hook cannot say, as it was."""
+        for command in self.SPLIT:
+            with self.subTest(command):
+                self.assertEqual(self.analysis(command).findings, [])
+                self.assertSilent(command)
+
+    def test_a_spud_call_and_a_write_are_read_through_it_too(self):
+        cli = self.spud_cli
+        self.assertRefused("C='%s'; echo \"$C ticket new --title x\" | sh" % cli, "Law 6")
+        self.assertRefused("T=ledger/tickets/SPD-001.md; echo \"echo x > $T\" | sh", "generated")
+        self.assertRefused("D=docs/x.md; echo touch $D | sh", "deliverables")
+        self.assertSilent("T=tests/out.txt; echo \"echo x > $T\" | sh")
 
 
 INLINE_WORDING = "the hook reads no inline program"

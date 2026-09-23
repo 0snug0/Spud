@@ -140,11 +140,12 @@ def read_writes(cmd, base, words, a):
                              resolved(suffix, a) if suffix else suffix, kind))
 
 
-def resolved(word, a):
+def resolved(word, a, blanks=None):
     """The word with every `$NAME` or `${NAME}` the line assigned put in its place, when both shells pass that value as the
     one plain word it spells: a value the line settled (not doubted, not a loop's or a function body's, not one the shells
     set themselves), holding no blank (bash would split it), no glob character (bash expands an unquoted expansion's) and
-    nothing left to expand.  A member writes into its scratchpad through a variable it set on the line
+    nothing left to expand.  `blanks`, for a reader that splits the words itself (shell/stdin_text, SPD-148): a value
+    holding a blank is put in place too, passed through this function first.  A member writes into its scratchpad through a variable it set on the line
     (`S=<scratchpad>; mkdir -p $S/base`) far too often for the raw word to be the reading here; everything else stays as
     spelled and earns the unresolvable-target refusal a redirection's spelling earns.
 
@@ -164,10 +165,11 @@ def resolved(word, a):
         value = a.vars.get(name)
         if value is None or name in a.doubt or name in a.sticky or a.all_doubt or name in syntax.DYNAMIC_VARIABLES:
             return m.group(0)
-        if not value or unresolved(value) or syntax._IFS_BLANKS_RE.search(value) or syntax._ARRAY_VALUE in value \
+        if not value or unresolved(value) or (blanks is None and syntax._IFS_BLANKS_RE.search(value)) \
+                or syntax._ARRAY_VALUE in value \
                 or syntax.GLOB_RE.search(prepare.deglob(value)):  # deglob: a glob character the assignment's own quoting marked literal counts too
             return m.group(0)
-        return value
+        return value if blanks is None else blanks(value)
 
     return _EXPANSION_RE.sub(one, word)
 
