@@ -1,4 +1,4 @@
-"""hooks/hookio: Hook constants, HookError and HookOutput, the spool.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/hookio: Hook constants, HookError and HookOutput, the spool."""
 
 import contextlib
 import fcntl
@@ -11,7 +11,7 @@ from ..state import ledgerdb
 
 
 # ----------------------------------------------------------------------------
-# Hooks (SPD-008): the harness's events, the laws as refusals
+# Hooks: the harness's events, the laws as refusals
 # ----------------------------------------------------------------------------
 #
 # `spud hook <event>` reads the harness payload on stdin and answers the documented way:
@@ -26,7 +26,7 @@ from ..state import ledgerdb
 HOOK_EVENTS = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop", "SessionStart", "Stop", "UserPromptSubmit")
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
 ENFORCED_TOOLS = ("Agent", "Bash") + EDIT_TOOLS
-# Spud's hand-written set (Law 1 and correction 2 on SPD-008); everything else in the
+# Spud's hand-written set (Law 1, as corrected when the hooks were designed); everything else in the
 # repository is a deliverable, and ledger/** and reports/** are generated.
 SPUD_PATHS = ("spud.config.json", "CLAUDE.md", ".claude/**", "docs/superpowers/specs/**",
               "ledger/Home.md", "ledger/Spud.md", "ledger/*.base", "ledger/_templates/**")
@@ -35,20 +35,20 @@ DESCRIPTION = re.compile(r"^\s*(?P<team>[A-Z][A-Z0-9]*-\d+)/(?P<name>[A-Za-z][\w
 AGENT_ID_RE = re.compile(r"^[0-9a-f]{17}$")
 SPUD_COMMANDS = ("init", "migrate", "backup", "schedule", "doctor", "config", "settings", "import", "render", "ticket", "member",
                  "proposal", "handoff", "report", "board", "fleet", "card", "events", "sql", "hook", "project", "session", "home", "pr",
-                 "vault")  # SPD-156: the home's Obsidian vault, installed from the tool's share/ and captured back into it
+                 "vault")  # the home's Obsidian vault, installed from the tool's share/ and captured back into it
 SPUD_ONLY_COMMANDS = ("init", "migrate", "import", "render", "backup", "schedule")
 SPUD_ONLY_SUBCOMMANDS = (("settings", "sync"), ("config", "sync"), ("ticket", "new"), ("ticket", "move"), ("ticket", "edit"), ("member", "resum"),
                          ("project", "add"), ("project", "edit"), ("project", "install"), ("project", "uninstall"), ("project", "sync"),
                          ("project", "remove"), ("session", "claim"), ("session", "release"), ("home", "move"),
-                         # SPD-157: `home sync` rewrites the home's own CLAUDE.md, notes, templates and views, every one
+                         # `home sync` rewrites the home's own CLAUDE.md, notes, templates and views, every one
                          # of them a SPUD_PATHS file the edit hook already refuses a member.
                          ("home", "sync"),
-                         ("pr", "record"),  # SPD-077: opening a pull request is part of landing, which is Spud's (Law 10)
-                         # SPD-156: installing the vault writes the home's own .obsidian/, which is Spud's directory; the
+                         ("pr", "record"),  # opening a pull request is part of landing, which is Spud's (Law 10)
+                         # Installing the vault writes the home's own .obsidian/, which is Spud's directory; the
                          # other half, `vault capture`, is a member's and writes only into that member's deliverables.
                          ("vault", "install"))
-# The spud calls a plain session in another project may run with `--as spud` (SPD-014): the ones that write nothing an
-# actor owns.  `board` stays here since SPD-077, when the full board began reconciling recorded pull requests: that write
+# The spud calls a plain session in another project may run with `--as spud`: the ones that write nothing an actor
+# owns.  `board` stays here although the full board reconciles recorded pull requests: that write
 # names the actor `reconcile` and no judgment, and board takes no `--as` of its own, so Law 6 has nothing to refuse.
 READ_ONLY_COMMANDS = ("board", "fleet", "card", "events", "sql", "doctor")
 READ_ONLY_SUBCOMMANDS = (("ticket", "show"), ("member", "show"), ("member", "list"), ("proposal", "list"), ("project", "list"), ("project", "show"),
@@ -57,7 +57,7 @@ MEMBER_OWN_COMMANDS = (("member", "log"), ("member", "result"), ("member", "bloc
 DB_PATH_RE = re.compile(r"ledger\.db|(?:^|[\s/'\"=])\.spud(?:/|$|[\s'\"])", re.IGNORECASE)
 # The ledger state directory at a project root: the database, its WAL and shm files, the worktree list cache, the backups
 # and the launcher's cached bytecode (bin/spud).  Only the CLI writes there; the Bash hook and the edit hook refuse it to
-# everyone in the same words (SPD-031).
+# everyone in the same words.
 STATE_DIR = ".spud"
 DB_REASON = ("direct access to the ledger database is refused (%s); the inspection path is `spud sql --readonly '<statement>'`,"
              " and every write goes through the spud CLI")

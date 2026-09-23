@@ -40,7 +40,7 @@ LAW_5 = "Law 5"  # a member outside its globs; the home's generated ledger/** an
 NOT_SPUD = "not Spud"  # a plain session, or an unbound agent_id of one, writing in Spud's home
 NOT_BOUND = "not bound"  # an unbound agent_id in a Spud session writing a project path
 STATE_WORDING = "ledger database"  # the state directory .spud/ at any project root, for everyone
-BOUND_WORKTREE = "SPD-098"  # a member of a bound ticket writing its project's path outside the worktree the ticket is bound to
+BOUND_WORKTREE = "a member of a bound ticket writes its project's paths there alone"  # a member of a bound ticket writing its project's path outside the worktree the ticket is bound to
 GIT_DIR = GIT_DIR_WORDING  # SPD-066: a path with a .git component, for every agent_id in a Spud session
 SPUD_PLANTED = SPUD_PLANTED_WORDING  # SPD-123: Spud's own git call reaching what a member may have planted in a known checkout
 

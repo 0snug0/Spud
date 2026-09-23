@@ -32,7 +32,7 @@ def case_insensitive_fs(path):
 
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
 SESSION_B = "7d1e6a0c-5b2f-4c8d-9e3a-1f2b3c4d5e6f"  # a second Spud session working in parallel (SPD-018)
-TRANSCRIPT = "/Users/eric/.claude/projects/-Users-eric-Personal-Spud/%s.jsonl"
+TRANSCRIPT = "/Users/Someone/.claude/projects/-Users-Someone-Personal-Spud/%s.jsonl"
 AGENT_A = "ac8c90dafa6697045"  # the spike's background probe
 AGENT_B = "adb9ecf5d69362ddd"  # the spike's foreground probe
 AGENT_C = "a0cfc2d597e041e6b"
@@ -67,7 +67,7 @@ def common(cwd, agent_id=None, agent_type=None, session=SESSION):
         "cwd": cwd,
         "permission_mode": "default",
         "prompt_id": "550e8400-e29b-41d4-a716-446655440000",
-        "scratchpad_dir": "/tmp/claude-501/-Users-eric-Personal-Spud/%s/scratchpad" % session,
+        "scratchpad_dir": "/tmp/claude-501/-Users-Someone-Personal-Spud/%s/scratchpad" % session,
     }
     if agent_id:
         d["agent_id"] = agent_id
@@ -3734,7 +3734,7 @@ class GitDirectoryPathTest(BashHookCase):
                 self.assertNotIn(GIT_DIR_WORDING, r.reason)
 
     def test_the_scratchpad_is_no_exception(self):
-        scratch = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        scratch = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
         for p in (scratch + "/repo/.git/hooks/pre-auto-gc", scratch + "/repo/.git", "/tmp/x/.git/index"):
             with self.subTest(p):
                 r = self.assertEditRefused(p, GIT_DIR_WORDING)
@@ -5813,7 +5813,7 @@ class ShellSnapshotTest(ShellSnapshotCase):
 
     Confirmed from a member's own Bash call before anything was written: `type gp` printed "gp is an alias for git push",
     `type gc` "gc is an alias for git commit --verbose", `type ggp` "ggp is a shell function from
-    /Users/ericlugo/.claude/shell-snapshots/snapshot-zsh-1789793561771-kk8ad0.sh", and `gst --short --branch` ran git and
+    /Users/Someone/.claude/shell-snapshots/snapshot-zsh-1789793561771-kk8ad0.sh", and `gst --short --branch` ran git and
     printed the worktree's status with no finding.  The six snapshots there define 497 aliases and 223 functions between
     them; 190 aliases expand to git and 111 of those to a write verb.
 
@@ -8001,8 +8001,8 @@ class WrapperCommandWordTest(BashHookCase):
 
 class WrapperDirectoryTest(BashHookCase):
     """SPD-128: strip_wrapper took env's `-C` and sudo's `-D`/`--chdir` as value options and dropped the value, so the command
-    such a wrapper runs was read in the line's own directories.  With cwd /Users/x/repo, main (4364362) read `env -C
-    tests/fake/.git/hooks tee post-index-change` as a redirect into /Users/x/repo, `env -C ledger/tickets touch SPD-001.md`
+    such a wrapper runs was read in the line's own directories.  With cwd /Users/X/repo, main (4364362) read `env -C
+    tests/fake/.git/hooks tee post-index-change` as a redirect into /Users/X/repo, `env -C ledger/tickets touch SPD-001.md`
     as a write by argument there, `env -C tests/fake git status` as a git call discovering its repository there, `env -C /usr
     sh -c 'echo x > f'` as a redirect there and `sudo -D sub touch f` as a write there: a bound member's tee into a nested
     .git's hooks, its touch of a ticket and its git call into a nested repository were each silent where the plain spelling
@@ -8027,7 +8027,7 @@ class WrapperDirectoryTest(BashHookCase):
     directory while the command opens what they name in the one it moved to.  AGENT_A plans home:tests/** and
     home:bin/spud, AGENT_C home:**; the home is a git repository with a nested one at tests/fake, as NestedRepositoryTest's."""
 
-    R = "/Users/x/repo"
+    R = "/Users/X/repo"
 
     def setUp(self):
         super().setUp()
@@ -8091,7 +8091,7 @@ class WrapperDirectoryTest(BashHookCase):
                                ("env -C sub -S 'touch f'", self.moved(R, "sub")),
                                ("env -C sub eval 'touch f'", self.moved(R, "sub")),
                                ("env -C ~ touch f", self.moved(home)), ("env -C ~/x touch f", self.moved(home, "x")),
-                               ("env -C ~+/sub touch f", self.moved(R, "sub")), ("env -C .. touch f", self.moved("/Users/x")),
+                               ("env -C ~+/sub touch f", self.moved(R, "sub")), ("env -C .. touch f", self.moved("/Users/X")),
                                ("D=sub; env -C $D touch f", self.moved(R, "sub")),  # a value the line assigned, as SPD-043 reads one
                                ("cd tests && env -C sub touch f", self.moved(R, "tests/sub")),
                                ("cd $X; env -C /usr touch f", self.moved("/usr")),  # absolute: known wherever the shell is
@@ -8155,7 +8155,7 @@ class WrapperDirectoryTest(BashHookCase):
                 self.assertIn(SPUD_PLANTED_WORDING, self.assertRefused(command, GIT_NESTED_WORDING, agent_id=None).reason)
 
     def test_a_harmless_move_stays_silent(self):
-        scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        scratchpad = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
         for command in ("env -C tests/out tee f", "env -C tests/out touch new.txt", "env -C %s tee probe.txt" % scratchpad,
                         "env -C /tmp tee spd-128-x", "sudo -D tests/out touch f", "sudo --chdir=tests/out tee f",
                         "env -C tests git status", "env -C tests/fake/.git/hooks ls", "env -C ledger/tickets cat SPD-001.md"):
@@ -8940,7 +8940,7 @@ class ArgumentWriteTest(BashHookCase):
     """SPD-121: the Bash hook held a write to the path rule only when it was a redirection, a tee operand or one of SPD-049's
     file-writing git options, so a command that writes the files it names as operands was never read: a bound member's
     `cp tests/src.txt tests/fake/.git/hooks/post-index-change`, `ln -s /tmp/x tests/fake/.git/hooks/x` and
-    `cp tests/src.txt /Users/nobody/.zshrc` were silent, past Law 5, SPD-064's outside allowlist and SPD-066's .git rule.
+    `cp tests/src.txt /Users/Nobody/.zshrc` were silent, past Law 5, SPD-064's outside allowlist and SPD-066's .git rule.
 
     Spud's design decision: a write by argument is a write by redirection.  The files cp, mv, ln (and link), install, mkdir,
     touch, rm (and unlink), rmdir, truncate, chmod, chown, chgrp, chflags and sed in place name as operands go through the
@@ -8955,19 +8955,19 @@ class ArgumentWriteTest(BashHookCase):
         super().setUp()
         self.narrow = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:bin/**"]), AGENT_C)
         home = self.home.path
-        self.home.env["HOME"] = "/Users/nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
+        self.home.env["HOME"] = "/Users/Nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
         for d in ("tests/fake/.git/hooks", "tests/out", "tests/copy", "docs", "ledger/tickets", "reports", "bin"):
             (home / d).mkdir(parents=True, exist_ok=True)
         for f in ("tests/src.txt", "tests/b.txt", "docs/x.md", "ledger/tickets/SPD-001.md", "bin/spud"):
             (home / f).write_text("a\n", encoding="utf-8")
-        self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        self.scratchpad = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
 
     def refused_targets(self):
         """(target, the needle its refusal carries) for AGENT_A: a .git component, outside the deliverables, the home's
         generated roots, and outside every project."""
         return (("tests/fake/.git/hooks/post-index-change", GIT_DIR_WORDING), ("docs/x.md", "deliverables"),
                 ("ledger/tickets/SPD-001.md", "generated"), ("reports/2026-09-17.md", "generated"),
-                ("/Users/nobody/.zshrc", OUTSIDE), ("~/.zshrc", OUTSIDE))
+                ("/Users/Nobody/.zshrc", OUTSIDE), ("~/.zshrc", OUTSIDE))
 
     def silent_targets(self):
         return ("tests/out/new.txt", self.scratchpad + "/probe.txt", "/tmp/spd-121-x")
@@ -8976,7 +8976,7 @@ class ArgumentWriteTest(BashHookCase):
         for command, needle, path in (
             ("cp tests/src.txt tests/fake/.git/hooks/post-index-change", GIT_DIR_WORDING, "tests/fake/.git/hooks/post-index-change"),
             ("ln -s /tmp/x tests/fake/.git/hooks/x", GIT_DIR_WORDING, "tests/fake/.git/hooks/x"),
-            ("cp tests/src.txt /Users/nobody/.zshrc", OUTSIDE, "/Users/nobody/.zshrc"),
+            ("cp tests/src.txt /Users/Nobody/.zshrc", OUTSIDE, "/Users/Nobody/.zshrc"),
         ):
             with self.subTest(command):
                 r = self.assertRefused(command, needle)
@@ -9071,7 +9071,7 @@ class ArgumentWriteTest(BashHookCase):
         self.assertSilent("mv tests/src.txt /tmp/spd-121-x")
 
     def test_ln_writes_its_link_name_never_its_target(self):
-        for command in ("ln -s tests/fake/.git/hooks tests/hooks-link", "ln -s docs/x.md tests/x-link", "ln -s /Users/nobody/.zshrc tests/rc",
+        for command in ("ln -s tests/fake/.git/hooks tests/hooks-link", "ln -s docs/x.md tests/x-link", "ln -s /Users/Nobody/.zshrc tests/rc",
                         "ln tests/src.txt tests/hard", "ln -sf /tmp/x tests/out/x", "cd tests && ln -s ../docs/x.md"):
             with self.subTest(command):
                 self.assertSilent(command)
@@ -9212,14 +9212,14 @@ class ArgumentWriteTest(BashHookCase):
                 r = self.assertRefused(form.format("docs/x.md"), "Law 1", agent_id=None)
                 self.assertIn(ARG_WORDING, r.reason)
                 self.assertRefused(form.format("ledger/tickets/SPD-001.md"), "generated", agent_id=None)
-                self.assertSilent(form.format("/Users/nobody/.zshrc"), agent_id=None)
+                self.assertSilent(form.format("/Users/Nobody/.zshrc"), agent_id=None)
                 self.assertSilent(form.format("/tmp/spd-121-x"), agent_id=None)
                 self.assertSilent(form.format(".claude/settings.json"), agent_id=None)  # his own, the backup under .claude/** too
         r = self.assertRefused("cp tests/src.txt tests/fake/.git/hooks/post-index-change", "Law 1", agent_id=None)
         self.assertNotIn(GIT_DIR_WORDING, r.reason)  # SPD-066's rule is a caller's with an agent_id
 
     def test_an_unbound_agent_id_is_held_as_for_a_redirection(self):
-        self.assertRefused("cp tests/src.txt /Users/nobody/.zshrc", OUTSIDE, agent_id=AGENT_D)
+        self.assertRefused("cp tests/src.txt /Users/Nobody/.zshrc", OUTSIDE, agent_id=AGENT_D)
         self.assertRefused("touch tests/fake/.git/hooks/x", GIT_DIR_WORDING, agent_id=AGENT_D)
         self.assertRefused("touch tests/x.py", "not bound", agent_id=AGENT_D)
         self.assertSilent("touch %s/probe.txt" % self.scratchpad, agent_id=AGENT_D)
@@ -9359,7 +9359,7 @@ class DirectoryWriteTest(BashHookCase):
                                 ("rm -rf .git", GIT_DIR_WORDING),
                                 ("mkdir -p .spud/x", "ledger database"),  # the line names .spud: refused before the words are read
                                 ("rm -rf .spud", "ledger database"), ("mkdir -p ledger/x", "generated"),
-                                ("rm -rf reports", "generated"), ("mkdir -p /Users/nobody/x", OUTSIDE)):
+                                ("rm -rf reports", "generated"), ("mkdir -p /Users/Nobody/x", OUTSIDE)):
             with self.subTest(command):
                 self.assertRefused(command, needle, agent_id=AGENT_C)
         self.assertRefused("mkdir -p ledger/x", "generated", agent_id=AGENT_E)
@@ -9424,7 +9424,7 @@ class TreeWriteCase(BashHookCase):
 
 
 class FindWriteTest(TreeWriteCase):
-    """SPD-126: find's writes were never read.  With cwd /Users/x/repo, main (08c344e) recorded no finding for `find .
+    """SPD-126: find's writes were never read.  With cwd /Users/X/repo, main (08c344e) recorded no finding for `find .
     -exec git push \\;` -- a member's push past Law 7, since find's -exec utility was never a command the analysis read --
     and no write for `find tests/tmp -name '*.pyc' -delete` or `find . -name x -exec rm {} \\;`.
 
@@ -9766,7 +9766,7 @@ class ExtractionWriteTest(TreeWriteCase):
                                 ("unzip a.zip -d reports", "generated"), ("patch -d ledger/tickets -p1 < x.patch", "generated"),
                                 ("curl -O --output-dir ledger https://example.com/x", "generated"), ("tar -xf a.tar -C docs", "deliverables"),
                                 ("unzip a.zip -d bin", "deliverables"), ("tar -xf a.tar -C tests/fake/.git", GIT_DIR_WORDING),
-                                ("tar -xf a.tar -C /Users/nobody", OUTSIDE)):
+                                ("tar -xf a.tar -C /Users/Nobody", OUTSIDE)):
             with self.subTest(command):
                 self.assertRefused(command, needle, agent_id=AGENT_G)
 
@@ -9850,10 +9850,10 @@ class SpelledWriteTest(TreeWriteCase):
 
     def setUp(self):
         super().setUp()
-        self.home.env["HOME"] = "/Users/nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
+        self.home.env["HOME"] = "/Users/Nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
         for d in ("tests/fake/.git/hooks", "out/sub", ".claude"):
             (self.home.path / d).mkdir(parents=True, exist_ok=True)
-        self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        self.scratchpad = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
 
     def full(self, command, cwd=None):
         """(the word, the backup suffix, the kind) of each write by argument the line records."""
@@ -9927,7 +9927,7 @@ class SpelledWriteTest(TreeWriteCase):
     def test_every_writer_is_held_to_the_path_rule(self):
         for label, form in SPELLED_WRITERS:
             for target, needle in (("ledger/tickets/SPD-001.md", "generated"), ("tests/fake/.git/hooks/pre-commit", GIT_DIR_WORDING),
-                                   ("/Users/nobody/x", OUTSIDE), ("docs/new.txt", "deliverables")):
+                                   ("/Users/Nobody/x", OUTSIDE), ("docs/new.txt", "deliverables")):
                 command = form.replace("{}", target)
                 with self.subTest(command=command):
                     r = self.assertRefused(command, needle, agent_id=AGENT_G)
@@ -9960,7 +9960,7 @@ class SpelledWriteTest(TreeWriteCase):
                                        ("mktemp -p docs x.XXXX", "deliverables", "docs/x.????"),
                                        ("mktemp tmp.XXXX", "deliverables", "tmp.????"),  # the checkout root
                                        ("mktemp ledger/tickets/x.XXXX", "generated", "ledger/tickets/x.????"),
-                                       ("mktemp -d /Users/nobody/x.XXXX", OUTSIDE, "/Users/nobody/x.????")):
+                                       ("mktemp -d /Users/Nobody/x.XXXX", OUTSIDE, "/Users/Nobody/x.????")):
             with self.subTest(command):
                 r = self.assertRefused(command, needle, agent_id=AGENT_G)
                 self.assertIn(shown, r.reason)  # the picked characters shown as a glob shows them
@@ -10047,7 +10047,7 @@ class SpelledWriteTest(TreeWriteCase):
             ("patch -d out -r ../docs/x.rej f ../x.patch", "deliverables", "docs/x.rej", AGENT_G),
             ("patch -d out -o ../ledger/tickets/SPD-001.md f ../x.patch", "generated", "ledger/tickets/SPD-001.md", AGENT_G),
             ("patch -d bin -Y ../docs/ x.py ../x.patch", "deliverables", "docs/x.py.orig", AGENT_H),  # -Y: before the basename
-            ("patch -d bin /Users/nobody/f ../x.patch", OUTSIDE, "/Users/nobody/f", AGENT_H),
+            ("patch -d bin /Users/Nobody/f ../x.patch", OUTSIDE, "/Users/Nobody/f", AGENT_H),
             ("patch -d tests fake/.git/hooks/pre-commit ../x.patch", GIT_DIR_WORDING, "pre-commit", AGENT_A),
             # a later patch in the file names its own file under the line's directory, whatever -o or the operand say
             ("patch -o out/y out/keep.txt x.patch", "deliverables", "home:", AGENT_G),
@@ -10101,7 +10101,7 @@ class SpelledWriteTest(TreeWriteCase):
                 r = self.assertRefused(form.replace("{}", "docs/x.md"), "Law 1", agent_id=None)
                 self.assertIn(ARG_WORDING, r.reason)
                 self.assertRefused(form.replace("{}", "ledger/tickets/SPD-001.md"), "generated", agent_id=None)
-                self.assertSilent(form.replace("{}", "/Users/nobody/x"), agent_id=None)
+                self.assertSilent(form.replace("{}", "/Users/Nobody/x"), agent_id=None)
                 self.assertSilent(form.replace("{}", ".claude/x"), agent_id=None)  # his own .claude/**
         self.assertSilent("mktemp .claude/x.XXXX", agent_id=None)
         self.assertRefused("mktemp docs/x.XXXX", "Law 1", agent_id=None)
@@ -10131,7 +10131,7 @@ SCRIPT_WRITERS = (
 
 class ScriptTextTest(TreeWriteCase):
     """SPD-139: the Bash hook reads a command's words, and a sed script or an awk program is one quoted word, so what the
-    script itself names was never read.  On main (08c344e), with cwd /Users/x/repo, each of these gave findings=[] and no
+    script itself names was never read.  On main (08c344e), with cwd /Users/X/repo, each of these gave findings=[] and no
     write: `awk 'BEGIN{system(\"git push\")}'` and `awk 'BEGIN{print \"x\" | \"git push\"}'` (a VCS write past Law 7),
     `awk '{print > \"ledger/tickets/SPD-001.md\"}' f` and `sed -n 'w ledger/tickets/SPD-001.md' f` (a write to a rendered
     note past Law 5).
@@ -10161,7 +10161,7 @@ class ScriptTextTest(TreeWriteCase):
 
     def setUp(self):
         super().setUp()
-        self.home.env["HOME"] = "/Users/nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
+        self.home.env["HOME"] = "/Users/Nobody"  # a HOME outside every project and every temp root, as OutsideProjectTest's
         (self.home.path / "out" / "p.sed").write_text("w docs/from-sed.txt\n", encoding="utf-8")
         (self.home.path / "out" / "p.awk").write_text('BEGIN{print "x" > "docs/from-awk.txt"}\n', encoding="utf-8")
         (self.home.path / "out" / "clean.awk").write_text('{n++} END{print n}\n', encoding="utf-8")
@@ -10303,7 +10303,7 @@ class ScriptTextTest(TreeWriteCase):
     def test_every_script_write_is_held_to_the_path_rule(self):
         for label, form in SCRIPT_WRITERS:
             for target, needle in (("ledger/tickets/SPD-001.md", "generated"), ("tests/fake/.git/hooks/pre-commit", GIT_DIR_WORDING),
-                                   ("/Users/nobody/x", OUTSIDE), ("docs/new.txt", "deliverables")):
+                                   ("/Users/Nobody/x", OUTSIDE), ("docs/new.txt", "deliverables")):
                 command = form.replace("{}", target)
                 with self.subTest(command=command):
                     r = self.assertRefused(command, needle, agent_id=AGENT_G)
@@ -10374,7 +10374,7 @@ class ScriptTextTest(TreeWriteCase):
                 r = self.assertRefused(form.replace("{}", "docs/x.md"), "Law 1", agent_id=None)
                 self.assertIn(ARG_WORDING, r.reason)
                 self.assertRefused(form.replace("{}", "ledger/tickets/SPD-001.md"), "generated", agent_id=None)
-                self.assertSilent(form.replace("{}", "/Users/nobody/x"), agent_id=None)
+                self.assertSilent(form.replace("{}", "/Users/Nobody/x"), agent_id=None)
                 self.assertSilent(form.replace("{}", ".claude/x"), agent_id=None)  # his own .claude/**
         for command in ("awk 'BEGIN{system(\"git push\")}'", "awk 'BEGIN{print \"x\" | \"git push\"}'",
                         "awk '{print > f}' a.tar", "sed -n 'W out/f' a.tar"):
@@ -10384,7 +10384,7 @@ class ScriptTextTest(TreeWriteCase):
 
 
 PROBE = "/tmp/spd-127-probe"  # the scratch directory D of Spud's probe of zsh 5.9 -f and bash 3.2, 2026-09-18
-NOBODY = "/Users/nobody"  # a directory outside every registered project and every temp root, as OutsideProjectTest's
+NOBODY = "/Users/Nobody"  # a directory outside every registered project and every temp root, as OutsideProjectTest's
 
 
 class TargetResolutionTest(BashHookCase):
@@ -10416,7 +10416,7 @@ class TargetResolutionTest(BashHookCase):
             (home / d).mkdir(parents=True, exist_ok=True)
         for f in ("tests/keep.py", "docs/x.md", "ledger/tickets/SPD-001.md"):
             (home / f).write_text("orig\n", encoding="utf-8")
-        self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        self.scratchpad = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
 
     def analysis(self, command):
         m = load_spud_module()
@@ -10799,7 +10799,7 @@ class PreEditTest(PathRuleAsserts, HookCase):
                   str(self.home.path) + "-sibling/x.md"):  # the suite's homes live under tempfile, an open root
             self.assertSilent(p)
             self.assertSilent(p, agent_id=None)
-        for p in ("/Users/eric/.claude/projects/-Users-eric-Personal-Spud/memory/x.md", "/etc/hosts"):
+        for p in ("/Users/Someone/.claude/projects/-Users-Someone-Personal-Spud/memory/x.md", "/etc/hosts"):
             self.assertSilent(p, agent_id=None)
             self.assertRefused(p, "outside every registered project")
 
@@ -11179,15 +11179,15 @@ class OutsideProjectTest(PathAliasAsserts, HookCase):
     which run before the project lookup.
 
     The suite's homes and registered projects live under tempfile, which the allowlist opens, so every refusal here names a
-    path under a HOME that does not exist (/Users/nobody) or a system directory outside every temp root."""
+    path under a HOME that does not exist (/Users/Nobody) or a system directory outside every temp root."""
 
     def setUp(self):
         super().setUp()
         self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:tests/**", "home:bin/spud"]), AGENT_A)
         self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
-        self.fake_home = "/Users/nobody"  # a HOME outside every project and every temp root; nothing here is created
+        self.fake_home = "/Users/Nobody"  # a HOME outside every project and every temp root; nothing here is created
         self.home.env["HOME"] = self.fake_home
-        self.scratchpad = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        self.scratchpad = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
         self.tmp = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
         self.addCleanup(shutil.rmtree, self.tmp, True)
 
@@ -11270,12 +11270,12 @@ class OutsideProjectTest(PathAliasAsserts, HookCase):
         self.assertSilent(tests / "outlink" / "x.txt")
 
     def test_spud_keeps_his_own_files_and_his_memory_directory(self):
-        for p in self.sensitive() + [self.fake_home + "/.claude/projects/-Users-eric-Personal-Spud/memory/MEMORY.md"]:
+        for p in self.sensitive() + [self.fake_home + "/.claude/projects/-Users-Someone-Personal-Spud/memory/MEMORY.md"]:
             with self.subTest(p):
                 self.assertSilent(p, agent_id=None)
 
     def test_the_harness_and_state_directory_refusals_still_come_first(self):
-        harness = "/private/tmp/claude-%d/-Users-eric-Personal-Spud/%s/subagents/agent-%s.meta.json" % (os.getuid(), SESSION, AGENT_A)
+        harness = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/subagents/agent-%s.meta.json" % (os.getuid(), SESSION, AGENT_A)
         r = self.assertRefused(harness, "harness")
         self.assertNotIn(OUTSIDE, r.reason)
         r = self.assertRefused(self.home.path / STATE / "ledger.db", DB_WORDING)

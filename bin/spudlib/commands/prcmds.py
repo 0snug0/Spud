@@ -1,4 +1,4 @@
-"""commands/prcmds: Landing pull requests: pr record, pr reconcile, pr list, and the blocks board, card and doctor show (SPD-077)."""
+"""commands/prcmds: Landing pull requests: pr record, pr reconcile, pr list, and the blocks board, card and doctor show."""
 
 import re
 from datetime import datetime
@@ -8,8 +8,8 @@ from ..core import kernel
 from ..hooks import worktrees
 from ..state import actors, ledgerdb, lookup
 
-# SPD-077.  Under `landing: pr` a ticket's done move used to depend on the session that opened the pull request still being
-# alive when it merged: BAD-058 sat `active` for 44 minutes after its work had landed, because its session had stopped and
+# Under `landing: pr` a ticket's done move used to depend on the session that opened the pull request still being alive
+# when it merged: one ticket sat `active` for 44 minutes after its work had landed, because its session had stopped and
 # nothing in the ledger knew a pull request existed.  So: Spud records the pull request when he opens it (`pr record`, his,
 # because opening one is part of landing and a member neither commits nor pushes), the reconciler reads each recorded,
 # not-yet-settled one with a single `gh pr view` off every hook path, and the board says what a merge leaves owed.
@@ -246,7 +246,7 @@ def cmd_pr_list(ctx, args):
 
 
 def failed_checks(con):
-    """Every still-open pull request of an open ticket whose last read failed (SPD-077): what `doctor` reports, because
+    """Every still-open pull request of an open ticket whose last read failed: what `doctor` reports, because
     while a read keeps failing the ledger cannot see whether the landing happened."""
     out = []
     for p in lookup.pull_requests(con):

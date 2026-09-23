@@ -1,4 +1,4 @@
-"""hooks/stophook: What a stopping session owes, and Stop.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/stophook: What a stopping session owes, and Stop."""
 
 from datetime import datetime
 
@@ -8,13 +8,13 @@ from ..projects import sessions
 from ..state import ledgerdb, lookup
 
 
-# Spud's Stop hook, one session at a time (SPD-018).  Eric runs tickets in parallel sessions; before SPD-018 every Stop
-# was held, ledger-wide, for any member returned unrecorded, another session's included.  A member's session is the
+# Spud's Stop hook, one session at a time.  Eric runs tickets in parallel sessions; before the hook read sessions every
+# Stop was held, ledger-wide, for any member returned unrecorded, another session's included.  A member's session is the
 # session that spawned its tree.  Every hook payload fired inside a subagent carries the main session's session_id (the
-# SPD-015 probe captures: a lead's PreToolUse(Agent) for its child and the SubagentStops of lead and child all carry
+# probe captures of nested spawns: a lead's PreToolUse(Agent) for its child and the SubagentStops of lead and child all carry
 # it), and so does CLAUDE_CODE_SESSION_ID in any Bash the harness runs, a subagent's included, which `member new`
 # records on the row it plans (planning_session).
-PLANNED_GRACE_SECONDS = 600  # a planned row no session can claim holds every session only once it has waited this long; a spawn allowed and never bound holds only once its allow is this old (SPD-025)
+PLANNED_GRACE_SECONDS = 600  # a planned row no session can claim holds every session only once it has waited this long; a spawn allowed and never bound holds only once its allow is this old
 
 
 def member_session(con, member):
@@ -35,7 +35,7 @@ def member_session(con, member):
 
 
 def planned_long_ago(stamp, at):
-    """Whether stamp (a row's planned_at, or since SPD-025 a spawn request's allow) is more than PLANNED_GRACE_SECONDS
+    """Whether stamp (a row's planned_at, or a spawn request's allow) is more than PLANNED_GRACE_SECONDS
     before at; a stamp that cannot be read counts as old."""
     try:
         planned, current = datetime.fromisoformat(stamp), datetime.fromisoformat(at)
@@ -57,7 +57,7 @@ def told_running(con, session, ref):
 
 def reservations(con, member):
     """A member's allowed spawn requests still waiting to bind, oldest first: the reservation hook_agent_spawn keeps
-    against a second spawn of the member until one binds (SPD-025)."""
+    against a second spawn of the member until one binds."""
     return con.execute("SELECT tool_use_id, at FROM spawn_requests WHERE member_id = ? AND decision = 'allow' AND agent_id IS NULL"
                        " ORDER BY at, rowid", (member["id"],)).fetchall()
 
@@ -69,7 +69,7 @@ def stop_owed(con, session, at):
     - returned: a final stop, no outcome, status active, at the root or under a finished parent;
     - planned: never spawned and no allowed spawn waiting to bind, at the root or under a finished parent; a row no
       session can claim only once it has waited PLANNED_GRACE_SECONDS, so a row planned a moment ago never holds;
-    - unbound: planned the same way, but its spawn was allowed and never bound (SPD-025): the harness failed the spawn,
+    - unbound: planned the same way, but its spawn was allowed and never bound: the harness failed the spawn,
       or the binding failed open.  Owed only once every such allow is more than PLANNED_GRACE_SECONDS old; until then
       it is a spawn in flight (PostToolUse(Agent) binds a background spawn at launch) and never holds;
     - running: active with no final stop under a finished parent, named once per session (Spud's own children at
@@ -111,8 +111,8 @@ def stop_item(r, what):
 
 
 def returned_clause(rows):
-    """The returned members, in the words of Spud's Stop since SPD-008, without the ending; when every one is a
-    root member the printed command also carries --next, since SPD-027 (a nested one's stays as it was: `member
+    """The returned members, in the words of Spud's Stop, without the ending; when every one is a
+    root member the printed command also carries --next (a nested one's does not: `member
     finish` writes no report entry, and no Next line, for a child)."""
     next_opt = " [--next '<what happens next>']" if rows and all(r["parent_id"] is None for r in rows) else ""
     return ("%d returned spudagent(s) are not recorded: %s. Record each with `spud --as spud member finish <SPUD-nnn/Name> --status done|blocked|failed"
@@ -122,7 +122,7 @@ def returned_clause(rows):
 
 def planned_clause(con, rows):
     """Planned rows never spawned: Spud spawns its own or records them failed; one under a finished parent nobody
-    can spawn.  A root row's failed command also carries --next, since SPD-027; a nested row's does not, the same
+    can spawn.  A root row's failed command also carries --next; a nested row's does not, the same
     as its unchanged member finish (no report entry for a child)."""
     items, steps = [], []
     for r in rows:
@@ -143,7 +143,7 @@ def planned_clause(con, rows):
 
 
 def unbound_clause(con, rows):
-    """Planned rows whose spawn PreToolUse(Agent) allowed, and so reserved, and which never bound (SPD-025).  They are not
+    """Planned rows whose spawn PreToolUse(Agent) allowed, and so reserved, and which never bound.  They are not
     'never spawned': the harness failed the spawn, or the binding failed open and the child may be running, so the
     binding gap comes first.  A root row that failed is planned anew, because the reservation refuses a second spawn of
     its description; one under a finished parent nobody can spawn again."""
@@ -180,7 +180,7 @@ def running_clause(con, rows):
 
 def stop_reason(con, returned, planned, unbound, running):
     """One block: returned first, then planned, then unbound, then running.  With returned members alone it is the reason Spud's Stop
-    has given since SPD-008, with --next added to the printed command when every one is a root member, since SPD-027."""
+    has always given, with --next added to the printed command when every one is a root member."""
     if returned and not planned and not unbound and not running:
         return "Law 9: " + returned_clause(returned) + ", then end the turn."
     clauses = ([returned_clause(returned)] if returned else []) + ([planned_clause(con, planned)] if planned else []) + ([unbound_clause(con, unbound)] if unbound else []) + ([running_clause(con, running)] if running else [])
@@ -196,7 +196,7 @@ def hook_stop(ctx, payload):
         at = kernel.now()
         with ledgerdb.write_txn(con):
             if sessions.session_mode(ctx, con, payload)[0] == "plain":
-                return hookio.SILENT  # a session that is not Spud owes the ledger nothing (SPD-014)
+                return hookio.SILENT  # a session that is not Spud owes the ledger nothing
             returned, planned, unbound, running = stop_owed(con, session, at)
             if not (returned or planned or unbound or running):
                 return hookio.SILENT

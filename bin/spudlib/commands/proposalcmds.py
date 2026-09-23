@@ -1,4 +1,4 @@
-"""commands/proposalcmds: proposal file, decide, list; handoff add; report add.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""commands/proposalcmds: proposal file, decide, list; handoff add; report add."""
 
 from . import reportentry
 from ..core import kernel
@@ -44,7 +44,7 @@ def cmd_proposal_decide(ctx, args):
                 raise kernel.SpudError(kernel.EXIT_ERROR, "no proposal %d" % args.id)
             if p["status"] != "open":
                 raise kernel.SpudError(kernel.EXIT_ERROR, "proposal %d is already %s" % (p["id"], p["status"]))
-            # SPD-120: a recorded holder that has returned cannot decide anything, so the proposal falls to the nearest
+            # A recorded holder that has returned cannot decide anything, so the proposal falls to the nearest
             # ancestor that can and to Spud at the root.  The climb is resolved here, before the ownership check, and
             # written below with the decision, so nothing is ever held by a member that no longer exists.
             recorded = p["holder_member_id"]
@@ -123,8 +123,8 @@ def cmd_proposal_list(ctx, args):
         rows = [lookup.proposal_dict(con, p) for p in con.execute(sql + " ORDER BY p.id", params).fetchall()]
     finally:
         con.close()
-    # SPD-120: the holder column says who must decide it now, naming the recorded holder when the climb passed one that
-    # has returned -- `Spud (was SPUD-110/Garfield)`.  The rows keep both, so --json still reads the recorded holder.
+    # The holder column says who must decide it now, naming the recorded holder when the climb passed one that has
+    # returned -- `Spud (was SPUD-nnn/<Name>)`.  The rows keep both, so --json still reads the recorded holder.
     shown = [dict(r, holder=lookup.holder_words(r["holder"], r["effective_holder"])) for r in rows]
     return kernel.Result({"proposals": rows}, kernel.table(shown, [("id", "id"), ("ticket", "ticket"), ("status", "status"), ("origin", "origin"), ("holder", "holder"), ("P", "suggested_priority"), ("title", "title")]))
 

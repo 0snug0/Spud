@@ -1,11 +1,11 @@
-"""commands/ghread: The one read of a pull request, `gh pr view --json state,mergedAt,url,number`, and the program that answers it (SPD-077)."""
+"""commands/ghread: The one read of a pull request, `gh pr view --json state,mergedAt,url,number`, and the program that answers it."""
 
 import json
 import os
 
 from ..core import lazy
 
-# SPD-077.  This module is the whole of the ledger's contact with GitHub, and the seam the suite patches: prcmds calls
+# This module is the whole of the ledger's contact with GitHub, and the seam the suite patches: prcmds calls
 # `ghread.pr_view(...)`, so `mock.patch("spudlib.commands.ghread.pr_view", ...)` reaches the call site.  Nothing on the
 # hook path imports it, and nothing here writes the ledger, runs git or merges anything: it reads one pull request and
 # says what GitHub said, or why it could not ask.

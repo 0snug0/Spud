@@ -1,10 +1,10 @@
-"""shell/expansions: Parameter expansions and a command's read points.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""shell/expansions: Parameter expansions and a command's read points."""
 
 from . import analyse, globbing, prepare, spud_calls, syntax
 from ..hooks import hookio, snapshots
 
 
-# What reading one word leaves its caller to do (SPD-043): read on from where the word was (its readings replaced it in place),
+# What reading one word leaves its caller to do: read on from where the word was (its readings replaced it in place),
 # stop (its readings were each analysed whole, or the command word cannot be read), or read on past it (it stays as spelled).
 _AGAIN, _STOP, _FLAGGED = "again", "stop", "flagged"
 _ACTIVATE_GLOBS = str.maketrans({syntax._GLOB_SENTINELS[c]: c for c in "*?[]"})  # bash globs an unquoted expansion, however it was assigned
@@ -13,9 +13,9 @@ _BRACES_PLAIN = str.maketrans({syntax._GLOB_SENTINELS["{"]: "{", syntax._GLOB_SE
 
 
 def expansion_word(word, command=False):
-    """True when the shell expands a parameter, arithmetic or a substitution in this word (SPD-043): a `$` neutralize_quoted_globs
+    """True when the shell expands a parameter, arithmetic or a substitution in this word: a `$` neutralize_quoted_globs
     did not mark literal, or a lifted `$(...)` or backtick body.  In the command word a bare `$X` is read as one whatever its
-    quoting, as it was before SPD-043 (`'$X' push` stays refused)."""
+    quoting (`'$X' push` stays refused)."""
     if hookio.SUBST in word or syntax._EXPANDING_DOLLAR_RE.search(word):
         return True
     return command and variable_reference(word, command) is not None
@@ -23,7 +23,7 @@ def expansion_word(word, command=False):
 
 def variable_reference(word, command=False):
     """The name of a bare `$X` or `${X}` the word is, quoted or not (`"${X}"`'s braces reach it as quoted glob sentinels); in the
-    command word a literal-marked dollar counts too, as before SPD-043; else None."""
+    command word a literal-marked dollar counts too; else None."""
     text = word.translate(_BRACES_PLAIN)
     if command:
         text = text.replace(syntax._LITERAL_DOLLAR, "")
@@ -32,12 +32,12 @@ def variable_reference(word, command=False):
 
 
 def active_read_word(word):
-    """A word the dispatch reads by name that must be resolved before it is read: an expansion (SPD-043) or a glob (SPD-041)."""
+    """A word the dispatch reads by name that must be resolved before it is read: an expansion or a glob."""
     return expansion_word(word) or globbing.active_glob_word(word)
 
 
 def assign_variable(a, name, value, append=False):
-    """Record `name=value` (or `name+=value`) where the shell runs it (SPD-043).  An appended value is not known (CDPATH's reads as
+    """Record `name=value` (or `name+=value`) where the shell runs it.  An appended value is not known (CDPATH's reads as
     `$`, which cd_target does not follow; any other as a substitution).  The value is certain unless the assignment may not run
     or persist here (a.unsure) or runs in a loop or function body, which may assign again later (sticky); a certain assignment
     settles an earlier doubt."""
@@ -51,8 +51,8 @@ def assign_variable(a, name, value, append=False):
         a.doubt.discard(name)
 
 
-# `alias NAME=body` stores shell text the shell runs wherever it next reads NAME in command position (SPD-059, Burbank's
-# SPD-054 proposal).  A shell expands an alias when it parses the text, before the line runs, so an alias defined on the line
+# `alias NAME=body` stores shell text the shell runs wherever it next reads NAME in command position.  A shell
+# expands an alias when it parses the text, before the line runs, so an alias defined on the line
 # reaches only code the line parses again: `eval`'s words, and a substitution inside them.  Probed in bash 3.2, zsh 5.9 -f,
 # zsh -f -o nobareglobqual and sh with a fake git first on a scratch PATH: `alias gp='git push'; eval gp` pushed in zsh,
 # zsh-nbgq and sh (bash expands no alias non-interactively without `shopt -s expand_aliases`, so it pushed nothing -- noted,
@@ -62,7 +62,7 @@ def assign_variable(a, name, value, append=False):
 # g=git; g push` ran nothing anywhere (the alias does not exist when the line is parsed), nor did `eval 'command gp'`, `eval
 # 'env gp'` or `eval 'sh -c gp'`, and `unalias` cleared.
 def record_alias(a, name, body, doubtful=False):
-    """Record `alias NAME=body`, or an `unalias` (whose body is None), where the shell reads it (SPD-059).  The name goes into
+    """Record `alias NAME=body`, or an `unalias` (whose body is None), where the shell reads it.  The name goes into
     `assigned` under a key no variable can have, so every rule that doubts a variable the line assigned -- a branch that may
     not run, a subshell, a pipeline element, a background list, a loop or function body, a reading only one shell makes --
     doubts the alias too, and a certain definition settles an earlier doubt as an assignment does.  The body itself stays out
@@ -89,7 +89,7 @@ def alias_arguments(words):
 
 
 def record_alias_line(words, a):
-    """Read an `alias` line's definitions into the analysis's table (SPD-059).  A word with no `=` is a query and defines
+    """Read an `alias` line's definitions into the analysis's table.  A word with no `=` is a query and defines
     nothing.  A body the hook cannot read (it holds an expansion or a substitution, whose value is not on the line) is
     recorded with no body and doubted, so the name refuses a member where `eval` dispatches it; a name it cannot read leaves
     every name of the line's in doubt, since the hook cannot tell which one this defines."""
@@ -101,7 +101,7 @@ def record_alias_line(words, a):
 
 def record_alias_definition(a, name, value):
     """One definition as the line spells it, `name` and `value` masked words: an `alias` line's `name=body`, or an element
-    of zsh's `aliases` parameter (SPD-105), whose value is None where the hook cannot know it (`aliases[gp]+=...`)."""
+    of zsh's `aliases` parameter, whose value is None where the hook cannot know it (`aliases[gp]+=...`)."""
     if expansion_word(name) or not syntax.IDENTIFIER_RE.match(prepare.deglob(name)):
         a.alias_unknown = True
         return
@@ -111,7 +111,7 @@ def record_alias_definition(a, name, value):
 
 def clear_alias_line(words, a):
     """`unalias NAME ...` and `unalias -a` clear what the line aliased; an argument the hook cannot read (an expansion, or a
-    pattern for zsh's `-m`) clears nothing and doubts every name instead (SPD-059)."""
+    pattern for zsh's `-m`) clears nothing and doubts every name instead."""
     rest = alias_arguments(words)
     options = words[1 : len(words) - len(rest)]
     if "-a" in options:
@@ -126,7 +126,7 @@ def clear_alias_line(words, a):
 
 def alias_substitution(name, a):
     """(the text an alias of this line's runs where `eval` dispatches its name, whether the hook cannot be sure of it), for a
-    command word inside an `eval` (SPD-059).  (None, False) when the name is no alias of the line's and the line defined none
+    command word inside an `eval`.  (None, False) when the name is no alias of the line's and the line defined none
     the hook could not read; (None, True) when it may be one, or may have been cleared, and the hook cannot say what it runs."""
     if name not in a.aliases:
         return None, a.alias_unknown
@@ -134,19 +134,19 @@ def alias_substitution(name, a):
     return a.aliases[name], key in a.doubt or key in a.sticky or a.all_doubt
 
 
-# SPD-133: the aliases and functions the shell already holds.  Claude Code starts a shell for every Bash call and sources
+# The aliases and functions the shell already holds.  Claude Code starts a shell for every Bash call and sources
 # its snapshot of the user's interactive shell in it (~/.claude/shell-snapshots/snapshot-zsh-*.sh), so a member's command
 # word is expanded by that profile's aliases and run by its functions before any program does: on this Mac `gp` pushed,
 # `gc -m x` committed, `g commit -m x` committed and `ggp` pushed, each reaching the hook as an unknown command with no
-# finding at all.  Confirmed from a member's own Bash call (SPD-133): `type gp` printed "gp is an alias for git push",
+# finding at all.  Confirmed from a member's own Bash call: `type gp` printed "gp is an alias for git push",
 # `type ggp` "ggp is a shell function from <that snapshot>", and `gst --short --branch` ran git and printed the worktree's
 # status.  hooks/snapshots holds the table; these two read a command word against it.  An alias the line itself defines is
-# a different thing and still SPD-059's: it reaches only text the line parses again, which is `eval`.
+# a different thing and read by the alias table: it reaches only text the line parses again, which is `eval`.
 def shell_aliased(words, a):
     """(the text the shell's own aliases put in place of `words`, the member's own words that follow that expansion,
     [(the name, what it runs)] for each one expanded, the first name whose body the hook cannot read), or
     (None, [], [], None) when the command word is none of them.  The own words are kept apart because a write a body
-    makes into one of them is the member's write, which analyse_shell_text never prunes (SPD-133).
+    makes into one of them is the member's write, which analyse_shell_text never prunes.
 
     A shell expands an alias where it parses the command word, textually and before any rule reads it, so the body and
     the words after it are analysed as the text the shell would have parsed -- `gc -m x` is `git commit --verbose -m x`
@@ -154,8 +154,8 @@ def shell_aliased(words, a):
     `_='sudo '`), and a name is not expanded again while its own expansion is in flight, which is what stops
     `alias ls='ls -G'`.  A word the line quoted or escaped (`\\gp`, `'gp'`) reaches this with its quotes already taken
     and is expanded all the same: that is fail-closed -- the name it spells is no program -- and telling the two apart
-    would need a mark inside the command word that every reading by name would then have to strip (SPD-043 records the
-    same choice for `'$X' push`)."""
+    would need a mark inside the command word that every reading by name would then have to strip (the expansion check makes
+    the same choice for `'$X' push`)."""
     found = snapshots.shell_table(a.home)
     if not found.aliases:  # a machine with no snapshot, and every scratch home the suite builds: nothing to read
         return None, [], [], None
@@ -189,7 +189,7 @@ def shell_function(name, a):
 
 
 def variable_readings(a, name):
-    """(readings, doubtful) for a bare `$name` whose value the line assigned (SPD-043, probed in zsh 5.9 -f and bash 3.2 with a fake
+    """(readings, doubtful) for a bare `$name` whose value the line assigned (probed in zsh 5.9 -f and bash 3.2 with a fake
     git): the words bash gives (the value split on blanks, each field's glob characters active even if quoted in the assignment,
     `X='g?t'; $X push` pushed; an array's first element) and the words zsh gives (the value as one word, never globbed, when it
     holds a blank, `X='/a b/git'; $X push` ran that git; every element of an array).  (None, False) when the value is not known
@@ -216,7 +216,7 @@ def variable_readings(a, name):
 
 
 def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fresh, wrapper_command=False):
-    """Read words[i], a word the dispatch reads by name that holds an expansion (SPD-043).  A bare `$X` or `${X}` whose value the
+    """Read words[i], a word the dispatch reads by name that holds an expansion.  A bare `$X` or `${X}` whose value the
     line assigned is read as the words the shells give it (variable_readings): one reading replaces it in place (_AGAIN), several
     are each analysed from the start (_STOP), and a doubtful value adds a "var-doubt" finding.  Anything else is not resolved: an
     operator form (`${X:-git}`), zsh's flags and modifiers (`${(L)X}`, `$~X`, `$X:t`), a subscript, a concatenation (`$X$Y`,
@@ -241,7 +241,7 @@ def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fres
             return _FLAGGED
         a.kinds.append("var")
         # a bare variable or a substitution names nothing; a partial expansion (`${HOME}/bin/spud`, `$D/git`) is dispatched as
-        # spelled, as it was before SPD-043, so Spud's checks still read it
+        # spelled, so Spud's checks still read it
         return _STOP if name is not None or hookio.SUBST in w else _FLAGGED
     if doubtful:
         a.findings.append(("var-doubt", spelled))
@@ -259,7 +259,7 @@ def first_read_index(words, start):
 
 def git_read_index(words, start=1):
     """The index, from `start`, of the first word git's option scan, its verb, the arguments git_refused reads, or the options
-    that name a program on the verbs of syntax.GIT_VERB_PROGRAM_OPTIONS (SPD-051) reads that holds a glob or an expansion, or
+    that name a program on the verbs of syntax.GIT_VERB_PROGRAM_OPTIONS reads that holds a glob or an expansion, or
     None."""
     i = 1
     while i < len(words):
@@ -286,7 +286,7 @@ def git_read_index(words, start=1):
 
 def verb_option_read_index(words, verb_at, start):
     """The index, from `start`, of the first option-shaped argument of the verb at `verb_at`, which carries a program-naming
-    option, that holds a glob or an expansion, or None (SPD-051).  Only the words before `--` that are spelled with a leading
+    option, that holds a glob or an expansion, or None.  Only the words before `--` that are spelled with a leading
     `-` are read, so `git ls-remote --upload-pac? cmd .` is read as --upload-pack while a pattern or a path a member greps
     for (`git grep '*.py'`) is left as the argument it is."""
     for k in range(verb_at + 1, len(words)):
@@ -311,7 +311,7 @@ def shell_read_index(words, start=1):
 
 
 # `trap` stores shell code the shell runs later: at exit, before every command under DEBUG, on ERR, and on every signal by
-# name or number (SPD-054, Agria's SPD-043 proposal).  Probed in bash 3.2, zsh 5.9 -f, zsh -f -o nobareglobqual and sh with a
+# name or number.  Probed in bash 3.2, zsh 5.9 -f, zsh -f -o nobareglobqual and sh with a
 # fake git first on a scratch PATH: all four ran the action of `trap 'git push' EXIT`, and the two shells disagree about
 # where that action is.  bash reads it after its options and `--` (`trap -- 'git push' EXIT` pushed; with `-p` or `-l` it
 # prints and runs nothing); zsh has no options there and takes the word right after `trap` whatever it is (`trap -P EXIT`
@@ -340,18 +340,18 @@ def trap_read_index(words, start=1):
 
 def analyse_trap(words, a, depth):
     """Read each action a `trap` line may set as the shell text it is, with its own quotes, as eval's rejoined words and a
-    shell's `-c` string are (SPD-054): a finding inside it is the finding it would be on the line.  The action runs later,
+    shell's `-c` string are: a finding inside it is the finding it would be on the line.  The action runs later,
     at a directory the hook cannot know (probed: `trap 'echo trapped >> rel.txt' EXIT; cd /tmp` wrote /tmp/rel.txt, and an
     EXIT action's `pwd` is the last directory of the line), so it is read with the directories unknown, as a sourced file
     is, and a relative redirection or tee inside it refuses a member.  The line's own directories and variables are
     restored afterwards: defining a trap changes nothing on the line, and the action's assignments run later, where
-    SPD-043's `a.all_doubt` after `trap` already doubts every variable."""
+    the expansion check's `a.all_doubt` after `trap` already doubts every variable."""
     cwds, variables = a.cwds, dict(a.vars)
     for k in trap_action_indices(words):
         a.cwds = None
         calls = len(a.git_calls)
         analyse.analyse_isolated(a, prepare.deglob(words[k]), depth + 1)
-        # SPD-063: the action's git calls are not scope-checked.  The hook reads the action with the directories unknown
+        # The action's git calls are not scope-checked.  The hook reads the action with the directories unknown
         # because it runs later, not because the line lost them, and `trap 'git status' EXIT` names no repository, so the
         # unresolvable-directory refusal would fall on every trap that mentions git.  Its own findings still stand.
         del a.git_calls[calls:]

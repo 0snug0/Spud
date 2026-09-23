@@ -21,9 +21,9 @@ import unittest
 from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE
 from test_hooks import AGENT_A, AGENT_B, AGENT_C, COMPLETION, PER_BLOCK_BREAKDOWN, PER_ENTRY_SUM, SESSION, TWO_REQUESTS_SUM, HookCase
 
-MAIN = "-Users-eric-Personal-Spud"  # the main checkout's project directory
-WORKTREE = "-Users-eric-Personal-Spud--claude-worktrees-spd-001-tokens"  # a worktree session's, emptied when the session left it
-OTHER_WORKTREE = "-Users-eric-Personal-Spud--claude-worktrees-spd-002-other"
+MAIN = "-Users-Someone-Personal-Spud"  # the main checkout's project directory
+WORKTREE = "-Users-Someone-Personal-Spud--claude-worktrees-spd-001-tokens"  # a worktree session's, emptied when the session left it
+OTHER_WORKTREE = "-Users-Someone-Personal-Spud--claude-worktrees-spd-002-other"
 OTHER_SESSION = "11111111-2222-4333-8444-555555555555"
 # per_block as a SubagentStop stored it before SPD-023 (5 entries added), between SPD-023 and SPD-013 (2 requests, no
 # per-model breakdown), and as one stores it since (2 requests, with the breakdown).

@@ -1,4 +1,4 @@
-"""commands/vaultinstall: `spud vault install`, and the same work as `spud init`'s step 4b (SPD-156).
+"""commands/vaultinstall: `spud vault install`, and the same work as `spud init`'s step 4b.
 
 Two halves.  The settings are copied out of `share/obsidian/` into the home's `.obsidian/`; the plugins and the theme
 are *downloaded*, because Obsidian loads only the plugins whose files are already in the vault and the tool repository
@@ -14,8 +14,8 @@ Three rules an edit here must keep:
   `spud home sync` is what refreshes them, keeping a copy of what it replaces, while a `.base` file of the reader's own
   survives.  `--force` is for re-writing what matched anyway.
 - **A refused download is never fatal.**  `install_vault` collects them, names each, and returns; `spud init` turns the
-  list into a note and a line telling the person to run `spud vault install` later (design section 3).  When the plugin
-  it refused provides a view a shipped `.base` uses, the line also names what that costs (SPD-159): the view(s) that
+  list into a note and a line telling the person to run `spud vault install` later.  When the plugin
+  it refused provides a view a shipped `.base` uses, the line also names what that costs: the view(s) that
   will not render until the plugin is installed -- `commands/doctor` is what keeps saying so afterward.
 """
 
@@ -28,7 +28,7 @@ NO_SHIPPED_VAULT = ("no %s: the tool repository's share/ is the source of the va
 VIEWS_ARE_THE_TOOL_S = ("this command does not touch the shipped `.base` views in %s -- `spud home sync` refreshes"
                         " them, keeping a copy of what it replaces, while a `.base` file of your own survives")
 HASH_MISMATCH = "%s: its SHA-256 is not the one the lock pins (the release was replaced upstream)"
-# SPD-159: what a refused plugin download costs, named beside the refusal itself -- the views a shipped `.base` file
+# What a refused plugin download costs, named beside the refusal itself -- the views a shipped `.base` file
 # uses that only this plugin provides, and that Obsidian therefore cannot render until the plugin is installed.  Only a
 # plugin whose lock entry names a view carries this clause; most plugins name none, and a theme never does.
 WONT_RENDER = ", so its %s view%s will not render"
@@ -134,7 +134,7 @@ def install_vault(ctx, force=False, check_only=False):
     it that is not one plain file name is a lock this tool will not install from), and a refusal before the settings are
     written leaves the vault exactly as it was.
 
-    `check_only` (SPD-157) records the same install and performs none of it -- no file written, no copy kept, no
+    `check_only` records the same install and performs none of it -- no file written, no copy kept, no
     download made -- which is the vault half of `spud home sync --check`.
     """
     lock = vaultlock.read_lock(ctx)

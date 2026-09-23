@@ -1,9 +1,8 @@
-"""commands/homesync: the files the tool owns in a home, and `spud home sync`, which regenerates every one of them
-(SPD-157, the portable-home design part 2).
+"""commands/homesync: the files the tool owns in a home, and `spud home sync`, which regenerates every one of them.
 
 Three things live here, and they are one subject.
 
-- **Which files the tool owns.**  `SCAFFOLDING` is the list `spud init` has written since SPW-001, moved here whole
+- **Which files the tool owns.**  `SCAFFOLDING` is the list `spud init` writes, moved here whole
   because it stopped being init's alone the moment a second command wrote from it; `shipped_skills` adds every file
   under `<tool>/share/skills/`, which a home reads from `.claude/skills/` (`home_relative`).  `tool_owned` is the pair
   both commands walk, and the only answer in the program to "what in a home comes from the tool".
@@ -22,7 +21,7 @@ Four rules an edit here must keep.
   home's backups directory, beside `vault install`'s own copies and the ledger's daily ones.  The folder says which
   command, the stamp says when and the path inside says what; each is named in the output.  The stamp is one no other
   run of this command has used (`state/backup.copy_stamp`), since the clock reads to the second and a run that shared a
-  second with the one before it would overwrite its copies (SPD-162).
+  second with the one before it would overwrite its copies.
 - **Nothing is written until everything can be.**  Every file is rendered, and the vault's lock read, before the first
   byte lands: a `{{mark}}` with no value refuses the whole sync naming the mark, exactly as `init` refuses, rather than
   leaving a home half old and half new.
@@ -48,12 +47,12 @@ from ..state import actors, backup, ledgerdb
 # The seven files `spud init` writes into a fresh home, in the order the `spud init` design lists them (section 2.2).
 # Each relative path is both the path under `<tool>/share/` and the path in the home: share/ mirrors the home's layout
 # for these.  Not every shipped file is here -- `share/agents/spudagent.md` is rendered to user scope by `project
-# install`, never into a home (SPW-004), and `share/obsidian/` is the vault's, installed under `.obsidian/`.
+# install`, never into a home, and `share/obsidian/` is the vault's, installed under `.obsidian/`.
 SCAFFOLDING = ("CLAUDE.md", "ledger/Home.md", "ledger/Spud.md", "ledger/Board.base", "ledger/Fleet.base",
                "ledger/_templates/ticket.md", "ledger/_templates/spudagent.md")
 # The one shipped directory whose path in a home is not its path under share/.  Claude Code reads a skill from
 # `.claude/skills/<name>/`, and `share/.claude/` cannot be shipped from this repository at all: a skill under the tool's
-# own `.claude/skills/` is a skill of *this* checkout's sessions, which is what SPW-004 learned about `.claude/agents/`.
+# own `.claude/skills/` is a skill of *this* checkout's sessions, as the tool's own `.claude/agents/` once proved.
 # So the tool ships `share/skills/<name>/` and the home gets `.claude/skills/<name>/`.  Read from the directory rather
 # than listed, so a second shipped skill needs no edit here.
 SKILLS = "skills"
@@ -200,7 +199,7 @@ def sync_home(ctx, project, check_only=False):
     """
     files, dropped = rendered_files(ctx, project)
     vaultlock.read_lock(ctx)  # a lock this tool will not install from refuses here, before anything is written
-    stamp = backup.copy_stamp(ctx, HOME_SYNC_BACKUPS)  # SPD-162: this run's own folder, whatever the clock says
+    stamp = backup.copy_stamp(ctx, HOME_SYNC_BACKUPS)  # this run's own folder, whatever the clock says
     record = {"home": str(ctx.home), "share": str(shipped.share_dir(ctx)), "check": bool(check_only),
               "written": [], "replaced": [], "unchanged": [], "dropped_lines": dropped,
               "backups": str(backup.backups_dir(ctx) / HOME_SYNC_BACKUPS / stamp)}

@@ -1,4 +1,4 @@
-"""shell/directories: Redirects, wrappers, prefixes, and the directories the shell may be in.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""shell/directories: Redirects, wrappers, prefixes, and the directories the shell may be in."""
 
 import os
 import re
@@ -15,13 +15,13 @@ def union_dirs(a, b):
 
 
 def redirect_descriptor(operator, operand):
-    """Whether an output operator's operand is a descriptor or a close rather than the name of a file it opens (SPD-045).
+    """Whether an output operator's operand is a descriptor or a close rather than the name of a file it opens.
     Only `>&` reads a word of digits or `-` that way: probed in zsh 5.9 -f -o nobareglobqual (this Mac's Bash tool) and
     bash 3.2 in an empty directory, `echo x > 3`, `>3`, `>> 3`, `>| 3`, `&> 3`, `1> 4`, `9> 9`, `2> 12` and `2>12` each
     created a file named by the digits in both shells and `&>> 3` in zsh (a syntax error in bash 3.2), and `> -`, `>> -`
     and `&> -` created a file named `-`, while `>& 3`, `>&3` and `1>&3` were a descriptor ("bad file descriptor" in both)
     and `>& -`, `>&-` a close; `>& out` wrote the file.  An operand the tokenizer leaves with a leading `&` is a
-    descriptor after every operator but `<>`, which has no dup form (`1<>&2` is a syntax error in both, SPD-040)."""
+    descriptor after every operator but `<>`, which has no dup form (`1<>&2` is a syntax error in both)."""
     if operand.startswith("&"):
         return operator != "<>"
     return operator == ">&" and re.fullmatch(r"-|\d+", operand) is not None
@@ -29,7 +29,7 @@ def redirect_descriptor(operator, operand):
 
 def separate_redirects(tokens):
     """Drop redirection operators and their operands; return (words, output targets).  A `<>` operand is always a file name
-    (SPD-040, probed: `<>3` and `<>-` created files named 3 and -, and `1<>&2` is a syntax error), never a descriptor."""
+    (probed: `<>3` and `<>-` created files named 3 and -, and `1<>&2` is a syntax error), never a descriptor."""
     words, targets = [], []
     i = 0
     while i < len(tokens):
@@ -55,9 +55,9 @@ def strip_wrapper(words):
     """`env`, `nohup`, `xargs`, `timeout 10`, `sudo -u x`, ...: drop the wrapper, its options and their values; return (the
     words it runs, the command strings it hands a shell, the index in `words` of the first word it did not consume, the
     (name, value) assignments `env` sets in the command's environment, the directory it runs the command in or None).  The
-    name is matched case-folded (SPD-030: ENV runs /usr/bin/env on macOS); `env -S` splits its string into the words it runs
+    name is matched case-folded (ENV runs /usr/bin/env on macOS); `env -S` splits its string into the words it runs
     (no shell: none of them is expanded), GNU `script -c` hands its string to a shell; `env NAME=value` puts NAME in the
-    environment of the command it runs (SPD-044).  The directory (SPD-128) is (the value of the last `env -C` or `sudo -D`,
+    environment of the command it runs.  The directory is (the value of the last `env -C` or `sudo -D`,
     whether the shell gave it as a word of its own), since only the last one counts (probed: `env -C /usr -C bin pwd`
     printed /bin); a value glued to its option or split out of `env -S` is one whose leading `~` no shell expanded."""
     name = os.path.basename(words[0]).casefold()
@@ -110,12 +110,12 @@ def strip_wrapper(words):
             continue
         break
     if name == "env":
-        # env puts every operand holding `=` past its first character in the environment, whatever the name (SPD-106,
-        # probed: `a b=c`, `x[1]=y`, `a%b=c` and `BASH_FUNC_foo%%=() { ...; }` each reached the program; `=x` is an
+        # env puts every operand holding `=` past its first character in the environment, whatever the name
+        # (probed: `a b=c`, `x[1]=y`, `a%b=c` and `BASH_FUNC_foo%%=() { ...; }` each reached the program; `=x` is an
         # error), so none of them is the command it runs
         while rest and "=" in rest[0][1:]:
             aname, _, avalue = rest[0].partition("=")
-            assignments.append((aname, avalue))  # env's environment reaches the command it runs (SPD-044)
+            assignments.append((aname, avalue))  # env's environment reaches the command it runs
             rest = rest[1:]
     elif name == "timeout" and rest and syntax.DURATION_RE.fullmatch(rest[0]):
         rest = rest[1:]
@@ -124,22 +124,23 @@ def strip_wrapper(words):
     return rest, strings, len(words) - min(originals, len(rest)), assignments, chdir
 
 
-# SPD-128: what a glob leaves in a word once analyse_words has read it as spelled (globbing.literalize): its glob characters
+# What a glob leaves in a word once analyse_words has read it as spelled (globbing.literalize): its glob characters
 # quoted, a leading `=` marked, and zsh's pattern characters plain -- which no word the shell gives unquoted holds.
 _READ_GLOB_RE = re.compile("[" + re.escape("".join(syntax._GLOB_UNSENTINEL) + syntax._LITERAL_EQUALS + "(|)<>") + "]")
-# SPD-128: a filename glob the shell expands against its own directory (syntax.GLOB_RE without the brace list, which names
+# A filename glob the shell expands against its own directory (syntax.GLOB_RE without the brace list, which names
 # the same words wherever the shell is)
 _FILENAME_GLOB_RE = re.compile("[*?\\[" + syntax.ZSH_OPEN + syntax.ZSH_RANGE_OPEN + "]")
 
 
 def wrapped_directories(chdir, command, a):
-    """The directories the command `env -C <dir>` or `sudo -D <dir>` runs (SPD-128) may run in, or None when the hook cannot
+    """The directories the command `env -C <dir>` or `sudo -D <dir>` runs may run in, or None when the hook cannot
     know.  `chdir` is strip_wrapper's (value, whether the shell gave it as a word of its own); `command`, the words the
-    wrapper runs.  Probed by Spud on this Mac's env (the member could not, SPD-094): an absolute, a relative, a glued and a
-    clustered value, a `~` the shell expands, and a string a shell runs all start there; a nested env moves from where the
-    outer one left it.  The program calls chdir(2) itself, so there is no CDPATH and no directory stack; a symlink resolves
-    as the kernel resolves it, before a `..` after it; and a relative value is read once against every directory the shell
-    may be in, never compounding as a cd in a loop does, since the shell's own directory does not move.
+    wrapper runs.  Probed by Spud on this Mac's env (a member in a worktree may not run a shell): an absolute, a
+    relative, a glued and a clustered value, a `~` the shell expands, and a string a shell runs all start there; a nested
+    env moves from where the outer one left it.  The program calls chdir(2) itself, so there is no CDPATH and no
+    directory stack; a symlink resolves as the kernel resolves it, before a `..` after it; and a relative value is read
+    once against every directory the shell may be in, never compounding as a cd in a loop does, since the shell's own
+    directory does not move.
 
     Unknown: a value holding an expansion the analysis left in it, or a glob, which has been read as spelled by the time it
     gets here, so a quoted glob character reads as one (_READ_GLOB_RE); `~-`, `~name`, and a leading `~` no shell expanded
@@ -154,7 +155,7 @@ def wrapped_directories(chdir, command, a):
         return a.cwds
     if "$" in value or "`" in value or hookio.SUBST in value or syntax.GLOB_RE.search(value) or _READ_GLOB_RE.search(value):
         return None
-    if syntax.unknown_operand(value):  # SPD-126: `find . -exec env -C {} ...`, `xargs -I% env -C % ...`
+    if syntax.unknown_operand(value):  # unspelled: `find . -exec env -C {} ...`, `xargs -I% env -C % ...`
         return None
     value = prepare.deglob(value)
     if value.startswith("~"):
@@ -175,7 +176,7 @@ def wrapped_directories(chdir, command, a):
 
 
 def prefix_effect(word, following):
-    """Whether a builtin behind this prefix still runs in the shell that reads the line (SPD-030, probed in zsh 5.9 and bash
+    """Whether a builtin behind this prefix still runs in the shell that reads the line (probed in zsh 5.9 and bash
     3.2): "shell" for `builtin` and the `time` reserved word; "either" where one shell runs the builtin and the other an
     external or nothing (`command` is the builtin in bash and the external in zsh, noglob and nocorrect are zsh's, zsh
     takes the option in `time -p` for the command); "process" for anything else, spelled in any other case or with a path
@@ -191,18 +192,18 @@ def prefix_effect(word, following):
 
 # Where a builtin behind the prefixes runs: in the shell that reads the line ("shell"), in one of the two shells
 # ("either"), in a forked shell of its own ("fork": zsh's coproc, whose exit fires an EXIT trap set there -- probed in zsh
-# 5.9 -f and zsh -f -o nobareglobqual, `coproc { trap 'git push' EXIT; }` pushed, SPD-054), or not at all ("process": an
+# 5.9 -f and zsh -f -o nobareglobqual, `coproc { trap 'git push' EXIT; }` pushed), or not at all ("process": an
 # external wrapper execs a program and finds no builtin).  A builtin runs for the first three and here for the first two.
 EFFECT_ORDER = {"shell": 0, "either": 1, "fork": 2, "process": 3}
 
 
 def builtin_runs(effect):
-    """A builtin behind the prefixes runs somewhere, so what it stores runs too (SPD-054)."""
+    """A builtin behind the prefixes runs somewhere, so what it stores runs too."""
     return effect != "process"
 
 
 def builtin_runs_here(effect):
-    """... and in the shell that reads the line, so a directory it changes is the line's own (SPD-030)."""
+    """... and in the shell that reads the line, so a directory it changes is the line's own."""
     return effect in ("shell", "either")
 
 
@@ -240,7 +241,7 @@ def cd_target(word, a, physical=False):
         return a.cwds  # both shells stay
     if word == "-" or "$" in word or "`" in word or hookio.SUBST in word or syntax.GLOB_RE.search(word) or re.fullmatch(r"[+-]\d+", word):
         return None
-    if syntax.unknown_operand(word):  # SPD-126: a path find hands its command, or what xargs reads from its input
+    if syntax.unknown_operand(word):  # a path find hands its command, or what xargs reads from its input
         return None
     word = prepare.deglob(word)  # a quoted or escaped metacharacter (the GLOB_RE above sees only unquoted ones) is a literal path char
     if word.startswith("~"):
@@ -308,7 +309,7 @@ def directory_change(words, a, effect):
     if words[0] == "chdir":
         effect = max(effect, "either", key=EFFECT_ORDER.get)  # zsh's synonym for cd; bash has no chdir
     new = cd_destinations(words[0], words[1:], a)
-    # SPD-037: a directory that exists but the process cannot enter (no execute bit, /var/root, one a member chmod 000's)
+    # A directory that exists but the process cannot enter (no execute bit, /var/root, one a member chmod 000's)
     # fails the cd exactly as a missing one does -- probed in zsh 5.9 and bash 3.2: "permission denied", and PWD stays
     # put -- so the hook keeps the old directory beside the new one rather than assume the cd ran.
     if new is not None and not all(os.path.isdir(d) and os.access(d, os.X_OK) for d in new):

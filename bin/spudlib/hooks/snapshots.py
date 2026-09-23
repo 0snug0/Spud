@@ -1,4 +1,4 @@
-"""hooks/snapshots: the aliases and functions the Bash tool's shell already holds, read from Claude Code's shell snapshot (SPD-133)."""
+"""hooks/snapshots: the aliases and functions the Bash tool's shell already holds, read from Claude Code's shell snapshot."""
 
 import contextlib
 import json
@@ -11,7 +11,7 @@ from ..core import homeconf
 
 # Claude Code writes a snapshot of the user's interactive shell -- ~/.claude/shell-snapshots/snapshot-<shell>-<stamp>-<id>.sh
 # -- and sources it in the shell it starts for every Bash call, so a member's command word is expanded by the aliases and
-# functions the user's profile defines before any program runs.  Until SPD-133 the hook read the word as written: `gc -m x`
+# functions the user's profile defines before any program runs.  Before this table the hook read the word as written: `gc -m x`
 # committed, `gp` and `ggp` pushed, `g commit -m x` committed, each read as an unknown command with no finding.
 #
 # Which snapshot a session sources is not in the hook's input, so every one of them is read, newest first, and the table is
@@ -28,10 +28,10 @@ SNAPSHOT_PREFIX = "snapshot-"
 CACHE_NAME = "shell-snapshot.json"  # the parsed table, under the home's .spud/, keyed by every snapshot's size and mtime
 BODY_CAP = 64 * 1024  # the most of one function body the hook reads; nothing a profile defines comes near it
 # A snapshot's `alias` line: zsh writes `alias -- name=body`, with the options it was defined with before the `--`.  A
-# global (`-g`) alias is expanded in every word, not only in command position, which SPD-109 reads on a line the member
-# writes and this table does not: it is recorded here all the same, since covering its command position is strictly more
+# global (`-g`) alias is expanded in every word, not only in command position, which the hook does not yet read on a line
+# the member writes, nor this table: it is recorded here all the same, since covering its command position is strictly more
 # than covering none of it.  A suffix (`-s`) alias runs a program for a word ending in its extension and names no command
-# word, so it is skipped.  Neither form is in this Mac's snapshots (SPD-133: 497 aliases, all plain).
+# word, so it is skipped.  Neither form is in this Mac's snapshots (497 aliases, all plain).
 ALIAS_RE = re.compile(r"^alias(?P<options>(?: +-[A-Za-z]+)*)(?: +--)? +(?P<rest>\S.*)$", re.S)
 UNALIAS_RE = re.compile(r"^unalias(?P<options>(?: +-[A-Za-z]+)*) +(?P<rest>\S.*)$", re.S)
 # `name () {` as zsh prints a function, and `function name {` as Claude Code writes the commands it shadows; the body runs
@@ -44,7 +44,7 @@ class Table:
     """What the shell the Bash tool starts already defines: `aliases`, each name's body as the shell stores it (None for a
     body the hook cannot read); `functions`, each name's body as (which snapshot, its first byte, its length); `gap`, what
     stopped the table being read, or None.  An empty table is the answer on a machine with no snapshots, and it keeps every
-    line the reading it had before SPD-133."""
+    line the reading it had without one."""
 
     def __init__(self, aliases=None, functions=None, files=(), gap=None):
         self.aliases = aliases if aliases is not None else {}
@@ -54,7 +54,7 @@ class Table:
 
     def body(self, name):
         """The shell text a function of this name runs, or None: read from the snapshot only when a line names it, so no
-        hook run pays for the 120 KB of function bodies a profile holds (SPD-133)."""
+        hook run pays for the 120 KB of function bodies a profile holds."""
         where = self.functions.get(name)
         if where is None:
             return None
@@ -274,7 +274,7 @@ def unquote_word(text):
 
 def write_cache(cache, entries, built):
     """Store the parsed table under the home's .spud/, atomically and only where that directory already exists: the CLI
-    makes it at `spud init`, and a hook never creates a state directory of its own (SPD-133, as SPD-016's worktree list)."""
+    makes it at `spud init`, and a hook never creates a state directory of its own, as the worktree list cache never does."""
     if not os.path.isdir(os.path.dirname(cache)):
         return
     tmp = "%s.%d.tmp" % (cache, os.getpid())
@@ -288,7 +288,7 @@ def write_cache(cache, entries, built):
 
 
 def table_report(home):
-    """What `spud doctor` says about the shell table (SPD-133): (a problem or None, a note or None)."""
+    """What `spud doctor` says about the shell table: (a problem or None, a note or None)."""
     found = shell_table(home)
     if found.gap is not None:
         return ("the hook cannot read this Mac's shell snapshots, so it reads a member's command word as written and an"

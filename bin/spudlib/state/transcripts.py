@@ -1,4 +1,4 @@
-"""state/transcripts: Transcript sums and the stored usage columns.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""state/transcripts: Transcript sums and the stored usage columns."""
 
 import json
 from datetime import datetime
@@ -55,17 +55,17 @@ def parse_timestamp(value):
         return None
 
 
-# How a transcript sum counts (SPD-023).  The harness writes an API response as one transcript entry per
+# How a transcript sum counts.  The harness writes an API response as one transcript entry per
 # content block, each repeating the response's message.id, its requestId and the request's usage, with only
 # output_tokens growing to the final count (a read-only survey of five live subagent transcripts on
 # 2026-09-13: 177 requests, every entry one block, the last entry of each request the maximum on every key).
-# Before SPD-023 every entry was added, so a request counted once per block and the tokens ran four to five
+# An older spud added every entry, so a request counted once per block and the tokens ran four to five
 # times too high.  A sum counted once per request carries "counting": "request"; a stored transcript sum
 # without it is found and re-summed by `spud member resum`.
 REQUEST_COUNTING = "request"
 TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
 
-# The per-model breakdown a transcript sum keeps beside its usage since SPD-013: what a run's list-price cost is computed
+# The per-model breakdown a transcript sum keeps beside its usage: what a run's list-price cost is computed
 # from (run_cost).  A read-only survey of the live transcripts on 2026-09-13 (1,590 requests in 46 files) found every
 # request's usage with its model (message.model), a service_tier and an inference_geo, nearly all with a speed; a
 # cache_creation split by TTL that sums to cache_creation_input_tokens (one exception, a server-side fallback's request:
@@ -136,13 +136,13 @@ def request_key(entry, index):
 
 
 def transcript_usage(path):
-    """A subagent transcript summed once per API request (SPD-023): a member's tokens whatever the spawn
-    shape, since a foreground completion's figures cover only its final request (run_totals keeps both,
-    SPD-021).  The assistant entries are grouped by request (request_key) and each request counts once,
+    """A subagent transcript summed once per API request: a member's tokens whatever the spawn
+    shape, since a foreground completion's figures cover only its final request (run_totals keeps
+    both).  The assistant entries are grouped by request (request_key) and each request counts once,
     by the usage of its last entry; messages counts the requests.  tool_uses counts distinct tool_use
     block ids (a block without an id counts where it appears), the same whether a response's blocks come
     one per entry or together; duration_ms runs from the first timestamp in the file to the last.  The
-    sum is marked "counting": "request" and keeps, since SPD-013, the per-model breakdown of its requests
+    sum is marked "counting": "request" and keeps the per-model breakdown of its requests
     (usage_breakdown) that a list-price cost is computed from.  None when the file holds no assistant usage;
     OSError when it cannot be read."""
     requests = {}

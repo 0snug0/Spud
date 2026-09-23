@@ -1,4 +1,4 @@
-"""commands/doctor: doctor.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""commands/doctor: doctor."""
 
 import os
 import sqlite3
@@ -13,7 +13,7 @@ from ..state import actors, backup, ledgerdb, lookup, schema
 
 WATCHER_DOWN = ("the render watcher %s is installed but not running: the vault is stale until `spud --as spud schedule install` reloads it"
                 % launchagents.RENDER_LABEL)
-# SPD-117: the vault behind the ledger by more than a render takes, which a watcher running and stuck leaves behind exactly
+# The vault behind the ledger by more than a render takes, which a watcher running and stuck leaves behind exactly
 # as a watcher that is down does.  The state of the vault, not of a process, so it is a problem either way.
 VAULT_BEHIND = "the vault is behind the ledger"
 RENDER_BEHIND = VAULT_BEHIND + " by %s, the oldest %s (a render lands within seconds of an event): `spud render` brings it up to date"
@@ -22,7 +22,7 @@ RENDER_BEHIND = VAULT_BEHIND + " by %s, the oldest %s (a render lands within sec
 RENDER_BEHIND_STUCK = RENDER_BEHIND + ", and `spud --as spud schedule install` reloads the watcher that is running and not rendering"
 # doctor's render line for each of the four states core/launchagents reports; the lag phrase follows it.
 WATCHER_TEXT = {"absent": "not installed", "down": "installed, not running", "current": "running", "behind": "running"}
-# SPW-001: a home with an empty registry is a working home -- the schema allows it and `spud init --no-project` makes one
+# A home with an empty registry is a working home -- the schema allows it and `spud init --no-project` makes one
 # -- but it can hold no ticket, since tickets.project_id references a project.  So it is a note, not a problem, and the
 # note names the command that ends it.  The first project registered gets id 1 and is the project the config names.
 NO_PROJECT = ("no project is registered, so this home can hold no ticket:"
@@ -30,14 +30,14 @@ NO_PROJECT = ("no project is registered, so this home can hold no ticket:"
 # A projects table with rows but no id 1: reachable by nothing the CLI does (`project remove` refuses id 1, archiving
 # keeps the row), and cheap to report.  `config sync` no longer creates the row, so nothing names a fix.
 NO_PROJECT_ONE = "no project 1 among the %d project(s) registered, so spud.config.json's prefixes (%s / %s) name no project"
-# SPD-157: a config with no `owner.name`.  A note and never a problem: the home works, every shipped file renders, and
+# A config with no `owner.name`.  A note and never a problem: the home works, every shipped file renders, and
 # what is missing is a name -- so the rendered CLAUDE.md, the brief template and the root note all say `the owner`
 # where they would say a person's, which is exactly the shape of a config written before the block existed.  A problem
 # here would fail `spud init`'s own step 10 on every such home and stop a command that has nothing left to do.
 NO_CONFIG_OWNER = ("%s names no owner, so every file the tool generates for this home calls the person it works for %r:"
                    " add an \"owner\" block beside \"identity\" ({\"name\": \"…\", \"pronouns\": {\"subject\": \"…\","
                    " \"object\": \"…\", \"possessive\": \"…\"}}), then `%s --as spud home sync` writes the files again")
-# SPW-006: the home's own .claude/settings.json, which `settings sync` writes and `init` writes at its step 6.  Its hook
+# The home's own .claude/settings.json, which `settings sync` writes and `init` writes at its step 6.  Its hook
 # lines are the whole of what makes a session launched in the home Spud -- the SessionStart board, the path rule, the
 # Agent and Bash guards -- and a home missing them loses every one of them in every home session, silently.
 SETTINGS_SYNC = "`spud --as spud settings sync`"
@@ -65,9 +65,9 @@ def cmd_doctor(ctx, args):
 
 
 def doctor_report(ctx):
-    """(report, problems, lines): what cmd_doctor prints and raises on; home move reads it too (SPD-097)."""
+    """(report, problems, lines): what cmd_doctor prints and raises on; home move reads it too."""
     problems = []
-    no_project = False  # SPW-001: an empty registry, reported as a note below, where the notes are made
+    no_project = False  # an empty registry, reported as a note below, where the notes are made
     report = {
         "interpreter": {"path": sys.executable, "version": "%d.%d.%d" % sys.version_info[:3], "flags": {"isolated": bool(sys.flags.isolated), "no_site": bool(sys.flags.no_site)}},
         "sqlite": {"library": sqlite3.sqlite_version, "module": sqlite3.version if hasattr(sqlite3, "version") else None},
@@ -91,8 +91,8 @@ def doctor_report(ctx):
         cfg_problems = homeconf.config_problems(config)
         problems.extend("config: " + p for p in cfg_problems)
         report["config"] = {"problems": cfg_problems, "limits": config.get("limits"), "pool": len(config.get("naming", {}).get("pool", []))}
-    report["settings"] = doctor_home_settings(ctx, problems)  # SPW-006: the home's own hook lines, beside the config's line
-    pricing = prices.price_table(config)[0] if config is not None else None  # SPD-013: the price table, and below what it cannot price
+    report["settings"] = doctor_home_settings(ctx, problems)  # the home's own hook lines, beside the config's line
+    pricing = prices.price_table(config)[0] if config is not None else None  # the price table, and below what it cannot price
     report["pricing"] = None if pricing is None else {"as_of": pricing["as_of"], "source": pricing["source"], "currency": "USD",
                                                       "models": sorted(pricing["models"]), "not_priced": []}
     db = report["database"]
@@ -109,7 +109,7 @@ def doctor_report(ctx):
             if db["journal_mode"] != "wal":
                 problems.append("journal_mode is %s, not wal" % db["journal_mode"])
             if db["user_version"] >= 1 and config is not None:
-                # SPW-001: the comparison is project 1's, and it is made only when the home has a project 1.
+                # The comparison is project 1's, and it is made only when the home has a project 1.
                 one = con.execute("SELECT key, ticket_prefix, team_prefix FROM projects WHERE id = 1").fetchone()
                 config_prefixes = (config.get("tickets", {}).get("prefix"), config.get("teams", {}).get("prefix"))
                 if one is not None:
@@ -133,7 +133,7 @@ def doctor_report(ctx):
             con.close()
     else:
         problems.append("no database at %s; run `spud init`" % ctx.db_path)
-    # The backup copies, read from the directory listing alone (SPD-012).  No backup state is ever a problem:
+    # The backup copies, read from the directory listing alone.  No backup state is ever a problem:
     # a Mac switched off for a weekend misses its daily copies and is not at fault.
     daily, other = backup.backup_listing(backup.backups_dir(ctx))
     report["backups"] = {"dir": str(backup.backups_dir(ctx)), "daily": {"count": len(daily), "newest": daily[-1] if daily else None, "oldest": daily[0] if daily else None}, "other": other}
@@ -179,7 +179,7 @@ def doctor_report(ctx):
         lines.append("pricing     %s" % ("%s: every cost shows —" % prices.NO_TABLE if not prices.price_table(config)[1] else "no usable price table: see problems"))
     for p in report["projects"]:
         lines.append("project     %s at %s: %s" % (p["key"], p["root"], ", ".join(p["checks"]) or "no check passed"))
-    if report["hooks"] is not None:  # SPW-003: the installation above can be perfect and this session still load none of it
+    if report["hooks"] is not None:  # the installation above can be perfect and this session still load none of it
         lines.extend(("hooks       " if n == 0 else "            ") + line for n, line in enumerate(report["hooks"]["lines"]))
     if report["repositories"] is not None:
         r = report["repositories"]
@@ -210,14 +210,14 @@ def doctor_report(ctx):
 
 
 def doctor_home_settings(ctx, problems):
-    """doctor's settings line (SPW-006): whether the home's own `.claude/settings.json` -- what `spud settings sync`
-    writes, and `init` at its step 6 -- carries a ledger hook line of this home for every event of HOOK_TABLE.  Nothing
-    else in the report asks.  The project lines read each installed project's `.claude/settings.local.json`, a different
-    file for a different directory; SPW-003's `hooks` line reads the files the session doctor itself runs in loads, which
-    for a session launched anywhere but the home are not this file at all -- so both could pass with this file absent,
-    and did, which is how a green doctor came to mean less than SPW-001 made it mean.
+    """doctor's settings line: whether the home's own `.claude/settings.json` -- what `spud settings sync` writes, and
+    `init` at its step 6 -- carries a ledger hook line of this home for every event of HOOK_TABLE.  Nothing else in the
+    report asks.  The project lines read each installed project's `.claude/settings.local.json`, a different file for a
+    different directory; the `hooks` line reads the files the session doctor itself runs in loads, which for a session
+    launched anywhere but the home are not this file at all -- so both could pass with this file absent, and did, which
+    is how a green doctor came to mean less than `spud init`, whose last step is doctor, takes it to mean.
 
-    A problem in every wrong state, and that is the point of the check rather than an oversight in it.  SPW-003's line
+    A problem in every wrong state, and that is the point of the check rather than an oversight in it.  The `hooks` line
     is deliberately a note because what is wrong there is where the session was launched and nothing in the home is
     broken; here this home's own installation is broken, one command fixes it, and `init`'s step 10 and `home move`'s
     7b -- which refuse on this report's problems -- are right to refuse until it is run.  An event short is an event
@@ -228,7 +228,7 @@ def doctor_home_settings(ctx, problems):
     `settings_hold_hooks` has always made for the project lines, not a choice of this line's, and it is a proposal of
     its own.
 
-    The rendered line is in the report, as SPW-003's are, so `--json` says as much as the text does."""
+    The rendered line is in the report, as the `hooks` lines are, so `--json` says as much as the text does."""
     path = ctx.home / ".claude" / "settings.json"
     exists, unreadable = path.is_file(), None
     if exists:
@@ -258,7 +258,7 @@ PR_CHECK_FAILED = ("the last read of %s (%s) failed: %s; until it succeeds the l
 
 
 def doctor_pull_requests(ctx, problems, notes):
-    """doctor's pull-request section (SPD-077): how many landing pull requests are recorded, open and settled, which
+    """doctor's pull-request section: how many landing pull requests are recorded, open and settled, which
     program answers for GitHub, and every still-open one of an open ticket whose last read failed.  A failed read is a
     problem the way a down render watcher is: nothing is broken in the ledger, but until it succeeds a merge that has
     already happened stays invisible.  A reader turned off is a note, the way a watcher never installed is."""
@@ -280,22 +280,22 @@ def doctor_pull_requests(ctx, problems, notes):
 
 SYNC_ALL = "run `spud --as spud project sync --all`"
 AGENT_ABSENT = "no spudagent definition at %s; " + SYNC_ALL
-# SPW-002: a hand edit of the installed copy and a home whose launcher moved read the same way -- the copy is not what
+# A hand edit of the installed copy and a home whose launcher moved read the same way -- the copy is not what
 # install renders from the tool repository's template now -- and one sync settles both.
 AGENT_DIFFERS = "%s is not the spudagent definition this home installs from %s; " + SYNC_ALL
-# SPW-004: Claude Code reads a project-scope agent definition in preference to the user-scope copy install writes, so a
+# Claude Code reads a project-scope agent definition in preference to the user-scope copy install writes, so a
 # `.claude/agents/spudagent.md` in a project's own checkout is the definition every session there actually reads -- which
-# is how the tool repository's own template, `{{launcher}}` and all, shadowed the installed copy until SPW-004 moved it
-# under share/.  Nothing in the installed files shows it, so doctor says it in as many words.
+# is how the tool repository's own template, `{{launcher}}` and all, shadowed the installed copy until it moved under
+# share/.  Nothing in the installed files shows it, so doctor says it in as many words.
 AGENT_SHADOWED = ("%s exists, so a spudagent in that checkout reads it and not %s, the definition this home installs:"
                   " Claude Code prefers a project-scope agent definition to the user-scope one")
 
 
 def doctor_projects(ctx, problems, notes):
-    """doctor's projects section (SPD-014): each active project, its root a main checkout (or the home itself, before
+    """doctor's projects section: each active project, its root a main checkout (or the home itself, before
     `home move`), and when it is installed its local settings carrying this home's hooks, the file ignored, the
     user-scope agent being what this home installs now, the /spud skill present, and whether a definition of the
-    project's own shadows the installed one (SPW-004).  The home pointer, the superseded worktree cache and that shadow
+    project's own shadows the installed one.  The home pointer, the superseded worktree cache and that shadow
     are notes, never problems.
 
     The shadow is a note because the file is that repository's and not this home's: doctor's problems are what `home
@@ -308,8 +308,9 @@ def doctor_projects(ctx, problems, notes):
         rows = con.execute("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall()
     finally:
         con.close()
-    # SPD-097: the tool repository's copy is the source, and since SPW-002 a template under share/ (SPW-004): the installed
-    # copy is compared with what this home renders from it now, never with the source's bytes, which name no machine's launcher.
+    # The tool repository's copy is the source, a template under share/ whose launcher is filled in per machine: the
+    # installed copy is compared with what this home renders from it now, never with the source's bytes, which name no
+    # machine's launcher.
     source_agent = agentdef.agent_source(ctx)
     try:
         expected_agent, agent_gone = agentdef.agent_markdown(ctx), None
@@ -320,7 +321,7 @@ def doctor_projects(ctx, problems, notes):
         if not os.path.isdir(root):
             bad.append("root %s is not a directory" % root)
         elif worktrees.file_identity(root) == worktrees.file_identity(ctx.home):
-            checks.append("root is the home (before home move)")  # SPD-097: project spud during the transition window
+            checks.append("root is the home (before home move)")  # a project rooted in the home, as the tool once was
         else:
             try:
                 proc = homeconf.run_git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", timeout=10)
@@ -356,7 +357,7 @@ def doctor_projects(ctx, problems, notes):
             if not files["pointer"].is_file():
                 notes.append("no home pointer at %s (a launcher copied outside every checkout cannot find the home)" % files["pointer"])
             own = agentdef.project_scope_agent(root)
-            if own.is_file():  # SPW-004: it wins over files["agent"], so say so; the report carries the answer either way
+            if own.is_file():  # it wins over files["agent"], so say so; the report carries the answer either way
                 project_agent = str(own)
                 notes.append(AGENT_SHADOWED % (project_agent, files["agent"]))
         else:
@@ -366,7 +367,7 @@ def doctor_projects(ctx, problems, notes):
                     "project_scope_agent": project_agent})
     if (ctx.home / hookio.STATE_DIR / "worktrees.json").exists():
         notes.append(".spud/worktrees.json is superseded by .spud/worktrees/<key>.json and ignored")
-    problem, note = snapshots.table_report(str(ctx.home))  # SPD-133: what the Bash hook reads a command word against
+    problem, note = snapshots.table_report(str(ctx.home))  # what the Bash hook reads a command word against
     if problem:
         problems.append(problem)
     if note:
@@ -375,7 +376,7 @@ def doctor_projects(ctx, problems, notes):
 
 
 def doctor_session_hooks(ctx, notes):
-    """doctor's hooks section (SPW-003): whether the session doctor itself runs in has this home's ledger hooks loaded
+    """doctor's hooks section: whether the session doctor itself runs in has this home's ledger hooks loaded
     where that session actually reads them -- the question the project lines above cannot answer, since they check the
     files this home installs and a session launched somewhere else reads none of them.
 
@@ -396,7 +397,7 @@ def doctor_session_hooks(ctx, notes):
 
 
 def doctor_shipped(ctx, notes):
-    """doctor's tool-owned-files section (SPD-157): every file `commands/homesync` says the tool owns in a home --
+    """doctor's tool-owned-files section: every file `commands/homesync` says the tool owns in a home --
     CLAUDE.md, the two ledger notes, the templates, the `.base` views and every shipped skill -- that this home either
     does not have or has and has changed, each a note naming `home sync`.
 
@@ -416,7 +417,7 @@ def doctor_shipped(ctx, notes):
 
 
 def doctor_vault(ctx, notes):
-    """doctor's vault section (SPD-156): every shipped settings file, `.base` file, plugin and theme this home has *and*
+    """doctor's vault section: every shipped settings file, `.base` file, plugin and theme this home has *and*
     has changed since it was captured, each a note naming the command that settles it.
 
     Notes, not problems, and on purpose: Obsidian rewrites `graph.json` when Eric pans the graph and `Board.base` when
@@ -438,7 +439,7 @@ def doctor_vault(ctx, notes):
 
 
 def doctor_repositories(ctx, problems):
-    """doctor's repositories section (SPD-123): every checkout the ledger knows -- the home, each active project's root and
+    """doctor's repositories section: every checkout the ledger knows -- the home, each active project's root and
     its listed worktrees -- read the way the Bash hook reads the repository of a git call (hooks/gitrepos), with every
     finding a problem: a hook that is not a sample, a program key at the local or worktree scope, a repository that is not
     the checkout's own.  The harness and Eric's terminal run git that no hook sees, so this is where Eric learns of one.
@@ -461,7 +462,7 @@ def doctor_repositories(ctx, problems):
 
 
 def doctor_render(ctx, problems, notes):
-    """doctor's render section (SPD-097, SPD-117): which of core/launchagents' four states the render watcher is in and how
+    """doctor's render section: which of core/launchagents' four states the render watcher is in and how
     far behind the ledger the vault is, then every rendered file whose on-disk text is neither the last render's nor the
     current one, each with the two commands that settle it.  A watcher installed and not running is a problem and one never
     installed is a note, as before; a vault behind past launchagents.RENDER_LAG_SECONDS is a problem of its own, raised

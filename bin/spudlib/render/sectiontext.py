@@ -1,4 +1,4 @@
-"""render/sectiontext: Section bodies rendered from rows.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""render/sectiontext: Section bodies rendered from rows."""
 
 from . import teamcard, workedon
 from ..core import kernel
@@ -6,7 +6,7 @@ from ..state import lookup
 
 
 def render_team_section(con, t, pricing=None):
-    """## Team: the table ending in its Total row (SPD-013), the tree with each member's worked-on suffix, the embed;
+    """## Team: the table ending in its Total row, the tree with each member's worked-on suffix, the embed;
     empty without members.  Costs come from the price table given, at render time."""
     rows = teamcard.team_order(con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (t["id"],)).fetchall(), t["lead_id"])
     if not rows:
@@ -21,7 +21,7 @@ def render_team_section(con, t, pricing=None):
 
 
 def render_landing_section(con, t):
-    """## Landing (SPD-116): every pull request recorded against the ticket, in record order, each as one sentence --
+    """## Landing: every pull request recorded against the ticket, in record order, each as one sentence --
     the number as a link on its URL, and the state in the words the board uses -- with what a merge leaves owed under
     it, from `lookup.pr_owed`, so the wording of an owed landing has one definition.  Empty without a pull request, so
     a ticket that never had one renders as it did before this section existed.

@@ -1,10 +1,10 @@
-"""shell/spelled_writes: the files a command names on the line past SPD-121's table (SPD-126) -- dd's of=, sort's -o, the
+"""shell/spelled_writes: the files a command names on the line past syntax.ARG_WRITE_COMMANDS -- dd's of=, sort's -o, the
 templates mktemp fills in, split's pieces and perl's in-place edits -- read for bash_reason to hold to the path rule as a
 redirection target.
 
-Until SPD-126 none of them was read: `dd if=/dev/zero of=out/f`, `sort -o out/f in`, `mktemp out/tmp.XXXX`, `split big
+None of them used to be read: `dd if=/dev/zero of=out/f`, `sort -o out/f in`, `mktemp out/tmp.XXXX`, `split big
 out/part_` and `perl -i -pe 's/a/b/' out/f` recorded no write at all, so a member's `sort -o ledger/tickets/SPD-001.md x` or
-`dd of=tests/fake/.git/hooks/pre-commit` never met Law 5 or SPD-066's git-directory rule.  None of their grammars is a shape
+`dd of=tests/fake/.git/hooks/pre-commit` never met Law 5 or the git-directory rule.  None of their grammars is a shape
 of syntax.ARG_WRITE_COMMANDS (an operand spelled `of=`, getopt_long's permuted options, a name the command picks, perl's
 switch clusters), so they have a table of their own beside it, syntax.SPELLED_WRITE_COMMANDS, and record into the same
 a.arg_writes.  Each is read on this Mac's man page:
@@ -20,8 +20,8 @@ a.arg_writes.  Each is read on this Mac's man page:
 - perlrun: -i[extension] edits every file the <> construct reads in place -- the operands after the program, which is -e's
   (or -E's) or the first operand -- with `<file><extension>` as the backup, or, when the extension holds `*`, the extension
   with each `*` replaced by the file; `-i` and `-i*` keep none.  The files are read as written whether or not -p or -n
-  wraps the program, since the program may read <> itself; what perl's program writes by itself stays unread (SPD-126's
-  brief: interpreters in general).
+  wraps the program, since the program may read <> itself; what perl's program writes by itself stays unread (the
+  interpreters in general are shell/inline_programs' reading).
 
 A name the command picks is held with hooks/pathrule.NAME_CHAR (and NAME_MORE for a run that may grow) in the place of each
 picked character, which every wildcard of a deliverable glob matches and no literal does: so a glob lets the write in only
@@ -32,7 +32,7 @@ substitution, a positional, a variable the line assigns but cannot settle, xargs
 -o or -i with any file, and is syntax.ANY_PATH, refused to a member as a target the hook cannot place.  A glob word there is
 read as spelled, as shell/tree_writes reads one.
 
-Past 250 lines (SPD-065's look-again point) it stays whole: a list of five short grammars with one caller, the analysis,
+Past 250 lines (the package's look-again point) it stays whole: a list of five short grammars with one caller, the analysis,
 and the two readings they share -- getopt_long's, which shell/downloads reads wget with too, and the picked names."""
 
 import os
@@ -68,7 +68,7 @@ SPLIT_VALUE_LETTERS = frozenset("ablnp")
 PERL_REST = frozenset("CDFMVmx")
 PERL_NEXT = frozenset("eEI")
 # The characters that begin what a word does not spell until the shell runs: an expansion, a substitution, or an operand
-# find or xargs hands the command (SPD-126).
+# find or xargs hands the command.
 _UNSETTLED = ("$", "`", hookio.SUBST, syntax.FIND_PATH, syntax.INPUT_OPERAND, syntax.ANY_PATH)
 
 

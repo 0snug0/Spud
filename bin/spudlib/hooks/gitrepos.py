@@ -1,7 +1,6 @@
 """hooks/gitrepos: The repository git reads from a directory, what it sets for itself and what it would run, read without running git.
 
-SPD-063 and SPD-066 built this in shell/git_config for a member's git call; SPD-123 moved it here, below the shell, because
-three readers need it and the shell's import cycle must stay off two of them: the Bash hook (shell/git_config, for every
+It began in shell/git_config, for a member's git call, and lives here, below the shell, because three readers need it and the shell's import cycle must stay off two of them: the Bash hook (shell/git_config, for every
 caller but a plain session's), the SessionStart context and `spud board --brief` (one line naming a checkout with a
 finding), and `spud doctor` (every finding).  It stays one module past the size rule's look-again point because it is one
 reading of one repository -- where git finds it, the config it sets for itself and the hooks it runs, and whether it is a
@@ -16,17 +15,17 @@ from . import hookio, worktrees
 from ..core import homeconf, lazy
 
 
-# -- the config a repository sets for itself (SPD-063) ------------------------------------------------------------------
+# -- the config a repository sets for itself ------------------------------------------------------------------------
 #
 # git reads the target repository's own config with nothing on the line, and a member can craft one under its deliverable
-# globs inside a checkout the ledger knows (`git -C tests/fake status` resolves inside the home, so SPD-047's git-repo
-# refusal, which only fires outside every known checkout, stays silent).  SPD-064 closes a member's writes to ~/.gitconfig
+# globs inside a checkout the ledger knows (`git -C tests/fake status` resolves inside the home, so the refusal of a
+# repository outside every known checkout stays silent).  The path rule closes a member's writes to ~/.gitconfig
 # and $XDG_CONFIG_HOME/git/config, and the edit hook now refuses every .git/config, so what is left is a repository the
 # member did not write: before a member's git call the hook reads the keys in force at that repository's `local` and
-# `worktree` scopes and refuses the ones that name or enable a program git runs (SPD-046's class).
+# `worktree` scopes and refuses the ones that name or enable a program git runs.
 #
 # The system and global scopes are Eric's own and stay out of it: credential.helper is in force at the system scope on this
-# Mac.  And the check is on the program-naming keys, not on every key outside SPD-046's inert allowlist: Spud's own checkout
+# Mac.  And the check is on the program-naming keys, not on every key outside the inert allowlist below: Spud's own checkout
 # carries core.filemode, core.bare, core.logallrefupdates, core.ignorecase, core.precomposeunicode, extensions.worktreeConfig,
 # remote.origin.url, remote.origin.fetch and branch.main.remote/merge/vscode-merge-base at its local scope (probed), none of
 # them in that allowlist, so a literal default-deny would refuse every member git call in every real repository.
@@ -37,7 +36,7 @@ GIT_CONFIG_INCLUDE_FILES = 8  # config files followed through include.path/inclu
 GIT_CONFIG_READ_LIMIT = 1 << 18  # bytes read from one config file when looking for its includes
 GIT_WALK_LIMIT = 64  # directories walked up from a candidate looking for a repository
 _GIT_INCLUDE_PATH = r"^[ \t]*path[ \t]*=[ \t]*(.+?)[ \t]*$"  # read with re.findall, so nothing compiles until a config is read
-# SPD-046's allowlist, which shell/git_programs reads for a `-c` key on the line and git_config_key_names_program for a key
+# The inert allowlist, which shell/git_programs reads for a `-c` key on the line and git_config_key_names_program for a key
 # in a repository's own config.  Sections whose every documented key is inert:
 GIT_INERT_CONFIG_SECTIONS = {
     "color",    # color.* -- terminal colour of output only (color.pager is a boolean, not a program)
@@ -53,7 +52,7 @@ GIT_INERT_CONFIG_KEYS = {
     "safe.directory",   # marks a directory trusted; runs no program
 }
 # The sections whose every documented key names or drives a program git runs, and the words the last component of such a key
-# carries (SPD-046's enumeration generalised: core.pager/editor/sshCommand/hooksPath/gitProxy/fsmonitor/alternateRefsCommand/
+# carries (the enumeration of the `-c` refusal, generalised: core.pager/editor/sshCommand/hooksPath/gitProxy/fsmonitor/alternateRefsCommand/
 # askPass, sequence.editor, diff.external and diff.<d>.command/textconv, filter.<d>.clean/smudge/process, {diff,merge,gui}
 # tool.<t>.cmd, gpg.program and gpg.<f>.program and gpg.ssh.defaultKeyCommand, credential.helper, pager.<cmd>,
 # log.showSignature, remote.<n>.uploadpack/receivepack, uploadpack.packObjectsHook, protocol.ext.allow, url.<b>.insteadOf,
@@ -65,20 +64,21 @@ GIT_PROGRAM_KEY_SECTIONS = {"filter", "difftool", "mergetool", "guitool", "insta
 GIT_PROGRAM_KEY_WORDS = ("pager", "editor", "command", "cmd", "program", "helper", "hook", "external", "textconv", "clean",
                          "smudge", "process", "askpass", "proxy", "exec", "uploadpack", "receivepack", "insteadof", "httpd",
                          "showsignature", "fsmonitor", "driver", "tool", "shell", "script", "wrapper", "alternaterefs")
-# Each key's answer, once per process (SPD-123): a repository with many branches or remotes has hundreds of keys at its own
+# Each key's answer, once per process: a repository with many branches or remotes has hundreds of keys at its own
 # scopes, its checkout and every worktree of it share them, and SessionStart and doctor read every checkout's in one run.
 _PROGRAM_KEYS = {}
 
 
 def git_config_key_inert(key):
-    """True when a config key is on SPD-046's allowlist: a section whose every key is inert, or one inert key."""
+    """True when a config key is on the inert allowlist: a section whose every key is inert, or one inert key."""
     section = key.split(".", 1)[0].strip().casefold()
     return section in GIT_INERT_CONFIG_SECTIONS or key.strip().casefold() in GIT_INERT_CONFIG_KEYS
 
 
 def git_config_key_names_program(key):
     """True when a config key in force in a repository names or enables a program git runs under a verb Law 7's table allows
-    (SPD-046's class), so a member's git call in that repository is refused (SPD-063).  The keys SPD-046 proved inert pass
+    (a pager, an editor, a hook path, a helper), so a member's git call in that repository is refused.  The keys proved
+    inert pass
     first, so color.pager (a boolean) and safe.directory stay silent; core.pager and pager.<cmd> never do, since the hook
     reads no value here."""
     named = _PROGRAM_KEYS.get(key)
@@ -138,7 +138,7 @@ def git_repository_dirs(directory, as_git_dir=False):
     the directory itself exactly when it was found as a bare layout.
 
     `as_git_dir`: the directory is one a git call names as its git or common directory (--git-dir, GIT_DIR, GIT_COMMON_DIR),
-    which git takes as given, so it is read as a git directory before its own .git is (SPD-066: a bare layout planted at a
+    which git takes as given, so it is read as a git directory before its own .git is (a bare layout planted at a
     checkout's root beside that root's .git is what `git --git-dir=<root>` reads); one that is not laid out as a git
     directory is walked as before, where git would refuse to run at all."""
     cur = os.path.abspath(directory)
@@ -225,7 +225,7 @@ _SCOPES_READ = {}  # the cache file -> (its stat, what it held when read), so on
 
 def git_scopes_cache(cache):
     """What <home>/.spud/git-config-scopes.json holds, {} when it is missing or unreadable.  Parsed once per process while
-    its stat stays the same (SPD-123): SessionStart and doctor read every checkout's entry in one run, and a repository with
+    its stat stays the same: SessionStart and doctor read every checkout's entry in one run, and a repository with
     many branches keeps hundreds of keys there.  A write replaces the file, which changes its inode, so it is read again.
     The dict is shared: git_own_config_keys builds a new one before it changes anything."""
     try:
@@ -251,8 +251,8 @@ def git_own_config_keys(home, where, gitdir, commondir):
     None when the hook could not read them, which fails closed.
 
     Kept in <home>/.spud/git-config-scopes.json under the stat fingerprint of the files git reads at those scopes, so a hook
-    runs git only after one of them changes: the Bash hook runs on every command line and SPD-016 keeps subprocess off its
-    path.  A repository that sets nothing for itself costs no git run at all.  The cache lives in the state directory, which
+    runs git only after one of them changes: the Bash hook runs on every command line, and subprocess stays off its
+    path, where importing it costs every run milliseconds.  A repository that sets nothing for itself costs no git run at all.  The cache lives in the state directory, which
     the edit and Bash hooks refuse to everyone, so nothing a member writes can widen what passes."""
     files = git_scope_config_files(gitdir, commondir)
     if not any(os.path.lexists(f) for f in files):
@@ -285,14 +285,14 @@ def git_own_config_keys(home, where, gitdir, commondir):
     return keys
 
 
-# -- a known checkout's own repository (SPD-066) ------------------------------------------------------------------------
+# -- a known checkout's own repository ---------------------------------------------------------------------------------
 
 
 def checkout_identities(checkouts):
     """What git_checkout_repository compares against, read once per call: {checkouts: project_checkouts' rows, roots: the
     identity of every root and listed worktree, commons: the identity of each registered root's own common directory}.
     Only a registered root's .git says which common directory is a checkout's own: a worktree's gitfile or commondir is a
-    file a member could rewrite to name any repository (SPD-123)."""
+    file a member could rewrite to name any repository."""
     ident = worktrees.file_identity
     roots, commons = set(), set()
     for _project, paths in checkouts:
@@ -311,7 +311,7 @@ def git_checkout_repository(known, where, gitdir, commondir):
     """True when the repository git_repository_dirs found is the own repository of a checkout the ledger knows (`known` is
     checkout_identities'): found through `<where>/.git`, where `where` is a root or listed worktree; or a git directory
     taken as it is (a bare layout, or one a call names), which is such a checkout's own git or common directory.  Either
-    way its common directory, the one whose hooks and config git reads, is a registered root's own (SPD-123: a worktree's
+    way its common directory, the one whose hooks and config git reads, is a registered root's own (a worktree's
     .git gitfile or its commondir rewritten to name another repository is not its checkout's).  Compared by file identity,
     so any spelling of a root the filesystem honours is it."""
     ident = worktrees.file_identity
@@ -338,10 +338,10 @@ def in_known_checkout(home, known, path):
     return any(worktrees.map_into_checkouts(known["checkouts"], c, str(home)) for c in (os.path.normpath(p), os.path.realpath(p)))
 
 
-# -- what git would run from it (SPD-123) --------------------------------------------------------------------------------
+# -- what git would run from it --------------------------------------------------------------------------------------
 #
-# SPD-066 closes every path a member spells into a git directory and every repository but a known checkout's own, and
-# SPD-063 the program keys of that repository; a member that writes through a program the hook cannot read (python -c, a
+# The path rule closes every path a member spells into a git directory, the Bash hook every repository but a known
+# checkout's own and the program keys of that repository; a member that writes through a program the hook cannot read (python -c, a
 # script under its globs, node) can still put a hook in a known checkout's common git directory, a program key in its config
 # or a worktree's config.worktree, or a repository below the checkout.  git runs a hook with nothing on the line (probed on
 # 2.54.0: post-index-change under any `git status`, reference-transaction under `git fetch`; pre-commit, commit-msg,
@@ -376,8 +376,8 @@ def git_hook_entries(commondir):
 
 
 def repository_findings(home, known, where, gitdir, commondir, hooks=None):
-    """[finding] for one repository git_repository_dirs found, in the order the Bash hook refuses a member (SPD-066's
-    repository, then SPD-063's keys, then SPD-123's hooks), each a dict: kind (foreign, unreadable, key, hook), what (the
+    """[finding] for one repository git_repository_dirs found, in the order the Bash hook refuses a member (the
+    repository, then its program keys, then its hooks), each a dict: kind (foreign, unreadable, key, hook), what (the
     repository, the key or the hook's path), file, and text, the phrase every reader shows.  A repository that is not a
     known checkout's own is its one finding: git runs nothing there to read its keys, and removing it is Eric's call.
 

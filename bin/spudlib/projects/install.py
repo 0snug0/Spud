@@ -1,4 +1,4 @@
-"""projects/install: project install, uninstall, sync, remove.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""projects/install: project install, uninstall, sync, remove."""
 
 import contextlib
 import json
@@ -17,14 +17,14 @@ EXCLUDE_COMMENT = "# spud project %s"
 
 
 def install_files(ctx, p):
-    """Where install writes for a project (design section 2.1)."""
+    """Where install writes for a project."""
     user = homeconf.user_claude_dir()
     return {
         "settings": Path(worktrees.project_root(ctx, p)) / ".claude" / "settings.local.json",
         "agent": user / "agents" / "spudagent.md",
         "skill": user / "skills" / "spud" / "SKILL.md",
         "pointer": homeconf.spud_config_dir() / "home",
-        "source_agent": agentdef.agent_source(ctx),  # SPD-097: in the tool repository, a template (SPW-002), under share/ (SPW-004)
+        "source_agent": agentdef.agent_source(ctx),  # in the tool repository, a template, under share/
     }
 
 
@@ -46,7 +46,7 @@ def git_common_dir(root):
 
 
 def ensure_ignored(root, key):
-    """Make sure git ignores the local settings file (design section 2.3): True when it appended the path to the common
+    """Make sure git ignores the local settings file: True when it appended the path to the common
     dir's info/exclude under its comment line, False when git already ignored it."""
     proc = homeconf.run_git(root, "check-ignore", "-q", "--", SETTINGS_LOCAL, timeout=30)
     if proc.returncode == 0:
@@ -84,9 +84,9 @@ def remove_exclude_block(root, key):
 
 
 def install_project(ctx, con, p):
-    """Write what project install writes (design section 2.1), each file only when its content changes: the ledger hooks,
+    """Write what project install writes, each file only when its content changes: the ledger hooks,
     the CLI allow rules and the home as an additional directory in the project's untracked local settings; the exclude
-    line when git does not already ignore that file; the spudagent definition rendered for this machine (SPW-002) and the
+    line when git does not already ignore that file; the spudagent definition rendered for this machine and the
     /spud skill at user scope; the home pointer when absent.  Returns (the install record for projects.installed, the
     paths written, whether the user agents directory held no agent before)."""
     root = Path(worktrees.project_root(ctx, p))
@@ -94,9 +94,9 @@ def install_project(ctx, con, p):
         raise kernel.SpudError(kernel.EXIT_ERROR, "project %s's root %s is not a directory; `spud --as spud project edit %s --root <path>`" % (p["key"], root, p["key"]))
     if worktrees.file_identity(root) is not None and worktrees.file_identity(root) == worktrees.file_identity(ctx.home):
         raise kernel.SpudError(kernel.EXIT_ERROR, "project %s's root is the home %s; the home's hooks are `spud --as spud settings sync`'s until"
-                               " `spud --as spud home move` separates the two (SPD-097)" % (p["key"], root))
+                               " `spud --as spud home move` separates the two" % (p["key"], root))
     files = install_files(ctx, p)
-    agent_text = agentdef.agent_markdown(ctx)  # SPW-002: rendered from Ctx before anything is written; it refuses when the source is gone
+    agent_text = agentdef.agent_markdown(ctx)  # rendered from Ctx before anything is written; it refuses when the source is gone
     if homeconf.run_git(root, "ls-files", "--error-unmatch", "--", SETTINGS_LOCAL, timeout=30).returncode == 0:
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is tracked in %s's git; install writes nothing in the tracked tree" % (SETTINGS_LOCAL, p["key"]))
     previous = json.loads(p["installed"]) if p["installed"] else {}
@@ -179,7 +179,7 @@ def strip_ledger_settings(ctx, settings, original, home_added):
 
 
 def uninstall_project(ctx, con, p):
-    """Undo what install recorded (design section 2.7): (what it changed, warnings).  The settings file gets its original
+    """Undo what install recorded: (what it changed, warnings).  The settings file gets its original
     bytes back when what is left equals what was there, is removed when install created it and nothing else is left,
     and is otherwise written without the ledger's entries.  The user-scope files go only with the last installed project,
     and only while they still match what install wrote."""
@@ -319,11 +319,11 @@ def cmd_project_remove(ctx, args):
         reportentry.check_next(con, actor, args)
         p = lookup.get_project(con, args.key)
         if p["id"] == 1:
-            # SPW-001: because it is project 1, not because it is the tool repository.  Removing it would leave
+            # Because it is project 1, not because it is the tool repository.  Removing it would leave
             # spud.config.json's prefixes naming no project, which doctor then reports for as long as the home lives.
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is project 1, whose name and prefixes spud.config.json names, and is never removed:"
                             " removing it would leave the config naming prefixes no project has" % p["key"])
-        # a parked ticket is open (SPD-096): it is not-now, not over, so project remove waits for it too
+        # a parked ticket is open: it is not-now, not over, so project remove waits for it too
         open_tickets = [r["key"] for r in con.execute("SELECT key FROM tickets WHERE project_id = ? AND status IN ('queued','active','parked') ORDER BY id", (p["id"],)).fetchall()]
         if open_tickets:
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s has open tickets (%s); move them to done or declined first" % (p["key"], ", ".join(open_tickets)))

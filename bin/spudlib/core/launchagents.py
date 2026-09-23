@@ -1,6 +1,6 @@
-"""core/launchagents: The two LaunchAgents' labels and plist paths, and how the render watcher is doing (SPD-097).
-Moved below commands/ from commands/schedule and commands/renderwatch on SPD-048, so that `spud board --brief`, doctor and
-the SessionStart hook ask one check: no hook may import a command module.  Since SPD-117 that check is how far behind the
+"""core/launchagents: The two LaunchAgents' labels and plist paths, and how the render watcher is doing.
+Moved below commands/ from commands/schedule and commands/renderwatch so that `spud board --brief`, doctor and
+the SessionStart hook ask one check: no hook may import a command module.  That check is how far behind the
 vault is, not whether a process is alive: a watcher running and stuck leaves every note stale and answered every liveness
 question correctly, so the four states below are what doctor, the board and the SessionStart context report."""
 
@@ -67,14 +67,14 @@ def watcher_installed():
 
 def latest_event_id(con):
     """The highest event id whose kind is not `render`: what the vault must have caught up with.  A render event never
-    triggers a pass, so the watcher does not chase its own writes.  Moved here from commands/renderwatch on SPD-117: the
+    triggers a pass, so the watcher does not chase its own writes.  Moved here from commands/renderwatch: the
     watcher's own comparison is the one the report needs, and no hook may import a command module."""
     return con.execute("SELECT COALESCE(MAX(id), 0) FROM events WHERE kind != 'render'").fetchone()[0]
 
 
 def record_render(ctx, through, at):
     """What every pass into the home leaves behind: the event id it rendered through, and when.  The renders table records
-    only the files a pass wrote (SPD-097: a pass that changes nothing writes nothing), so its through_event_id stands still
+    only the files a pass wrote (a pass that changes nothing writes nothing), so its through_event_id stands still
     whenever an event changes no note -- an event the renderers never read, a hook denial say.  A lag read from that table
     alone would then call a vault that is perfectly current behind, and no `spud render` could clear it.  This mark advances
     on every pass instead, and writes no database row.  Best effort: a mark that cannot be written leaves the table's
@@ -85,7 +85,7 @@ def record_render(ctx, through, at):
 
 def rendered_through(ctx, con):
     """The highest event id the vault is known to be rendered through: the last pass's mark, or the renders table's own
-    watermark when there is no readable mark (a home last rendered before SPD-117, one whose mark could not be written).
+    watermark when there is no readable mark (a home last rendered by an older spud, one whose mark could not be written).
     The larger of the two, so neither source can drag the answer backwards."""
     through = con.execute("SELECT COALESCE(MAX(through_event_id), 0) FROM renders").fetchone()[0]
     try:

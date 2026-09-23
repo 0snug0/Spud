@@ -1,4 +1,4 @@
-"""commands/ticketcmds: ticket new, move, edit, show.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""commands/ticketcmds: ticket new, move, edit, show."""
 
 import json
 import os
@@ -9,7 +9,7 @@ from ..hooks import worktrees
 from ..state import actors, ledgerdb, lookup, ops
 
 
-# Report entries (SPD-011).  Spud's recording commands write their own report.entry in the transaction of
+# Report entries.  Spud's recording commands write their own report.entry in the transaction of
 # the record they make: ticket new, ticket move, ticket edit when --priority changes the priority, member
 # finish of a root member, and proposal decide.  The title is generated and the body is `- ` lines; Spud
 # types only the Next line, with --next.  `report add` stays for what no command records (a merge, an install).
@@ -31,13 +31,13 @@ def cmd_ticket_new(ctx, args):
             project = con.execute("SELECT * FROM projects WHERE key = ?", (args.project,)).fetchone()
             if project is None:
                 raise kernel.SpudError(kernel.EXIT_ERROR, "no project %r" % args.project)
-        else:  # SPD-014: the project of the working directory, else project 1 (the home is none, SPD-097)
+        else:  # the project of the working directory, else project 1 (the home is no project)
             try:
                 mapped = worktrees.cli_project_of(ctx, con, os.getcwd())
             except OSError:
                 mapped = None
             project = mapped[0] if mapped and not worktrees.is_home(mapped[0]) else con.execute("SELECT * FROM projects WHERE id = 1").fetchone()
-            if project is None:  # SPW-001: a home may hold no project, and then it can hold no ticket either
+            if project is None:  # a home may hold no project, and then it can hold no ticket either
                 raise kernel.SpudError(kernel.EXIT_ERROR, "no project is registered; `spud --as spud project add <path> --key <key>"
                                 " --ticket-prefix %s --team-prefix %s --landing merge` registers one, or give --project"
                                 % (ctx.config.get("tickets", {}).get("prefix", "SPD"), ctx.config.get("teams", {}).get("prefix", "SPUD")))
@@ -57,7 +57,7 @@ def cmd_ticket_new(ctx, args):
         d = lookup.ticket_dict(con, t)
     finally:
         con.close()
-    # SPW-001: project 1 is the project every unqualified `ticket new` lands in, so its key adds nothing to the line.
+    # Project 1 is the project every unqualified `ticket new` lands in, so its key adds nothing to the line.
     keys = d["team_key"] if project["id"] == 1 else "%s, %s" % (d["team_key"], d["project"])
     return reportentry.with_report_entry({"ticket": d}, "%s (%s) created: %s [%s]" % (d["key"], keys, d["title"], d["status"]), entry)
 
@@ -68,7 +68,7 @@ def cmd_ticket_move(ctx, args):
         actor = actors.resolve_actor(con, args.actor)
         actors.require_spud(con, actor, "moving a ticket")
         reportentry.check_next(con, actor, args)
-        # SPD-096: the reason qualifies the status, so it is required to park and refused to anything else, both before
+        # The reason qualifies the status, so it is required to park and refused to anything else, both before
         # a row is read.  --reason on any other move keeps its old meaning: a note in the event body, stored nowhere.
         parked = args.status == "parked"
         if parked and not (args.reason or "").strip():

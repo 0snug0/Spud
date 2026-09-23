@@ -1,4 +1,4 @@
-"""shell/git_verbs: Law 7's verbs: git's own commands, unknown verbs, repository targets.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""shell/git_verbs: Law 7's verbs: git's own commands, unknown verbs, repository targets."""
 
 import contextlib
 import json
@@ -41,11 +41,11 @@ def git_binary_fingerprint():
 def git_own_commands(home=None):
     """The names git dispatches itself, from the git the hook runs (`git --list-cmds=main`: 174 on git 2.54.0, a superset of
     --list-cmds=builtins' 147), with git_env()'s sanitised environment -- the hook's own, never the line's HOME or PATH.
-    None when git cannot be run or names nothing, which fails the unknown-verb check closed (SPD-047).
+    None when git cannot be run or names nothing, which fails the unknown-verb check closed.
 
     Read once per process, and kept in <home>/.spud/git-commands.json under the fingerprint of the git binary it was read
     from, so a hook runs git only after git itself changes: the Bash hook runs on every command line, and the list costs
-    about 8 ms with the subprocess import, which SPD-016 keeps off the hook path.  A cache that is missing, unreadable or
+    about 8 ms with the subprocess import, which stays off the hook path.  A cache that is missing, unreadable or
     stale is read anew; one that cannot be written is left unwritten.  It lives in the state directory, which the edit and
     Bash hooks refuse to everyone, so nothing a member writes can widen git's command set."""
     global _GIT_OWN_COMMANDS
@@ -81,12 +81,12 @@ def git_own_commands(home=None):
 
 def git_unknown_verb(verb, home=None):
     """("verb", name) when the verb is not one of git's own commands, ("unreadable", name) when the hook could not read that
-    command list at all, else None (SPD-047).  git ignores an alias that hides one of its own commands ("aliases that hide
+    command list at all, else None.  git ignores an alias that hides one of its own commands ("aliases that hide
     existing Git commands are ignored", git-config(1); `alias.log` and `alias.status` were ignored, probed), so an alias can
     only introduce a verb git does not have: a verb outside git's own set is the tell for every alias source at once -- a
     repository's .git/config reached by -C/--git-dir/GIT_DIR, ~/.gitconfig, $XDG_CONFIG_HOME/git/config, the system config, an
     include, GIT_CONFIG_* -- and for an external `git-<verb>` program on PATH, which the hook cannot read either.  A verb built
-    from an expansion keeps SPD-043's own reason."""
+    from an expansion keeps the unresolvable expansion's own reason."""
     if verb is None:
         return None
     name = prepare.deglob(verb)
@@ -102,7 +102,7 @@ def git_repo_targets(words, variables):
     """Every directory a git call points git at, as (spelling, path): the composed `-C` chain (git chdirs there before it reads
     any config, and a repeated -C is relative to the previous one), the values of --git-dir and --work-tree (spaced and `=`
     forms) resolved against that chain wherever they stand on the line, and GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR in force.
-    Each names a repository whose .git/config the hook cannot read (SPD-047).  A path is absolute, or relative to the directory
+    Each names a repository whose .git/config the hook cannot read.  A path is absolute, or relative to the directory
     the shell is in."""
     base, options = None, []
     i = 1
@@ -137,7 +137,7 @@ def git_repo_targets(words, variables):
     return targets
 
 
-# SPD-066: what a git_repo_targets entry names, read back from the spelling that function gives it (`-C <dir>`, `<option>=<v>`
+# what a git_repo_targets entry names, read back from the spelling that function gives it (`-C <dir>`, `<option>=<v>`
 # or `<option> <v>`, `<VAR>=<v>`).  The -C chain is where git discovers the repository from; --git-dir and GIT_DIR name the
 # git directory itself and GIT_COMMON_DIR the common one, whose config and hooks git reads, each taken as given with no
 # discovery; --work-tree and GIT_WORK_TREE name only the work tree: git still discovers the repository from the directory
@@ -153,14 +153,14 @@ def git_target_kind(spelled):
 
 
 def git_write_option_targets(words):
-    """Every file or directory a git call's own options name for git to write (SPD-049), as (the spelling a reason names
+    """Every file or directory a git call's own options name for git to write, as (the spelling a reason names
     it by, the path word as the line spells it): the diff option syntax.GIT_FILE_OPTIONS on any verb, this verb's entry
     in syntax.GIT_VERB_FILE_OPTIONS, and the positional forms of syntax.GIT_VERB_FILE_POSITIONALS.
 
     Read in every spelling git takes: spaced, `=`-attached, a short option with its value attached or clustered, and any
     `--`-prefix of a long option, git's parse-options resolving an unambiguous one.  A verb GIT_WRITE_VERBS refuses whole
     carries no target: Law 7's verb is the reason a member gets, and `git init`/`git clone` are Spud's own.  A verb Law 7
-    refuses through GIT_MEMBER_VERBS instead (SPD-087: read-tree, checkout-index, index-pack, repack, pack-objects,
+    refuses through GIT_MEMBER_VERBS instead (read-tree, checkout-index, index-pack, repack, pack-objects,
     commit-graph, multi-pack-index, credential-store ...) keeps its target and its entry: Law 7 does not bind Spud, and
     the path rule still holds his own call to it."""
     verb, args = git_verb(words)
@@ -194,7 +194,7 @@ def git_write_option_targets(words):
 
 
 def git_write_positional_targets(verb, args):
-    """The positional words of a verb whose writing form names its file that way (SPD-049): `git bundle create <file>`,
+    """The positional words of a verb whose writing form names its file that way: `git bundle create <file>`,
     `git mailinfo <msg> <patch>`, `git pack-objects <base-name>`.  An option is skipped as spelled; which of a verb's
     options take a separate value is not known here, so such a value is read as a positional and checked too, which fails
     closed."""
@@ -218,12 +218,12 @@ def git_write_positional_targets(verb, args):
 
 
 def git_write_env_targets(variables):
-    """Every file or directory a git call writes because of a variable in force on the line (SPD-049), as (the spelling a
+    """Every file or directory a git call writes because of a variable in force on the line, as (the spelling a
     reason names it by, the path word): a GIT_TRACE* sibling whose value is a path git appends to -- an absolute one, or
     a `~` the shell expanded before git saw it, a descriptor, an off value and a relative one writing nothing -- or whose
     value the hook cannot read, which fails closed, and GIT_INDEX_FILE and GIT_OBJECT_DIRECTORY, whose value is a path
-    whatever its shape.  `variables` holds each value as the shell passes it to git, a `$NAME` the line settled resolved
-    (SPD-127), so the shape that decides here is the one git sees.  A fixed order so the reason is deterministic."""
+    whatever its shape.  `variables` holds each value as the shell passes it to git, a `$NAME` the line settled
+    resolved, so the shape that decides here is the one git sees.  A fixed order so the reason is deterministic."""
     out = []
     for name in sorted(variables):
         value = variables[name]
@@ -237,7 +237,7 @@ def git_write_env_targets(variables):
 
 
 def git_write_targets(words, variables):
-    """Every file or directory a git call writes beside the repository it reads (SPD-049): what its options name, then
+    """Every file or directory a git call writes beside the repository it reads: what its options name, then
     what the environment in force names.  Each is checked with the path rule in bash_reason, like a redirection target."""
     return git_write_option_targets(words) + git_write_env_targets(variables)
 
@@ -270,14 +270,14 @@ def flag_list_refused(verb, args, read_flags, value_flags):
 
 
 def git_not_allowed(verb):
-    """The verb when Law 7 allows a member no form of it (SPD-087): every name git answers to outside
+    """The verb when Law 7 allows a member no form of it: every name git answers to outside
     syntax.GIT_MEMBER_VERBS, so a plumbing verb the old denylist never held -- and one a later git adds -- is refused
     rather than silent.
 
     Read after git_refused, so Law 7's own table and its subcommand cases keep their reason when the hook cannot read
     git's command list, and after git_unknown_verb, so the name here is one of git's own commands: a name git does not
-    know is SPD-047's, whose reason names the alias or the external `git-<verb>` program it must be.  A verb built from
-    an expansion is SPD-043's, which doubts the whole word."""
+    know is the unknown-verb check's, whose reason names the alias or the external `git-<verb>` program it must be.  A
+    verb built from an expansion is the unresolvable expansion's, which doubts the whole word."""
     if verb is None or verb in syntax.GIT_MEMBER_VERBS:
         return None
     name = prepare.deglob(verb)
@@ -287,7 +287,7 @@ def git_not_allowed(verb):
 def git_refused(verb, args):
     """The verb when Law 7's own table or one of its subcommand cases refuses it for a spudagent, else None.  Every
     other name git knows is refused by git_not_allowed; these are the ones whose refusal stands whatever git's command
-    list says (SPD-087)."""
+    list says."""
     if verb is None:
         return None
     if verb in syntax.GIT_WRITE_VERBS:
@@ -305,7 +305,7 @@ def git_refused(verb, args):
     if verb == "tag":
         return flag_list_refused(verb, args, syntax.TAG_READ_FLAGS, syntax.TAG_READ_VALUE_FLAGS)
     if verb == "config":
-        # Two syntaxes (SPD-063, probed on git 2.54.0): the flags, where a key and a value write and one positional reads,
+        # Two syntaxes (probed on git 2.54.0): the flags, where a key and a value write and one positional reads,
         # and the 2.46 subcommands, where the verb is the first positional -- `git config edit` opens the file in an editor
         # with a single positional, and `git config get <key>` reads with two.  A read selector (--get, --get-urlmatch,
         # --get-color ...) takes positionals of its own, so they are never a key and a value.

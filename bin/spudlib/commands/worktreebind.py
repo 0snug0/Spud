@@ -1,4 +1,4 @@
-"""commands/worktreebind: Ticket-bound worktrees at `member new` and `member edit`: which deliverables need one, the caller's checkout, the binding, its refusals, and the worktree `card` and `board` show (SPD-098)."""
+"""commands/worktreebind: Ticket-bound worktrees at `member new` and `member edit`: which deliverables need one, the caller's checkout, the binding, its refusals, and the worktree `card` and `board` show."""
 
 import os
 
@@ -7,7 +7,7 @@ from ..hooks import hookio, worktrees
 from ..state import ledgerdb, lookup, ops
 
 
-# The home and tool split design's section 6, approved by Eric on 2026-09-16 as a refusal, not a warning.  A ticket needs a
+# Ticket-bound worktrees, a refusal and not a warning.  A ticket needs a
 # worktree when a deliverable of the member being planned resolves into a checkout of its project: a bare glob, or one
 # qualified with the project's own key; `home:` never does, and a glob naming another project is refused outright, since
 # one ticket binds one worktree of its own project (Spud's decision 3).  The first plan that needs one binds the ticket to
@@ -23,26 +23,26 @@ from ..state import ledgerdb, lookup, ops
 
 MAIN_CHECKOUT = (
     "%(key)s needs a worktree: %(glob)s is in project %(project)s's checkout, and this command runs in its main checkout"
-    " %(root)s, where code is never built (SPD-098). Enter a linked worktree of it first (EnterWorktree name: %(name)s), then"
+    " %(root)s, where code is never built. Enter a linked worktree of it first (EnterWorktree name: %(name)s), then"
     " rerun this command from there: the first plan from a worktree binds the ticket to it")
 OUTSIDE_PROJECT = (
     "%(key)s needs a worktree of project %(project)s: %(glob)s is in its checkout, and this command runs in %(cwd)s, in"
-    " %(where)s, outside that project (SPD-098). Start the ticket from the project root %(root)s: a session there enters a"
+    " %(where)s, outside that project. Start the ticket from the project root %(root)s: a session there enters a"
     " linked worktree (EnterWorktree name: %(name)s) and reruns this command from it, which binds the ticket to that worktree")
 BOUND_ELSEWHERE = (
     "%(key)s is bound to the worktree %(bound)s (%(state)s), which git still lists, and this command runs in %(here)s:"
-    " plan from that worktree (SPD-098). %(tail)s")
+    " plan from that worktree. %(tail)s")
 BOUND_ELSEWHERE_SPUD = ("A ticket moves to another worktree only once its bound one is gone (removed after landing); then a"
                         " plan from the new worktree rebinds it")
 BOUND_ELSEWHERE_MEMBER = ("A member never rebinds a ticket: Spud rebinds it, by planning from the worktree the work moves to"
                           " once the bound one is gone")
 STALE_FOR_MEMBER = (
-    "%(key)s was bound to the worktree %(bound)s, which no longer exists, and a member never rebinds a ticket (SPD-098):"
+    "%(key)s was bound to the worktree %(bound)s, which no longer exists, and a member never rebinds a ticket:"
     " Spud rebinds it by planning a member from the worktree the work continues in (this command runs in %(here)s). Ask"
     " your parent, or record the question with `member block`")
 OTHER_PROJECT = (
     "deliverable %(glob)r names project %(other)s, and %(key)s is project %(project)s's: one ticket binds one worktree of its"
-    " own project, so the work in project %(other)s is a ticket there (spud --as spud ticket new --project %(other)s) (SPD-098)")
+    " own project, so the work in project %(other)s is a ticket there (spud --as spud ticket new --project %(other)s)")
 
 
 def working_directory():

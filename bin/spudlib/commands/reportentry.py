@@ -1,4 +1,4 @@
-"""commands/reportentry: Report entries and --next, shared by the recording commands.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""commands/reportentry: Report entries and --next, shared by the recording commands."""
 
 from ..core import kernel
 from ..state import actors, ledgerdb

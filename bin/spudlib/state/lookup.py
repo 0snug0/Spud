@@ -1,4 +1,4 @@
-"""state/lookup: Row lookups and row dicts; member and project handles.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""state/lookup: Row lookups and row dicts; member and project handles."""
 
 import json
 import re
@@ -100,7 +100,7 @@ def ticket_dict(con, t):
         "created_at": t["created_at"],
         "updated_at": t["updated_at"],
         "closed_at": t["closed_at"],
-        "worktree": t["worktree"],  # SPD-098: the bound linked worktree, None while unbound; never rendered into a note
+        "worktree": t["worktree"],  # the bound linked worktree, None while unbound; never rendered into a note
     }
 
 
@@ -140,7 +140,7 @@ def member_dict(con, m):
 
 
 def effective_holder(con, member_id):
-    """Who must decide a proposal held by `member_id` now (SPD-120): that member while it can still act, else the nearest
+    """Who must decide a proposal held by `member_id` now: that member while it can still act, else the nearest
     ancestor that can, and None -- Spud -- at the root.  A member can act while its status is in kernel.ALIVE, planned or
     active; done, failed and blocked have all returned, and a blocked one acts again only after `member start`.  The climb
     is read where a decision is made and written there, never at `member finish`, so a blocked member that is re-briefed
@@ -164,7 +164,7 @@ def holder_name(ref):
 
 
 def holder_words(recorded, effective):
-    """Who must decide a proposal now, naming the recorded holder when the climb passed it (SPD-120):
+    """Who must decide a proposal now, naming the recorded holder when the climb passed it:
     `Spud (was BADS-110/Garfield)`.  Both are member refs, or None for Spud."""
     if effective == recorded:
         return holder_name(recorded)
@@ -172,7 +172,7 @@ def holder_words(recorded, effective):
 
 
 def held_proposals(con, member_id):
-    """The open proposals a member must decide (SPD-120): those recorded to it, and those recorded to a member below it
+    """The open proposals a member must decide: those recorded to it, and those recorded to a member below it
     that has returned, whose climb ends at it.  [{id, title}] in id order.  `member finish` reads it before the status
     change and names what it found, since after the change every one of them climbs one step further; it refuses
     nothing, because recording a returned member's outcome is Law 9 and the finish is what hands them on."""
@@ -183,7 +183,7 @@ def held_proposals(con, member_id):
 def proposal_dict(con, p):
     ticket = get_ticket_by_id(con, p["ticket_id"])
     created = get_ticket_by_id(con, p["created_ticket_id"]) if p["created_ticket_id"] else None
-    # SPD-120: who must decide it now, which is the recorded holder unless that member has returned.  A settled proposal
+    # Who must decide it now, which is the recorded holder unless that member has returned.  A settled proposal
     # is nobody's to decide, so it stays its own holder rather than reading as inherited.
     effective = effective_holder(con, p["holder_member_id"]) if p["status"] == "open" else p["holder_member_id"]
     return {
@@ -203,7 +203,7 @@ def proposal_dict(con, p):
 
 
 def pull_requests(con, ticket_ids=None, settled_only=False):
-    """The recorded landing pull requests (SPD-077), in ticket then record order: of these ticket ids, or every one when
+    """The recorded landing pull requests, in ticket then record order: of these ticket ids, or every one when
     None; `settled_only` keeps the merged and closed ones, which are the rows that nag."""
     if ticket_ids is not None and not ticket_ids:
         return []  # an empty id list matches nothing, and `IN ()` is a syntax error
@@ -218,7 +218,7 @@ def pull_requests(con, ticket_ids=None, settled_only=False):
 
 
 def ticket_landing(con, ticket_id):
-    """The one pull request a ticket's note describes in its two frontmatter keys (SPD-116): the newest row recorded,
+    """The one pull request a ticket's note describes in its two frontmatter keys: the newest row recorded,
     which is the one `pr record` last said the ticket lands through; None when none is recorded.  The newest row, not
     the unsettled one, because that is the value that changes only when Spud records another pull request -- a
     reconciled state moves `pr_state` and never `pr`.  A ticket carries several rows over its life; every one of them
@@ -265,7 +265,7 @@ def pr_state_text(d):
 
 
 def pr_owed(d):
-    """What a merged pull request leaves owed while its ticket is still open (SPD-077): the done move with the URL in the
+    """What a merged pull request leaves owed while its ticket is still open: the done move with the URL in the
     Outcome, and the cleanup of the worktree and the local branch the record named.  [] for anything else -- a closed
     unmerged pull request is surfaced and owes nothing, and a ticket already done or declined was settled by hand.  The
     ledger never does any of this itself: the move is a judgment and the cleanup is git's."""
@@ -281,7 +281,7 @@ def pr_owed(d):
 
 def pr_nag_line(d):
     """The line a merged or closed pull request puts on the brief board and in every SessionStart context, built from
-    stored state alone: no gh call and no git, because that text is injected at every session start (SPD-077)."""
+    stored state alone: no gh call and no git, because that text is injected at every session start."""
     owed = pr_owed(d)
     return "pull request %s %s%s" % (pr_name(d), pr_state_text(d), ("; owed: " + "; ".join(owed)) if owed else "")
 

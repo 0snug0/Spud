@@ -1,6 +1,6 @@
 """commands/vaultlock: the Obsidian vault the tool ships -- what `share/obsidian/` and `share/obsidian.lock.json` hold,
-the one function every download goes through, and the comparisons `vault install`, `vault capture` and `doctor` share
-(SPD-156, the portable-home design sections 1 to 3 read against `share/`).
+the one function every download goes through, and the comparisons `vault install`, `vault capture` and `doctor` share,
+read against `share/`.
 
 Four facts about Obsidian this module is built on, each confirmed against Eric's own vault rather than reasoned about:
 
@@ -35,7 +35,7 @@ doctor's own module, is not: those findings *are* the comparisons above asked in
 some of each, which is the reason the three do not each carry their own rule for what Obsidian's `/* nosourcemap */`
 means.
 
-**The restricted `.base` reader moved in from tests/test_share.py (SPD-159).**  It reads a `.base` file in the
+**The restricted `.base` reader moved in from tests/test_share.py.**  It reads a `.base` file in the
 deliberately narrow YAML subset that guard test was built on: block mappings and sequences, `key:`, `key: value`,
 `- value`, `- key: value`, plain scalars to the end of the line, quoted scalars, integers and an *empty* flow
 collection, refusing a tab, a flow collection with anything in it, an anchor, an alias, a tag, a block scalar, a
@@ -76,7 +76,7 @@ NOSOURCEMAP = b"\n/* nosourcemap */"
 BACKUP_DIR = "vault-install"
 
 # The suite runs the CLI as a subprocess, so no `mock.patch` reaches a download made inside one.  This env var is how a
-# test steers `download`, exactly as SPD-077's SPUD_GH steers the GitHub reader: `off` refuses every download, which is
+# test steers `download`, exactly as SPUD_GH steers the GitHub reader: `off` refuses every download, which is
 # what `tests/helpers.Home` sets on every scratch home, so no test can reach the network by forgetting something; a
 # directory serves each URL from the file named by that URL, percent-encoded whole (`served_name`); unset is the network.
 DOWNLOAD_ENV = "SPUD_VAULT_DOWNLOADS"
@@ -110,7 +110,7 @@ CAPTURE_HINT = "`spud --as <agent_id> vault capture --into <worktree>` on a tick
 DIFFERS = "the vault's %s differs from the one the tool ships (%s); " + CAPTURE_HINT
 VERSION_DIFFERS = "%s %s is installed and the lock pins %s; " + CAPTURE_HINT
 FILES_DIFFER = "%s %s is installed and %s %s not what the lock pins; " + CAPTURE_HINT
-# SPD-159: `spud init` writes a home's `ledger/*.base` views at step 4a whether or not step 4b's plugin downloads
+# `spud init` writes a home's `ledger/*.base` views at step 4a whether or not step 4b's plugin downloads
 # succeeded, so a home can hold a view Obsidian has no plugin to render -- refused download, no network, a hash
 # mismatch -- and nothing said so until this note.  A view naming %r; the file it is in; the plugin(s) that provide
 # its type, none installed; and the command that settles it.
@@ -164,8 +164,8 @@ def download(url, timeout=TIMEOUT, accept=None):
     headers = {"User-Agent": USER_AGENT}
     if accept:
         headers["Accept"] = accept
-    # `http.client.IncompleteRead` -- a body cut short -- is an HTTPException and *not* an OSError, so before SPD-156's
-    # review a truncated download left `spud vault install` and `spud init` as a traceback instead of a refusal.  It is
+    # `http.client.IncompleteRead` -- a body cut short -- is an HTTPException and *not* an OSError, so until a review
+    # caught it a truncated download left `spud vault install` and `spud init` as a traceback instead of a refusal.  It is
     # named through `urllib.request`, which imports `http.client` itself and is the only thing here that raises one, so
     # catching it costs no import of its own -- and none on the `spud` runs that download nothing.
     cut_short = lazy.urllib_request.http.client.HTTPException
@@ -353,7 +353,7 @@ def view_types(lock):
 
 
 # ----------------------------------------------------------------------------
-# The restricted `.base` reader (SPD-159, moved in from tests/test_share.py)
+# The restricted `.base` reader (moved in from tests/test_share.py)
 # ----------------------------------------------------------------------------
 
 
@@ -547,7 +547,8 @@ def locked_findings(ctx):
 
 def missing_plugin_findings(ctx):
     """[(what, sentence)]: a view in one of the home's own `ledger/*.base` files whose type the currently-shipped
-    lock names a plugin for, but that plugin is not in this home's `.obsidian/plugins/` -- the SPD-159 check.
+    lock names a plugin for, but that plugin is not in this home's `.obsidian/plugins/` -- a view the home ships and
+    cannot render.
 
     A view whose type no locked plugin names is not a finding here: `table` is Obsidian's own, needing no plugin, and
     every other unrecognised type is `tests/test_share.py`'s to guard, over the shipped set -- this reads a home's

@@ -1,11 +1,11 @@
-"""shell/prepare: Heredocs, substitutions, newlines and quoted globs before tokenizing.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""shell/prepare: Heredocs, substitutions, newlines and quoted globs before tokenizing."""
 
 from . import syntax
 from ..hooks import hookio
 
 
-# What a quoted or escaped character becomes: a glob metacharacter's sentinel (SPD-034), and since SPD-126 a shell operator
-# character's, so a quoted `;` or `(` stays in its word instead of reaching the walk as the operator.
+# What a quoted or escaped character becomes: a glob metacharacter's sentinel, or a shell operator character's, so a
+# quoted `;` or `(` stays in its word instead of reaching the walk as the operator.
 _QUOTED_SENTINELS = dict(syntax._GLOB_SENTINELS, **syntax._PUNCT_SENTINELS)
 
 
@@ -85,7 +85,7 @@ def split_substitutions(command):
 
 
 def newlines_as_separators(text):
-    """An unquoted newline ends a command as `;` does, but shlex reads it as a blank (SPD-030: `ls<newline>git push` hid the
+    """An unquoted newline ends a command as `;` does, but shlex reads it as a blank (`ls<newline>git push` once hid the
     push).  A backslash-newline outside single quotes joins the lines.  A comment keeps its words (a word the shell ignores
     is at worst read as one more command) with its quote characters blanked, so an apostrophe in it cannot unbalance
     shlex, which gets no commenters."""
@@ -133,13 +133,13 @@ def newlines_as_separators(text):
 
 def neutralize_quoted_globs(text):
     """Replace a glob metacharacter (`* ? [ ] { } ,`) that is single-quoted, double-quoted or backslash-escaped with a
-    sentinel, so filename generation and brace expansion are read only from the unquoted metacharacters (SPD-034: zsh 5.9
+    sentinel, so filename generation and brace expansion are read only from the unquoted metacharacters (zsh 5.9
     and bash 3.2 both expand an unquoted glob in a redirection target, and both leave a quoted one literal).  The quotes and
     backslashes are kept for shlex to strip; deglob restores the literal character.  Word boundaries are untouched, so other
-    words are read exactly as before.  SPD-126: a quoted or escaped shell operator character (`; & | < > ( )`) gets a sentinel
+    words are read exactly as before.  A quoted or escaped shell operator character (`; & | < > ( )`) gets a sentinel
     too, so `find . \\( -name a \\) -exec rm {} \\; -delete` reaches the walk as one command whose words hold them.
 
-    SPD-043: beside a `$` it leaves the marks the expansion check reads once shlex has removed the quotes: _LITERAL_DOLLAR after a
+    Beside a `$` it leaves the marks the expansion check reads once shlex has removed the quotes: _LITERAL_DOLLAR after a
     `$` that is single-quoted, escaped, or last in double quotes (no expansion in either shell), _QUOTED_DOLLAR after the `$` of
     `$'...'` and `$"..."` (text the hook does not decode), and _NAME_END where a quote or an escape continues a word right after a
     bare `$name` (`$X"t"` and `$X\\t` read $X, then t)."""

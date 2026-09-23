@@ -1,4 +1,4 @@
-"""hooks/sessionhooks: SessionStart and UserPromptSubmit.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/sessionhooks: SessionStart and UserPromptSubmit."""
 
 import re
 
@@ -9,12 +9,12 @@ from ..state import actors, ledgerdb, ops
 
 
 def hook_session_start(ctx, payload):
-    """The board for a Spud session in the home (and outside every project); in another project (SPD-014) the one-line
+    """The board for a Spud session in the home (and outside every project); in another project the one-line
     notice for a session that is not Spud, and for a Spud one a header naming the project with the board.  A Spud
     session's context is cut on whole lines to sessions.SESSION_CONTEXT_CAP, since a larger additionalContext reaches the
-    model only as a preview (the design's probe P2; measured on SPD-048), and carries the render watcher's lines above the
-    board when the watcher is down or the vault is behind (SPD-117), where no cut reaches them, and there too the line
-    naming a checkout that holds what a member may have planted for git to run (SPD-123)."""
+    model only as a preview (tests/probes/context_limit.py measures the harness's inline limit), and carries the render
+    watcher's lines above the board when the watcher is down or the vault is behind, where no cut reaches them, and there
+    too the line naming a checkout that holds what a member may have planted for git to run."""
     if not ctx.db_path.is_file():
         return hookio.SILENT
     con = ledgerdb.connect(ctx)
@@ -33,12 +33,12 @@ def hook_session_start(ctx, payload):
     return hookio.HookOutput({"hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": context}})
 
 
-# The UserPromptSubmit hook (SPD-057).  Eric starts a session in a claim project with "Work on BAD-006" and no /spud; before
-# SPD-057 it stayed plain, and the work happened outside the ledger.  Now a prompt that names a ticket of the session's
+# The UserPromptSubmit hook.  Eric starts a session in a claim project with "Work on BAD-006" and no /spud; without this
+# hook it stayed plain, and the work happened outside the ledger.  Now a prompt that names a ticket of the session's
 # launch project claims the session the way `session claim` does, and hands the model the /spud skill's steps.
 PROMPT_KEY_SHAPE = re.compile(r"\b[A-Z][A-Z0-9]*-\d+\b")  # a cheap test before the database is opened: most prompts name no key
 SPUD_COMMAND = re.compile(r"\A\s*/spud(?:\s|\Z)|<command-name>\s*/spud\s*</command-name>")  # typed, or as the transcript expands it
-PROMPT_CLAIM_CAP = sessions.SESSION_CONTEXT_CAP  # the same inline limit as SessionStart's context (the design's probe P2; SPD-048)
+PROMPT_CLAIM_CAP = sessions.SESSION_CONTEXT_CAP  # the same inline limit as SessionStart's context
 
 
 def prompt_is_spud_command(prompt):

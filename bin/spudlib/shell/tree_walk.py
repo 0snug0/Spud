@@ -1,8 +1,8 @@
-"""shell/tree_walk: the walk that holds a copied tree's git directory to SPD-066's rule (SPD-126).
+"""shell/tree_walk: the walk that holds a copied tree's git directory to the rule that no member writes one.
 
 A recursive copy or move -- cp -R, mv, rsync, ditto -- lands its source's files wherever it lands, and find hands its command
 the files already under its starting points, so a `.git` directory or gitfile, a `.gitconfig` or a `git/config` in that
-tree is written where the tree lands, and SPD-066 refuses a caller the path rule holds any such write: git runs a hook from
+tree is written where the tree lands, and the hook refuses a caller the path rule holds any such write: git runs a hook from
 there, and reads its config, with nothing on the line.  arg_writes.written_paths asks this module which directories a
 source word names now and what git reads under each, and turns each find into a target of its own where it lands.
 

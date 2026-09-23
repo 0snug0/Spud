@@ -1,13 +1,13 @@
 #!/opt/homebrew/bin/python3.14
-"""spud: the launcher of the one program that writes the ledger (SPD-007; the launcher since SPD-016).
+"""spud: the launcher of the one program that writes the ledger.
 
 Run it as  python3.14 -I -S bin/spud [--as ACTOR] [--json] <command> ...
 
 The program is spud_ledger.py beside this file's real path, never found through sys.path or the working directory, and
-the package spudlib beside it, which spud_ledger.py imports by the class of the loader that loaded it (SPD-065).
+the package spudlib beside it, which spud_ledger.py imports by the class of the loader that loaded it.
 Python compiles a script on every run but caches a module's bytecode, so this launcher loads the program as a module.
 Its bytecode goes under <home>/.spud/pycache/, in a tree mirroring each file's own path, so a worktree's program and
-the main checkout's never share a file.  <home> is SPUD_HOME, else what ~/.config/spud/home names (SPD-097: the home
+the main checkout's never share a file.  <home> is SPUD_HOME, else what ~/.config/spud/home names (the home
 is a plain directory, never the checkout this launcher sits in), and nothing is cached unless <home>/.spud/ already
 exists: refused to edits and to shell commands like the database beside it.  Only the program's bytecode goes there;
 the standard-library modules it imports keep Python's defaults.
@@ -38,7 +38,7 @@ class CachedLoader(SourceFileLoader):
 
 
 def home_dir():
-    """SPUD_HOME, else the ~/.config/spud/home pointer (SPD-097): the home whose state directory holds the bytecode cache;
+    """SPUD_HOME, else the ~/.config/spud/home pointer: the home whose state directory holds the bytecode cache;
     None when neither names one, and then nothing is cached."""
     home = os.environ.get("SPUD_HOME")
     if not home:

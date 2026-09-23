@@ -1,4 +1,4 @@
-"""cli/cliparser: build_parser, normalize_argv, text_arg, date_arg.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""cli/cliparser: build_parser, normalize_argv, text_arg, date_arg."""
 
 import sys
 from datetime import date
@@ -44,7 +44,7 @@ def text_arg(value):
 
 
 def date_arg(value):
-    """--until (SPD-096): a plain YYYY-MM-DD, the spelling every date in the ledger's frontmatter has.  A past date is
+    """--until: a plain YYYY-MM-DD, the spelling every date in the ledger's frontmatter has.  A past date is
     accepted: the ticket is due back at once."""
     try:
         parsed = date.fromisoformat(value)
@@ -63,7 +63,7 @@ def build_parser():
     sub = parser.add_subparsers(dest="command", metavar="<command>")
     sub.required = True
 
-    # SPW-001: init builds a home from nothing -- the config, the database, the first project, the vault scaffolding and
+    # init builds a home from nothing -- the config, the database, the first project, the vault scaffolding and
     # the pointer -- so it is the one command that may run with no home to resolve (bin/spud_ledger.main's own branch),
     # and every value it needs is a flag, prompted for only when stdin is a tty.
     p = sub.add_parser("init", help="build a home from nothing: the config, the database (created, or migrated if behind), the first project, the vault scaffolding, the ~/.config/spud/home pointer (Spud's)")
@@ -85,7 +85,7 @@ def build_parser():
                    help="install neither LaunchAgent (%s, the daily backup, and %s, the render watcher): `spud schedule install` does it later, and doctor reports a watcher never installed as a note, not a problem"
                         % (launchagents.SCHEDULE_LABEL, launchagents.RENDER_LABEL))
     p.add_argument("--no-vault", action="store_true",
-                   help="install no Obsidian vault: step 4 writes the scaffolding and stops, and `spud --as spud vault install` sets one up later (SPD-156)")
+                   help="install no Obsidian vault: step 4 writes the scaffolding and stops, and `spud --as spud vault install` sets one up later")
     p.add_argument("--repoint", action="store_true", help="~/.config/spud/home names another home: point this machine here instead (that home is left untouched)")
     p.add_argument("--yes", action="store_true", help="never prompt: every value not given takes its default, and one with no default is refused")
     p.add_argument("--dry-run", action="store_true", help="check the preconditions and print the steps; write nothing")
@@ -132,7 +132,7 @@ def build_parser():
     p.add_argument("--project", help="the project whose local settings carry this line (project install): a failure with no agent_id fails open")
     p.set_defaults(func=dispatch.cmd_hook)
 
-    p = sub.add_parser("project", help="repositories Spud works in besides his home (SPD-014)")
+    p = sub.add_parser("project", help="repositories Spud works in besides his home")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
     q = ps.add_parser("add", help="register a repository's main checkout as a project; installs nothing (Spud's)")
@@ -178,7 +178,7 @@ def build_parser():
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes")
     q.set_defaults(func=install.cmd_project_remove)
 
-    p = sub.add_parser("session", help="this Claude Code session: claim it for Spud in another project, release it, show it (SPD-014)")
+    p = sub.add_parser("session", help="this Claude Code session: claim it for Spud in another project, release it, show it")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
     q = ps.add_parser("claim", help="make this session Spud in its project (what /spud runs); needs CLAUDE_CODE_SESSION_ID")
@@ -189,7 +189,7 @@ def build_parser():
     q = ps.add_parser("show", help="the home, the working directory's project and checkout, the session and its mode (any actor)")
     q.set_defaults(func=sessions.cmd_session_show)
 
-    p = sub.add_parser("home", help="Spud's home: the directory holding the database, the config and the vault (SPD-097)")
+    p = sub.add_parser("home", help="Spud's home: the directory holding the database, the config and the vault")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
     q = ps.add_parser("move", help="move the home to an empty directory outside every git work tree: backup, copy, re-point, re-sync hooks and agents, verify (Spud's)",
@@ -203,7 +203,7 @@ def build_parser():
     q.add_argument("--check", action="store_true", help="print what would change, file by file, and write nothing")
     q.set_defaults(func=homesync.cmd_home_sync)
 
-    p = sub.add_parser("vault", help="the home's Obsidian vault: install it from the tool's share/, or capture this one back into a ticket's worktree (SPD-156)",
+    p = sub.add_parser("vault", help="the home's Obsidian vault: install it from the tool's share/, or capture this one back into a ticket's worktree",
                        description=helptexts.VAULT_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
@@ -227,7 +227,7 @@ def build_parser():
     p = sub.add_parser("render", help="regenerate ledger/ and reports/ from the database; a hand-edited file is left alone (exit 6), a note whose frontmatter only changed YAML style (Obsidian's rewrite) is rendered over and kept in the event; --watch keeps doing it (Spud's)")
     p.add_argument("--out", help="render into this directory instead of SPUD_HOME (no hash checks)")
     p.add_argument("--discard", metavar="PATH", help="overwrite this hand-edited file with the current render, keeping the discarded text in the event (Spud only)")
-    p.add_argument("--watch", action="store_true", help="run until SIGTERM, rendering whenever the event log moves: the LaunchAgent local.spud.render's run (SPD-097)")
+    p.add_argument("--watch", action="store_true", help="run until SIGTERM, rendering whenever the event log moves: the LaunchAgent local.spud.render's run")
     p.add_argument("--interval", type=float, default=renderwatch.WATCH_INTERVAL, metavar="SECONDS", help="with --watch: seconds between reads of the event log (default %.0f)" % renderwatch.WATCH_INTERVAL)
     p.add_argument("--ticks", type=int, metavar="N", help="with --watch: stop after N reads (tests)")
     p.set_defaults(func=renderwatch.render_entry)
@@ -275,7 +275,7 @@ def build_parser():
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
     member_new_help = ("plan a member (the actor is its parent): limits, lineage, name draw; a code ticket binds the linked worktree it runs"
-                       " in, and it refuses from the main checkout, outside the project or another worktree (SPD-098)")
+                       " in, and it refuses from the main checkout, outside the project or another worktree")
     q = ps.add_parser("new", help=member_new_help, description=member_new_help)
     q.add_argument("--ticket", help="ticket key (required for Spud; implied for a member)")
     q.add_argument("--persona", required=True)
@@ -321,7 +321,7 @@ def build_parser():
     q = ps.add_parser("list", help="list members: what card shows for --ticket, else what fleet shows for every member (read-only)")
     q.add_argument("--ticket", help="a ticket key; without it, every member")
     q.set_defaults(func=views.cmd_member_list)
-    q = ps.add_parser("resum", help="re-sum stored transcript sums that added every entry (before SPD-023) or lack the per-model breakdown (before SPD-013), once per API request, from the transcripts (Spud's)",
+    q = ps.add_parser("resum", help="re-sum stored transcript sums that added every transcript entry rather than one per API request, or lack the per-model breakdown, once per API request, from the transcripts (Spud's)",
                       description=helptexts.RESUM_DESCRIPTION, epilog=helptexts.RESUM_EPILOG, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
     q.add_argument("refs", nargs="*", metavar="ref", help="a member, SPUD-nnn/<Name> or SPUD-nnn/<lineage>; several may be named")
     q.add_argument("--all", action="store_true", help="every member whose usage_json holds a transcript sum")
@@ -374,7 +374,7 @@ def build_parser():
     q.set_defaults(func=proposalcmds.cmd_report_add)
 
     pr_help = ("landing pull requests: the one a ticket lands through, read back with `gh pr view` and surfaced on the board, so a"
-               " merge reaches the ledger without the session that opened it (SPD-077)")
+               " merge reaches the ledger without the session that opened it")
     p = sub.add_parser("pr", help=pr_help, description=helptexts.PR_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True

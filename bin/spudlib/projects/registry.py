@@ -1,4 +1,4 @@
-"""projects/registry: project add, list, show, edit, and their validation.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""projects/registry: project add, list, show, edit, and their validation."""
 
 import json
 import os
@@ -12,12 +12,12 @@ from ..state import actors, ledgerdb, lookup
 
 
 # ----------------------------------------------------------------------------
-# Projects and sessions (SPD-014)
+# Projects and sessions
 # ----------------------------------------------------------------------------
 #
-# docs/design/2026-09-14-cross-repository-projects.md.  A project is a registered repository; the home is no project
-# (SPD-097).  Project 1 is the project whose name and prefixes `spud.config.json` names -- not the tool repository, which
-# it was presumed to be until SPW-001 (docs/design/2026-09-21-spud-init.md section 1), and not a row that must exist: a
+# A project is a registered repository; the home is no project.
+# Project 1 is the project whose name and prefixes `spud.config.json` names -- not the tool repository, which it was
+# once presumed to be, and not a row that must exist: a
 # home may hold no project, and then it holds no ticket either.  The first project registered gets id 1.
 # A session launched in another project is Spud only after `/spud` claims it (projects.sessions = 'claim', the default
 # for `project add`, Eric 2026-09-14), or when its project is 'always', as project spud is until `home move`; a session
@@ -41,10 +41,10 @@ def identity_chain(path):
 
 
 def project_root_shape(ctx, path):
-    """Rules 1 and 2 of `project add` (design section 1.2), the ones a candidate root answers on its own: an existing
+    """Rules 1 and 2 of `project add`, the ones a candidate root answers on its own: an existing
     directory, not the home, the root of a git repository's main checkout.  Returns the resolved root.
 
-    Its own function since SPW-001: `spud init` has to check the root it was given before it creates the database, so
+    Its own function because `spud init` has to check the root it was given before it creates the database, so
     there is no connection to pass, and the registry scan validate_project_root adds to this is vacuous anyway on the
     empty registry init starts from."""
     try:
@@ -53,8 +53,8 @@ def project_root_shape(ctx, path):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is not an existing directory" % path)
     if not root.is_dir():
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is not a directory" % root)
-    if worktrees.file_identity(root) == worktrees.file_identity(ctx.home):  # SPD-097: asked before git, since the home is no git repository
-        raise kernel.SpudError(kernel.EXIT_ERROR, "%s is Spud's home, which is not a project (SPD-097); register the tool repository or another checkout" % root)
+    if worktrees.file_identity(root) == worktrees.file_identity(ctx.home):  # asked before git, since the home is no git repository
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s is Spud's home, which is not a project; register the tool repository or another checkout" % root)
     proc = homeconf.run_git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", timeout=30)
     lines = proc.stdout.strip().split("\n") if proc.returncode == 0 else []
     if len(lines) != 2:
@@ -68,7 +68,7 @@ def project_root_shape(ctx, path):
 
 
 def validate_project_root(ctx, con, path, exclude_id=None):
-    """The rules 1 to 3 of `project add` (design section 1.2): the shape above, and then not inside an active project's
+    """The rules 1 to 3 of `project add`: the shape above, and then not inside an active project's
     root and not containing one.  Returns the resolved root."""
     root = project_root_shape(ctx, path)
     ident = worktrees.file_identity(root)
@@ -91,7 +91,7 @@ def check_project_key(con, key):
     if not PROJECT_KEY_RE.fullmatch(key or ""):
         raise kernel.SpudError(kernel.EXIT_ERROR, "--key %r must be lower-case letters, digits and hyphens, starting with a letter, at most 32 characters" % key)
     if key == kernel.HOME_KEY:
-        raise kernel.SpudError(kernel.EXIT_ERROR, "the key %s is reserved: it names Spud's home in a deliverable glob (home:<glob>), and the home is not a project (SPD-097)" % key)
+        raise kernel.SpudError(kernel.EXIT_ERROR, "the key %s is reserved: it names Spud's home in a deliverable glob (home:<glob>), and the home is not a project" % key)
     if con.execute("SELECT 1 FROM projects WHERE key = ?", (key,)).fetchone():
         raise kernel.SpudError(kernel.EXIT_ERROR, "project %s exists already" % key)
 
@@ -121,7 +121,7 @@ def origin_head_branch(root):
 
 def project_dict(ctx, con, p):
     root = worktrees.project_root(ctx, p)
-    # SPD-097: every project's hooks live in its untracked local settings; the home's own .claude/settings.json belongs to no project.
+    # Every project's hooks live in its untracked local settings; the home's own .claude/settings.json belongs to no project.
     settings = os.path.join(root, ".claude", "settings.local.json")
     record = json.loads(p["installed"]) if p["installed"] else None
     return {
@@ -213,7 +213,7 @@ def cmd_project_edit(ctx, args):
         at = kernel.now()
         with ledgerdb.write_txn(con):
             p = lookup.get_project(con, args.key)
-            project_one = p["id"] == 1  # SPW-001: whatever project 1 is, its name and prefixes are spud.config.json's
+            project_one = p["id"] == 1  # whatever project 1 is, its name and prefixes are spud.config.json's
             updates = {}
             if args.name is not None:
                 if project_one:

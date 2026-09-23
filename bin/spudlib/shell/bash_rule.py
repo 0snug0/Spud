@@ -1,4 +1,4 @@
-"""shell/bash_rule: bash_reason: the Bash hook's rule over a line.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""shell/bash_rule: bash_reason: the Bash hook's rule over a line."""
 
 import os
 
@@ -9,8 +9,8 @@ from ..state import lookup
 
 # What a refused write is called in each channel's reasons: the path rule's own reason wrapped for the write ("into"),
 # a target holding an expansion ("variable", a member alone: Spud's own such target the hook simply cannot read), a
-# target relative to a directory the hook cannot follow ("unfollowable", every caller since SPD-035), and the two a glob
-# earns a member ("capped", "nomatch").  SPD-126: a target holding an operand the line does not spell (syntax.unknown_operand)
+# target relative to a directory the hook cannot follow ("unfollowable", every caller), and the two a glob
+# earns a member ("capped", "nomatch").  A target holding an operand the line does not spell (syntax.unknown_operand)
 # earns a member "input" -- what xargs reads from its input, what find hands its command -- or "anywhere", files a command
 # places where the line cannot say.
 _UNFOLLOWABLE = ("a cd into a variable, `cd -`, popd, a directory stack entry or ~name, an option or a CDPATH it cannot"
@@ -52,7 +52,7 @@ GIT_WRITE_MESSAGES = {
     "input": "the file this git call writes (%s)" + _INPUT,
     "anywhere": "the file this git call writes (%s)" + _ANYWHERE,
 }
-# SPD-121: a file a command names as an operand and writes (cp, mv, ln, install, mkdir, touch, rm, rmdir, truncate, chmod
+# a file a command names as an operand and writes (cp, mv, ln, install, mkdir, touch, rm, rmdir, truncate, chmod
 # and its kin, sed in place), `%s` naming the command and the file as the line spells them.
 ARG_WRITE_MESSAGES = {
     "into": "a write by argument (%s): %s",
@@ -66,13 +66,13 @@ ARG_WRITE_MESSAGES = {
                 " name the files explicitly"),
     "input": "a write by argument (%s)" + _INPUT,
     "anywhere": "a write by argument (%s)" + _ANYWHERE,
-    # SPD-126: a tree a recursive copy lands, or find hands its command, that the walk for a git directory could not read whole
+    # a tree a recursive copy lands, or find hands its command, that the walk for a git directory could not read whole
     "unwalked": ("a write by argument (%s) lands a directory tree the hook could not read whole (more than %d entries, or a"
                  " directory it cannot list), so it cannot tell whether a git directory or config file lands with it, which"
-                 " no spudagent writes (SPD-066); copy or search a smaller tree, or exclude .git"),
+                 " no spudagent writes; copy or search a smaller tree, or exclude .git"),
 }
-# SPD-150: an interpreter run whose program the line spells rather than reads from a file (shell/inline_programs), which
-# is how BADS-140/Jeremy wrote `scripts/web-seed.js` past his deliverable globs: `python3.14 - <<'PY' ... p.write_text(s)`.
+# an interpreter run whose program the line spells rather than reads from a file (shell/inline_programs), which
+# is how a member in another project wrote a script past its deliverable globs: `python3.14 - <<'PY' ... p.write_text(s)`.
 # Law 1's number, because the fence it passes is the one the edit hook puts on every path -- Spud's own files and a
 # member's deliverables -- and the way through that fence is the Edit or Write tool, which the hook checks.
 INLINE_PROGRAM_REASON = (
@@ -84,7 +84,7 @@ INLINE_PROGRAM_REASON = (
     " proposal if the work really needs a program of its own")
 INLINE_PROGRAM_STDIN = ("it reads on standard input (a here-document, a here-string, a pipe or a `<` file), having none"
                         " of its own")
-# SPD-043's reason for a word the hook cannot resolve where a command is read by name, which SPD-152 reads in two places:
+# The reason for a word the hook cannot resolve where a command is read by name, which is read in two places:
 # where the word stands on the line ("var-word", among the findings as spelled) and where an xargs reads it from an input
 # the line does not spell ("inline-word", read last with the inline program it may carry, shell/interpreter_words).
 VAR_WORD_REASON = ("the word %s holds a parameter expansion, arithmetic or a substitution the hook cannot resolve, or is an operand the"
@@ -101,9 +101,9 @@ def inline_program_reason(detail):
 
 
 def path_directories(kind, path):
-    """SPD-126: the kinds the path rule reads a write of `path` with, every one of which must let it in.  A whole-subtree
-    write, "tree", never loosens what the line earned before SPD-126:
-    - "rm-tree" (rm -r, find -delete) is "tree" -- narrower than SPD-129's "remove", which rm -r was -- unless the path
+    """The kinds the path rule reads a write of `path` with, every one of which must let it in.  A whole-subtree
+    write, "tree", never loosens what the line earned before it was read as one:
+    - "rm-tree" (rm -r, find -delete) is "tree" -- narrower than "remove", which rm -r was -- unless the path
       exists now as something other than a directory (a file, or a symlink, which rm removes as itself): "remove" then.
     - "file-tree" (chmod -R and its kin, mv's source) is the file the path is, and "tree" too while it is a directory now.
     - "find-tree" (a write under find's starting point) is "tree" unless the path exists as something other than a
@@ -120,7 +120,7 @@ def path_directories(kind, path):
 
 
 def shown_picked(text):
-    """SPD-126: a reason with the characters a command picks for a name (hooks/pathrule.NAME_CHAR, NAME_MORE) shown as a glob
+    """A reason with the characters a command picks for a name (hooks/pathrule.NAME_CHAR, NAME_MORE) shown as a glob
     shows them: `?` one, `*` any number more."""
     return text.replace(pathrule.NAME_CHAR, "?").replace(pathrule.NAME_MORE, "*")
 
@@ -150,7 +150,7 @@ def target_has_active_glob(target):
 
 def git_target_dirs(target, cwds):
     """(the directories a git call's repository target may name, whether the hook cannot resolve it): a path relative to a
-    directory it cannot follow, `~-`/`~+`/`~name`, or a value holding an expansion is unresolvable (SPD-047)."""
+    directory it cannot follow, `~-`/`~+`/`~name`, or a value holding an expansion is unresolvable."""
     path = prepare.deglob(target)
     if spud_calls.unresolvable_word(path):
         return [], True
@@ -166,7 +166,7 @@ def git_target_dirs(target, cwds):
 
 
 def git_repo_outside(ctx, con, target, cwds):
-    """Where a git call's repository target lands (SPD-047): (the first directory it may name that lies outside every checkout
+    """Where a git call's repository target lands: (the first directory it may name that lies outside every checkout
     the ledger knows, False), (None, True) when the hook cannot resolve it, else (None, None).  Inside is a registered
     project's root or one of the worktrees git names for it, read as the path rule reads a file's path."""
     candidates, unresolved = git_target_dirs(target, cwds)
@@ -179,7 +179,7 @@ def git_repo_outside(ctx, con, target, cwds):
 
 
 def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="spud"):
-    """(reason or None, analysis) for a Bash command line, with what the shell expanded named after it (SPD-133): the
+    """(reason or None, analysis) for a Bash command line, with what the shell expanded named after it: the
     refusal is the one the words the shell actually runs earn, and a member that typed `gc -m x` reads Law 7's words
     about `git commit` beside the alias that spelled it."""
     reason, analysis = bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode)
@@ -189,7 +189,7 @@ def bash_reason(ctx, con, caller_agent_id, caller_member, command, cwd, mode="sp
 
 
 def shell_expansion_note(analysis):
-    """What a reason adds when the shell this line runs in already defined one of its command words (SPD-133).  Claude
+    """What a reason adds when the shell this line runs in already defined one of its command words.  Claude
     Code sources its snapshot of the user's interactive shell in the shell it starts for every Bash call, so the word the
     member wrote is not the command that runs; the reason says which names it read and what each one is."""
     named, seen = [], set()
@@ -203,7 +203,7 @@ def shell_expansion_note(analysis):
 
 
 def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="spud"):
-    """(reason or None, analysis) for a Bash command line.  In a session that is not Spud (`mode` plain, SPD-014) a caller
+    """(reason or None, analysis) for a Bash command line.  In a session that is not Spud (`mode` plain) a caller
     with no agent_id, or an unbound one (Eric's own subagents), keeps the database, `spud hook`, `--as spud` and member-own
     refusals and the path rule, and gets no Law 7 refusal; a bound member gets every refusal, in any session."""
     db_reason = hookio.DB_REASON
@@ -215,8 +215,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     plain = mode == "plain"
     strict = bool(caller_agent_id) and not (plain and caller_member is None)
     who = ("%s (agent_id %s)" % (lookup.member_ref(con, caller_member["id"]), caller_agent_id)) if caller_member else ("agent_id %s" % caller_agent_id if caller_agent_id else "Spud")
-    # An expansion the hook cannot resolve in a word it reads by name (SPD-043) refuses a member last, and a verb outside git's
-    # own commands or a repository it cannot read (SPD-047) second to last, so a refusal the words as spelled already earn
+    # An expansion the hook cannot resolve in a word it reads by name refuses a member last, and a verb outside git's
+    # own commands or a repository it cannot read second to last, so a refusal the words as spelled already earn
     # (Law 7's verb, a program config key, an ambiguous glob, Law 6, an actor) keeps its own reason.
     for kind, detail in sorted(analysis.findings, key=lambda f: spud_calls.FINDING_LAST.get(f[0], 0)):
         if kind == "db":
@@ -349,8 +349,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                     return ("`--as %s` does not resolve to the caller's own member %s; use `--as %s`"
                             % (prepare.deglob(call["actor"]), who, caller_agent_id)), analysis
     if strict:
-        # SPD-066 and SPD-063: the repository each git call reads must be a known checkout's own, and the config it sets for
-        # itself, which git reads with nothing on the line, is held to the program allowlist; SPD-123: and it holds no hook
+        # The repository each git call reads must be a known checkout's own, and the config it sets for
+        # itself, which git reads with nothing on the line, is held to the program allowlist; and it holds no hook
         # a member planted.  After the findings, so a refusal the words as spelled already earn (a write verb, a program
         # key, an unknown verb, a repository outside every known checkout) keeps its own reason.
         for targets, target_cwds in analysis.git_calls:
@@ -358,7 +358,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
             if reason:
                 return reason, analysis
     elif not caller_agent_id and not plain:
-        # SPD-123: Spud's own git call, which runs as Eric's, reads the same repository for what a member could have
+        # Spud's own git call, which runs as Eric's, reads the same repository for what a member could have
         # planted there through a program the hook cannot read.  A plain session's calls and its own subagents never reach
         # this: they keep the answers they had.
         for targets, target_cwds in analysis.git_calls:
@@ -368,8 +368,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
 
     def target_reason(messages, spelled, path, directory=None):
         """edit_reason for one concrete file a redirection, a tee, a git call or a write by argument may open, phrased for
-        the write.  `directory` is the kind only a write by argument carries: SPD-129's making or removal of a directory,
-        SPD-126's whole-subtree writes, each read with the kinds path_directories gives for this path."""
+        the write.  `directory` is the kind only a write by argument carries: the making or removal of a directory,
+        the whole-subtree writes, each read with the kinds path_directories gives for this path."""
         for kind in path_directories(directory, path):
             reason, rel = pathrule.edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode, kind)
             if reason:
@@ -383,11 +383,11 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     def targets_reason(entries, messages):
         """The reason one of these writes is refused, or None.  An entry is (the spelling the reason names it by, or None
         for the target's own, the target word as the shell passes it -- a `$NAME` the line settled already resolved where
-        the analysis recorded it (SPD-127), everything else as the line spells it -- the directories the shell may be in
-        when it opens, and SPD-129's directory kind, None for every write that is not a directory's making or removal)."""
+        the analysis recorded it, everything else as the line spells it -- the directories the shell may be in
+        when it opens, and the directory kind, None for every write that is not a directory's making or removal)."""
         for named, target, target_cwds, directory in entries:
             spelled = shown_picked(syntax.shown_operands(prepare.deglob(named if named else target)))
-            if syntax.unknown_operand(target):  # SPD-126: an operand the line does not spell, for a member as a variable is
+            if syntax.unknown_operand(target):  # an operand the line does not spell, for a member as a variable is
                 if strict:
                     return messages["anywhere" if syntax.ANY_PATH in target else "input"] % spelled
                 continue
@@ -396,10 +396,10 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                     return messages["variable"] % spelled
                 continue
             if target_has_active_glob(target):
-                # The shell expands the target before opening it (SPD-034): check every file it opens from every candidate
+                # The shell expands the target before opening it: check every file it opens from every candidate
                 # directory, not the literal spelling that maps under no root.
                 expansion = redirect_globs.expand_redirect_target(target, target_cwds)
-                if expansion is None:  # a directory the hook cannot follow: refused for Spud too since SPD-035
+                if expansion is None:  # a directory the hook cannot follow: refused for Spud too
                     return messages["unfollowable"] % spelled
                 matches, capped = expansion
                 for path in matches:
@@ -418,18 +418,18 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                             return reason
                 continue
             paths = redirection_paths(prepare.deglob(target), target_cwds)
-            if paths is None:  # a directory the hook cannot follow: Spud's target was left unchecked until SPD-035
+            if paths is None:  # a directory the hook cannot follow: refused for Spud too
                 return messages["unfollowable"] % spelled
-            for path in paths:  # every directory the shell may be in (SPD-030)
+            for path in paths:  # every directory the shell may be in
                 reason = target_reason(messages, spelled, path, directory)
                 if reason:
                     return reason
         return None
 
     # The redirections first, so a line that already earned a redirection's reason keeps it; then the files a git call
-    # writes through its own options or the environment (SPD-049), and the files a command names as operands and writes
-    # (SPD-121), which are held to the same rule.
-    # SPD-126: for a caller the path rule holds, each tree a recursive copy lands or find hands its command is walked too.
+    # writes through its own options or the environment, and the files a command names as operands and writes
+    # by argument, which are held to the same rule.
+    # For a caller the path rule holds, each tree a recursive copy lands or find hands its command is walked too.
     written, capped, unwalked = arg_writes.written_paths(analysis.arg_writes, walk=strict)
     for entries, messages in (([(None, t, c, None) for t, c in analysis.redirects], REDIRECT_MESSAGES),
                               ([(n, t, c, None) for n, t, c in analysis.git_writes], GIT_WRITE_MESSAGES),
@@ -442,17 +442,17 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     if strict and unwalked:  # a tree whose walk for a git directory stopped short
         return ARG_WRITE_MESSAGES["unwalked"] % (unwalked, syntax.GLOB_SCAN_CAP), analysis
     if strict:
-        # SPD-150: last of all, where the findings FINDING_LAST holds back stand: an inline program says only that the
+        # last of all, where the findings FINDING_LAST holds back stand: an inline program says only that the
         # hook cannot read what runs, so every refusal the line has already earned keeps its own reason -- a git verb, a
         # database call, a spud call, a program git would run, and each write the path rule refuses above, which is
-        # what SPD-126's readings of perl and sed still answer with.
+        # what the readings of perl and sed as writers still answer with.
         for kind, detail in analysis.findings:
             if kind == "inline":
                 return inline_program_reason(detail), analysis
             if kind == "inline-word":
-                # SPD-152: an interpreter's option position the hook cannot read at all, because an xargs reads it from an
+                # an interpreter's option position the hook cannot read at all, because an xargs reads it from an
                 # input the line does not spell (`cat f | xargs node`, where an `-e` may stand).  Read here rather than
                 # among the findings as spelled, for the same reason an inline program is: what the same input writes
-                # (SPD-126's `xargs perl -pi -e s/a/b/ < list`) keeps its own reason.
+                # (`xargs perl -pi -e s/a/b/ < list`) keeps its own reason.
                 return VAR_WORD_REASON % detail, analysis
     return None, analysis

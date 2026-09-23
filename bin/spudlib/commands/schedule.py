@@ -1,5 +1,4 @@
-"""commands/schedule: spud backup, and the two LaunchAgents that run the daily backup and the render watcher (SPD-097).
-Moved from bin/spud_ledger.py (SPD-065)."""
+"""commands/schedule: spud backup, and the two LaunchAgents that run the daily backup and the render watcher."""
 
 import contextlib
 import os
@@ -78,10 +77,10 @@ def daily_backup(ctx, con, keep):
     return kernel.Result({"path": str(path), "written": True, "pruned": pruned, "kept": kept}, text)
 
 
-# schedule (SPD-012): the macOS LaunchAgents.  Eric chose launchd over a Claude scheduled task: the CLI runs alone, with
-# the app closed, and a run missed during sleep fires at wake.  Two agents since SPD-097: the daily backup, and the
+# schedule: the macOS LaunchAgents.  Eric chose launchd over a Claude scheduled task: the CLI runs alone, with
+# the app closed, and a run missed during sleep fires at wake.  Two agents: the daily backup, and the
 # render watcher that keeps the vault current (RunAtLoad and KeepAlive, so launchd restarts it whenever it exits).  Their
-# labels and plist paths are core/launchagents' since SPD-048.
+# labels and plist paths are core/launchagents'.
 SCHEDULE_AT = "03:00"
 SCHEDULE_LOG = "~/Library/Logs/spud-backup.log"
 RENDER_LOG = ".spud/logs/render.log"  # under the home; the watcher truncates it at each start
@@ -107,12 +106,12 @@ def require_spud_flag(args, what):
 
 
 def schedule_plist_path():
-    """The backup agent's plist: the name every caller from before SPD-097 knows."""
+    """The backup agent's plist: the name every caller from before the render watcher knows."""
     return launchagents.agent_plist_path("backup")
 
 
 def schedule_plist(ctx, at):
-    """The LaunchAgent as a dict: the tool's bin/spud (SPD-097) run by this interpreter as
+    """The LaunchAgent as a dict: the tool's bin/spud run by this interpreter as
     given, symlinks unresolved so a Homebrew upgrade keeps the path valid; SPUD_HOME set, because launchd's
     environment is minimal; at load and daily at `at` (hour, minute)."""
     if not sys.executable:
@@ -131,7 +130,7 @@ def schedule_plist(ctx, at):
 
 
 def render_plist(ctx):
-    """The watcher's LaunchAgent (SPD-097): `spud --as spud render --watch` under the tool's bin/spud with SPUD_HOME set,
+    """The watcher's LaunchAgent:`spud --as spud render --watch` under the tool's bin/spud with SPUD_HOME set,
     started at load and restarted by launchd whenever it exits (KeepAlive), its output in <home>/.spud/logs/render.log."""
     if not sys.executable:
         raise kernel.SpudError(kernel.EXIT_ERROR, "cannot tell which Python runs spud: sys.executable is empty")
@@ -212,7 +211,7 @@ def bootstrap_agent(path, label):
 
 
 def install_agents(ctx, at):
-    """Write both plists atomically and (re)load both jobs, backup first; home move runs this too (SPD-097).  Returns one
+    """Write both plists atomically and (re)load both jobs, backup first; home move runs this too.  Returns one
     record per agent: label, path, replaced, booted_out, attempts."""
     import plistlib  # see cmd_schedule_show
 

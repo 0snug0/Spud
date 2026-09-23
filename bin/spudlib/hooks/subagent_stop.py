@@ -1,4 +1,4 @@
-"""hooks/subagent_stop: A parent's finishing rule, and SubagentStop.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/subagent_stop: A parent's finishing rule, and SubagentStop."""
 
 import os
 from pathlib import Path
@@ -14,7 +14,7 @@ RESULT_HOLD = ("record your Result with `spud --as %s member result '<what you p
 
 
 def last_resume(con, member):
-    """The event id of the member's last resume (SPD-050), None when it was never resumed: the start that
+    """The event id of the member's last resume, None when it was never resumed: the start that
     superseded a return, which hook_subagent_start marks."""
     row = con.execute("SELECT MAX(id) AS id FROM events WHERE member_id = ? AND kind = ?"
                       " AND json_extract(data, '$.resumed') = 1", (member["id"], recording.RESUME_KIND)).fetchone()
@@ -22,8 +22,8 @@ def last_resume(con, member):
 
 
 def recorded_since(con, member, resumed):
-    """Whether the Result or Blocked the member holds answers for the round that is ending (SPD-050).  With no
-    resume this is the column check the Result hold has made since SPD-015.  After one it is not enough: what the
+    """Whether the Result or Blocked the member holds answers for the round that is ending.  With no
+    resume this is the column check the Result hold has always made.  After one it is not enough: what the
     member recorded before it was resumed was the verdict of the round before, and letting it stand would send a
     second round of work back with a first round's Result.  So the hold asks for a `member result` or `member
     block` recorded since the resume, and the events are the memory of when that was."""
@@ -37,7 +37,7 @@ def recorded_since(con, member, resumed):
 
 def unrecorded_children(con, member):
     """A member's own direct children that have returned (a final stop) and still have no
-    verdict: the shape `hook_stop` uses for Spud's children, one level down (SPD-015)."""
+    verdict: the shape `hook_stop` uses for Spud's children, one level down."""
     return con.execute(
         "SELECT m.*, t.team_key FROM members m JOIN tickets t ON t.id = m.ticket_id"
         " WHERE m.parent_id = ? AND m.stopped_at IS NOT NULL AND (m.outcome IS NULL OR trim(m.outcome) = '')"
@@ -82,7 +82,7 @@ def alive_children_reason(con, agent_id, children):
     reservation refuses a second spawn of it (hook_agent_spawn), so telling the lead to spawn it
     now would be wrong; its way out is the hook.error check and the lead's own actor, with no
     grace period, since a lead's background child binds at launch and a foreground one cannot
-    outlive the lead's own turn (SPD-028; SPD-025 gives the session-level kind, ten minutes on)."""
+    outlive the lead's own turn (Spud's Stop holds the session-level kind, ten minutes on)."""
     reserved = {}
     for c in children:
         if c["status"] != "active":
@@ -189,7 +189,7 @@ def hook_subagent_stop(ctx, payload):
             base = {"agent_type": agent_type, "stop_hook_active": stop_hook_active, "bound_by": bound_by}
             if member is None:
                 if not sessions.pending_spawn(con, payload.get("session_id")) and sessions.session_mode(ctx, con, payload)[0] == "plain":
-                    return hookio.SILENT  # Eric's own subagent in a session that is not Spud, with no spawn to bind: no event (SPD-014)
+                    return hookio.SILENT  # Eric's own subagent in a session that is not Spud, with no spawn to bind: no event
                 ledgerdb.write_event(con, at, "hook:SubagentStop", "member.stopped", "subagent %s stopped unbound (%s)" % (agent_id, agent_type), agent_id=agent_id, data=base)
                 return hookio.SILENT
             ref = lookup.member_ref(con, member["id"])
@@ -227,8 +227,8 @@ def hook_subagent_stop(ctx, payload):
             summed = None
             if (transcripts.usage_parts(member["usage_json"])[0] is None or resumed is not None) and transcript and os.path.isfile(transcript):
                 # a stored transcript sum stays, however it was counted (`member resum` re-sums one that added every
-                # entry, SPD-023); a completion recorded before this stop stays beside the new sum (SPD-021).
-                # A resumed member is the exception (SPD-050): its stored sum covers the round before, while the
+                # entry); a completion recorded before this stop stays beside the new sum.
+                # A resumed member is the exception: its stored sum covers the round before, while the
                 # transcript has gone on growing through the round now ending, so the run figures are counted again
                 # from the whole file -- which is what a sum always is, so counting twice changes nothing else.
                 # Live proof of the gap: the probe of 2026-09-15 stopped a second time with `transcript_usage: false`

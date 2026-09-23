@@ -1,7 +1,7 @@
-"""shell/downloads: the two downloaders, curl and wget, read whole (SPD-126): the files they are told to write by name and
+"""shell/downloads: the two downloaders, curl and wget, read whole: the files they are told to write by name and
 the ones the URL or the server names under a directory.
 
-Until SPD-126 neither was read.  SPD-126's first engineer read curl's -O, --remote-name-all and -J -- a file named by the
+Neither was read at first.  The first reading took curl's -O, --remote-name-all and -J -- a file named by the
 URL or the server, a whole-subtree write (arg_writes' kind "tree") of --output-dir's directory or the line's -- in
 shell/tree_writes; the second moved that reading here beside the files curl names itself, so one scan of curl's options
 reads both, and added wget.

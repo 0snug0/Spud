@@ -1,4 +1,4 @@
-"""hooks/worktrees: Case folding, worktrees and project checkouts, file identity, path readings.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/worktrees: Case folding, worktrees and project checkouts, file identity, path readings."""
 
 import contextlib
 import json
@@ -43,7 +43,7 @@ def repository_dir(root):
     what a linked worktree, a submodule and `git init --separate-git-dir` leave there -- the directory it points at, relative
     spellings resolved against the checkout.  A worktree's `<common>/worktrees/<name>` is read back to `<common>`, the
     directory whose `worktrees` holds every linked worktree of the repository, so worktrees_fingerprint answers for a linked
-    worktree exactly as it does for the main checkout (SPD-097).  This is what `git rev-parse --git-common-dir` answers,
+    worktree exactly as it does for the main checkout.  This is what `git rev-parse --git-common-dir` answers,
     read from the filesystem: projects/install asks git for it and is off the hook path, where no run pays a subprocess."""
     git_dir = os.path.join(str(root), ".git")
     if os.path.isdir(git_dir):
@@ -73,8 +73,8 @@ def worktrees_fingerprint(home):
     """What changes when a worktree of a checkout is added, moved, repaired or removed, read without running git: the
     stat of <repository>/worktrees and of each worktrees/<id>/gitdir, the file gitrepository-layout(5) documents as
     the path back to that worktree.  None when the checkout's `.git` names no repository directory, where only git can say.
-    Since SPD-097 a linked worktree (whose `.git` is a gitfile) has one too, so its list caches like a main checkout's:
-    before that the fingerprint was None there and every hook run shelled out to `git worktree list` again."""
+    A linked worktree (whose `.git` is a gitfile) has one too, so its list caches like a main checkout's: when it did
+    not, the fingerprint was None there and every hook run shelled out to `git worktree list` again."""
     git_dir = repository_dir(home)
     if git_dir is None:
         return None
@@ -109,7 +109,7 @@ def git_worktree_list(home):
 
 
 def home_row(ctx):
-    """The home as the path rule and the session mode see it (SPD-097): a row-shaped dict under the reserved key, so the code
+    """The home as the path rule and the session mode see it: a row-shaped dict under the reserved key, so the code
     that walks project rows treats the home as one more checkout, the one whose generated roots and Spud's own paths apply."""
     return {"id": 0, "key": kernel.HOME_KEY, "name": kernel.HOME_KEY, "root_path": str(ctx.home), "remote": None, "ticket_prefix": None,
             "team_prefix": None, "created_at": None, "default_branch": None, "landing": None, "sessions": "always", "installed": None,
@@ -122,7 +122,7 @@ def is_home(project):
 
 
 def same_directory(a, b):
-    """True when two paths name one directory: the same file, whatever spelling the filesystem honours (SPD-029), or, when
+    """True when two paths name one directory: the same file, whatever spelling the filesystem honours, or, when
     there is nothing to stat, the same normalized string."""
     ident = file_identity(a)
     if ident is not None:
@@ -137,12 +137,12 @@ def home_roots(project, home):
     home, so each of its worktrees has a `ledger/` checked out from main, and Law 5 covers those files there as it does at
     the home.  Once the home is a directory of its own, a worktree's `ledger/` is an ordinary path, which is right: the vault
     is no longer there.  The deliverable globs are not touched -- a worktree of the tool is project spud's checkout, so a
-    bare or `spud:` glob binds in it and a `home:` glob does not (SPD-097)."""
+    bare or `spud:` glob binds in it and a `home:` glob does not."""
     return is_home(project) or (home is not None and same_directory(project["root_path"], home))
 
 
 def project_root(ctx, project):
-    """A project's main checkout, the row's root_path (SPD-097: project 1 is the tool repository, whose root is recorded like
+    """A project's main checkout, the row's root_path (project 1 is the tool repository, whose root is recorded like
     any other's; the home row's root_path is the home)."""
     return project["root_path"]
 
@@ -151,7 +151,7 @@ def checkout_worktrees(ctx, project):
     """Every worktree git names for a project's root ([] when the root has no .git of its own, or is gone), kept in
     <home>/.spud/worktrees/<key>.json under the fingerprint it was listed at, so a hook runs git only after the
     worktrees change (about 8 ms with the subprocess import).  A cache that is missing, unreadable, stale or listed for
-    another root is listed anew; one that cannot be written is left unwritten (SPD-016, per project since SPD-014)."""
+    another root is listed anew; one that cannot be written is left unwritten."""
     root = project_root(ctx, project)
     if root in _WORKTREES:
         return _WORKTREES[root]
@@ -187,7 +187,7 @@ def checkout_worktrees(ctx, project):
 def project_checkouts(ctx, con):
     """[(row, [root, *worktrees])] for the home and every active project, the home first: it has no worktrees, and where it
     and a project's root are one directory (the tool repository before `home move`) the home's rules win for paths under
-    it, since map_into_checkouts keeps the first root of an identity (SPD-097)."""
+    it, since map_into_checkouts keeps the first root of an identity."""
     return [(home_row(ctx), [str(ctx.home)])] + [(p, [project_root(ctx, p), *checkout_worktrees(ctx, p)])
                                                  for p in con.execute("SELECT * FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall()]
 
@@ -215,7 +215,7 @@ def cli_project_of(ctx, con, path):
 def file_identity(path):
     """(st_dev, st_ino) of what `path` names, symlinks followed; None when there is nothing to stat.  Every spelling the
     filesystem resolves to one directory has its identity: a case variant or an NFD spelling on APFS, a simple case
-    fold (U+017F for s, U+212A for k), the /System/Volumes/Data firmlink prefix on macOS, a symlink (SPD-029)."""
+    fold (U+017F for s, U+212A for k), the /System/Volumes/Data firmlink prefix on macOS, a symlink."""
     try:
         st = os.stat(path)
     except (OSError, ValueError):
@@ -237,17 +237,17 @@ def same_entry(base, spelled, canonical):
 
 def map_into_checkouts(roots, path, home=None):
     """(project row, checkout root, repository-relative path) when `path` (absolute, normalized) lies in a checkout of an
-    active project: its root or a worktree git names for it (SPD-016), wherever it is, or a directory under
+    active project: its root or a worktree git names for it, wherever it is, or a directory under
     .claude/worktrees/<name>/ of one; None when outside.  `roots` is project_checkouts().  The root nearest the path wins,
-    so a worktree inside a root maps to itself, not to that root (SPD-014: every project's roots in one search).
+    so a worktree inside a root maps to itself, not to that root (every project's roots are in one search).
 
-    A root is found by file identity, not by spelling (SPD-029): the nearest existing ancestor of the path whose
+    A root is found by file identity, not by spelling: the nearest existing ancestor of the path whose
     (st_dev, st_ino) is a root's, the components below it being the repository-relative path, so any spelling of the
     root the filesystem honours is the root.  A root with nothing to stat (a worktree git still lists after its
     directory went) is matched by spelling as before.  A generated root of the home spelled another way (Ledger,
     reportſ) is named ledger or reports when it is the same directory; the state directory is named so under every root.
     `home` is the home's path: it decides which checkouts carry the generated roots at all (home_roots), and None asks
-    only the reserved key, which is every caller outside this module (SPD-097)."""
+    only the reserved key, which is every caller outside this module."""
     idents, spelled = {}, []
     for project, checkouts in roots:
         for root in checkouts:
@@ -294,8 +294,7 @@ def map_into_checkouts(roots, path, home=None):
 def path_readings(path, cwd):
     """Every reading of `path` the kernel could give: the lexical path and, when a symlink changes it, the real one.
     Relative paths resolve against the payload's cwd.  The real path is taken of the path as given too, since the kernel
-    resolves a symlink before a `..` after it (tests/link/.. is the link target's parent) where normpath drops the pair
-    (SPD-029)."""
+    resolves a symlink before a `..` after it (tests/link/.. is the link target's parent) where normpath drops the pair."""
     p = os.path.expanduser(path) if path.startswith("~") else path
     if not os.path.isabs(p):
         p = os.path.join(cwd or os.getcwd(), p)
@@ -309,7 +308,7 @@ def path_readings(path, cwd):
 
 def path_placements(ctx, con, path, cwd):
     """(inside, outside) for every reading of `path`: the ones that land in a project's checkout, as (project row, root,
-    repository-relative path), and the ones that land in no registered project at all, as absolute paths (SPD-064)."""
+    repository-relative path), and the ones that land in no registered project at all, as absolute paths."""
     roots = project_checkouts(ctx, con)
     inside, outside = [], []
     for c in path_readings(path, cwd):

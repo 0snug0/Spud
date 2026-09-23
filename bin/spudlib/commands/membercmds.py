@@ -1,4 +1,4 @@
-"""commands/membercmds: member new, start, finish, edit, log, result, block, show.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""commands/membercmds: member new, start, finish, edit, log, result, block, show."""
 
 import contextlib
 import json
@@ -14,7 +14,7 @@ def cmd_member_new(ctx, args):
     try:
         actor = actors.resolve_actor(con, args.actor)
         ops.check_prose_headings(args.brief, markdown.IMPORT_MEMBER_SECTIONS, "--brief")
-        binder = worktreebind.Binder(ctx, worktreebind.working_directory())  # SPD-098: a code ticket binds a worktree
+        binder = worktreebind.Binder(ctx, worktreebind.working_directory())  # a code ticket binds a worktree
         binder.prepare(con, actor, worktreebind.planned_ticket(con, actor, args.ticket), args.deliverable)
         m = ops.plan_member(ctx, con, actor, args.ticket, args.persona, args.model, name=args.name, tier_reason=args.tier_reason,
                         agent_type=args.agent_type, brief=args.brief or "", deliverables=args.deliverable,
@@ -57,7 +57,7 @@ def cmd_member_finish(ctx, args):
             extra = {"outcome": args.outcome}
             if args.summary is not None:
                 extra["summary"] = args.summary
-            # SPD-120: a finished member decides nothing more, so say what it was holding and who it now falls to.  This
+            # A finished member decides nothing more, so say what it was holding and who it now falls to.  This
             # refuses nothing and moves nothing: recording a returned member's outcome is Law 9, and the climb is
             # resolved and written at `proposal decide`, so a blocked member that is re-briefed keeps what nobody decided.
             held = lookup.held_proposals(con, m["id"])
@@ -87,7 +87,7 @@ def cmd_member_edit(ctx, args):
     con = ledgerdb.connect(ctx)
     try:
         actor = actors.resolve_actor(con, args.actor)
-        binder = worktreebind.Binder(ctx, worktreebind.working_directory())  # SPD-098: new deliverables bind as member new's do
+        binder = worktreebind.Binder(ctx, worktreebind.working_directory())  # new deliverables bind as member new's do
         if args.deliverable is not None:
             with contextlib.suppress(kernel.SpudError):  # the transaction reports a member it cannot read
                 binder.prepare(con, actor, lookup.get_ticket_by_id(con, lookup.get_member(con, args.ref)["ticket_id"]), args.deliverable)

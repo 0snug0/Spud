@@ -1,5 +1,5 @@
-"""commands/publish: render, one pass at a time.  Moved from bin/spud_ledger.py (SPD-065); since SPD-097 the pass the watcher
-repeats, under a lock, writing the database only when it wrote a file, restyled one or found a conflict it had not logged."""
+"""commands/publish: render, one pass at a time: the pass the watcher repeats, under a lock, writing the database only
+when it wrote a file, restyled one or found a conflict it had not logged."""
 
 import contextlib
 import fcntl
@@ -11,7 +11,7 @@ from ..imports import accept
 from ..render import notefiles
 from ..state import actors, ledgerdb
 
-RENDER_LOCK = "render.lock"  # <home>/.spud/render.lock: one render at a time (SPD-097); a manual render waits for the watcher's pass
+RENDER_LOCK = "render.lock"  # <home>/.spud/render.lock: one render at a time; a manual render waits for the watcher's pass
 
 
 @contextlib.contextmanager
@@ -40,7 +40,7 @@ def conflict_logged(con, rel, on_disk):
 def render_pass(ctx, con, out_root=None, check_only=False):
     """One pass over every generated file.  Into the home (out_root None): records the hashes, writes each new conflict once
     per path and on-disk hash, and touches the database only when it wrote a file, re-rendered a style-only rewrite,
-    found a new conflict or has a hash to record (SPD-097: a render that changes nothing writes nothing).  Into --out:
+    found a new conflict or has a hash to record (a render that changes nothing writes nothing).  Into --out:
     checks and records nothing.  check_only: what the pass would write and refuse, writing nothing at all (home move's
     preconditions, doctor).  Returns written, unchanged, conflicts, restyled and new_conflicts as relative paths, and
     `through`, the highest event id the pass rendered."""
@@ -115,9 +115,9 @@ def render_pass(ctx, con, out_root=None, check_only=False):
                                      data={"written": written, "unchanged": len(unchanged), "conflicts": conflicts,
                                            "restyled": [rel for rel, _ in restyled], "through_event_id": through})
     if into_home and not check_only:
-        # SPD-117: every pass leaves its watermark, the pass that wrote nothing included, so doctor, the board and the
+        # Every pass leaves its watermark, the pass that wrote nothing included, so doctor, the board and the
         # SessionStart context can tell a vault that has caught up from one a stuck watcher left behind.  Not a row: this
-        # is the one record a no-op pass makes, and SPD-097's rule is that such a pass writes nothing to the database.
+        # is the one record a no-op pass makes, and the rule is that such a pass writes nothing to the database.
         launchagents.record_render(ctx, through, kernel.now())
     return {"out": str(root), "written": written, "unchanged": unchanged, "conflicts": conflicts, "restyled": [rel for rel, _ in restyled],
             "new_conflicts": [rel for rel, _ in new_conflicts], "through": through}

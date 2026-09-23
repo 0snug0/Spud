@@ -1,4 +1,4 @@
-"""cli/helptexts: The long help texts the parser shows.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""cli/helptexts: The long help texts the parser shows."""
 
 # ----------------------------------------------------------------------------
 # Argument parsing and main
@@ -20,21 +20,21 @@ hooks: `spud hook <event>` is the harness's entry point (payload on stdin, answe
        hook.error events).  Inspect the database with `spud sql --readonly '<statement>'`.
        A session loads them from the directory it was launched in (CLAUDE_PROJECT_DIR),
        so one launched outside the home and outside every registered project's checkout
-       runs none of them and nothing it does is recorded or guarded (SPW-003):
+       runs none of them and nothing it does is recorded or guarded:
        `spud session show` and `spud doctor` say so, and name the fix -- as a note, since
        what is wrong there is where the session was launched.  The home's own
        .claude/settings.json is this home's own installation, and the whole of what makes
        a session launched in the home Spud, so doctor's `settings` line reports it absent,
-       unreadable or an event short as a problem: `spud --as spud settings sync` (SPW-006).
+       unreadable or an event short as a problem: `spud --as spud settings sync`.
 
 deliverable globs (--deliverable): repository-relative, no leading slash and no `..`;
        `*` and `?` match inside one path segment, `**` crosses segments, a trailing `/`
        means everything under that directory, `<key>:` in front names a project's
-       checkout by its key and `home:` Spud's home (SPD-097).  Every other character is
+       checkout by its key and `home:` Spud's home.  Every other character is
        literal, brackets included: write a Next.js segment plainly,
-       admin/src/app/accounts/[email]/** (SPD-086).
+       admin/src/app/accounts/[email]/**.
 
-ticket worktrees (SPD-098): a bare glob, or one naming the ticket's own project, binds
+ticket worktrees: a bare glob, or one naming the ticket's own project, binds
        the ticket to the linked worktree of that project `member new` runs in, and the
        edit and Bash hooks then hold its members to that worktree.  `member new` and
        `member edit --deliverable` refuse (exit 5) from the main checkout (enter a
@@ -43,7 +43,7 @@ ticket worktrees (SPD-098): a bare glob, or one naming the ticket's own project,
        another project, whose work is a ticket there.  A binding whose worktree is gone
        is rebound by Spud's next plan from a worktree; a member never rebinds.
 
-landing pull requests (SPD-077): under a project whose landing is `pr`, Spud records
+landing pull requests: under a project whose landing is `pr`, Spud records
        the pull request with `spud --as spud pr record` right after `gh pr create`.
        `spud pr reconcile`, which the full board runs itself, reads each recorded,
        still-open one once with `gh pr view` and stores what it said; `spud board` and
@@ -59,8 +59,8 @@ exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,
 """
 
 PR_DESCRIPTION = """\
-Landing pull requests (SPD-077).  Under `landing: pr` a ticket's done move used to depend on the session that
-opened the pull request still being alive when it merged: BAD-058 showed as `active` for 44 minutes after its
+Landing pull requests.  Under `landing: pr` a ticket's done move used to depend on the session that
+opened the pull request still being alive when it merged: one ticket showed as `active` for 44 minutes after its
 work had landed, because its session had stopped and nothing in the ledger knew a pull request existed.
 
   record     Spud's, right after `gh pr create`: the URL, the head branch (also the local branch the cleanup
@@ -73,7 +73,7 @@ work had landed, because its session had stopped and nothing in the ledger knew 
              not stop the run, and is listed by `spud doctor`.  A settled pull request is never read again.
   list       what is recorded, read-only.
 
-Since SPD-116 the rendered ticket note carries it as well: the properties `pr` (the number the URL gave) and
+The rendered ticket note carries it as well: the properties `pr` (the number the URL gave) and
 `pr_state` right after the status, which the Obsidian views filter on, and a generated `## Landing` section of
 one sentence per recorded pull request -- the number as a link on its URL, the state in these same words, and
 what a merge leaves owed.  It renders from the table alone, never says when the row was last read, and so a
@@ -89,13 +89,13 @@ whole run.  SPUD_GH names the program (default `gh`), and the literal SPUD_GH=of
 """
 
 RESUM_DESCRIPTION = """\
-Re-sum members' stored transcript sums from their transcripts, once per API request (SPD-023), with the
-per-model breakdown a list-price cost is computed from (SPD-013).
+Re-sum members' stored transcript sums from their transcripts, once per API request, with the
+per-model breakdown a list-price cost is computed from.
 
 The harness writes an API response as one transcript entry per content block, each repeating the
-request's message.id, requestId and usage.  A sum stored before SPD-023 added every entry, so its
+request's message.id, requestId and usage.  A sum stored by an older spud added every entry, so its
 tokens run four to five times too high.  A sum made since counts each request once, by its last
-entry, and carries "counting": "request"; one stored before SPD-013 keeps no per-model breakdown, so
+entry, and carries "counting": "request"; one stored before costs were priced keeps no per-model breakdown, so
 no cost can be priced from it.  Both are re-summed.  A sum with its breakdown is left as it is, so a
 second run changes nothing.
 
@@ -135,7 +135,7 @@ exit codes: 0 a copy written, or today's daily copy already there; 1 the write o
 """
 
 SCHEDULE_DESCRIPTION = """\
-Two macOS LaunchAgents (SPD-012, SPD-097).  local.spud.backup runs `spud --as spud backup --daily` at load and daily at
+Two macOS LaunchAgents.  local.spud.backup runs `spud --as spud backup --daily` at load and daily at
 the --at time; launchd fires a run missed during sleep at wake, and backup --daily writes one copy a day however often
 it runs.  local.spud.render runs `spud --as spud render --watch` at load and again whenever it exits (KeepAlive), so
 the vault follows the database within seconds; its log is <home>/.spud/logs/render.log, started afresh at each start.
@@ -145,7 +145,7 @@ The plists are $SPUD_LAUNCH_AGENTS_DIR/<label>.plist (default ~/Library/LaunchAg
 """
 
 HOME_MOVE_DESCRIPTION = """\
-Move Spud's home to a plain directory (SPD-097, design section 5).  Refused while any member is planned or active, when
+Move Spud's home to a plain directory.  Refused while any member is planned or active, when
 --to exists and is not empty, lies inside a git work tree or inside the current home, when a rendered file is hand-edited
 (spud doctor lists them with the commands that settle each), when an earlier move left .spud-moved behind, and when the
 running bin/spud sits in a linked worktree.  Then, each step reported: a checked backup; the database copied with
@@ -159,7 +159,7 @@ left by hand and how to roll back until the removal commit.  --dry-run checks th
 """
 
 HOME_SYNC_DESCRIPTION = """\
-Write every file the tool owns in this home again from <tool>/share/ (SPD-157, the portable-home design part 2), so a
+Write every file the tool owns in this home again from <tool>/share/, so a
 home's own text is generated rather than hand-kept in two places: CLAUDE.md, ledger/Home.md, ledger/Spud.md,
 ledger/_templates/, the .base views, every skill under share/skills/ (which a home reads from .claude/skills/), and the
 Obsidian settings and pinned plugins through the same install `spud vault install` runs.  The ledger's rendered notes,
@@ -177,7 +177,7 @@ the copy of each replaced file would be kept -- and writes nothing, downloads no
 """
 
 VAULT_DESCRIPTION = """\
-The home's Obsidian vault, which the tool ships and the tool captures (SPD-156, the portable-home design section 3).
+The home's Obsidian vault, which the tool ships and the tool captures.
 `vault install` writes <home>/.obsidian/ from <tool>/share/obsidian/ and downloads every plugin and theme
 <tool>/share/obsidian.lock.json pins, checking each file's SHA-256 before it is renamed into place: a release replaced
 upstream refuses that one plugin by name and the rest still install, and a refused download is a line in the output,

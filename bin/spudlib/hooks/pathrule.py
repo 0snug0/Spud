@@ -1,4 +1,4 @@
-"""hooks/pathrule: Laws 1 and 5 over a path: globs, outside roots, git config files and git directories, the state directory, edit_reason.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/pathrule: Laws 1 and 5 over a path: globs, outside roots, git config files and git directories, the state directory, edit_reason."""
 
 import json
 import os
@@ -12,12 +12,12 @@ from ..state import lookup, ops
 # -- paths: the rule of Law 5 (deliverables) and Law 1 (Spud's own set) ---------------
 
 
-# SPD-086: a bracket is a literal character in a deliverable glob, never a character class.  Until this ticket `[` opened
-# a class, as a shell glob's does, so `admin/src/app/accounts/[email]/**` -- a Next.js dynamic route segment, a directory
-# genuinely named `[email]` -- compiled to a class over e, m, a, i and l and matched no real path at all: BADS-054/Snowden
-# was refused its own page.tsx in the words of its own brief.  Deliverable globs are written by Spud and by parents through
-# `member new`, never by a shell: of every member ever planned, the only globs holding a bracket are BAD-054's three, all
-# three a literal segment (one of them the `?email?` workaround this bug forced); no class is documented anywhere, and
+# A bracket is a literal character in a deliverable glob, never a character class.  When `[` opened a class, as a shell
+# glob's does, `admin/src/app/accounts/[email]/**` -- a Next.js dynamic route segment, a directory genuinely named
+# `[email]` -- compiled to a class over e, m, a, i and l and matched no real path at all, and a member was refused its own
+# page.tsx in the words of its own brief.  Deliverable globs are written by Spud and by parents through `member new`,
+# never by a shell: of every member ever planned, the only globs holding a bracket were one ticket's three, all three a
+# literal segment (one of them the `?email?` workaround this bug forced); no class is documented anywhere, and
 # SPUD_PATHS holds none.  Class support was also unsafe on the hook path, where this runs in every Write and Edit: the
 # shell's own escape `[[]email[]]` compiled to an unterminated set, so path_matches_glob raised re.PatternError instead of
 # answering.  Escaping both ways round (option 1) would have needed `normalize_bare_deliverable` to stop folding `\` into
@@ -25,7 +25,7 @@ from ..state import lookup, ops
 # is either a wildcard or re.escape'd, so glob_to_regex is total: no glob it accepts can fail to compile.
 def glob_to_regex(glob):
     """Repository-relative globs: `*` and `?` stay inside a path segment, `**` crosses segments, and every other
-    character -- `[` and `]` included -- is literal, so a `[segment]` directory is written plainly (SPD-086)."""
+    character -- `[` and `]` included -- is literal, so a `[segment]` directory is written plainly."""
     i, n, out = 0, len(glob), []
     while i < n:
         c = glob[i]
@@ -48,7 +48,7 @@ def glob_to_regex(glob):
     return "^" + "".join(out) + "$"
 
 
-# SPD-126: a character of a name a command picks for itself -- mktemp's X, split's suffix letter, a numbered backup's
+# A character of a name a command picks for itself -- mktemp's X, split's suffix letter, a numbered backup's
 # digit -- in a write target the Bash hook records (shell/spelled_writes).  It is no character a glob spells, so every
 # wildcard of a deliverable glob matches it and no literal does: a glob matches a target holding it only when it matches
 # every name the command may pick there.  NAME_MORE stands for any number more of them (split's suffix grows past its
@@ -61,7 +61,7 @@ def path_matches_glob(rel, glob, fold=False):
     if glob.endswith("/"):
         glob += "**"
     if NAME_MORE in rel:
-        # SPD-126: a run of picked characters of any length.  Read one at a time, the glob's matcher settles within the
+        # A run of picked characters of any length.  Read one at a time, the glob's matcher settles within the
         # glob's own length -- each state that is not a star's either dies or reaches one, and a star keeps what it has --
         # so a run longer than the glob changes nothing, and the lengths up to it and one more decide every length.
         return all(re.fullmatch(glob_to_regex(glob), rel.replace(NAME_MORE, NAME_CHAR * n), re.IGNORECASE if fold else 0)
@@ -69,22 +69,22 @@ def path_matches_glob(rel, glob, fold=False):
     return re.fullmatch(glob_to_regex(glob), rel, re.IGNORECASE if fold else 0) is not None
 
 
-# SPD-129: the directory a glob covers, which no match of it names.  path_matches_glob reads `X/**` as `X/` plus something,
-# so a member whose deliverable is `test/fixtures/movecheck/**` may write every file under that directory and was refused
-# the `mkdir -p` that makes it (Law 5).  Before SPD-121 a mkdir was unread and the question never arose; now it is the
-# natural first line of a member's work, and SPD-121's differential over the 3477 commands spudagents ran holds five
-# refusals of exactly this shape.  Spud's decision is two readings, one per direction, and they are not symmetrical:
+# The directory a glob covers, which no match of it names.  path_matches_glob reads `X/**` as `X/` plus something, so a
+# member whose deliverable is `test/fixtures/movecheck/**` may write every file under that directory and was refused the
+# `mkdir -p` that makes it (Law 5).  While the Bash hook did not read a mkdir the question never arose; now it is the
+# natural first line of a member's work, and a differential over the 3477 commands spudagents had run held five refusals
+# of exactly this shape.  Spud's decision is two readings, one per direction, and they are not symmetrical:
 # making a directory writes no content, so an ancestor of the directory is as harmless as the directory itself, while
 # removing one takes everything under it with it.  The kind of write comes from the command (shell/arg_writes): only
-# mkdir's operands, install -d's, rmdir's and rm's under -r, -R or -d carry one (SPD-126 reads rm -r as "tree", below, and
-# adds the commands whose files the line does not spell), and every other write of the same path --
+# mkdir's operands, install -d's, rmdir's and rm's under -r, -R or -d carry one (the "tree" reading, below, takes rm -r
+# and the commands whose files the line does not spell), and every other write of the same path --
 # touch, cp, mv, ln, tee, sed -i, a redirection, a Write or an Edit -- is a file and keeps the reading it had.
 def glob_directory(glob):
     """A glob's literal directory prefix: its leading segments that hold no wildcard, dropping the segment the first
     wildcard is in, and, when the glob holds none, its last segment, which is the file it names.  So
     `test/fixtures/movecheck/**` gives `test/fixtures/movecheck`, `admin/src/*.ts` gives `admin/src`, `bin/spud` gives
     `bin` and `dist/` gives `dist`, while a glob that starts with a wildcard (`**/x`, `*.md`) or names a single segment
-    gives ``, which is no directory at all.  A bracket is a literal character, never a class (SPD-086), so `[email]` is
+    gives ``, which is no directory at all.  A bracket is a literal character, never a class, so `[email]` is
     an ordinary segment."""
     segments = glob.split("/")
     for i, segment in enumerate(segments):
@@ -102,13 +102,13 @@ def glob_covers_directory(rel, glob, how, fold=False):
     filesystem does, as path_matches_glob's re.IGNORECASE does for a match.  The reading is the glob's alone: nothing here
     stats the path, so a member is answered the same before and after it has made its own directory.
 
-    SPD-126's "tree": a write that may put a file anywhere under `rel`, or remove everything there -- what find runs and
+    The "tree" reading: a write that may put a file anywhere under `rel`, or remove everything there -- what find runs and
     deletes, a recursive copy's contents, an archive extracted, a download named by the server -- is inside only when this
     one glob matches every path under `rel`: `**` itself, or a glob ending in `/**` (or `/`) that matches `rel` or whose
     literal root is `rel` (`tests/**` covers `tests` and `tests/tmp`).  A glob that matches `rel` but not everything below
     it (`bin/*`, `docs/*.md`) never covers the subtree, although path_matches_glob matches `rel` itself; nor does one
     whose root holds a wildcard, at that root (`a/*/**` covers `a/x/y`, not `a/x`).  So "tree" never lets in what
-    SPD-129's "remove" refuses, and rm -r, read as "remove" until SPD-126, is only ever narrowed."""
+    "remove" refuses, and rm -r, once read as "remove", is only ever narrowed."""
     if fold:
         rel = rel.casefold()
         glob = glob.casefold()
@@ -135,16 +135,16 @@ def harness_file(path):
     return HARNESS_FILES_RE.search(p) is not None or re.search(r"/agent-[0-9a-f]+\.(?:meta\.json|jsonl)$", p, re.IGNORECASE) is not None
 
 
-# SPD-064: the path rule holds a member to its deliverable globs inside a registered project; outside every project
-# edit_reason returned no reason at all, so a bound member could Write, Edit or redirect into ~/.gitconfig (which SPD-047
-# shows git reads with nothing on the line), ~/.claude/settings.json and ~/.claude/agents/ (the user-level hooks,
+# The path rule holds a member to its deliverable globs inside a registered project; outside every project edit_reason
+# once returned no reason at all, so a bound member could Write, Edit or redirect into ~/.gitconfig (which git reads
+# with nothing on the line), ~/.claude/settings.json and ~/.claude/agents/ (the user-level hooks,
 # permissions and the spudagent definition `project sync --all` writes there), the shell rc files, ~/.ssh, a LaunchAgent,
 # or anything else in Eric's home.  Spud's decision is the allowlist: outside every registered project only the harness's
 # scratchpad root for this user and the system temp directories stay open, where members run probes and differential
-# harnesses (Cherie did for SPD-047); everything else is refused, fail closed, the rule's shape everywhere else.
+# harnesses; everything else is refused, fail closed, the rule's shape everywhere else.
 SCRATCHPAD_ROOT = "/private/tmp/claude-%d"  # the harness's scratchpad root: /private/tmp/claude-<uid>/<project>/<session>/scratchpad
 FIXED_TEMP_ROOTS = ("/tmp", "/private/tmp", "/var/folders", "/private/var/folders")
-TEMP_ROOT_VARS = ("TMPDIR", "TMP", "TEMP")  # what tempfile.gettempdir() reads, which the hook path may not import (SPD-016)
+TEMP_ROOT_VARS = ("TMPDIR", "TMP", "TEMP")  # what tempfile.gettempdir() reads, which the hook path may not import
 # The character devices a redirection legitimately opens: /dev/null and the standard streams, which are outside every project
 # and are nobody's file (QUIET_TARGETS is the same set for the spud allow; /dev/stdout resolves to /dev/fd/1 on macOS).
 DEV_WRITE_ROOTS = ("/dev/null", "/dev/zero", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty", "/dev/fd")
@@ -157,7 +157,7 @@ OUTSIDE_PROJECT_REASON = (
 
 
 def outside_roots():
-    """The roots outside every registered project a caller with an agent_id may still write under (SPD-064), each in every
+    """The roots outside every registered project a caller with an agent_id may still write under, each in every
     spelling the filesystem honours, since a target is held under one by both its lexical and its real reading (on macOS
     /tmp is /private/tmp and TMPDIR is under /var/folders, which is /private/var/folders)."""
     roots = [SCRATCHPAD_ROOT % os.getuid(), *FIXED_TEMP_ROOTS, *DEV_WRITE_ROOTS]
@@ -180,7 +180,7 @@ def under_outside_root(path, roots):
 
 def outside_project_reason(outside):
     """The reason a caller with an agent_id may not write these readings of a target, none of which lands in a registered
-    project, or None when every one of them is under an allowed outside root (SPD-064).  Both readings must hold, so a
+    project, or None when every one of them is under an allowed outside root.  Both readings must hold, so a
     symlink planted in the scratchpad that points at ~/.gitconfig is refused, while /tmp and /private/tmp, which resolve
     to each other, stay open."""
     roots = outside_roots()
@@ -190,12 +190,13 @@ def outside_project_reason(outside):
     return None
 
 
-# SPD-063: the files git reads with nothing on the line.  SPD-064 closes a member's writes to ~/.gitconfig and
+# The files git reads with nothing on the line.  The outside roots above close a member's writes to ~/.gitconfig and
 # $XDG_CONFIG_HOME/git/config, but a repository's own config stays open: a member can craft `.git/config` (or
 # `.git/config.worktree`, or a file an `include.path` there names) under its own deliverable globs inside a checkout the
-# ledger knows, and `git -C tests/fake status` resolves inside the home, so SPD-047's git-repo refusal never fires.  Such a
-# file defines aliases git expands into a write verb and every program-naming key of SPD-046's class under a real verb, so
-# no caller with an agent_id writes one, anywhere, its own deliverables included.
+# ledger knows, and `git -C tests/fake status` resolves inside the home, so the refusal of a repository outside every
+# known checkout never fires.  Such a file defines aliases git expands into a write verb, and every key that names a
+# program git runs (a pager, an editor, a hook path, a helper) under a real verb, so no caller with an agent_id writes
+# one, anywhere, its own deliverables included.
 GIT_CONFIG_FILE_NAMES = (".gitconfig",)
 GIT_CONFIG_FILE_TAILS = ((".git", "config"), (".git", "config.worktree"), ("git", "config"))
 GIT_CONFIG_FILE_REASON = (
@@ -210,18 +211,18 @@ GIT_CONFIG_FILE_REASON = (
 def git_config_file(path):
     """True when `path` (absolute, normalized) names a configuration file git reads by itself: any `.gitconfig`, or a path
     ending in `.git/config`, `.git/config.worktree` or `git/config`.  Matched case-folded, so a case variant or a simple
-    fold is refused on every filesystem (SPD-029's reading of the generated roots)."""
+    fold is refused on every filesystem, as the generated roots are."""
     parts = [p.casefold() for p in path.replace("\\", "/").split("/") if p]
     if parts and parts[-1] in GIT_CONFIG_FILE_NAMES:
         return True
     return any(len(parts) >= len(tail) and parts[-len(tail):] == list(tail) for tail in GIT_CONFIG_FILE_TAILS)
 
 
-# SPD-066: the rest of a git directory.  SPD-063 closes the config files, but git also runs a hook from <gitdir>/hooks with
+# The rest of a git directory.  The config files are closed above, but git also runs a hook from <gitdir>/hooks with
 # nothing on the line and no config key naming it (probed on git 2.54.0: every `git status` runs post-index-change, every
 # `git fetch` reference-transaction), reads info/attributes, info/exclude, shallow and the index, and follows a worktree's
 # or a submodule's .git gitfile to any git directory it names.  So no caller with an agent_id writes a path with a `.git`
-# component, anywhere, its own deliverables included, the way SPD-031 refuses the state directory at any project root.
+# component, anywhere, its own deliverables included, the way the state directory is refused at any project root.
 # A .git/config keeps GIT_CONFIG_FILE_REASON, checked first: it is the more specific reason (an alias as well as a hook).
 # A component that merely begins with .git (.gitignore, .github, .gitattributes, .gitmodules) is an ordinary file of the tree.
 GIT_DIR_COMPONENT = ".git"
@@ -235,15 +236,15 @@ GIT_DIR_PATH_REASON = (
 
 def git_dir_path(path):
     """True when `path` has a component `.git`: it lies in a git directory, or is a .git gitfile.  Matched case-folded, like
-    git_config_file, so a case variant is refused on every filesystem (SPD-029's reading)."""
+    git_config_file, so a case variant is refused on every filesystem."""
     return any(p.casefold() == GIT_DIR_COMPONENT for p in path.replace("\\", "/").split("/"))
 
 
-# SPD-126: a write anywhere under a directory (shell/find_xargs, shell/tree_writes) reaches every path below it, and a
+# A write anywhere under a directory (shell/find_xargs, shell/tree_writes) reaches every path below it, and a
 # checkout's root below it brings that checkout's .git, and for the home and every project root the ledger's state
 # directory, into the write although no reading of the directory's own path names them: `find . -delete` at a root,
 # `rm -rf .claude` over the worktrees, `tar -x -C /tmp` above a checkout under /tmp.  So a caller the path rule holds is
-# refused such a write whenever a checkout the ledger knows lies at or under it, as SPD-066 refuses writing the .git itself.
+# refused such a write whenever a checkout the ledger knows lies at or under it, as writing the .git itself is refused.
 TREE_CHECKOUT_REASON = (
     "Law 7: a write anywhere under %s reaches %s, the root of a checkout the ledger knows, and with it that checkout's .git"
     " directory or gitfile (git runs its hooks and reads its config with nothing on the line) and, at a project root, the"
@@ -252,7 +253,7 @@ TREE_CHECKOUT_REASON = (
 
 
 def tree_checkout_reason(ctx, con, readings):
-    """The reason a write anywhere under one of these readings of a directory is refused (SPD-126), or None: a checkout root
+    """The reason a write anywhere under one of these readings of a directory is refused, or None: a checkout root
     of the home or a registered project, or one of their worktrees, is that directory or lies under it.  Compared by file
     identity, as map_into_checkouts finds a root, so a case variant, a symlink or the /System/Volumes/Data prefix of the
     directory is the directory; a directory that does not exist yet holds no checkout."""
@@ -278,7 +279,7 @@ NOT_SPUD_HOME = ("a session that is not Spud does not write in Spud's home (%s i
 
 OUTSIDE_BOUND_WORKTREE = (
     "Law 5: %(rel)s is in %(checkout)s, a checkout of project %(project)s, and %(ref)s's ticket %(key)s is bound to %(bound)s: a"
-    " member of a bound ticket writes its project's paths there alone, never in the main checkout or another worktree (SPD-098). %(tail)s")
+    " member of a bound ticket writes its project's paths there alone, never in the main checkout or another worktree. %(tail)s")
 OUTSIDE_BOUND_WORKTREE_TAIL = "Write the same path under %s"
 OUTSIDE_GONE_WORKTREE_TAIL = ("That worktree is gone, so no checkout is open to you: ask your parent, since Spud rebinds the ticket by"
                               " planning a member from the worktree the work continues in")
@@ -288,17 +289,17 @@ def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticke
     """None when the actor may write the repository path `rel` of project `project_key`, else the reason.  The
     generated roots are the home's alone and are matched whatever the case (a case variant is refused on every
     filesystem), case-folded rather than lower-cased so that the simple folds APFS honours
-    (reportſ is reports) count too (SPD-029); globs fold case only where the filesystem does.  In another project
-    Spud has no own files (SPD-014): every path there is a deliverable, and a member's bare glob is relative to its
-    ticket's project, a `<key>:<glob>` to that project's, a `home:<glob>` to the home (SPD-097).  `home` is
+    (reportſ is reports) count too; globs fold case only where the filesystem does.  In another project
+    Spud has no own files: every path there is a deliverable, and a member's bare glob is relative to its
+    ticket's project, a `<key>:<glob>` to that project's, a `home:<glob>` to the home.  `home` is
     worktrees.home_roots for the checkout the path was mapped into, so in the transition window a worktree of the tool
     repository still carries the generated roots and Spud's own set, while its globs stay project spud's.  `elsewhere`
-    is (ticket key, bound worktree, checkout) when the member's ticket is bound (SPD-098) and the path lies in another
+    is (ticket key, bound worktree, checkout) when the member's ticket is bound and the path lies in another
     checkout of the ticket's own project: no glob of the member's matches there, whatever it says.  `directory` is "make"
-    or "remove" when the write only makes or removes a directory (SPD-129), which a glob covers without matching; it is
+    or "remove" when the write only makes or removes a directory, which a glob covers without matching; it is
     read inside the glob loop, so a glob's scope and its case folding hold for it exactly as they hold for a match, and
     every refusal before the loop -- the generated roots, a bound ticket's other checkouts -- wins over it as it did.
-    "tree" (SPD-126) is a write anywhere under `rel`, which only glob_covers_directory's whole-subtree reading lets in: a
+    "tree" is a write anywhere under `rel`, which only glob_covers_directory's whole-subtree reading lets in: a
     glob that merely matches `rel` does not.  Spud has no globs, so for him every kind is the write of `rel` itself."""
     generated = home and rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS
     if member is None:
@@ -336,7 +337,7 @@ def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticke
 def in_state_dir(rel):
     """True when the repository path lies in the ledger state directory at its root (or is that directory).  The first
     component is case-folded, like a generated root's, so a case variant or a simple fold (U+017F for s) is refused on
-    every filesystem; map_into_repository has already named a same-file spelling of it canonically (SPD-031).  A state
+    every filesystem; map_into_repository has already named a same-file spelling of it canonically.  A state
     directory deeper in the tree is no ledger's (bin/spud keeps its state at the root of its home) and stays under the globs."""
     return rel.split("/", 1)[0].casefold() == hookio.STATE_DIR
 
@@ -347,21 +348,21 @@ def state_dir_reason(rel):
 
 
 def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud", directory=None):
-    """The path rule for a Write/Edit target (and for a shell redirection target), the table of the design's section 3.2
-    (SPD-014).  A path in the ledger state directory at any project root, by any reading of it, is refused to everyone
-    before the binding, Law 1 and glob checks (SPD-031).  A bound member is held to its globs in any session; a session
+    """The path rule for a Write/Edit target (and for a shell redirection target), across every
+    registered project.  A path in the ledger state directory at any project root, by any reading of it, is refused
+    to everyone before the binding, Law 1 and glob checks.  A bound member is held to its globs in any session; a session
     that is not Spud (`mode` plain), and an unbound subagent of one, writes freely in other projects and nowhere in the home.
 
-    Since SPD-064 a caller with an agent_id in a Spud session is held outside the projects too: a git configuration file
-    (SPD-063) and any other path in a git directory (SPD-066) are refused wherever they lie, and every reading of the target must land either in a registered project, where the
+    A caller with an agent_id in a Spud session is held outside the projects too: a git configuration file
+    and any other path in a git directory are refused wherever they lie, and every reading of the target must land either in a registered project, where the
     globs decide, or under an allowed outside root -- the session scratchpad and the system temp directories.  So a symlink
     that reaches out of a project, and a path in no project at all, are both refused instead of passing unchecked.
 
-    `directory` (SPD-129) says the write only makes ("make") or only removes ("remove") a directory, which shell/arg_writes
+    `directory` says the write only makes ("make") or only removes ("remove") a directory, which shell/arg_writes
     reads from the command; a member is then held to path_reason's directory reading of its globs as well as to a match.
     Every other caller leaves it None -- the Write/Edit hook, a redirection, tee, a git call's own writes -- and every
     refusal above here is unchanged, so a .git component, the state directory and the outside allowlist still win.
-    "tree" (SPD-126) is a write anywhere under the path: every refusal above holds for the path itself, a checkout root at
+    "tree" is a write anywhere under the path: every refusal above holds for the path itself, a checkout root at
     or under it is refused as the .git it brings (tree_checkout_reason), and the outside allowlist, a prefix reading,
     holds the whole subtree as it holds one file."""
     readings = worktrees.path_readings(path, cwd)
@@ -370,16 +371,16 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
             return ("%s is one of the harness's subagent files (<project>/<session>/subagents/...): the ledger binds identities from them,"
                     " so nothing but Claude Code writes them" % candidate), None
     # A caller the path rule binds: a bound member in any session, and an agent_id in a Spud session before its binding,
-    # which has no globs of its own (a plain session's own subagents are Eric's, SPD-014).
+    # which has no globs of its own (a plain session's own subagents are Eric's).
     held = bool(caller_agent_id) and not (mode == "plain" and caller_member is None)
     if held:
         for candidate in readings:
             if git_config_file(candidate):
                 return GIT_CONFIG_FILE_REASON % candidate, None
-        for candidate in readings:  # SPD-066: the rest of a git directory, after the more specific config reason
+        for candidate in readings:  # the rest of a git directory, after the more specific config reason
             if git_dir_path(candidate):
                 return GIT_DIR_PATH_REASON % candidate, None
-    # SPD-126: a checkout at or under a directory written whole brings its .git into the write, which the path's own
+    # A checkout at or under a directory written whole brings its .git into the write, which the path's own
     # reasons (another checkout, the outside allowlist, the globs) do not see; asked once they have all let it in
     tree = held and directory == "tree"
     inside, outside = worktrees.path_placements(ctx, con, path, cwd)
@@ -397,7 +398,7 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
         ref = lookup.member_ref(con, caller_member["id"])
         ticket = lookup.get_ticket_by_id(con, caller_member["ticket_id"])
         ticket_project = lookup.project_key_of(con, ticket)
-        bound = ticket["worktree"]  # SPD-098: NULL for a ticket no plan has bound, which keeps the rule it had
+        bound = ticket["worktree"]  # NULL for a ticket no plan has bound, which keeps the rule it had
         for project, root, rel in inside:
             elsewhere = None
             if bound is not None and project["key"] == ticket_project and not worktrees.same_directory(root, bound):

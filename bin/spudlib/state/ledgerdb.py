@@ -1,4 +1,4 @@
-"""state/ledgerdb: Connections, transactions, migrations applied, config rows mirrored, events written.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""state/ledgerdb: Connections, transactions, migrations applied, config rows mirrored, events written."""
 
 import contextlib
 import json
@@ -77,10 +77,10 @@ def apply_migrations(ctx, con, created):
 def sync_config_rows(ctx, con):
     """Mirror naming.pool into name_pool, and the config's prefixes onto project 1 -- when the home has one.
 
-    SPW-001: project 1 is the project whose name and prefixes `spud.config.json` names, and no longer presumed to be the
+    Project 1 is the project whose name and prefixes `spud.config.json` names, and no longer presumed to be the
     tool repository.  This function inserted it, unconditionally, at the tool's root, so every new home was born believing
     its first project was the `spud` checkout; registering the first project is `spud init`'s to do, or nobody's -- a home
-    may hold no project at all (design section 1.4, `docs/design/2026-09-21-spud-init.md`).  A home that has a row 1 is
+    may hold no project at all.  A home that has a row 1 is
     refreshed exactly as it was before: its two prefixes from the config, and `remote` when that is still NULL."""
     config = ctx.config
     pool = config.get("naming", {}).get("pool", [])
@@ -98,7 +98,7 @@ def sync_config_rows(ctx, con):
             "UPDATE projects SET ticket_prefix = ?, team_prefix = ? WHERE id = 1",
             (ticket_prefix, team_prefix),
         )
-        if row["remote"] is None:  # SPD-014: informational, and read from project 1's own root since SPW-001
+        if row["remote"] is None:  # informational, and read from project 1's own root
             remote = homeconf.git_remote_url(row["root_path"])
             if remote:
                 con.execute("UPDATE projects SET remote = ? WHERE id = 1 AND remote IS NULL", (remote,))

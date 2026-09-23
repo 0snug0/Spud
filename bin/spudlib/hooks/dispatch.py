@@ -1,4 +1,4 @@
-"""hooks/dispatch: HOOK_HANDLERS and cmd_hook: a hook run imports its own event's handler module alone.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/dispatch: HOOK_HANDLERS and cmd_hook: a hook run imports its own event's handler module alone."""
 
 import contextlib
 import importlib
@@ -9,7 +9,7 @@ from . import hookio
 from ..core import kernel
 
 
-HOOK_HANDLERS = {  # event -> (its module in spudlib.hooks, its handler): a hook run imports its own handler's modules alone (SPD-065)
+HOOK_HANDLERS = {  # event -> (its module in spudlib.hooks, its handler): a hook run imports its own handler's modules alone
     "PreToolUse": ("pretool", "hook_pre_tool_use"),
     "PostToolUse": ("recording", "hook_post_tool_use"),
     "SubagentStart": ("recording", "hook_subagent_start"),
@@ -46,7 +46,7 @@ def cmd_hook(ctx, args):
             hookio.spool_write(ctx, record)
         enforcing = event == "PreToolUse" or (event == "Stop" and not fields.get("stop_hook_active"))
         if enforcing and ctx.hook_project and not (isinstance(fields.get("agent_id"), str) and fields.get("agent_id")):
-            # A project's hook line (design section 6.4): a failure with no agent_id to hold fails open, so a ledger outage
+            # A project's hook line: a failure with no agent_id to hold fails open, so a ledger outage
             # never stalls a session in that repository; a subagent's call still fails closed.
             return kernel.Result(None, raw="", exit_code=kernel.EXIT_OK, stderr="spud hook %s --project %s: %s (failing open: no agent_id)" % (event, ctx.hook_project, e))
         if enforcing:

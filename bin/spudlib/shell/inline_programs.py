@@ -1,6 +1,6 @@
-"""shell/inline_programs: the program an interpreter run spells on the line rather than reads from a file (SPD-150).
+"""shell/inline_programs: the program an interpreter run spells on the line rather than reads from a file.
 
-BADS-140/Jeremy wrote `scripts/web-seed.js`, a path outside his deliverable globs, with
+Jeremy, a spudagent on another project, wrote `scripts/web-seed.js`, a path outside his deliverable globs, with
 
     python3.14 - <<'PY'
     import pathlib
@@ -9,48 +9,49 @@ BADS-140/Jeremy wrote `scripts/web-seed.js`, a path outside his deliverable glob
     PY
 
 and patched two files inside his globs the same way.  Nothing went through Edit or Write, so the edit hook never saw
-them, and the Bash rule read the line as far as `python3.14` and appended kind `other`: SPD-126's brief left the
-interpreters out on purpose, as shell/spelled_writes says, so Law 5's fence stood only where a member used the tools.
+them, and the Bash rule read the line as far as `python3.14` and appended kind `other`: the reading of writes by
+argument left the interpreters out on purpose, as shell/spelled_writes says, so Law 5's fence stood only where a member
+used the tools.
 
 The rule this module decides: for a caller the Bash rule holds (a member), an interpreter run whose program the line
 spells rather than reads from a file is refused, because the hook reads no such program and cannot tell what it writes.
 Spelled means an option that carries the program -- python's `-c`, node's (bun's, deno's) `-e`/`--eval`/`-p`/`--print`,
 perl's `-e`/`-E`, ruby's `-e` -- or standard input, where the line feeds it and the interpreter has no program of its
-own (`python3.14 - <<'PY'`, `echo ... | node`, `python3 < x.py`, `cat x | perl`).  SPD-152 added a third: a subcommand
+own (`python3.14 - <<'PY'`, `echo ... | node`, `python3 < x.py`, `cat x | perl`).  A third shape is a subcommand
 whose own operand is the program (`deno eval <code>`).
 
 What stays exactly as it was: a program from a file (`python3.14 -I -S tests/suite.py`, the spud launcher,
 `node scripts/build-web.js`), python's `-m module`, and an interpreter left to read a terminal, which runs no program of
-the line's (`python3` on its own, the REPL).  Whether a member may run a script file it wrote itself is SPD-145's open
-question, which nothing here touches.  Spud keeps his inline programs: the hook cannot read those either, but Law 1
+the line's (`python3` on its own, the REPL).  Whether a member may run a script file it wrote itself is an open question,
+which nothing here touches.  Spud keeps his inline programs: the hook cannot read those either, but Law 1
 binds him where it cannot see, and his are investigation rather than a way past a fence.
 
 The table below is each interpreter's own option grammar, from its manual: python(1) and `python3.14 --help`, node(1)
 with bun's and deno's spellings of its two, perlrun, and ruby(1).  perl's switches are read in shell/spelled_writes too,
 for the files `-i` edits; both rows come from perlrun and neither reads the other's, because they answer different
-questions -- which switch gave the program, against what `-i` puts beside each file.  SPD-152's rows: osascript(1),
+questions -- which switch gave the program, against what `-i` puts beside each file.  The other rows: osascript(1),
 php(1) (`php --help`), lua(1), Rscript's own usage in the R manual, `swift --help`, and deno's own help, whose grammar
 is its subcommands'.  shell/interpreter_words reads the same table for the two shapes that are about the words rather
 than the grammar: a word the line cannot settle where an option may stand, and the words an xargs appends.
 
-What stays open after SPD-152, none of it this module's to close:
+What stays open, none of it this module's to close:
 
 - **A family the table does not name.**  A row is what reads an interpreter, so a runner outside these names records
   nothing at all: julia's `-e`, elixir's `-e`, scala's and groovy's `-e`, luajit's `-e`, and whatever a project's
   toolchain brings next.  Each is one row when a project needs it.
-- **A program from a file**, which is SPD-145's question for every caller, and with it every option that names a
+- **A program from a file**, which is an open question for every caller, and with it every option that names a
   library the interpreter runs before the program: perl's `-M`, ruby's `-r`, node's `--require`, deno's `--preload`
   and `deno repl --eval-file`.  Each names a file, so each is that same question and not this one.
 - **A subcommand that runs a shell command rather than a program**: `bun exec` ("Run a shell script directly with
   Bun", `bun --help`), `deno task <name>` and `npm run <name>`, whose command comes from deno.json or package.json.
-  That is SPD-143's reading of a shell string in another shape -- the hook reads no such string here -- and no
+  That is the reading of a shell string fed to a shell, in another shape -- the hook reads no such string here -- and no
   inline program of an interpreter's.
 - **An environment variable that carries the interpreter's own switches**, which each manual limits to switches that
   carry no program: PERL5OPT takes only `-[CDIMUdmtwW]` (perlrun), RUBYOPT only `-d -E -I -K -r -T -U -v -w -W` and
   the `--debug`/`--enable`/`--disable` kin (ruby(1)), NODE_OPTIONS no `-e`, `-p` or script at all (node(1)), and
   PYTHONSTARTUP a file read in interactive mode (python(1)).  What is left is `-M` and `-r`, a library from a file.
 
-Past 250 lines since SPD-152 (SPD-065's rule): it is one body of data read as one -- a row per family, each row its
+Past 250 lines (the package's look-again point): it is one body of data read as one -- a row per family, each row its
 manual's and its comment the citation -- with the single grammar that walks a run's words against it, which
 spelled_program reads for a verdict and interpreter_words.read_index for indices, so the two can never disagree about
 where an option ends and a program begins.  The seam that was real came out: the words such a run is read with, one
@@ -78,7 +79,7 @@ class Interpreter:
     `module`: the short letters that name a program the hook reads somewhere else (python's `-m`, whose module name the
     analysis already reads for a database call).
 
-    SPD-152, for the families whose grammar is no shape of the four SPD-150 tabled:
+    For the families whose grammar is no shape of python's, node's, perl's or ruby's:
     `subcommands`: {the subcommand: what the words after it are} for a family that runs code under a subcommand rather
     than an option -- "code" where the subcommand's first operand is the program (`deno eval <code>`), "stdin" where a
     run with no program of its own reads one there (`deno repl`, `swift repl`), "file" where it reads none at all
@@ -111,7 +112,7 @@ JS = Interpreter(code="ep", code_long=("--eval", "--print"), value="r", value_lo
 # standard input ("Specifying the filename '-' to read the file from stdin", `deno run --help`), and so may any other
 # subcommand that takes a script, which is why each is tabled rather than left to be read as a file's name.  A word the
 # table does not name is the file or task deno runs (`deno main.ts`), read as a program from a file exactly as before.
-# node's own letters stay on the row: `deno -e 'x'` was refused since SPD-150 and stays refused.
+# node's own letters stay on the row: `deno -e 'x'` was refused from the first and stays refused.
 DENO = Interpreter(code="ep", code_long=("--eval", "--print"), value="r", value_long=("--require",),
                    subcommands={"eval": "code", "repl": "stdin", "run": "file", "serve": "file", "watch": "file",
                                 "task": "file", "test": "file", "bench": "file", "check": "file", "compile": "file"})
@@ -148,7 +149,7 @@ RSCRIPT = Interpreter(code="e", stdin_program=False)
 # would find `e` inside `-access-notes-path`: whole_options reads each word as one option instead.
 SWIFT = Interpreter(code="e", subcommands={"repl": "stdin"}, whole_options=True)
 # The families a base name alone names, ahead of the four regular expressions and syntax.JS_RUNTIMES below: deno, whose
-# subcommands are its grammar, and the rows SPD-152 added.  tsx and ts-node run node and pass its options through, so
+# subcommands are its grammar, and the rows beyond python, node, perl and ruby.  tsx and ts-node run node and pass its options through, so
 # they read node's row -- `-e`/`--eval`, `-p`/`--print`, standard input -- and their own long options (`--project`,
 # `--compilerOptions`) carry no program.  The names are as the dispatch casefolds them (`Rscript` reaches this as
 # `rscript`).
@@ -188,7 +189,7 @@ def read_inline(cmd, base, words, a, fed):
 
 def spelled_program(base, words):
     """(how this interpreter run reaches its program, the option that carries it): ("option", the option as spelled)
-    for a program an option's value holds or a subcommand's operand is (SPD-152: `deno eval <code>`, whose subcommand
+    for a program an option's value holds or a subcommand's operand is (`deno eval <code>`, whose subcommand
     is what the refusal names), ("stdin", the operand that names standard input or None) for one the interpreter reads
     there, or (None, None) for a program from a file, a module, or a command outside the table.
 
@@ -201,7 +202,7 @@ def spelled_program(base, words):
         if role in ("option", "stdin"):
             return role, spelled
         if role in ("program", "module"):
-            return None, None  # a program from a file, which the hook reads no more of than it ever did (SPD-145)
+            return None, None  # a program from a file, which the hook reads no more of than it ever did
     return None, None
 
 
@@ -213,7 +214,7 @@ def read_words(kind, words):
     - (i, "program", the word) for the file the run's program comes from, after which no word is read by name: its own
       arguments are the program's, whatever they look like;
     - (None, "option", the option) for an option whose value is the program, or a subcommand whose operand is
-      (SPD-152), the option's own word having been yielded before it;
+      the program, the option's own word having been yielded before it;
     - (None, "stdin", the operand or None) for a program the interpreter reads on standard input, named by a `-`
       operand or by the run having no program of its own at all;
     - (None, "module", the option) for python's `-m`, whose module the analysis reads elsewhere.
@@ -228,7 +229,7 @@ def read_words(kind, words):
     while i < len(words):
         w = prepare.deglob(words[i])
         if code_operand and (not options or not w.startswith("-")):
-            yield i, "option", sub  # SPD-152: the subcommand's first operand is the code (`deno eval 'x'`)
+            yield i, "option", sub  # the subcommand's first operand is the code (`deno eval 'x'`)
             return
         if options and w == "--":
             yield i, "word", None
@@ -243,7 +244,7 @@ def read_words(kind, words):
             if mode is None:
                 yield i, "program", w
                 return
-            # SPD-152: this family runs its program under a subcommand, which says where that program comes from
+            # this family runs its program under a subcommand, which says where that program comes from
             sub, code_operand, stdin_at_end = w, mode == "code", mode == "stdin"
             yield i, "word", None
             i += 1
