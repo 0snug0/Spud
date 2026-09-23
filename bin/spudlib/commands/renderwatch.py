@@ -11,7 +11,7 @@ import stat
 import sys
 import time
 
-from . import publish
+from . import publish, schedule
 from ..core import kernel, launchagents
 from ..state import ledgerdb, schema
 
@@ -24,19 +24,55 @@ def render_entry(ctx, args):
 
 
 def log_line(text):
-    """One timestamped line on stdout, flushed: launchd redirects it into <home>/.spud/logs/render.log."""
+    """One timestamped line on stdout, flushed: launchd redirects it into <home>/.spud/logs/render.log
+    (the previous run's is render.log.1, rotate_log)."""
     sys.stdout.write("%s %s\n" % (kernel.now(), text))
     sys.stdout.flush()
 
 
-def truncate_log():
-    """launchd appends to StandardOutPath; the watcher starts its log afresh when stdout is a regular file, and leaves a
-    terminal or a pipe alone."""
+def kept_tail(path, limit):
+    """The last `limit` bytes of the file at most, read from there alone, and cut at a line start when the cut falls
+    inside a line."""
+    with open(path, "rb") as f:
+        size = f.seek(0, os.SEEK_END)
+        f.seek(max(0, size - limit))
+        tail = f.read(limit)
+    if size <= limit:
+        return tail
+    start = tail.find(b"\n") + 1
+    return tail[start:] if 0 < start < len(tail) else tail
+
+
+def rotate_log(ctx):
+    """Start the watcher's log afresh, keeping the previous run's in render.log.1 (SPD-170).  Since SPD-119 a watcher ends
+    on every deploy and KeepAlive starts the next, and the old truncation erased the line saying why the last run ended.
+
+    launchd opens <home>/.spud/logs/render.log as StandardOutPath and StandardErrorPath and hands the process those fds
+    before any Python runs, so the file is never renamed: a rename would leave both fds writing into render.log.1.  The old
+    content's tail (at most RENDER_LOG_KEEP bytes, so the pair stays bounded however often the watcher restarts) is copied
+    to render.log.1 through a temporary file and a rename, then render.log is truncated in place and each of stdout and
+    stderr that is this file is sought back to its start, which lands the next write at offset 0 whether or not launchd
+    opened it O_APPEND.  A stdout that is not the home's render.log -- a terminal, a pipe, a file a person redirected it
+    to -- is left alone."""
+    log = ctx.home / schedule.RENDER_LOG
     with contextlib.suppress(OSError, ValueError):
         fd = sys.stdout.fileno()
-        if stat.S_ISREG(os.fstat(fd).st_mode):
-            sys.stdout.flush()
-            os.ftruncate(fd, 0)
+        st = os.fstat(fd)
+        disk = os.stat(log)
+        if not stat.S_ISREG(st.st_mode) or (st.st_dev, st.st_ino) != (disk.st_dev, disk.st_ino):
+            return
+        sys.stdout.flush()
+        sys.stderr.flush()
+        if st.st_size:
+            kept = log.with_name(log.name + ".1")
+            partial = log.with_name(log.name + ".1.tmp")
+            partial.write_bytes(kept_tail(log, schedule.RENDER_LOG_KEEP))
+            os.replace(partial, kept)
+        os.ftruncate(fd, 0)
+        for each in (fd, sys.stderr.fileno()):
+            same = os.fstat(each)
+            if (same.st_dev, same.st_ino) == (st.st_dev, st.st_ino):
+                os.lseek(each, 0, os.SEEK_SET)
 
 
 def file_stamp(path):
@@ -101,7 +137,7 @@ def cmd_render_watch(ctx, args):
     stop = []
     for sig in (signal.SIGTERM, signal.SIGINT):
         signal.signal(sig, lambda signum, frame: stop.append(signum))
-    truncate_log()
+    rotate_log(ctx)
     log_line("watching %s every %.2f s" % (ctx.db_path, args.interval))
     passes, ticks, seen, ended = 0, 0, None, None
     loaded = program_stamps()
