@@ -191,6 +191,11 @@ def mark_zsh_patterns(text):
       list )` is a parse error, so the subshell read in its place reads a line that runs nothing.  No loop name and no
       word list follow a for loop's `(( ... ))` header: its short body's first word is a command word, and a group opening
       the word after that a pattern (SPD-178: `echo new | for (( i=0; i<1; i++ )) tee (l|x)/t` wrote l/t);
+    - a foreach's `( word ... )` after its names is its word list, as a for's is, and never a glob (`foreach f (a|b)` is a
+      parse error); a command follows it, and a group opening the word after that is a pattern (SPD-180: `echo ft |
+      foreach f (a) tee (l|x)/t > /dev/null; end` wrote l/t).  zsh reads the word after each of a foreach's names in
+      command position, so more names may follow the first and a `{` or `do` there opens a body over the positional
+      parameters, a subshell possible after it;
     - glued inside a word, `(` is a pattern in zsh and a syntax error in bash, whole in both readings, except `()` (a function's
       header), `$((`, `name=(` and a reserved word in command position.  There zsh splits every brace off a run of them
       opening the word, so `{(` and `{{(` run a subshell in their groups, read so in both readings; every other reserved
@@ -220,6 +225,9 @@ def mark_zsh_patterns(text):
     # zsh's `for name ( word ... )` word list is not a glob (`for f (a|b)` is a parse error), and a command follows
     # it and a `repeat` count, so `for f (a b) (git push)` and `repeat 1 (git push)` open subshells, not patterns.
     for_list = 0  # 1: the loop's name is next; 2: a `(` here opens its word list; a `for (( ... ))` header clears it
+    # a foreach's header (SPD-180): more names may follow its first, and zsh reads the word after each name in command
+    # position, so a `{` or a `do` there opens a body over the positional parameters and a `(` after the `{` a subshell
+    foreach_names = False
     repeat_count = False  # the next word is a `repeat` count; the body, in command position, follows it
     for_close = -1  # where a `for name (` list closes
     closed = False  # the word just read ended in the `}` that closes a group (SPD-142: an `always` after it keeps command position)
@@ -254,7 +262,7 @@ def mark_zsh_patterns(text):
                 # (tests/probes/shell_probe.py).  A repeat count and a closing brace are never pending here on a line
                 # zsh runs: `((` right after `repeat` opens its count word, not an arithmetic command, and right after a
                 # closing brace it is a parse error (`{ echo a } (( 1 ))` failed near ` 1 `).
-                for_list, repeat_count, closed = 0, False, False
+                for_list, repeat_count, closed, foreach_names = 0, False, False, False
                 continue
             if for_list == 2 and i in parens:  # `for f ( a b )`: the loop's word list
                 for_close = parens[i]
@@ -270,7 +278,7 @@ def mark_zsh_patterns(text):
             other.append(op)
             pos, i = i, i + len(op)
             arith_next = False
-            for_list, repeat_count, closed = 0, False, False
+            for_list, repeat_count, closed, foreach_names = 0, False, False, False
             if op in ("<(", ">("):
                 command, target = True, None
             elif op in ("(", "()"):  # a subshell, or a function's header: a command follows (zsh's INOUTPAR)
@@ -367,8 +375,9 @@ def mark_zsh_patterns(text):
         out.append("".join(word))
         other.append("".join(alternative))
         w, i = text[start:j], j
-        was_name, was_count = for_list == 1, repeat_count
-        arith_next, for_list, repeat_count = False, 0, False
+        another = foreach_names and for_list == 2 and syntax.foreach_name(w)  # a foreach's next name, after its first
+        was_name, was_count, in_foreach = for_list == 1 or another, repeat_count, foreach_names
+        arith_next, for_list, repeat_count, foreach_names = False, 0, False, False
         after_close, closed = closed, False
         # SPD-142: a word ending in the `}` that closes a group is read as the word before that brace, which then gives
         # zsh its command position back -- but inside `[[ ... ]]` and a case's subject or patterns only the `]]` and the
@@ -407,7 +416,8 @@ def mark_zsh_patterns(text):
                 cond, command = True, False
             elif w in ("for", "select", "foreach", "function", "repeat"):
                 command, arith_next = False, w in ("for", "select")
-                for_list, repeat_count = 1 if w in ("for", "select") else 0, w == "repeat"
+                for_list, repeat_count = 1 if w in ("for", "select", "foreach") else 0, w == "repeat"
+                foreach_names = w == "foreach"
             elif w in ZSH_COMMAND_POSITION_WORDS or assignment_words.assignment_word(w):
                 pass
             elif w == "always" and after_close:
@@ -418,6 +428,11 @@ def mark_zsh_patterns(text):
             command, closed = True, True
         if was_name and not for_list:
             for_list = 2  # the loop's name was read: a `(` now opens its word list, not a pattern
+            if in_foreach:
+                # SPD-180: zsh reads the word after a foreach's name in command position, so a `{` or a `do` there opens a
+                # body over the positional parameters, and a subshell may follow it (probed in zsh 5.9: `foreach f { echo
+                # x }` and `foreach f do echo x; done` ran once for each positional parameter); a `(` is still the list
+                foreach_names = command = True
         elif was_count:
             command = True  # `repeat word`: its body follows, in command position (zsh's SHORT_LOOPS)
     return "".join(out), "".join(other)

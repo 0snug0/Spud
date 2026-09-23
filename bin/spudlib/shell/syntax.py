@@ -11,6 +11,14 @@ OUT_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<>"}
 IN_REDIRECTS = {"<", "<<", "<<<", "<<-", "<&"}
 RESERVED_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "select", "case", "esac",
                   "in", "function", "!", "{", "}", "coproc"}
+# zsh's own reserved words, as `enable -r` listed them in zsh 5.9 -f (tests/probes/shell_probe.py, SPD-180).  Its lexer
+# reads each as a token of its own wherever it is in command position, as it is after each of a foreach's names, so one
+# there ends the names and opens the loop's body: `set -- p; foreach f if true; then echo x; fi; end`, `foreach f [[ -n x
+# ]] && echo x; end`, `foreach f typeset -f > tf; end` and `foreach f export X=1; end` each ran as that body.  `in` is
+# not one: zsh's parser compares the word itself there.
+ZSH_RESERVED_WORDS = {"!", "[[", "case", "coproc", "declare", "do", "done", "elif", "else", "end", "esac", "export", "fi",
+                      "float", "for", "foreach", "function", "if", "integer", "local", "nocorrect", "readonly", "repeat",
+                      "select", "then", "time", "typeset", "until", "while", "{", "}"}
 # Matched case-folded: macOS PATH lookup is case-insensitive, so ENV runs /usr/bin/env.  noglob and nocorrect are
 # zsh's precommand modifiers.
 WRAPPERS = {"env", "command", "exec", "builtin", "nohup", "nice", "time", "timeout", "caffeinate", "sudo", "doas",
@@ -516,6 +524,13 @@ class ShellAnalysis:
     def all_spud(self):
         """Every simple command is a spud call (a `cd` beside it changes nothing that matters)."""
         return "spud" in self.kinds and all(k in ("spud", "cd") for k in self.kinds) and not self.unparseable
+
+
+def foreach_name(word):
+    """Whether zsh reads this word, standing after a foreach's names, as one more name (SPD-180): an identifier, neither
+    `in`, which starts a word list there, nor a reserved word, which its lexer reads as a token of its own there
+    (ZSH_RESERVED_WORDS).  Anything else ends the names and opens the body (walk.ShellWalk.foreach_names has the probes)."""
+    return word != "in" and word not in ZSH_RESERVED_WORDS and IDENTIFIER_RE.match(word) is not None
 
 
 def unknown_operand(word):

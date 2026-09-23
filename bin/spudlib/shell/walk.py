@@ -31,8 +31,9 @@ class ShellFrame:
     its branches ended in so far, and the enclosing list's state to restore.
 
     The kinds: "group" a `{ list }`, "sub" one that runs in its own process (a `( list )` subshell, and a coproc's
-    `{ list }` group, whose fork the `coproc` before it makes), "loop" a for, select, repeat, while or until,
-    "cond" an if, "case" a case, "func" a function body."""
+    `{ list }` group, whose fork the `coproc` before it makes), "loop" a for, select, repeat, foreach, while or until,
+    "cond" an if, "case" a case, "func" a function body.  A foreach's closer is `end` until its body turns out to be a
+    `do ... done` (resolve_body)."""
 
     __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints",
                  "procsub")
@@ -44,13 +45,14 @@ class ShellFrame:
         # the functions defined before a `( ... )` subshell opened, restored when it closes; None for every other
         # frame kind, whose function definitions reach a call after it and are kept.
         self.funcs = funcs
-        # a loop's or a conditional's body form.  None for anything but a for, select or repeat (which starts
+        # a loop's or a conditional's body form.  None for anything but a for, select, repeat or foreach (which starts
         # at "header") and an if, while or until (which starts at "cond", its condition list); then "pending" or "cond-pending"
-        # once that is complete, until the body's first word, and then "long" (`do ... done`, `then ... fi`), "compound" (a
-        # `{ ... }` or `( ... )` body) or "sublist" (zsh's SHORT_LOOPS and SHORT_REPEAT: one and-or list, closing this frame
-        # where the list ends).  A loop's compound body closes the loop with it; a conditional's becomes "sublist", since an
-        # `else` or an `elif` may still follow it (probed: `if [[ -n x ]] { echo a } else { echo b }` ran).  An `elif`
-        # puts a conditional's frame back to "cond", the elif's own condition list, from any of these (see branch).
+        # once that is complete, until the body's first word, and then "long" (`do ... done`, `then ... fi`, a foreach's list
+        # up to its `end`), "compound" (a `{ ... }` or `( ... )` body; a foreach's `{ ... }` only) or "sublist" (zsh's
+        # SHORT_LOOPS and SHORT_REPEAT: one and-or list, closing this frame where the list ends).  A loop's compound body
+        # closes the loop with it; a conditional's becomes "sublist", since an `else` or an `elif` may still follow it
+        # (probed: `if [[ -n x ]] { echo a } else { echo b }` ran).  An `elif` puts a conditional's frame back to "cond",
+        # the elif's own condition list, from any of these (see branch).
         self.body = None
         # the text the pipeline element around it had printed when it opened, the text the lists before that
         # element in the enclosing compound command had printed, and that element's standard input with the one every
@@ -82,6 +84,9 @@ class ShellWalk:
     - the same holds for an `if`, `while` or `until` whose condition ends in `[[ ... ]]`, which closes the condition
       the way a terminator closes a loop header, so `then` and `do` are optional there too; an `elif` after such a body
       opens the next condition list the same way, so its own `[[ ... ]]` and body are read as the `if`'s were;
+    - zsh's `foreach name ... ( word ... )` (or `in word ... TERM`, or neither: the positional parameters) is a loop whose
+      body is a `do ... done`, a `{ list }`, or a list of any length up to an `end` in command position, a `( list )`
+      among its commands (SPD-180; see resolve_body and ends_foreach);
     - zsh's try-always form, `{ list } always { list }`, is one compound command holding both lists, so the always
       block runs where the try block left the shell and the compound ends at the always block's `}` (see close_brace);
     - zsh splits a brace off the word it is glued to: `{git push}` is the group `{ git push }` (see add_word).
@@ -93,8 +98,8 @@ class ShellWalk:
         self.glued = glued  # zsh's reading: a brace glued to a word opens or closes a group where a lone one would
         self.split_brace = False  # ... and it did on this line, so the reading differs from bash's
         self.words, self.stack = [], []
-        self.skip = False  # the words are a for, select or case header or a function's name, not a command
-        self.header = None  # which header they are: "for" (for, select), "repeat" or "func"
+        self.skip = False  # the words are a for, select, foreach or case header or a function's name, not a command
+        self.header = None  # which header they are: "for" (for, select), "foreach", "repeat" or "func"
         self.expect_body = False  # the header is complete: the next word decides the body's form
         self.function_next = False  # `name ()` or `function name` was read: the next body is a function's
         self.redirect_cwds = syntax._CURRENT
@@ -265,10 +270,33 @@ class ShellWalk:
 
     # -- zsh's short loop forms ---------------------------------------------------------
     def open_loop(self, t):
-        """A `for`, `select` or `repeat` in command position: its header is read, then its body, with or without `do`."""
-        self.push("loop", "done")
-        self.skip, self.header = True, "repeat" if t == "repeat" else "for"
+        """A `for`, `select`, `repeat` or `foreach` in command position: its header is read, then its body, with or without
+        `do`.  A foreach's body may run to an `end`, which is its closer until the body shows its form (resolve_body)."""
+        self.push("loop", "end" if t == "foreach" else "done")
+        self.skip, self.header = True, t if t in ("repeat", "foreach") else "for"
         self.stack[-1].body = "header"
+
+    def foreach_names(self, words):
+        """Whether a foreach header's words so far are only its names (syntax.foreach_name), after which zsh reads the next
+        word in command position (its parser, par_for): a `( ... )` there is the word list, `in` starts one, another
+        identifier is one more name, and anything else -- a reserved word, a redirection -- opens the body of a loop over
+        the positional parameters: a `do ... done`, a `{ ... }`, or the first command of a list up to `end`.  Probed in
+        zsh 5.9 with `set -- p`: `foreach a b (1 2 3 4) echo two-$a$b; end` printed two-12 two-34; `foreach f do ...;
+        done`, `foreach f g { ... }` and syntax.ZSH_RESERVED_WORDS' lines ran their bodies; `foreach f > o1; end` made o1
+        and `foreach f g >o2 echo x; end` wrote x to o2; `foreach f git push; end` ran nothing, git and push being names;
+        and `foreach f x-y; end` failed near `x-y`, a word that is neither (read as the body, fail closed)."""
+        return all(syntax.foreach_name(w) for w in words)
+
+    def ends_foreach(self):
+        """Whether an `end` in command position closes a foreach: the compound command it would close, past the short
+        loops' and short conditionals' sublists, is a foreach whose body runs to its `end`.  zsh rejects an `end` anywhere
+        else as a parse error; the walk reads it there as the word it is to bash, and to the lines before SPD-180.
+        Probed in zsh 5.9: that `end` closes after a `}`, a subshell's `)` and an `esac`, not after a `fi` or a `done`
+        (a parse error, a line that runs nothing, read all the same), and zsh splits it off a glued `}` (glued_close)."""
+        for frame in reversed(self.stack):
+            if frame.body != "sublist":
+                return frame.closer == "end"
+        return False
 
     def open_conditional(self, t):
         """An `if`, `while` or `until` in command position: its condition list, then its body, which a `[[ ... ]]` at the end
@@ -316,6 +344,14 @@ class ShellWalk:
         if frame is None or frame.body not in ("pending", "cond-pending"):
             return
         braced = t[:1] == "{" and (t == "{" or self.glued)  # `repeat 1 {git push}`: a group, its brace glued
+        if frame.closer == "end":
+            # a foreach (SPD-180, probed in zsh 5.9): a `do ... done` or a `{ ... }` body ends the loop as a for's does, with
+            # no `end` after it (`foreach f (a) { echo x }; end` failed near `end`); any other word, a `(` among them, starts
+            # a list that runs to the `end` (`foreach f (a) ( echo sub ) end` and `foreach f (a b) echo s1; echo s2; end` ran)
+            if t == "do":
+                frame.closer = "done"
+            frame.body = "compound" if braced else "long"
+            return
         frame.body = "long" if t in ("do", "then") else ("compound" if braced or t == "(" else "sublist")
 
     def close_sublists(self):
@@ -446,7 +482,8 @@ class ShellWalk:
         `{vcs {a}`, `{vcs ${x-q}` and `{vcs a\\}` left the group open.  An assignment in assignment position keeps its `}`
         (`{x=1}` and `{ x=1}` never closed; `{x=1 }` set x and `{vcs x=1}` logged `x=1`), and so does a word in a header
         the walk skips.  Outside any group zsh rejects the line and bash runs it with the `}` in the word, which is how the
-        hook always read it.  After `fi`, `done` or `esac` the `}` closes what a lone one would after that word."""
+        hook always read it.  After `fi`, `done`, `esac` or a foreach's `end` the `}` closes what a lone one would after
+        that word."""
         if self.skip:
             return None
         rest = t[:-1]
@@ -461,7 +498,8 @@ class ShellWalk:
                 return None
         if assignment_words.assignment_word(t) and all(assignment_words.assignment_word(w) for w in self.words):
             return None
-        closer = rest if not self.words and rest in ("fi", "done", "esac") else None
+        closes = rest in ("fi", "done", "esac") or rest == "end" and self.ends_foreach()  # `end}` (probed: `{ foreach ...; end}`)
+        closer = rest if not self.words and closes else None
         return rest if self.brace_closes(closer) else None
 
     def add_word(self, t):
@@ -469,7 +507,13 @@ class ShellWalk:
         would open there -- never in a case pattern -- and the rest of it is read as the next word, from command position
         (probed: `{vcs try}`, `time {vcs try}`, `f() {vcs a}`, `{vcs}` and `{}` ran as groups, `{"vcs" try}` and
         `{\\vcs try}` too; `{vcs,x}` ran a command named `vcs,x`, no brace expansion); and a word whose `}` glued_close
-        splits off is read, then the `}` is, as a lone one after it.  bash reads both braces as part of their words."""
+        splits off is read, then the `}` is, as a lone one after it.  bash reads both braces as part of their words.
+
+        After a foreach's names, with no word list, a word that is no name -- a reserved word, a redirection -- ends the
+        header and opens the body (foreach_names)."""
+        if self.skip and self.header == "foreach" and t != "in" and not syntax.foreach_name(t) and self.foreach_names(self.words):
+            self.end_header()
+            self.resolve_body(t)
         while t[:1] == "{" and (t == "{" or (self.glued and not self.in_pattern())) and self.open_brace():
             if t == "{":
                 return
@@ -485,7 +529,7 @@ class ShellWalk:
     def read_word(self, t):
         """add_word's reading of a word once its braces are settled: a reserved word, a `}`, or one more word of the command."""
         if not self.words and not self.skip:
-            if t in ("}", "fi", "done", "esac"):
+            if t in ("}", "fi", "done", "esac") or t == "end" and self.ends_foreach():
                 self.close_sublists()
                 if self.stack and self.stack[-1].closer == t:
                     if t == "}":
@@ -496,7 +540,7 @@ class ShellWalk:
             if t in ("if", "while", "until"):
                 self.open_conditional(t)
                 return
-            if t in ("for", "select", "repeat"):
+            if t in ("for", "select", "repeat", "foreach"):
                 self.open_loop(t)
                 return
             if t == "case":  # its subject and `in` are read with the first pattern and discarded at the pattern's `)`
@@ -509,9 +553,11 @@ class ShellWalk:
                 self.function_next = self.skip = True
                 self.header = "func"
                 return
-        if not self.skip and self.words and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words) and t in ("for", "select", "repeat", "if", "while", "until"):
+        if not self.skip and self.words and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words) \
+                and t in ("for", "select", "repeat", "foreach", "if", "while", "until"):
             # zsh runs a compound command after `coproc`, `time` and `!` (probed: `coproc repeat 1 git push`, `coproc if
-            # [[ -n x ]] git push`, `time if [[ -n x ]] git push` and `! if [[ -n x ]] git push` each ran it)
+            # [[ -n x ]] git push`, `time if [[ -n x ]] git push` and `! if [[ -n x ]] git push` each ran it, and so did
+            # `time foreach f (a) echo x; end` and `! foreach ...`)
             self.discard()
             if t in ("if", "while", "until"):
                 self.open_conditional(t)
@@ -526,7 +572,7 @@ class ShellWalk:
             self.close_brace()
             return
         self.words.append(t)
-        if self.skip and self.header == "for":
+        if self.skip and self.header in ("for", "foreach"):
             self.loop_header_word(t)
         if self.skip and self.header == "repeat":  # `repeat word`: one word of header, then the body
             self.end_header()
@@ -571,8 +617,10 @@ class ShellWalk:
                     j += 1
                 self.words.append("".join(toks[i : j + 1]))
                 i = j
-                if self.header in ("for", "repeat") and len(self.words) <= 2:
-                    self.end_header()  # `for (( ... ))` or `for name ( ... )` closed: its body follows
+                # `for (( ... ))`, `for name ( ... )` or `foreach name ... ( ... )` closed: its body follows
+                if self.header in ("for", "repeat") and len(self.words) <= 2 \
+                        or self.header == "foreach" and self.foreach_names(self.words[:-1]):
+                    self.end_header()
             elif t in ("(", "<(", ">("):
                 self.function_next = False
                 self.push("sub", ")")
@@ -608,7 +656,7 @@ class ShellWalk:
                 self.a.cwds = self.list_start  # the whole and-or list ran in the background
                 self.start_list()
             elif t in syntax.LIST_TERMINATORS:
-                if self.skip and self.header == "for":
+                if self.skip and self.header in ("for", "foreach"):
                     self.end_header()  # `for f in a b;` and `for f;`: zsh takes what follows as the body
                 self.finish()
                 self.close_sublists()
