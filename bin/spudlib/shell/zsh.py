@@ -50,6 +50,12 @@ _ARITH_WORD = str.maketrans(dict(_ARITH_MARKS, **{c: syntax._ARITH_SENTINELS[c] 
 _GROUP_MARKS = syntax._ZSH_SENTINELS
 _PATTERN_MARKS = {c: syntax._ARITH_SENTINELS[c] for c in "(|)<> \t;\n"}
 _WORD_END = " \t;&|>)" + syntax.LINE_BREAK  # what ends a word the scan copies, when no quote holds it
+# The states of mark_zsh_patterns' case stack that read a case's word or one of its patterns (SPD-184): a process
+# substitution opened there is a list zsh runs, and its `)` is never the pattern's.  Beside them the stack holds "body",
+# and, for SPD-184, "proc" (the list of a process substitution opened in one of these states), "inner" (a parenthesis
+# opened inside that list: a subshell, a for loop's word list, a nested substitution) and "group" (a group opened there
+# that _zsh_group does not take: one holding a `<( )`, or a parse error), each closed by its own `)`.
+_CASE_WORD_STATES = ("subject", "in", "pattern")
 
 
 def _scan_pairs(text):
@@ -196,6 +202,38 @@ def _before_close(word, command):
     return None if depth else word[:-1]
 
 
+def _optional_list(text, k):
+    """zsh's reading of a `=( ... )` that opens the content of a case pattern's optional parentheses, the `(` just before
+    text[k] (SPD-184): (both readings' text for it, the index after it), or None where no `=(` opens that content.  zsh
+    lexes that content as the pattern's text, so the substitution runs the list up to its first `)` with the pattern's
+    `(` and `|` taken out of it, and only one opening the content runs: probed in zsh 5.9 -f and -f -o nobareglobqual (see
+    tests/test_hooks.py CaseSubstitutionTest), `( =(tou|ch r90) )` made r90, `( =(touch (r97|r98)) )` made r97r98,
+    `( =(touch r105)|=(touch r106) )` made r105 alone, and a newline before it (`(<newline>=(touch r83) )`) made nothing.
+    The list is marked as a line of its own, and read as the `<( ... )` whose file name it hands the pattern: bash
+    rejects the line."""
+    lead = k
+    while lead < len(text) and text[lead] in " \t":
+        lead += 1
+    end = text.find(")", lead + 2) if text.startswith("=(", lead) else -1
+    if end < 0:
+        return None
+    marked, other = mark_zsh_patterns(text[lead + 2 : end].replace("(", "").replace("|", ""))
+    return (text[k:lead] + "<(" + marked + ")", text[k:lead] + "<(" + other + ")"), end + 1
+
+
+def _ends_pattern(text, k):
+    """Whether a case pattern ends at the `)` before text[k], which closes a group of it that _zsh_group did not take
+    (SPD-184): unless the word goes on after it, or a `)` or a `|` follows it, that group was the pattern's optional
+    parentheses, as SPD-181 reads a word that starts and ends with a group _zsh_group took (probed in zsh 5.9 -f and -f -o
+    nobareglobqual: `(q|<(true)) (echo m72)` and `(q|<(true))) (echo m77)` ran their bodies)."""
+    n = len(text)
+    if k < n and text[k] not in " \t;&<>" + syntax.LINE_BREAK:
+        return False
+    while k < n and text[k] in " \t":
+        k += 1
+    return text[k : k + 1] not in (")", "|")
+
+
 def mark_zsh_patterns(text):
     """zsh's reading of its own glob operators, for the masked outer text of a line: a group `(a|b)` and a numeric range
     `<n-m>` that zsh reads as part of a word are kept in that word with sentinels, where shlex would read a subshell and an
@@ -250,6 +288,13 @@ def mark_zsh_patterns(text):
       array -- and the body after it does.  zsh generates no file names from a pattern, so its groups are marked with the
       inert _PATTERN_MARKS; bash rejects a group in a pattern, and the other reading restores one that opens a word
       (CasePatternGroupTest has the probes);
+    - a case's word and patterns hold process substitutions zsh runs (SPD-184): a `=( ... )` opening the word or a
+      top-level alternative of a pattern, one opening the content of the pattern's optional parentheses (whose list runs
+      to its first `)` without the pattern's `(` and `|`: _optional_list), and a `<( ... )` or `>( ... )` anywhere in
+      them, a group included.  Both readings take each for a `<( ... )` or `>( ... )`: its list is read as commands, its
+      `)` never ends the pattern (the case stack's "proc", "inner" and "group" states, _CASE_WORD_STATES), and the
+      pattern goes on after it.  A `=` anywhere else in a pattern is the pattern's text (CaseSubstitutionTest has the
+      probes);
     - a newline, which newlines_as_separators writes as syntax.LINE_BREAK, is part of the pattern inside a group, in any
       word (SPD-183: `echo x | tee (l|<newline>x)/t` wrote l/t, and _zsh_group has the probes), and everywhere else the `;`
       it ends a command with, as the walk always read it; bash rejects such a group, and the other reading, restoring
@@ -278,7 +323,9 @@ def mark_zsh_patterns(text):
     repeat_count = False  # the next word is a `repeat` count; the body, in command position, follows it
     for_close = -1  # where a `for name (` list closes
     closed = False  # the word just read ended in the `}` that closes a group (SPD-142: an `always` after it keeps command position)
-    cases = []  # per open case command: "subject", "in", "pattern" or "body"
+    # per open case command: "subject", "in", "pattern" or "body"; above those, per parenthesis open in a case's word or
+    # pattern, "proc", "inner" or "group" (_CASE_WORD_STATES, SPD-184)
+    cases = []
     while i < n:
         c = text[i]
         if c in " \t":
@@ -286,7 +333,24 @@ def mark_zsh_patterns(text):
             other.append(c)
             i += 1
             continue
-        in_pattern = bool(cases) and cases[-1] == "pattern"
+        top = cases[-1] if cases else None
+        in_pattern = top == "pattern"
+        pattern_text = in_pattern or top == "group"  # a pattern's text, a group the scan did not take included
+        if c == "=" and top in _CASE_WORD_STATES and text.startswith("=(", i) and not punctuation_next:
+            # SPD-184: a `=( ... )` opening the case's word or a top-level alternative of a pattern is a process
+            # substitution, its list parsed as commands, and its `)` is the list's, never the pattern's (probed in zsh 5.9
+            # -f and -f -o nobareglobqual: `case x in =(touch r01)) ...`, `case =(touch r02) in x) ...`, `y|=(...)`,
+            # `x| =(...)`, `;; =(...)` and `=(case y in y) touch r17;; esac))` made theirs, and `x|=(tou|ch r100))` ran
+            # `tou` and `ch`; tests/test_hooks.py CaseSubstitutionTest has the rest).  Both readings take it for the
+            # `<( ... )` whose file name it hands the case, as zsh does -- a file holding the list's output -- and bash
+            # rejects the line.
+            out.append("<(")
+            other.append("<(")
+            cases.append("proc")
+            i += 2
+            command, target, arith_next = True, None, False
+            for_list, repeat_count, closed, more_names = 0, False, False, False
+            continue
         if punctuation_next:  # a word stopped here without reading a pattern: this is shell punctuation, the plain reading
             word_start = False
         elif c == "(":
@@ -316,7 +380,7 @@ def mark_zsh_patterns(text):
                 word_start = False
             else:
                 # a case pattern stands outside command position (SPD-181), so a group opens its word there as anywhere else
-                word_start = not (command or cond or heredoc or text.startswith("()", i)) and _zsh_group(text, i, scan, in_pattern) is not None
+                word_start = not (command or cond or heredoc or text.startswith("()", i)) and _zsh_group(text, i, scan, pattern_text) is not None
         else:
             word_start = c == "<" and not (cond or heredoc) and syntax.ZSH_RANGE_RE.match(text, i) is not None
         punctuation_next = False
@@ -332,17 +396,44 @@ def mark_zsh_patterns(text):
             for_list, repeat_count, closed, more_names = 0, False, False, False
             if op in ("<(", ">("):
                 command, target = True, None
+                if top in ("proc", "inner"):
+                    cases.append("inner")
+                elif top in _CASE_WORD_STATES or top == "group":
+                    # SPD-184: zsh runs a `<( )` or `>( )` anywhere in a case's word or pattern, a group included, its
+                    # list parsed as commands (probed in zsh 5.9: `(x|<(touch r27)))`, `a>(touch r29))` and `case (y|<(touch
+                    # r112)) in` made theirs, `(x|<(tou|ch r102)))` ran `tou` and `ch`); its `)` is the list's
+                    cases.append("proc")
             elif op in ("(", "()"):  # a subshell, or a function's header: a command follows (zsh's INOUTPAR)
                 command = True
+                if op == "(" and top in ("proc", "inner"):
+                    cases.append("inner")  # counted, so the substitution's list ends at its own `)`
+                elif op == "(" and (top in _CASE_WORD_STATES or top == "group"):
+                    # SPD-184: a group in a case's word or pattern that _zsh_group did not take -- one holding a `<( )`, or
+                    # a parse error -- is still the pattern's text, and its `)` closes it; a `=( ... )` opening it is
+                    # read as one opening the optional parentheses (probed: `( =(touch r82) <(true) )` made r82)
+                    cases.append("group")
+                    command = False
+                    listed = _optional_list(text, i) if top == "pattern" else None
+                    if listed is not None:
+                        out.append(listed[0][0])
+                        other.append(listed[0][1])
+                        i = listed[1]
             elif op == ")":
-                if in_pattern:
+                if top in ("proc", "inner", "group"):
+                    cases.pop()
+                    command = pos == for_close if top == "inner" else False
+                    if top != "inner" and cases and cases[-1] == "subject":
+                        cases[-1] = "in"  # the case's word is read, the substitution or the group part of it
+                    elif top == "group" and cases and cases[-1] == "pattern" and _ends_pattern(text, i):
+                        cases[-1], command = "body", True  # the pattern's optional parentheses: the body follows
+                elif in_pattern:
                     cases[-1], command = "body", True
                 else:
                     command = pos == for_close  # a `for name ( ... )` list closes: its body follows
             elif op in syntax.OUT_REDIRECTS or op in syntax.IN_REDIRECTS:
                 target = command if target is None else target
                 command, heredoc = False, op in ("<<", "<<-")
-            elif not in_pattern:  # ; ;; ;& ;| ;;& & && || | |&
+            elif not pattern_text:  # ; ;; ;& ;| ;;& & && || | |&
                 command, target, heredoc = True, None, False
                 if op in (";;", ";&", ";|", ";;&") and cases and cases[-1] == "body":
                     # the next arm's pattern, out of command position (SPD-181): a `((` there is its word, not an
@@ -403,11 +494,11 @@ def mark_zsh_patterns(text):
                     reserved = command and not brace_run and 0 < j - start <= 9 and text[start:j] in ZSH_COMMAND_POSITION_WORDS
                     # `name=(`, `name+=(` and `name[1,0]=(`: an array assignment's parenthesis, never a group -- but no
                     # word of a case pattern assigns (SPD-181: `case mode=x in mode=(a|x)) echo m4;; esac` printed m4)
-                    array = target is None and not in_pattern and j > start and text[j - 1] == "=" \
+                    array = target is None and not pattern_text and j > start and text[j - 1] == "=" \
                         and assignment_words.array_head(text[start:j])
                     group = None
                     if not (cond or heredoc or brace_run or array or text.startswith("()", j)):
-                        group = _zsh_group(text, j, scan, in_pattern)
+                        group = _zsh_group(text, j, scan, pattern_text)
                     if group is None:
                         punctuation_next = True  # the walk reads this parenthesis in the plain reading
                         break
@@ -450,6 +541,15 @@ def mark_zsh_patterns(text):
                 # newlines_as_separators keeps, may stand before the first.  The optional parentheses are the shell's
                 # in zsh's reading, for the walk to open and close the pattern with; bash, which reads `(x) body` alike,
                 # rejects every other such word, and the other reading restores the group as it restores any opening a word.
+                listed = _optional_list(text, start + 1)
+                if listed is not None:
+                    # SPD-184: a `=( ... )` opening the optional parentheses' content is a process substitution; the
+                    # rest of the content is read again as the pattern's text, up to the `)` that closes them
+                    out.append("(" + listed[0][0])
+                    other.append("(" + listed[0][1])
+                    cases.append("group")
+                    i = listed[1]
+                    continue
                 out.append("(" + zsh_word[1:-1] + ")")
                 other.append(other_word)
                 cases[-1], command = "body", True
@@ -477,8 +577,8 @@ def mark_zsh_patterns(text):
             cases[-1], before = "in", None
         elif cases and cases[-1] == "in":
             cases[-1], before = ("pattern" if w == "in" else "in"), None
-        elif in_pattern:
-            if w == "esac":
+        elif pattern_text:
+            if in_pattern and w == "esac":
                 cases.pop()
                 command = True
             else:
@@ -487,7 +587,7 @@ def mark_zsh_patterns(text):
             if w == "case":
                 cases.append("subject")
                 command = False
-            elif w == "esac" and cases:
+            elif w == "esac" and cases and top not in ("proc", "inner"):  # a substitution's list closes no case
                 cases.pop()
             elif w == "[[":
                 cond, command = True, False

@@ -191,8 +191,11 @@ class ShellWalk:
         after = frame.saved if frame.kind == "sub" else (inner if frame.kind == "group" else directories.union_dirs(frame.seen, inner))
         (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words,
          self.skip, self.header, self.expect_body) = frame.outer
-        if frame.procsub:
-            self.words.append(hookio.SUBST)  # the file name `<( list )` hands the command, as `$( ... )` stands in a word
+        if frame.procsub and not self.in_pattern():
+            # the file name `<( list )` hands the command, as `$( ... )` stands in a word.  Not in a case's word or pattern
+            # (SPD-184), which no command reads: there it stood among words discarded at the pattern's `)`, took the first
+            # `$( ... )` of the body with it, read before the body's cd, and after a `|` named a command
+            self.words.append(hookio.SUBST)
         self.a.cwds = after
         if after != frame.saved and self.conditional:
             self.uncertain = True
