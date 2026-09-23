@@ -121,12 +121,12 @@ def command_input(tokens, bodies, piped, a=None):
     """The text the simple command `tokens` reads on standard input, or None where the line does not spell it.
 
     The last thing the line puts there wins: a here-document body, which ShellWalk.consume has already taken out of the
-    words (`bodies`); a here-string whose word the hook can resolve; or the text the pipeline element before this one
-    printed (`piped`).  A file (`sh < f`), a descriptor (`sh <&3`) and a word holding an expansion, a substitution or a
-    glob leave it unknown, and so does a here-string whose settled value the two shells do not read alike
-    (_string_text).  A here-document and a `<` on one command are read in the order the redirections stand, which
-    the body no longer stands in; the body wins, since the hook reads it anyway.  `a`: the line's analysis, whose settled
-    values a here-string's word is read with (SPD-148)."""
+    words (`bodies`), an unquoted one as its expansion leaves it (heredocs.received_body, SPD-206); a here-string whose
+    word the hook can resolve; or the text the pipeline element before this one printed (`piped`).  A file (`sh < f`), a
+    descriptor (`sh <&3`) and a word holding an expansion, a substitution or a glob leave it unknown, and so does a
+    here-string whose settled value the two shells do not read alike (_string_text).  A here-document and a `<` on one
+    command are read in the order the redirections stand, which the body no longer stands in; the body wins, since the
+    hook reads it anyway.  `a`: the line's analysis, whose settled values a here-string's word is read with (SPD-148)."""
     text = bodies[-1] + "\n" if bodies else piped
     i = 0
     while i < len(tokens):

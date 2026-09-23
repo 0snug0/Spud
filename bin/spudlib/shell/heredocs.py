@@ -11,7 +11,9 @@ substitution's own analysis.  A `$( )` ends where zsh ends it, past its bodies a
 line's `)` (probed), and so does split_substitutions, which counts parentheses (proposal 299), so the text between is read
 as the outer line's commands, bash's reading.  tests/test_hooks.py HereDocumentBodyTest has the probes.  For each body it
 takes out the scan also says whether any character of its delimiter is quoted: a body whose delimiter has none is expanded
-before its command reads it, and ShellWalk.consume reads its substitutions (SPD-192, HereDocumentExpansionTest).
+before its command reads it, and ShellWalk.consume reads its substitutions (SPD-192, HereDocumentExpansionTest), then
+hands the command the text that expansion leaves, received_body (SPD-206, HereDocumentInputTest); a body whose delimiter
+is quoted reaches its command as it is spelled.
 
 What the scan cannot tell from characters alone is what an open `(` is: a subshell or an array assignment, whose newline
 ends a command, or zsh's glob group or an arithmetic command, whose newline does not (and whose `<<` is a shift there).
@@ -38,6 +40,7 @@ _BRACED_RE = re.compile(r"[\\'\"`${}]")  # in a `${ }`
 _ARITH_RE = re.compile(r"[\\$()\[\]]")  # in an arithmetic expansion
 _BACKTICK_RE = re.compile(r"[\\`]")
 _ANSI_RE = re.compile(r"[\\']")  # in `$'...'`
+_RECEIVED_RE = re.compile(r"[\\`$]")  # in an unquoted body (received_body)
 _WORD_START = " \t\n;&|()<>"  # before a `#` that opens a comment (newlines_as_separators reads the same)
 _DELIMITER_END = " \t\n;&|<>()"
 _CASE_RE = re.compile(r"(?<![\w-])case(?![\w-])")
@@ -73,6 +76,36 @@ def strip_heredocs(command):
     if "<<" not in command:
         return command, [], []
     return _Scan(command).run()
+
+
+def received_body(body):
+    """The text a command fed an unquoted here-document reads, as ShellWalk.consume hands it on (SPD-206): the body with
+    the backslash taken off before a `$`, a backtick or a backslash, a backslash-newline taken out whole, which joins the
+    two lines, and every other backslash kept, as zsh and bash expand it -- a default word's text included (probed
+    through tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: `cat` fed `[\\$] [\\\\]
+    [\\x] [a\\<newline>b]` printed `[$] [\\] [\\x] [ab]`, and sh fed `\\$(echo RAN > l/h1)` ran it; tests/test_hooks.py
+    HereDocumentInputTest).  Each `$( )` and backtick substitution keeps its text as spelled, since that text is the
+    substitution's own and what the command reads is its output: the substitution is read where it runs
+    (reevaluation.read_expanded_body), and read again, fail closed, by a shell fed the body."""
+    if "\\" not in body:
+        return body
+    out, mark, i = [], 0, 0
+    while (m := _RECEIVED_RE.search(body, i)) is not None:
+        i, c = m.start(), m.group()
+        if c == "\\":
+            escaped = body[i + 1 : i + 2]
+            if escaped and escaped in "$`\\\n":
+                out.append(body[mark:i])
+                mark = i + (2 if escaped == "\n" else 1)
+            i += 2
+        elif c == "`":
+            i = prepare.backtick_end(body, i) + 1
+        elif body.startswith("$(", i) and not body.startswith("$((", i):
+            i = prepare.substitution_end(body, i) + 1
+        else:
+            i += 1
+    out.append(body[mark:])
+    return "".join(out)
 
 
 class _Scan:

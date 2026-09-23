@@ -7625,6 +7625,81 @@ class HereDocumentExpansionTest(BashHookCase):
                 self.assertIn(("git", ("push", "push")), findings)
 
 
+class HereDocumentInputTest(BashHookCase):
+    """SPD-206, filed by SPD-192's engineer: the shell that expands an unquoted here-document's body hands its command the
+    text it expanded, and the hook handed a shell fed such a body the body as spelled, so its reading of that shell saw
+    other commands than the shell runs.  The ticket's evidence, on the SPD-192 tree: `sh <<EOF` fed each of the first
+    four lines below, a push in place of the echo, recorded no finding, and the joined line aimed at the ledger recorded
+    the target `ledger/tickets/SPD-00` and a backslash.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f and in GNU bash 3.2.57, which printed the same, with TMPPREFIX in the probe's directory:
+
+    - each of the three outer shells feeding /bin/sh an unquoted body ran `\\$(echo RAN > l/h1)`, `echo \\$(echo RAN >
+      l/h2)`, `\\`echo RAN > l/h3\\``, `echo hi > l/h\\\\` then a line `5` (sh joined them: h5), and `ec\\\\` then a line
+      `ho RAN > l/h6`: all five files were written; the first line ran too fed through `cat <<EOF | sh`, to `bash` and
+      to `zsh -f`, and to sh after `<<-` with its tabs;
+    - with the delimiter quoted, sh stopped at the first line with a syntax error and wrote nothing;
+    - `cat` fed `[\\a] [\\"] [\\'] [\\$] [\\`] [\\\\] [\\x] [a\\<newline>b] [\\\\\\\\]` printed `[\\a] [\\"] [\\'] [$] [`]
+      [\\] [\\x] [ab] [\\\\]`: a backslash escapes a `$`, a backtick, a backslash and a newline, and stays before anything
+      else; a default word's text is read the same (`${u:-\\$(echo X)}` printed `$(echo X)`), while a `$( )`'s and
+      backticks' text is the substitution's own (`$(echo '\\$x')` printed `\\$x`)."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+    JOINED = "echo hi > ledger/tickets/SPD-00\\\\\n1.md"  # an escaped backslash, then a newline
+
+    def setUp(self):
+        super().setUp()
+        p = self.home.path / self.TARGET
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_read_as_the_shell_receives_it(self):
+        for body in ("\\$(git push)", "echo \\$(git push)", "\\`git push\\`", "git pu\\\\\nsh"):
+            self.law_7("sh <<EOF\n%s\nEOF" % body)
+
+    def test_the_joined_line_names_the_ledger_file_whole(self):
+        line = "sh <<EOF\n%s\nEOF" % self.JOINED
+        self.assertEqual([t for t, _cwds in self.analysis(line).redirects], [self.TARGET])
+        self.assertRefused(line, "Law 1", agent_id=None)
+        self.assertRefused(line, "generated")
+
+    def test_every_reader_of_the_body_is_handed_the_same_text(self):
+        # a shell reading it on standard input through a printer (shell/stdin_text), each shell, and `<<-` with its tabs
+        for line in ("cat <<EOF | sh\n\\$(git push)\nEOF", "bash <<EOF\n\\$(git push)\nEOF",
+                     "zsh -f <<EOF\n\\$(git push)\nEOF", "sh <<-EOF\n\t\\$(git push)\n\tEOF"):
+            self.law_7(line)
+
+    def test_a_quoted_delimiter_hands_the_body_over_as_spelled(self):
+        for operator in HEREDOC_QUOTED_OPERATORS:
+            line = "sh %s\n%s\nEOF" % (operator, self.JOINED)
+            with self.subTest(line=line):
+                self.assertEqual([t for t, _cwds in self.analysis(line).redirects], ["ledger/tickets/SPD-00\\"])
+            line = "sh %s\n\\$(git push)\necho \\$(git push)\n\\`git push\\`\nEOF" % operator
+            with self.subTest(line=line):
+                self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+
+    def test_the_text_a_command_receives(self):
+        received = self.m.received_body
+        self.assertEqual(received("[\\a] [\\\"] [\\'] [\\$] [\\`] [\\\\] [\\x] [a\\\nb] [\\\\\\\\]"),
+                         "[\\a] [\\\"] [\\'] [$] [`] [\\] [\\x] [ab] [\\\\]")
+        self.assertEqual(received("${u:-\\$(echo X)}"), "${u:-$(echo X)}")
+        for kept in ("$(echo '\\$x')", "`echo '\\\\$y'`", "$(echo a\\\nb)", "no escape", "trailing\\"):
+            with self.subTest(kept=kept):
+                self.assertEqual(received(kept), kept)
+
+
 # SPD-184: the process substitutions zsh runs in a case's word and its patterns, `%s` standing for the list.  With a file
 # touched in place of %s, zsh 5.9 made it for each (CaseSubstitutionTest has the probes).
 CASE_EQUALS_FORMS = (
