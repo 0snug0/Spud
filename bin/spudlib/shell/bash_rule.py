@@ -73,17 +73,26 @@ ARG_WRITE_MESSAGES = {
 }
 # an interpreter run whose program the line spells rather than reads from a file (shell/inline_programs), which
 # is how a member in another project wrote a script past its deliverable globs: `python3.14 - <<'PY' ... p.write_text(s)`.
-# Law 1's number, because the fence it passes is the one the edit hook puts on every path -- Spud's own files and a
-# member's deliverables -- and the way through that fence is the Edit or Write tool, which the hook checks.
+# Since SPD-175 only a program whose text shows a write marker (shell/program_writes), whose text the line does not
+# spell, or whose family no marker is tabled for is refused.  The rule it holds a member to is no law of Spud's: it is
+# the spudagent definition's (share/agents/spudagent.md), "Write only to the deliverable paths your parent planned",
+# which every other channel is held to.  The way out is a channel the hook checks -- the Edit or Write tool, or the
+# program's output redirected -- and no longer a program from a file, which the hook reads no better.
 INLINE_PROGRAM_REASON = (
-    "Law 1: `%s` runs a program %s, and the hook reads no inline program: it cannot tell which files that program"
-    " writes, so a write from there passes the fence every other channel is held to (the Edit and Write hook, a"
-    " redirection, a write by argument, a sed or awk script). Edit a deliverable with the Edit or Write tool, which the"
-    " edit hook checks against your globs; run a program from a file (`python3.14 -I -S tests/suite.py`,"
-    " `node scripts/build-web.js`) or a module (`python3 -m json.tool`), both of which are unchanged; and file a"
-    " proposal if the work really needs a program of its own")
+    "`%s` runs a program %s, and %s. The spudagent definition has you write only to the deliverable paths your parent"
+    " planned, and every other channel is held to them (the Edit and Write hook, a redirection, a write by argument, a"
+    " sed or awk script). Edit a deliverable with the Edit or Write tool, which the edit hook checks against your globs,"
+    " or have the program print what it makes and redirect that (`> file`), which the path rule checks; a program the"
+    " line spells whose text shows no write runs as it is; and file a proposal if the work really needs a program that"
+    " writes")
 INLINE_PROGRAM_STDIN = ("it reads on standard input (a here-document, a here-string, a pipe or a `<` file), having none"
                         " of its own")
+INLINE_PROGRAM_WHY = {
+    "writes": "its text writes (`%s`), a write the hook does not follow to a path it can check",
+    "unspelled": ("the line does not spell its text (a pipe from a file or a program, a `<` file, a word the line cannot"
+                  " settle), so the hook cannot read whether it writes"),
+    "untabled": "the hook tables no write markers for `%s`'s language, so it cannot read whether that program writes",
+}
 # The reason for a word the hook cannot resolve where a command is read by name, which is read in two places:
 # where the word stands on the line ("var-word", among the findings as spelled) and where an xargs reads it from an input
 # the line does not spell ("inline-word", read last with the inline program it may carry, shell/interpreter_words).
@@ -202,9 +211,13 @@ def unreadable_reason(cause):
 
 def inline_program_reason(detail):
     """The refusal an interpreter run earns a member for a program the line spells: (the command word as spelled, the
-    option that carries the program, or None where the interpreter reads it on standard input)."""
-    cmd, option = detail
-    return INLINE_PROGRAM_REASON % (cmd, ("`%s` carries" % option) if option else INLINE_PROGRAM_STDIN)
+    option that carries the program or None where the interpreter reads it on standard input, why, the write marker),
+    as shell/inline_programs.read_inline records it."""
+    cmd, option, why, marker = detail
+    because = INLINE_PROGRAM_WHY[why]
+    if "%s" in because:
+        because %= marker if why == "writes" else cmd
+    return INLINE_PROGRAM_REASON % (cmd, ("`%s` carries" % option) if option else INLINE_PROGRAM_STDIN, because)
 
 
 def path_directories(kind, path):
@@ -571,8 +584,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     if strict and unwalked:  # a tree whose walk for a git directory stopped short
         return ARG_WRITE_MESSAGES["unwalked"] % (unwalked, syntax.GLOB_SCAN_CAP), analysis
     if strict:
-        # last of all, where the findings FINDING_LAST holds back stand: an inline program says only that the
-        # hook cannot read what runs, so every refusal the line has already earned keeps its own reason -- a git verb, a
+        # last of all, where the findings FINDING_LAST holds back stand: an inline program says only that its text
+        # writes somewhere the hook does not follow, or that the hook cannot read it, so every refusal the line has already earned keeps its own reason -- a git verb, a
         # database call, a spud call, a program git would run, and each write the path rule refuses above, which is
         # what the readings of perl and sed as writers still answer with.
         # A shell whose commands come from a file (shell/script_files) is read here too, for the same reason; an

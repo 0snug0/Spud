@@ -1663,9 +1663,9 @@ class SpudAllowIdentityTest(BashHookCase):
                 self.assertSilentForBoth(spelled)
                 self.assertStillRefused(spelled)
         self.assertSilentForBoth("python3.14 -I -S -m spud_ledger {tail}")
-        # -c and - run code of the line's own, which SPD-150 refuses a member outright; neither is an allowed spud call
-        # for anyone, which is what this test is about.
-        for spelled in ("python3.14 -I -S -c 'import runpy' %s {tail}" % launcher,
+        # -c and - run code of the line's own, which SPD-150 refuses a member where it cannot read that it writes nothing
+        # (SPD-175); neither is an allowed spud call for anyone, which is what this test is about.
+        for spelled in ("python3.14 -I -S -c 'import runpy; exec(1)' %s {tail}" % launcher,
                         "python3.14 -I -S - %s {tail} < %s" % (launcher, launcher)):
             with self.subTest(spelled=spelled):
                 self.assertSilent(spelled.format(tail="--as spud board"), None)
@@ -9904,44 +9904,106 @@ class ScriptRunnerTest(BashHookCase):
         self.assertEqual(self.plans("npm run build --script-shell x")[0][0], "refuse")
 
 
-INLINE_WORDING = "the hook reads no inline program"
+# The wording every refusal of an inline program shares (SPD-175): the rule it holds a member to, which is the spudagent
+# definition's glob rule and no law of Spud's, and then one of three reasons the hook gives.
+INLINE_WORDING = "the deliverable paths your parent planned"
+INLINE_WRITES = "its text writes"
+INLINE_UNSPELLED = "the line does not spell its text"
+INLINE_UNTABLED = "tables no write markers"
 
 
 class InlineProgramTest(BashHookCase):
-    """SPD-150: an interpreter run whose program the line spells rather than reads from a file.
+    """SPD-150, narrowed by SPD-175: an interpreter run whose program the line spells rather than reads from a file.
 
     BADS-140/Jeremy wrote `scripts/web-seed.js`, outside his deliverable globs, with the HEREDOC below, and patched two
     files inside his globs the same way; nothing went through Edit or Write, so the edit hook never saw them, and the
     Bash rule read the line as far as `python3.14` and appended kind `other` (SPD-126's brief left the interpreters out
-    on purpose).  So Law 5's fence stood only where a member used the tools.
+    on purpose).  So the glob fence stood only where a member used the tools.
 
-    Since this ticket a caller the Bash rule holds is refused an interpreter run whose program the line spells: an
-    option that carries it (python's `-c`, node's `-e`/`--eval`/`-p`/`--print` with bun's and deno's spellings, perl's
-    `-e`/`-E`, ruby's `-e`) or standard input, where the line feeds it and the interpreter has no program of its own.
+    SPD-150 refused a member every such run.  The 106 refusals it earned in its first two days held 71 programs that
+    only read and print, 26 find-and-replace edits inside the member's own globs, 6 writes to a temp directory and 3
+    that wrote nothing at all, and none that would have written outside the member's globs.  Since SPD-175 (Eric's
+    call, 2026-09-22) the text the line spells -- an option's value, a here-document, a here-string, text a printer
+    pipes -- is scanned for write markers tabled per interpreter family from its own documentation
+    (shell/program_writes), and only a program whose text shows one is refused.  A program whose text the line does
+    not spell (a pipe from a file or another program, a `<` file, a word the line cannot settle) stays refused: there
+    is nothing to scan.  The scan is a nudge against the plain spellings, not a wall; a program from a file already
+    runs unread.
+
     A program from a file, python's `-m module` and an interpreter left to read a terminal are unchanged, whatever they
-    write -- whether a member may run a script file it wrote itself is SPD-145's question -- and Spud keeps his inline
-    programs, Law 1 binding him where the hook cannot see.
-
-    The refusal is read last of all (bash_rule), so every reason a line has already earned it keeps: a git verb, a
-    database call, a spud call, and each write the path rule refuses, which is how SPD-126's readings of perl's `-i`
-    still answer."""
+    write, and Spud keeps his inline programs.  The refusal is read last of all (bash_rule), so every reason a line has
+    already earned it keeps: a git verb, a database call, a spud call, and each write the path rule refuses."""
 
     HEREDOC = ("python3.14 - <<'PY'\nimport pathlib\np = pathlib.Path('scripts/web-seed.js')\ns = p.read_text()\n"
                "p.write_text(s.replace('a', 'b'))\nPY")
-    # Each line runs a program the line spells: an option carries it, or the interpreter reads it on standard input.
-    SPELLED = (
-        HEREDOC,
+    # SPUD-153/Herschel's here-document, refused by SPD-150: it reads the spudlib-modules map and the real modules and
+    # prints how they differ, and writes nothing.
+    HERSCHEL = (
+        "python3.14 -I -S - <<'EOF'\nimport re\nfrom pathlib import Path\n\n"
+        "skill = Path(\".claude/skills/spudlib-modules/SKILL.md\").read_text(encoding=\"utf-8\")\n"
+        "tree_block = skill.split(\"```\\nbin/\\n\")[1].split(\"```\", 1)[0]\nrows = {}\n"
+        "for line in tree_block.splitlines():\n    m = re.match(r\"\\s+(\\w+)/\\s+(.+)\", line)\n    if m:\n"
+        "        rows[m.group(1)] = [x.strip() for x in m.group(2).split(\"\u00b7\")]\n\n"
+        "for d, listed in rows.items():\n    real = sorted(p.stem for p in Path(\"bin/spudlib\", d).glob(\"*.py\"))\n"
+        "    status = \"OK\" if sorted(listed) == real else \"MISMATCH\"\n"
+        "    print(\"%-10s %-8s listed=%d real=%d\" % (d, status, len(listed), len(real)))\nEOF")
+    # BADS-175/Vern's edit, refused by SPD-150 and still refused: a find-and-replace written back with write_text.
+    VERN = ("python3 - <<'PY'\nimport re, pathlib\np = pathlib.Path('admin/src/lib/actions/run-usage-views.ts')\n"
+            "s = p.read_text()\ns = s.replace(\"message: message(err,\", \"message: refusal(err,\")\n"
+            "p.write_text(s)\nprint(s.count('refusal('))\nPY")
+    # Each line runs a program the line spells, and the text shows no write: allowed since SPD-175.
+    READS_ONLY = (
+        HERSCHEL,
         "python3.14 -c 'import pathlib'", "python3 -c'print(1)'", "python3 -Ic 'print(1)'", "python3 -I -S -c 'print(1)'",
-        "python3 -W ignore -c 'print(1)'", "python3 -c 'print(1)' > /dev/null",
-        "echo 'print(1)' | python3", "echo 'print(1)' | python3 -", "python3 <<< 'print(1)'", "python3 < tests/x.py",
-        "python3 - < tests/x.py", "cat tests/x.py | python3", "python3 /dev/stdin <<< 'print(1)'",
-        "python3 - <<'PY'\nprint(1)\nPY", "env python3 -c 'print(1)'", "cd tests && python3 -c 'print(1)'",
+        "python3 -W ignore -c 'print(1)'", "python3 -c 'print(1)' > /dev/null", "python3.14 -I -S -c \"pass\"",
+        "echo 'print(1)' | python3", "echo 'print(1)' | python3 -", "python3 <<< 'print(1)'",
+        "python3 /dev/stdin <<< 'print(1)'", "python3 - <<'PY'\nprint(1)\nPY", "env python3 -c 'print(1)'",
+        "cd tests && python3 -c 'print(1)'", "python3 -c 'import sys; print(sys.argv)' $UNSET",
+        "python3.14 -c \"import json; print(json.load(open('spud.config.json'))['naming'])\"",
+        "python3 -c 'open(\"x\", encoding=\"utf-8\").read()'", "python3 -c 'open(\"x\", \"rb\").read()'",
+        "python3 -c 'import os; print(os.path.join(\"a\", \"w\"))'", "python3 -c 'print(\"a b\".replace(\"a\", \"b\"))'",
+        "python3 -c 'import re; print(re.compile(\"a\").sub(\"b\", \"a\"))'", "python3 -c 'import ast; ast.literal_eval(\"1\")'",
         "node -e 'console.log(1)'", "node -p 'process.cwd()'", "node --eval 'console.log(1)'", "node --eval='x'",
         "node --print 'x'", "node -pe 'x'", "node --require ./r.js -e 'x'", "nodejs -e 'x'", "bun -e 'x'", "deno -e 'x'",
-        "node - <<'JS'\nconsole.log(1)\nJS", "cat tests/x.js | node", "echo 'console.log(1)' | node",
+        "node - <<'JS'\nconsole.log(1)\nJS", "echo 'console.log(1)' | node",
+        "node -e \"const p=require('./package.json');console.log(JSON.stringify({test:p.scripts.test},null,1))\"",
+        "node -e 'console.log(require(\"fs\").readFileSync(\"x\", \"utf8\"))'", "node -e 'console.log(/a/.exec(\"a\"))'",
+        "node -e 'process.stdout.write(\"x\")'", "node --input-type=module -e 'const m = await import(\"x\"); console.log(m)'",
         "perl -e 'print 1'", "perl -E 'say 1'", "perl -pe 's/a/b/' tests/x.txt", "perl -0pe 'print' tests/x.txt",
-        "perl -ne 'print if /x/' tests/x.txt", "perl -I lib -e 'print 1'", "cat tests/x.pl | perl",
+        "perl -ne 'print if /x/' tests/x.txt", "perl -I lib -e 'print 1'", "perl -e 'print readlink \"x\"'",
+        "perl -e 'open(my $fh, \"<\", \"x\") or die; print <$fh>'",
         "ruby -e 'puts 1'", "ruby -ne 'puts 1'", "ruby -I lib -e 'puts 1'", "echo 'puts 1' | ruby",
+        "ruby -e 'puts File.read(\"x\")'", "ruby -e 'h = {a: 1}; h.delete(:a); p h'",
+    )
+    # ... and each of these spells a program whose text writes, or runs one: refused, as SPD-150 refused them.
+    WRITES = (
+        HEREDOC, VERN,
+        "python3 -c 'import pathlib; pathlib.Path(\"x\").write_text(\"y\")'", "python3 -c 'open(\"x\", \"w\").write(\"y\")'",
+        "python3 -c \"open('x', mode='a')\"", "python3 -c 'import io; io.open(\"x\", \"w\", encoding=\"utf-8\")'",
+        "python3 -c 'import os; os.remove(\"x\")'", "python3 -c 'import shutil; shutil.copy(\"a\", \"b\")'",
+        "python3 -c 'import subprocess; subprocess.run([\"git\", \"push\"])'", "python3 -c 'import os; os.system(\"x\")'",
+        "python3 -c 'exec(\"x\")'", "python3 -c 'from pathlib import Path; Path(\"d\").mkdir()'",
+        "python3 -c 'import pathlib; pathlib.Path(\"a\").replace(\"b\")'", "python3 -c 'from os import remove; remove(1)'",
+        "python3 - <<'PY'\nimport os\nos.makedirs('d')\nPY", "echo 'import os; os.unlink(1)' | python3",
+        "python3 <<< 'import shutil; shutil.rmtree(\"d\")'", "python3 -c 'import os; os.open(\"x\", os.O_WRONLY)'",
+        "node -e 'require(\"fs\").writeFileSync(\"x\", \"y\")'", "node -e 'fs.appendFileSync(\"x\", 1)'",
+        "node -e 'require(\"child_process\").execSync(\"git push\")'", "node -e 'fs.rmSync(\"d\", {recursive: true})'",
+        "node -e 'fs.renameSync(\"a\", \"b\")'", "node -e 'fs.mkdirSync(\"d\")'", "node -e 'fs.openSync(\"x\", \"w\")'",
+        "node -p 'eval(\"1\")'", "bun -e 'Bun.write(\"x\", \"y\")'", "deno eval 'Deno.writeTextFileSync(\"x\", \"y\")'",
+        "deno -e 'Deno.removeSync(\"x\")'", "tsx -e 'fs.copyFileSync(\"a\", \"b\")'",
+        "node - <<'JS'\nrequire('fs').writeFileSync('x', 'y')\nJS", "echo 'fs.unlinkSync(1)' | node",
+        "perl -e 'open(my $fh, \">\", \"x\")'", "perl -e 'open(F, \">x\")'", "perl -e 'open F, \">>\", \"x\"'",
+        "perl -e 'unlink \"x\"'", "perl -e 'rename \"a\", \"b\"'", "perl -e 'mkdir \"d\"'", "perl -e 'system \"git push\"'",
+        "perl -e 'print `git push`'", "perl -0777 -i -pe 's/a/b/' /tmp/x.txt", "perl -pi -e 's/a/b/' /tmp/x.txt",
+        "ruby -e 'File.write(\"x\", \"y\")'", "ruby -e 'File.open(\"x\", \"w\") { |f| f.puts 1 }'",
+        "ruby -e 'require \"fileutils\"; FileUtils.rm_rf(\"d\")'", "ruby -e 'system(\"git push\")'",
+        "ruby -e 'puts `git push`'", "ruby -i -pe 'x' tests/x.txt",
+    )
+    # ... and each of these runs a program whose text the line does not spell: refused, since there is nothing to scan.
+    UNSPELLED = (
+        "python3 < tests/x.py", "python3 - < tests/x.py", "cat tests/x.py | python3", "cat tests/x.js | node",
+        "cat tests/x.pl | perl", "date | python3", "python3 -c \"$CODE\"", "node -e \"$(cat f)\"",
+        "python3 -c \"print('$d')\"", "perl -e 'print 1' $F", "node -e 'x' \"$(cat f)\"",
     )
     # ... and each of these runs a program from a file, a module, or none at all: unchanged, for every caller.
     READS_A_FILE = (
@@ -9970,42 +10032,80 @@ class InlineProgramTest(BashHookCase):
         return [detail for kind, detail in self.analysis(command).findings if kind == "inline"]
 
     def test_the_bads_140_heredoc_is_refused_and_recorded(self):
-        r = self.assertRefused(self.HEREDOC, "Law 1")
-        self.assertIn(INLINE_WORDING, r.reason)
+        r = self.assertRefused(self.HEREDOC, INLINE_WORDING)
+        self.assertIn(INLINE_WRITES, r.reason)
+        self.assertIn("write_text", r.reason)
         self.assertIn("python3.14", r.reason)
         self.assertIn("standard input", r.reason)
         self.assertIn("Edit or Write", r.reason)
+        self.assertIn("spudagent", r.reason)
         events = self.denied()
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["data"]["tool_name"], "Bash")
         self.assertIn(INLINE_WORDING, events[0]["data"]["reason"])
 
-    def test_the_analysis_finds_the_program_the_line_spells(self):
-        for command in self.SPELLED:
+    def test_the_reason_names_no_law(self):
+        """None of Spud's ten laws states a member's glob fence: the spudagent definition does, so the reason names it
+        and no law.  And it no longer offers a program from a file as the way out, which the hook reads no better."""
+        for command in (self.HEREDOC, "cat tests/x.py | python3", "php -r 'echo 1;'"):
             with self.subTest(command):
-                self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
-        for command in self.READS_A_FILE:
+                r = self.assertRefused(command, INLINE_WORDING)
+                self.assertNotIn("Law ", r.reason)
+                self.assertNotIn("tests/suite.py", r.reason)
+                self.assertIn("redirect", r.reason)
+
+    def test_the_analysis_finds_only_the_program_that_writes_or_cannot_be_read(self):
+        for command in self.WRITES:
+            with self.subTest(command):
+                found = self.inline(command)
+                self.assertEqual(len(found), 1, self.analysis(command).findings)
+                self.assertEqual(found[0][2], "writes", found)
+        for command in self.UNSPELLED:
+            with self.subTest(command):
+                found = self.inline(command)
+                self.assertEqual(len(found), 1, self.analysis(command).findings)
+                self.assertEqual(found[0][2], "unspelled", found)
+        for command in self.READS_ONLY + self.READS_A_FILE:
             with self.subTest(command):
                 self.assertEqual(self.inline(command), [])
 
-    def test_the_option_that_carries_the_program_is_the_one_the_reason_names(self):
-        for command, option in (("python3 -c 'print(1)'", "-c"), ("python3 -Ic 'print(1)'", "-c"),
-                                ("node -e 'x'", "-e"), ("node -p 'x'", "-p"), ("node -pe 'x'", "-p"),
-                                ("node --eval 'x'", "--eval"), ("node --eval='x'", "--eval"), ("node --print 'x'", "--print"),
-                                ("perl -e 'print 1'", "-e"), ("perl -E 'say 1'", "-E"), ("perl -pe 's/a/b/' f", "-e"),
-                                ("ruby -e 'puts 1'", "-e")):
+    def test_the_marker_the_reason_names(self):
+        for command, marker in ((self.HEREDOC, "write_text"), (self.VERN, "write_text"),
+                                ("python3 -c 'open(\"x\", \"w\")'", "\"w\""), ("python3 -c 'import os; os.remove(1)'", "os.remove"),
+                                ("node -e 'fs.writeFileSync(1)'", "writeFileSync"), ("perl -e 'unlink 1'", "unlink"),
+                                ("perl -pi -e 's/a/b/' /tmp/x.txt", "-i"), ("ruby -e 'File.write(1)'", "File.write")):
             with self.subTest(command):
-                self.assertEqual(self.inline(command), [(command.split()[0], option)])
-        for command in ("echo 'print(1)' | python3", self.HEREDOC, "cat tests/x.js | node"):
+                self.assertIn(marker, self.inline(command)[0][3])
+                self.assertIn(marker, self.assertRefused(command, INLINE_WRITES).reason)
+
+    def test_the_option_that_carries_the_program_is_the_one_the_reason_names(self):
+        for command, option in (("python3 -c 'open(1, \"w\")'", "-c"), ("python3 -Ic 'open(1, \"w\")'", "-c"),
+                                ("node -e 'fs.rmSync(1)'", "-e"), ("node -p 'fs.rmSync(1)'", "-p"),
+                                ("node -pe 'fs.rmSync(1)'", "-p"), ("node --eval 'fs.rmSync(1)'", "--eval"),
+                                ("node --eval='fs.rmSync(1)'", "--eval"), ("node --print 'fs.rmSync(1)'", "--print"),
+                                ("perl -e 'unlink 1'", "-e"), ("perl -E 'unlink 1'", "-E"), ("perl -pe 'unlink 1' f", "-e"),
+                                ("ruby -e 'system 1'", "-e")):
+            with self.subTest(command):
+                self.assertEqual(self.inline(command)[0][:2], (command.split()[0], option))
+        for command in ("echo 'import os; os.remove(1)' | python3", self.HEREDOC, "cat tests/x.js | node"):
             with self.subTest(command):  # standard input: no option carries it
                 self.assertEqual(self.inline(command)[0][1], None)
 
-    def test_a_member_is_refused_and_spud_keeps_his_inline_programs(self):
-        for command in self.SPELLED:
+    def test_a_member_is_refused_a_writing_or_unreadable_program_and_spud_keeps_his(self):
+        for command in self.WRITES:
             with self.subTest(command):
-                self.assertRefused(command, INLINE_WORDING)
-                self.assertRefused(command, "Law 1")
-                self.assertSilent(command, agent_id=None)  # Law 1 binds Spud where the hook cannot see; his are probes
+                self.assertRefused(command, INLINE_WRITES)
+                self.assertSilent(command, agent_id=None)
+        for command in self.UNSPELLED:
+            with self.subTest(command):
+                self.assertRefused(command, INLINE_UNSPELLED)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_program_that_only_reads_runs_for_everyone(self):
+        for command in self.READS_ONLY:
+            with self.subTest(command):
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=None)
 
     def test_a_program_from_a_file_a_module_and_a_terminal_are_unchanged(self):
         for command in self.READS_A_FILE:
@@ -10027,7 +10127,8 @@ class InlineProgramTest(BashHookCase):
         self.assertSilent("python3.14 -I -S %s/bin/spud board | head" % self.home.path)
 
     def test_a_refusal_the_line_already_earns_keeps_its_own_reason(self):
-        for command, needle in (("python3 -c 'print(1)' && git commit -m x", "Law 7"),
+        for command, needle in (("python3 -c 'open(1, \"w\")' && git commit -m x", "Law 7"),
+                                ("node -e 'fs.rmSync(1)' > docs/x.md", "deliverables"),
                                 ("node -e 'x' > docs/x.md", "deliverables"),
                                 ("perl -pi.bak -e s/a/b/ bin/spud", "deliverables"),
                                 ("perl -pi -e s/a/b/ ledger/tickets/SPD-001.md", "generated"),
@@ -10038,18 +10139,24 @@ class InlineProgramTest(BashHookCase):
                 self.assertNotIn(INLINE_WORDING, r.reason)
 
     def test_the_input_a_pipeline_and_a_group_give_an_interpreter(self):
-        """The reading is SPD-143's: what the line puts on a command's standard input, whether or not the hook can spell
-        the text -- a file, another program's output and an unreadable printer all feed a program it cannot read."""
+        """The reading is SPD-143's: what the line puts on a command's standard input, and whether the hook can spell
+        the text -- a file, another program's output and an unreadable printer all feed a program it cannot read, while
+        text a printer spells is scanned like a here-document."""
         for command in ("{ python3; }", "(python3)", "python3 3< tests/x.py", "python3 2>&1", "if true; then python3; fi"):
             with self.subTest(command):  # nothing on standard input: the REPL, whatever stands around it
                 self.assertSilent(command)
-        for command in ("echo 'print(1)' | { python3; }", "echo 'print(1)' | (python3)",
-                        "date | python3", "python3 <&3", "echo x | tee /dev/null | python3",
-                        "for f in tests/*.py; do python3 < $f; done"):
+        for command in ("echo 'print(1)' | { python3; }", "echo 'print(1)' | (python3)", "echo x | tee /dev/null | python3"):
+            with self.subTest(command):  # text the line spells, and no write in it
+                self.assertSilent(command)
+        for command in ("echo 'import os; os.remove(1)' | { python3; }", "echo 'import os; os.remove(1)' | (python3)"):
             with self.subTest(command):
-                self.assertRefused(command, INLINE_WORDING)
+                self.assertRefused(command, INLINE_WRITES)
+        for command in ("date | python3", "python3 <&3", "for f in tests/*.py; do python3 < $f; done"):
+            with self.subTest(command):
+                self.assertRefused(command, INLINE_UNSPELLED)
         self.assertSilent("echo 'print(1)' | xargs node")  # xargs reads the input; its command gets none of it
-        self.assertRefused("echo 'print(1)' | xargs node -e", INLINE_WORDING)  # ... but the -e is still an -e
+        self.assertSilent("echo 'print(1)' | xargs node -e")  # ... and the -e's program is the text it appends
+        self.assertRefused("echo 'fs.rmSync(1)' | xargs node -e", INLINE_WRITES)
 
 
 class UntabledInterpreterTest(BashHookCase):
@@ -10075,16 +10182,31 @@ class UntabledInterpreterTest(BashHookCase):
     program on its standard input printed the driver's help and ran nothing, so swift reads standard input only where
     the line names it -- `-`, or `swift repl`.
 
-    The refusal, the reason and what stays unchanged are all SPD-150's: Law 1 through bash_rule.inline_program_reason,
-    read last so an earlier refusal keeps its own wording, a program from a file untouched (SPD-145), and Spud's own
-    inline programs his."""
+    The refusal, the reason and what stays unchanged are all SPD-150's: bash_rule.inline_program_reason, read last so
+    an earlier refusal keeps its own wording, a program from a file untouched (SPD-145), and Spud's own inline programs
+    his.
 
-    # Each line runs a program the line spells, through a shape SPD-150's four rows did not read.
-    SPELLED = (
+    Since SPD-175 a program whose text the line spells is refused only where that text shows a write marker, tabled per
+    family (shell/program_writes).  deno reads node's markers with its own `Deno.` calls, and tsx and ts-node run node,
+    so their programs are scanned as node's.  The other five stay refused whatever their text: osascript's `tell
+    application` reaches every scriptable application's verbs and its JavaScript dialect the whole Cocoa bridge, swift
+    reaches Foundation's, and php, lua and Rscript are not installed here and no member's refusal ran one, so none of
+    them is tabled as soundly as the four families are."""
+
+    # Each line runs a program the line spells through deno's subcommands, tsx or ts-node, and writes nothing.
+    READS_ONLY = (
         "deno eval 'console.log(1)'", "deno eval --ext=ts 'console.log(1)'", "deno eval -- 'console.log(1)'",
         "deno repl --eval 'console.log(1)'", "deno repl --eval='console.log(1)'",
         "deno run - <<'JS'\nconsole.log(1)\nJS", "echo 'console.log(1)' | deno run -",
-        "echo 'console.log(1)' | deno run --allow-read -", "deno run - < scripts/x.ts",
+        "echo 'console.log(1)' | deno run --allow-read -",
+        "tsx -e 'console.log(1)'", "tsx --eval 'x'", "ts-node -p 'x'", "ts-node --eval 'x'", "echo 'x' | ts-node",
+    )
+    # ... and the same shapes where the text writes, or the line does not spell it.
+    WRITES = ("deno eval 'Deno.writeTextFileSync(\"x\", \"y\")'", "deno repl --eval 'Deno.removeSync(1)'",
+              "deno run - <<'JS'\nDeno.mkdirSync('d')\nJS", "tsx -e 'fs.writeFileSync(1)'", "ts-node -p 'fs.rmSync(1)'")
+    UNSPELLED = ("deno run - < scripts/x.ts", "cat scripts/x.ts | ts-node", "cat scripts/x.ts | deno run -")
+    # Each line runs a program the line spells, in a family no write marker is tabled for.
+    SPELLED = (
         "osascript -e 'do shell script \"git push\"'", "osascript -l JavaScript -e 'x'", "osascript -s o -e 'x'",
         "osascript <<'AS'\ndo shell script \"git push\"\nAS", "echo 'display dialog \"x\"' | osascript",
         "osascript - <<'AS'\nbeep\nAS",
@@ -10092,7 +10214,6 @@ class UntabledInterpreterTest(BashHookCase):
         "echo '<?php echo 1;' | php", "php < tests/x.php",
         "lua -e 'print(1)'", "lua -l mod -e 'print(1)'", "lua - <<'L'\nprint(1)\nL", "echo 'print(1)' | lua",
         "Rscript -e 'print(1)'", "Rscript --vanilla -e 'print(1)'", "Rscript -e 'a' -e 'b'",
-        "tsx -e 'console.log(1)'", "tsx --eval 'x'", "ts-node -p 'x'", "ts-node --eval 'x'", "echo 'x' | ts-node",
         "swift -e 'print(1)'", "swift -O -e 'print(1)'", "swift - <<'S'\nprint(1)\nS", "swift - < tests/x.swift",
     )
     # ... and each of these runs a program from a file or none at all: unchanged, for every caller (`deno task <name>` runs a
@@ -10121,40 +10242,52 @@ class UntabledInterpreterTest(BashHookCase):
     def test_the_analysis_finds_the_program_the_line_spells(self):
         for command in self.SPELLED:
             with self.subTest(command):
-                self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
-        for command in self.READS_A_FILE:
+                found = self.inline(command)
+                self.assertEqual(len(found), 1, self.analysis(command).findings)
+                self.assertEqual(found[0][2], "untabled", found)
+        for command, why in [(c, "writes") for c in self.WRITES] + [(c, "unspelled") for c in self.UNSPELLED]:
+            with self.subTest(command):
+                found = self.inline(command)
+                self.assertEqual(len(found), 1, self.analysis(command).findings)
+                self.assertEqual(found[0][2], why, found)
+        for command in self.READS_A_FILE + self.READS_ONLY:
             with self.subTest(command):
                 self.assertEqual(self.inline(command), [])
 
     def test_a_member_is_refused_and_spud_keeps_his_inline_programs(self):
-        for command in self.SPELLED:
+        for command, needle in ([(c, INLINE_UNTABLED) for c in self.SPELLED] + [(c, INLINE_WRITES) for c in self.WRITES]
+                                + [(c, INLINE_UNSPELLED) for c in self.UNSPELLED]):
             with self.subTest(command):
-                self.assertRefused(command, INLINE_WORDING)
-                self.assertRefused(command, "Law 1")
-                self.assertSilent(command, agent_id=None)  # Law 1 binds Spud where the hook cannot see; his are probes
+                r = self.assertRefused(command, INLINE_WORDING)
+                self.assertIn(needle, r.reason)
+                self.assertNotIn("Law 1", r.reason)
+                self.assertSilent(command, agent_id=None)  # Spud keeps his; his are probes
 
-    def test_a_program_from_a_file_a_task_and_a_terminal_are_unchanged(self):
-        for command in self.READS_A_FILE:
+    def test_a_program_from_a_file_a_task_a_terminal_and_one_that_only_reads_are_unchanged(self):
+        for command in self.READS_A_FILE + self.READS_ONLY:
             with self.subTest(command):
                 self.assertSilent(command)
                 self.assertSilent(command, agent_id=None)
 
     def test_what_the_reason_names_as_carrying_the_program(self):
         """The subcommand for deno's operand form, the option for every other, and None for standard input."""
-        for command, option in (("deno eval 'x'", "eval"), ("deno eval -- 'x'", "eval"),
-                                ("deno repl --eval 'x'", "--eval"), ("deno repl --eval='x'", "--eval"),
-                                ("deno -e 'x'", "-e"), ("osascript -e 'x'", "-e"), ("php -r 'x'", "-r"),
+        for command, option in (("deno eval 'Deno.removeSync(1)'", "eval"), ("deno eval -- 'Deno.removeSync(1)'", "eval"),
+                                ("deno repl --eval 'Deno.removeSync(1)'", "--eval"),
+                                ("deno repl --eval='Deno.removeSync(1)'", "--eval"),
+                                ("deno -e 'Deno.removeSync(1)'", "-e"), ("osascript -e 'x'", "-e"), ("php -r 'x'", "-r"),
                                 ("php -R 'x'", "-R"), ("lua -e 'x'", "-e"), ("Rscript -e 'x'", "-e"),
-                                ("tsx -e 'x'", "-e"), ("ts-node -p 'x'", "-p"), ("swift -e 'x'", "-e")):
+                                ("tsx -e 'fs.rmSync(1)'", "-e"), ("ts-node -p 'fs.rmSync(1)'", "-p"), ("swift -e 'x'", "-e")):
             with self.subTest(command):
-                self.assertEqual(self.inline(command), [(command.split()[0], option)])
+                self.assertEqual(self.inline(command)[0][:2], (command.split()[0], option))
                 self.assertIn("`%s` carries" % option, self.assertRefused(command, INLINE_WORDING).reason)
-        for command in ("deno run - <<'JS'\nx\nJS", "echo x | osascript", "swift - <<'S'\nx\nS", "echo x | lua"):
+        for command in ("deno run - <<'JS'\nDeno.removeSync(1)\nJS", "echo x | osascript", "swift - <<'S'\nx\nS",
+                        "echo x | lua"):
             with self.subTest(command):  # standard input: no option carries it
                 self.assertEqual(self.inline(command)[0][1], None)
+        self.assertIn("`osascript`", self.assertRefused("osascript -e 'beep'", INLINE_UNTABLED).reason)
 
     def test_a_refusal_the_line_already_earns_keeps_its_own_reason(self):
-        for command, needle in (("deno eval 'x' && git commit -m x", "Law 7"),
+        for command, needle in (("deno eval 'Deno.removeSync(1)' && git commit -m x", "Law 7"),
                                 ("osascript -e 'x' > docs/x.md", "deliverables"),
                                 ("php -r 'x' > ledger/tickets/SPD-001.md", "generated"),
                                 ("swift -e 'x' | tee CLAUDE.md", "deliverables"),
@@ -10238,27 +10371,32 @@ class InterpreterWordTest(BashHookCase):
 
     def test_a_settled_value_is_read_as_the_value(self):
         """SPD-127's reading: the word the shell would hand the interpreter, not the spelling."""
-        for command, option in (("X=-p; node $X code", "-p"), ("X=-e; ruby $X 'puts 1'", "-e"),
-                                ("X=--eval; node $X 'x'", "--eval"), ("X=-r; php $X 'echo 1;'", "-r")):
+        for command, option in (("X=-p; node $X fs.rmSync", "-p"), ("X=-e; ruby $X 'system 1'", "-e"),
+                                ("X=--eval; node $X 'fs.rmSync(1)'", "--eval"), ("X=-r; php $X 'echo 1;'", "-r")):
             with self.subTest(command):
-                self.assertEqual(self.inline(command), [(command.split()[1], option)])
+                self.assertEqual(self.inline(command)[0][:2], (command.split()[1], option))
                 self.assertRefused(command, INLINE_WORDING)
+        self.assertSilent("X=-p; node $X code")  # SPD-175: the program `-p` carries is read, and writes nothing
         for command in ("X=scripts/x.js; node $X", "X=tests/x.py; python3 $X", "X=scripts/x.php; php $X"):
             with self.subTest(command):  # a settled value naming a file: a program from a file, as it always was
                 self.assertEqual(self.inline(command), [])
                 self.assertSilent(command)
 
     def test_the_option_an_xargs_reads_out_of_its_input(self):
-        for command in ("printf '%s\\n' '-e code' | xargs node", "printf '%s\\n' '-e code' | xargs ruby",
-                        "printf '%s\\n' '-r code' | xargs php", "printf '%s\\n' '--eval code' | xargs node",
-                        "printf '%s\\n' '-e code' | xargs -I% node %", "echo 'eval code' | xargs deno",
-                        "{ printf '%s\\n' '-e code'; } | xargs node", "printf '%s\\n' '-e code' | xargs -0 node",
-                        "xargs node <<< '-e code'", "xargs deno <<< 'eval code'", "xargs osascript <<< '-e beep'",
-                        "echo '-e code' | xargs node", "echo '-e code' | xargs -I% node %"):
+        for command in ("printf '%s\\n' '-e rmSync' | xargs node", "printf '%s\\n' '-e system' | xargs ruby",
+                        "printf '%s\\n' '-r code' | xargs php", "printf '%s\\n' '--eval rmSync' | xargs node",
+                        "printf '%s\\n' '-e rmSync' | xargs -I% node %", "echo 'eval Deno.removeSync' | xargs deno",
+                        "{ printf '%s\\n' '-e rmSync'; } | xargs node", "printf '%s\\n' '-e rmSync' | xargs -0 node",
+                        "xargs node <<< '-e rmSync'", "xargs deno <<< 'eval Deno.removeSync'", "xargs osascript <<< '-e beep'",
+                        "echo '-e rmSync' | xargs node", "echo '-e rmSync' | xargs -I% node %"):
             with self.subTest(command):
                 self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
                 self.assertRefused(command, INLINE_WORDING)
                 self.assertSilent(command, agent_id=None)
+        for command in ("printf '%s\\n' '-e code' | xargs node", "xargs node <<< '-e code'", "echo '-e code' | xargs node"):
+            with self.subTest(command):  # SPD-175: the program the input spells is read, and writes nothing
+                self.assertEqual(self.inline(command), [])
+                self.assertSilent(command)
 
     def test_an_input_the_line_does_not_spell_leaves_the_option_position_unreadable(self):
         for command in self.UNSPELLED_INPUT:
@@ -10395,8 +10533,8 @@ class RuntimeShellTest(BashHookCase):
     def test_what_the_text_runs_is_read_as_a_shell_reads_it(self):
         """The text is a shell's, so every other reading reaches into it: an inline program, a write the path rule
         holds, a database call, and a spud call."""
-        self.assertRefused("npx -c \"node -e 'x'\"", INLINE_WORDING)
-        self.assertRefused("bun exec 'python3 -c 1'", INLINE_WORDING)
+        self.assertRefused("npx -c \"node -e 'fs.rmSync(1)'\"", INLINE_WORDING)
+        self.assertRefused("bun exec 'python3 -c \"import os; os.remove(1)\"'", INLINE_WORDING)
         self.assertRefused("bun exec 'echo x > CLAUDE.md'", "deliverables")
         self.assertRefused("pnpm exec -c 'sqlite3 x.db'", "spud sql --readonly")
         self.assertRefused("yarn exec 'git push; ls'", "Law 7")
@@ -10407,8 +10545,8 @@ class RuntimeShellTest(BashHookCase):
         """SPD-152 read `deno task --eval` as deno's `--eval` carrying a program; it is a task's text, read as a shell."""
         self.assertEqual([f for f in self.analysis("deno task --eval 'echo hi'").findings if f[0] == "inline"], [])
         self.assertSilent("deno task --eval 'echo hi'")
-        self.assertRefused("deno eval 'x'", INLINE_WORDING)  # deno's own eval is still a program
-        self.assertRefused("deno task --eval \"deno eval 'x'\"", INLINE_WORDING)
+        self.assertRefused("deno eval 'Deno.removeSync(1)'", INLINE_WORDING)  # deno's own eval is still a program
+        self.assertRefused("deno task --eval \"deno eval 'Deno.removeSync(1)'\"", INLINE_WORDING)
 
 
 # A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
@@ -10542,8 +10680,9 @@ class ShellSnapshotTest(ShellSnapshotCase):
             self.silent_for_everyone(cmd)
         # SPD-150: the alias (python=python3) still shadows the program; the words after it are the member's own, so an
         # inline program behind one is refused exactly as it is spelled out, and stays Spud's.
-        self.refused_for_members("python -c pass", INLINE_WORDING)
-        self.assertSilent("python -c pass", agent_id=None)
+        self.refused_for_members("python -c 'import os; os.remove(1)'", INLINE_WORDING)
+        self.assertSilent("python -c 'import os; os.remove(1)'", agent_id=None)
+        self.silent_for_everyone("python -c pass")  # SPD-175: a program whose text writes nothing runs
 
     def test_a_recursive_alias_terminates(self):
         """`alias ls='ls -G'` and `ll='ls -lh'`: zsh does not expand a name again inside its own expansion."""
@@ -10779,8 +10918,10 @@ class RealShellSnapshotTest(BashHookCase):
             with self.subTest(cmd):
                 r = self.real_bash(cmd)
                 self.assertNotEqual(r.decision, "deny", (cmd, r.reason))
-        # ... and one a member ran all day until SPD-150, refused now whatever this Mac's profile says (InlineProgramTest)
-        self.assertIn(INLINE_WORDING, self.real_bash("python3 -c pass").reason)
+        # ... and one a member ran all day, refused by SPD-150 and allowed again by SPD-175 since its text writes nothing,
+        # while one whose text writes is refused whatever this Mac's profile says (InlineProgramTest)
+        self.assertNotEqual(self.real_bash("python3 -c pass").decision, "deny")
+        self.assertIn(INLINE_WORDING, self.real_bash("python3 -c 'import os; os.remove(1)'").reason)
 
     def test_a_function_that_hands_its_words_to_git_reads_them(self):
         """SPD-203: oh-my-zsh defines `__git_prompt_git () { GIT_OPTIONAL_LOCKS=0 command git "$@" }`, which ran a
@@ -14870,18 +15011,22 @@ class SpelledWriteTest(TreeWriteCase):
         self.assertRefused("split -a 3 a.tar out/x", "deliverables", agent_id=AGENT_I)
 
     def test_perl_in_place_and_its_backup(self):
-        # SPD-150: perl's -e and -E are inline programs, refused a member before its files are reached, so the silent
-        # lines here name perl's other program, a file; each of them was silent for the same reason before that ticket.
+        # SPD-150: perl's -e and -E are inline programs, refused a member where their text writes (SPD-175) -- and -i is
+        # a write marker, so an inline -i edit is refused before its files are reached -- so the silent lines with -i here
+        # name perl's other program, a file; each of them was silent for the same reason before that ticket.
         for command in ("perl -pi script.pl bin/spud", "perl -0pi script.pl tests/x.txt", "perl -pi.bak script.pl tests/x.txt",
                         "perl script.pl docs/x.md", "perl -p script.pl docs/x.md", "perl -Ilib script.pl docs/x.md",
-                        "find tests/out -exec perl -pi script.pl {} +"):
+                        "find tests/out -exec perl -pi script.pl {} +",
+                        # a program the line spells whose text writes nothing, which SPD-175 lets run
+                        "perl -pe s/a/b/ docs/x.md", "perl -ne 'print if /x/' docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'"):
             with self.subTest(command):
                 self.assertSilent(command, agent_id=AGENT_A)
-        for command in ("perl -pi -e s/a/b/ bin/spud", "perl -0pi -e s/a/b/ tests/x.txt", "perl -pe s/a/b/ docs/x.md",
-                        "perl -ne 'print if /x/' docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'",
-                        "sleep_ms() { perl -e 'select undef, undef, undef, $ARGV[0]' \"$1\"; }; sleep_ms 20"):  # the differential's
+        # ... and perl reads its switches past -e's program, so a word it reads there that the line does not settle may
+        # be a -i or another -e: the differential's `"$1"`, read in a body the line defines, stays refused
+        for command in ("perl -pi -e s/a/b/ bin/spud", "perl -0pi -e s/a/b/ tests/x.txt",
+                        "sleep_ms() { perl -e 'select undef, undef, undef, $ARGV[0]' \"$1\"; }; sleep_ms 20"):
             with self.subTest(command):
-                self.assertRefused(command, INLINE_WORDING, agent_id=AGENT_A)  # SPD-150, whatever the files it edits
+                self.assertRefused(command, INLINE_WORDING, agent_id=AGENT_A)  # -i, whatever the files it edits
         for command in ("perl -pe s/a/b/ docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'"):  # Spud keeps his
             with self.subTest(command):
                 self.assertSilent(command, agent_id=None)
