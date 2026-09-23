@@ -3,6 +3,9 @@
 from . import analyse, assignment_words, directories, globbing, prepare, stdin_text, syntax
 from ..hooks import hookio
 
+# The loops whose header names a variable, one header grammar to zsh (its parser's par_for; ShellWalk.names_end)
+_NAMED_LOOPS = ("for", "select", "foreach")
+
 
 def _value_may_start_with_dash(word):
     """Whether a masked word, as the shell expands it, may start with `-`: spelled so, an expansion or an operand
@@ -81,6 +84,11 @@ class ShellWalk:
     - zsh's SHORT_LOOPS (on by default) run a loop body with no `do` and `done`: after `repeat word`, after
       `for name ( word ... )` and after a `for`/`select` list closed by `;` or a newline, the body is a `do ... done`, a
       `{ list }`, a `( list )` or one sublist, and the loop ends where that sublist ends;
+    - a `for`, `select` or `foreach` header (zsh's par_for) is its names, then `( word ... )`, `in word ... TERM` or neither,
+      the positional parameters.  zsh reads the word after each name in command position: for a for or a foreach an
+      identifier there is one more name, and any other word -- `do`, `{`, another reserved word, a redirection -- opens the
+      body; a select takes one name, and the word after it opens its body unless it is `in` or `(` (SPD-182; see
+      names_end);
     - the same holds for an `if`, `while` or `until` whose condition ends in `[[ ... ]]`, which closes the condition
       the way a terminator closes a loop header, so `then` and `do` are optional there too; an `elif` after such a body
       opens the next condition list the same way, so its own `[[ ... ]]` and body are read as the `if`'s were;
@@ -99,7 +107,7 @@ class ShellWalk:
         self.split_brace = False  # ... and it did on this line, so the reading differs from bash's
         self.words, self.stack = [], []
         self.skip = False  # the words are a for, select, foreach or case header or a function's name, not a command
-        self.header = None  # which header they are: "for" (for, select), "foreach", "repeat" or "func"
+        self.header = None  # which header they are: "for", "select", "foreach" (_NAMED_LOOPS), "repeat" or "func"
         self.expect_body = False  # the header is complete: the next word decides the body's form
         self.function_next = False  # `name ()` or `function name` was read: the next body is a function's
         self.redirect_cwds = syntax._CURRENT
@@ -273,19 +281,43 @@ class ShellWalk:
         """A `for`, `select`, `repeat` or `foreach` in command position: its header is read, then its body, with or without
         `do`.  A foreach's body may run to an `end`, which is its closer until the body shows its form (resolve_body)."""
         self.push("loop", "end" if t == "foreach" else "done")
-        self.skip, self.header = True, t if t in ("repeat", "foreach") else "for"
+        self.skip, self.header = True, t
         self.stack[-1].body = "header"
 
-    def foreach_names(self, words):
-        """Whether a foreach header's words so far are only its names (syntax.foreach_name), after which zsh reads the next
-        word in command position (its parser, par_for): a `( ... )` there is the word list, `in` starts one, another
-        identifier is one more name, and anything else -- a reserved word, a redirection -- opens the body of a loop over
-        the positional parameters: a `do ... done`, a `{ ... }`, or the first command of a list up to `end`.  Probed in
-        zsh 5.9 with `set -- p`: `foreach a b (1 2 3 4) echo two-$a$b; end` printed two-12 two-34; `foreach f do ...;
-        done`, `foreach f g { ... }` and syntax.ZSH_RESERVED_WORDS' lines ran their bodies; `foreach f > o1; end` made o1
-        and `foreach f g >o2 echo x; end` wrote x to o2; `foreach f git push; end` ran nothing, git and push being names;
-        and `foreach f x-y; end` failed near `x-y`, a word that is neither (read as the body, fail closed)."""
-        return all(syntax.foreach_name(w) for w in words)
+    def loop_names(self, words):
+        """Whether a for, select or foreach header's words so far are only its names, no word list begun: after them zsh's
+        parser (par_for) reads the next word in command position, where a `( ... )` is the word list and `in` starts one.
+        A select takes one name; every word a for's or a foreach's header took after its first is a name until an `in`,
+        since any other word ends the header (names_end)."""
+        if self.header == "select":
+            return len(words) <= 1
+        return "in" not in words[1:]
+
+    def names_end(self, t):
+        """Whether `t`, read in a for, select or foreach header after its words so far, ends the names and opens the body of
+        a loop over the positional parameters: a `do ... done`, a `{ ... }`, or the first command of one sublist -- of a
+        list up to `end`, for a foreach (resolve_body).  The first word is the first name if zsh takes it for one
+        (syntax.loop_name), and otherwise a parse error, read as the body, fail closed.  After the names, with no word list
+        begun, a select's body starts at once, and a for's or a foreach's at the first word that is no name -- a reserved
+        word, a redirection, a word zsh rejects -- where a run of digits just before a redirection operator is that
+        redirection's descriptor, as directories.separate_redirects reads it, not a name.
+
+        Probed in zsh 5.9 -f and -f -o nobareglobqual with `set -- p` (SPD-180, SPD-182): `foreach a b (1 2 3 4) echo
+        two-$a$b; end` and `for a b (1 2 3 4) echo two-$a$b` printed two-12 two-34; `for f do ...; done`, `for f { ... }`,
+        `for a b do ...; done`, `foreach f g { ... }` and syntax.ZSH_RESERVED_WORDS' lines ran their bodies; `for f > o1`
+        made o1, `for f 2> o2 echo x` made o2 and ran echo, and `for f g >o3 echo x` wrote x to o3; `for f git push` and
+        `foreach f git push; end` ran nothing, git and push being names; `for f x-y` and `foreach f x-y; end` failed near
+        `x-y`, a word that is neither (read as the body, fail closed); and a select's body started after its one name,
+        `select f x-y` running a command named x-y and `select a b c` one named b."""
+        if not self.words:
+            return not syntax.loop_name(t, first=True)
+        if t == "in":
+            return False
+        if self.header != "select" and syntax.loop_name(t):
+            following = self.toks[self.at + 1] if self.at + 1 < len(self.toks) else None
+            if not (t.isdigit() and (following in syntax.OUT_REDIRECTS or following in syntax.IN_REDIRECTS)):
+                return False  # one more name, or a word of the list
+        return self.loop_names(self.words)
 
     def ends_foreach(self):
         """Whether an `end` in command position closes a foreach: the compound command it would close, past the short
@@ -509,9 +541,9 @@ class ShellWalk:
         `{\\vcs try}` too; `{vcs,x}` ran a command named `vcs,x`, no brace expansion); and a word whose `}` glued_close
         splits off is read, then the `}` is, as a lone one after it.  bash reads both braces as part of their words.
 
-        After a foreach's names, with no word list, a word that is no name -- a reserved word, a redirection -- ends the
-        header and opens the body (foreach_names)."""
-        if self.skip and self.header == "foreach" and t != "in" and not syntax.foreach_name(t) and self.foreach_names(self.words):
+        After a for's, a select's or a foreach's names, with no word list, a word that is no name -- a reserved word, a
+        redirection -- ends the header and opens the body (names_end)."""
+        if self.skip and self.header in _NAMED_LOOPS and self.names_end(t):
             self.end_header()
             self.resolve_body(t)
         while t[:1] == "{" and (t == "{" or (self.glued and not self.in_pattern())) and self.open_brace():
@@ -572,7 +604,7 @@ class ShellWalk:
             self.close_brace()
             return
         self.words.append(t)
-        if self.skip and self.header in ("for", "foreach"):
+        if self.skip and self.header in _NAMED_LOOPS:
             self.loop_header_word(t)
         if self.skip and self.header == "repeat":  # `repeat word`: one word of header, then the body
             self.end_header()
@@ -617,9 +649,10 @@ class ShellWalk:
                     j += 1
                 self.words.append("".join(toks[i : j + 1]))
                 i = j
-                # `for (( ... ))`, `for name ( ... )` or `foreach name ... ( ... )` closed: its body follows
-                if self.header in ("for", "repeat") and len(self.words) <= 2 \
-                        or self.header == "foreach" and self.foreach_names(self.words[:-1]):
+                # `for (( ... ))`, `repeat (( ... ))`, or a `for`, `select` or `foreach` list after its names closed: its
+                # body follows
+                if self.header == "repeat" and len(self.words) <= 2 \
+                        or self.header in _NAMED_LOOPS and self.loop_names(self.words[:-1]):
                     self.end_header()
             elif t in ("(", "<(", ">("):
                 self.function_next = False
@@ -656,7 +689,7 @@ class ShellWalk:
                 self.a.cwds = self.list_start  # the whole and-or list ran in the background
                 self.start_list()
             elif t in syntax.LIST_TERMINATORS:
-                if self.skip and self.header in ("for", "foreach"):
+                if self.skip and self.header in _NAMED_LOOPS:
                     self.end_header()  # `for f in a b;` and `for f;`: zsh takes what follows as the body
                 self.finish()
                 self.close_sublists()

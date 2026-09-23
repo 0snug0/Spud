@@ -12,10 +12,11 @@ IN_REDIRECTS = {"<", "<<", "<<<", "<<-", "<&"}
 RESERVED_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "select", "case", "esac",
                   "in", "function", "!", "{", "}", "coproc"}
 # zsh's own reserved words, as `enable -r` listed them in zsh 5.9 -f (tests/probes/shell_probe.py, SPD-180).  Its lexer
-# reads each as a token of its own wherever it is in command position, as it is after each of a foreach's names, so one
-# there ends the names and opens the loop's body: `set -- p; foreach f if true; then echo x; fi; end`, `foreach f [[ -n x
-# ]] && echo x; end`, `foreach f typeset -f > tf; end` and `foreach f export X=1; end` each ran as that body.  `in` is
-# not one: zsh's parser compares the word itself there.
+# reads each as a token of its own wherever it is in command position, as it is after each of a for's or a foreach's names,
+# so one there ends the names and opens the loop's body: `set -- p; foreach f if true; then echo x; fi; end`, `foreach f
+# [[ -n x ]] && echo x; end`, `foreach f typeset -f > tf; end` and `foreach f export X=1; end` each ran as that body, and
+# so did `for f if true; then echo x; fi` and `for f typeset -f > o4` (SPD-182).  `in` is not one: zsh's parser compares
+# the word itself there.
 ZSH_RESERVED_WORDS = {"!", "[[", "case", "coproc", "declare", "do", "done", "elif", "else", "end", "esac", "export", "fi",
                       "float", "for", "foreach", "function", "if", "integer", "local", "nocorrect", "readonly", "repeat",
                       "select", "then", "time", "typeset", "until", "while", "{", "}"}
@@ -90,6 +91,7 @@ LOOP_PREFIX_WORDS = {"coproc", "time", "!"}
 # simple command named NAME, and zsh, whose coproc takes a command only, is a parse error for every named form).
 COPROC_COMPOUND_WORDS = {"{", "(", "[[", "if", "while", "until", "for", "select", "case"}
 IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+LOOP_NAME_RE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)\Z")  # a loop's name to zsh: an identifier or a run of digits
 DIRECTORY_COMMANDS = {"cd", "chdir", "pushd", "popd"}  # the builtins, spelled exactly: CD and /usr/bin/cd are programs
 SHELL_DECLARATIONS = {"export", "typeset", "declare", "local", "readonly"}
 # A redirection or tee target the shell expands is checked as every file it opens, not as its literal spelling.
@@ -526,11 +528,16 @@ class ShellAnalysis:
         return "spud" in self.kinds and all(k in ("spud", "cd") for k in self.kinds) and not self.unparseable
 
 
-def foreach_name(word):
-    """Whether zsh reads this word, standing after a foreach's names, as one more name (SPD-180): an identifier, neither
-    `in`, which starts a word list there, nor a reserved word, which its lexer reads as a token of its own there
-    (ZSH_RESERVED_WORDS).  Anything else ends the names and opens the body (walk.ShellWalk.foreach_names has the probes)."""
-    return word != "in" and word not in ZSH_RESERVED_WORDS and IDENTIFIER_RE.match(word) is not None
+def loop_name(word, first=False):
+    """Whether zsh reads this word, in a for, select or foreach header, as one of the loop's names (its parser, par_for;
+    SPD-180, SPD-182): an identifier or a run of digits, which its isident takes as well (probed in zsh 5.9: `for f 1 (a b)
+    echo $f$1` printed ab, and so did foreach).  The `first` word after the reserved word is read with command position
+    off, so `in` and a reserved word are names there too (`for in (a b)`, `for do (a b)` and `select in (a)` ran their
+    bodies); after it zsh reads each word in command position, where `in` starts a word list and a reserved word is a token
+    of its own (ZSH_RESERVED_WORDS), and either ends the names, as any other word does (walk.ShellWalk.names_end)."""
+    if LOOP_NAME_RE.match(word) is None:
+        return False
+    return first or word != "in" and word not in ZSH_RESERVED_WORDS
 
 
 def unknown_operand(word):

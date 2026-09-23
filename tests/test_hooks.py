@@ -6319,7 +6319,7 @@ class ForeachBodyTest(BashHookCase):
     def test_a_word_after_the_names_that_is_no_name_opens_the_body(self):
         """zsh reads the word after each of a foreach's names in command position, so a reserved word or a redirection there
         ends the names and opens the body of a loop over the positional parameters, while another identifier is one more
-        name (syntax.ZSH_RESERVED_WORDS and ShellWalk.foreach_names have the probes; with `set -- p`, `foreach f repeat 1
+        name (syntax.ZSH_RESERVED_WORDS and ShellWalk.names_end have the probes; with `set -- p`, `foreach f repeat 1
         echo rp-$f; end`, `foreach f nocorrect ...`, `foreach f time ...`, `foreach f ! ...` and `foreach f foreach g (b)
         ...; end; end` ran theirs too).  A `(` after a `{` or a `do` there opens a subshell (`foreach f {(echo gsub-$f)}`,
         `foreach f do (echo dsub-$f); done` and `foreach f g { (echo bsub-$f) }` ran it), and a group after the body's
@@ -6438,6 +6438,332 @@ class ForeachBodyTest(BashHookCase):
                      "foreach f (a) { " * 500 + "git push" + " }" * 500, "end; " * 2000 + "git push",
                      "foreach a " + "b " * 3000 + "(c) git push; end", "foreach f (a) true; " * 2000 + "git push",
                      "foreach " * 500):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-182: the other spellings of a for or select header, `%s` its body.  zsh's parser (par_for) reads a for's header as it
+# reads a foreach's (SPD-180): one or more names, then `( word ... )`, `in word ... TERM` or neither -- the positional
+# parameters -- with the word after each name in command position, so a `do` or a `{` there opens a body over the positional
+# parameters and a word that is no name the first command of one.  The first name may be any identifier, `in` and a reserved
+# word among them, and every name a run of digits.  A select takes one name, and the word after it, unless `in` or `(`, is
+# its body's first.  FOR_OPENERS are the other words that open such a body: a reserved word, a subshell after a `{` or a
+# `do`; FOR_BODIES are body forms, each after `for a b (1 2)`, `for f do`, `for f {` and `select f` (where a `( list )`
+# is the word list instead); FOR_ENCLOSED are the places such a loop may stand.  With `set -- p`, a file holding 1 on
+# standard input for a select, and `echo <label> >> ran.log` in the slot, each of the 102 lines built from these and from
+# ForSelectHeaderTest's other loop forms logged its label in zsh 5.9 (arm64-apple-darwin26.0) -f and -f -o nobareglobqual (tests/probes/shell_probe.py,
+# 2026-09-23), and with `tee (l|x)/t<n>` in the slot each of the 39 headers and enclosing forms it writes through wrote its
+# l/t<n>; bash 3.2.57 ran only the lines whose loop is spelled `for f do` or `select f do` (and `zsh -f -c`'s, which zsh
+# ran), and rejected the rest.
+FOR_HEADERS = (
+    "for f do %s; done",
+    "for f { %s }",
+    "for f {%s}",
+    "for a b (1 2) %s",
+    "for a b (1 2) { %s }",
+    "for a b (1 2); %s",
+    "for a b do %s; done",
+    "for a b { %s }",
+    "for f g {%s}",
+    "for in (a b) %s",
+    "for do (a b) %s",
+    "for end (a) %s",
+    "for 1 (a b) %s",
+    "for f 1 (a b) %s",
+    "for f 12 (a b) %s",
+    "for if in a b; %s",
+)
+SELECT_HEADERS = (
+    "select f %s",
+    "select f do %s; done",
+    "select f { %s }",
+    "select f {%s}",
+    "select in (a) %s",
+)
+FOR_OPENERS = (
+    "for f repeat 1 %s",
+    "for f time %s",
+    "for f ! %s",
+    "for f nocorrect %s",
+    "for f if true; then %s; fi",
+    "for f [[ -n x ]] && %s",
+    "for f case x in x) %s;; esac",
+    "for f for g (x) %s",
+    "for f foreach g (x) %s; end",
+    "for f {(%s)}",
+    "for f do (%s); done",
+    "for f g { (%s) }",
+    "for f function g { %s }; g",
+    "select f if true; then %s; fi",
+    "select f repeat 1 %s",
+    "select f [[ -n x ]] && %s",
+    "select f {(%s)}",
+    "foreach in (a b) %s; end",
+    "foreach end (a) %s; end",
+    "foreach f 1 (a b) %s; end",
+)
+FOR_BODIES = ("%s", "( %s )", "{ %s }", "true && %s", "false || %s", "%s | cat", "if true; then %s; fi",
+              "case x in x) %s;; esac", "repeat 1 %s")
+FOR_ENCLOSED = ("eval 'for f do %s; done'", "x=$(for a b (1 2) %s)", "zsh -f -c 'for f { %s }' zc p",
+                "fn() { for f do %s; done }; fn q", "if true; then for a b (1 2) %s; fi", "{ for f { %s } }",
+                "time for f do %s; done", "! for f { %s }", "echo x | for f do %s; done",
+                "case x in x) for a b (1 2) %s;; esac", "for f (a) for g { %s }", "repeat 1 for f do %s; done",
+                "eval 'select f %s'", "x=$(select f %s)")
+
+
+class ForSelectHeaderTest(BashHookCase):
+    """SPD-182, filed by SPD-180's engineer: ShellWalk read every word of a for or select header up to a terminator, or up to
+    a `( ... )` list after exactly one name, as the header's, so the four spellings whose body starts on the header's line
+    with no terminator -- `for f do git push; done`, `for f { git push }`, `for a b (1 2) git push` and `select f git push`
+    -- were a header with nothing after it.  A git write there was silent for a member (Law 7), a redirection or a tee into a
+    generated file recorded nothing (Law 1 for Spud, Law 5 for a member), and mark_zsh_patterns read a `(` after the name, a
+    `do` or a `{` as a glob, so `for f do (git push); done` hid its subshell.  SPD-180 gave foreach zsh's reading of its
+    header; for and select share it (par_for) and now read so too, and so does foreach where its names were read short:
+    `foreach in (a b) ...; end` and `foreach f 1 (a b) ...; end` were silent as well.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line but the qualifier's, and in GNU bash 3.2.57:
+
+    - the ticket's evidence, with `set -- p`: `for f do echo fd-$f; done` printed fd-p (bash ran it too, the POSIX form),
+      `for f { echo fb-$f }` fb-p, `for a b (1 2 3 4) echo two-$a$b` two-12 and two-34, and `{ select f echo sel-$f; } <
+      in`, with 1 in the file, sel-p; bash rejected all but the first near the word after the name;
+    - the names: after the first, zsh reads each word in command position, so a reserved word or a redirection ends them and
+      opens the body (`for f > o1` made o1, `for f 2> o2 echo x` made o2, `for f &> o8 echo x` o8, and FOR_OPENERS ran
+      theirs), an identifier or a run of digits is one more name (`for f 1 (a b) echo n-$f$1` printed n-ab, and so did
+      foreach), and any other word is a parse error (`for f x-y`, `for f a[1] (x)`).  The first name is read with command
+      position off: `for in (a b)`, `foreach in (a b)`, `select in (a)`, `for do (a b)`, `for end (a)`, `for if in a b;`
+      and `for 1 (a b)` each ran their body for each word, and `for x-y (a)` and `for { ... }` failed near their word;
+    - select takes one name: `select f x-y` ran a command named x-y, `select a b c` one named b, and `select a b (1 2) echo
+      x` failed expanding `(1 2)` as b's glob argument (no matches found; unknown file attribute under -f); `select f (echo
+      x)` is its word list, and `select f` then a newline and `(echo x)` a subshell body;
+    - the body: a for's is a `do ... done`, a `{ list }` or one sublist (`for a b (1 2) echo s1-$a; echo s2-$a` printed
+      s1-1 then s2-1 once); `for f git push` ran nothing, git and push being names, and `for f git push; done` failed near
+      `done`; a `((` after a name is an arithmetic command, not a list (`for f ((1)) && echo $f` echoed the positional
+      parameter);
+    - the loop runs in the shell: `for f do cd d; done`, `for f { cd d }`, `for a b (1 2) cd d` and `{ select f cd d; } <
+      in` each ended in d, and `for f do (cd d); done` did not move it;
+    - with l/t present, the pattern after the body's command word was expanded: `echo fd | for f do tee (l|x)/t1 >
+      /dev/null; done`, `for f { echo fb > (l|x)/t2 }`, `for a b (1 2) echo ab > (l|x)/t3`, `echo abt | for a b (1 2) tee
+      (l|x)/t4 > /dev/null`, `{ select f echo sr > (l|x)/t6; } < in` and `{ select f tee (l|x)/t8 < in; } < in` each wrote
+      its l/t, and `for f g > (l|x)/t echo gx` wrote gx there; with b and c present, zsh -f ran the `e:` code of `for f do
+      ls (b|c)(e:<code>:); done`, of `for a b (1 2) ls (b|c)(e:<code>:)` and of `{ select f ls (b|c)(e:<code>:); } < in`
+      for the files it matched, and zsh -f -o nobareglobqual read a second pattern and found no match.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "(ledger|x)/tickets/SPD-001.md"
+    EVIDENCE = ("for f do %s; done", "for f { %s }", "for a b (1 2) %s", "select f %s")
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def every_payload(self, form):
+        """Law 7, Law 6, Law 5's --as, the database and Law 1 through a redirection and a tee for both members; for Spud, the
+        checks that apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        for command, needle in (("git push", "Law 7"), ("%s ticket new --title x" % spud, "Law 6"),
+                                ("%s --as spud member log hi" % spud, "Law 6"),
+                                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                                ("echo x | tee ledger/tickets/SPD-001.md", "generated")):
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=form % command, agent_id=agent_id):
+                    self.assertRefused(form % command, needle, agent_id)
+        for command, needle in (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1")):
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, needle, agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def refused_everywhere(self, line, target="ledger/tickets/SPD-001.md"):
+        """Refused to both members for the ledger file, named as the line spells it, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                r = self.assertRefused(line, "generated", agent_id)
+                self.assertIn(target, r.reason)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def path_rule(self, line):
+        """A write with no `/` in its words: refused to AGENT_A, whose deliverables are tests/** and bin/spud, allowed to
+        AGENT_C, and refused to Spud, whose own files these are not."""
+        with self.subTest(line=line):
+            self.assertRefused(line, "deliverables")
+            self.assertSilent(line, AGENT_C)
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_the_loop_zsh_runs(self):
+        for header in self.EVIDENCE:
+            self.law_7(header % "git push")
+            self.refused_everywhere(header % "tee ledger/tickets/SPD-001.md")
+            self.refused_everywhere(header % "echo x > ledger/tickets/SPD-001.md")
+            self.path_rule(header % "rm -rf docs")
+            self.assertIn("docs", [w[1] for w in self.analysis(header % "rm -rf docs").arg_writes])
+            # the pattern zsh expands after the body's command word is kept in its word, a list's own `(` left as it is
+            for line in (header % ("tee %s" % self.TARGET), header % ("echo x > %s" % self.TARGET)):
+                with self.subTest(line=line):
+                    marked, _other = self.m.mark_zsh_patterns(line)
+                    self.assertEqual(marked.count("("), line.count("(") - 1)
+                    self.assertEqual(self.m.deglob(marked), line)
+                    self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(line).redirects])
+                self.refused_everywhere(line, self.TARGET)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_header_reads_its_body(self):
+        for header in FOR_HEADERS + SELECT_HEADERS:
+            self.law_7(header % "git push")
+            self.refused_everywhere(header % ("tee %s" % self.TARGET), self.TARGET)
+
+    def test_every_word_that_opens_a_body_reads_it(self):
+        """A reserved word, a subshell after a `{` or a `do`, and a redirection after the names (FOR_OPENERS; with `set --
+        p`, `for f > o1` made o1, `for f 2> o2 echo x` made o2, `for f g >o3 echo x` wrote x to o3, `for f &> o8 echo x` made
+        o8, `for f g > (l|x)/t echo x` wrote x to l/t, `for f typeset -f > o4` made o4, and `{ select f > o5; } < in` and `{
+        select f 2> o6 echo x; } < in` made theirs)."""
+        for opener in FOR_OPENERS:
+            self.law_7(opener % "git push")
+        self.path_rule("for f repeat 1 rm -rf docs")
+        for line in ("for f > ledger/tickets/SPD-001.md", "for f 2> ledger/tickets/SPD-001.md git status",
+                     "for f &> ledger/tickets/SPD-001.md echo x", "select f > ledger/tickets/SPD-001.md",
+                     "select f 2> ledger/tickets/SPD-001.md echo x", "for f typeset -f > ledger/tickets/SPD-001.md"):
+            self.refused_everywhere(line)
+        self.refused_everywhere("for f g > %s echo x" % self.TARGET, self.TARGET)
+        self.refused_everywhere("echo x | for f do tee %s > /dev/null; done" % self.TARGET, self.TARGET)
+        self.refused_everywhere("select f tee %s < ledger/tickets/SPD-001.md" % self.TARGET, self.TARGET)
+        self.refused_everywhere("select f { echo x > %s }" % self.TARGET, self.TARGET)
+        self.refused_everywhere("select f echo x | tee %s > /dev/null" % self.TARGET, self.TARGET)
+        # a redirection's own descriptor stays the redirection's: `2>&1` duplicates, it writes no file named 1
+        self.law_7("for f 2>&1 git push")
+
+    def test_every_body_form_reads_its_commands(self):
+        """Each body form after each header, but a `( ... )` right after a select's name, which is its word list
+        (test_names_and_lists_run_nothing)."""
+        for header in ("for a b (1 2) %s", "for f do %s; done", "for f { %s }", "select f %s"):
+            for body in FOR_BODIES:
+                if not (header == "select f %s" and body[:1] == "("):
+                    self.law_7(header % (body % "git push"))
+
+    def test_every_enclosing_text_reads_its_body(self):
+        for form in FOR_ENCLOSED:
+            self.law_7(form % "git push")
+            self.refused_everywhere(form % ("tee %s" % self.TARGET), self.TARGET)
+
+    def test_every_payload_for_every_caller(self):
+        for form in self.EVIDENCE + ("for a b (1 2) ( %s )", "for f do ( {%s} ); done", "for f g { %s }", "for in (a b) %s",
+                                     "for f 1 (a b) %s", "select f { %s }", "select f do %s; done", "for f if true; then %s; fi"):
+            self.every_payload(form)
+
+    def test_the_path_rule_in_the_body(self):
+        for form in self.EVIDENCE + ("for f {%s}", "select f { %s }"):
+            for write in ("echo x | tee note.txt", "touch note.txt", "rm -rf docs"):
+                self.path_rule(form % write)
+            line = form % "echo x | tee tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_the_qualifier_code_is_read(self):
+        tickets = str(self.home.path / "ledger" / "tickets")
+        for header in ("for f do %s; done", "select f %s", "for a b (1 2) %s"):
+            self.law_7(header % "ls (b|c)(e:'git push':)")
+            line = header % "ls (b|c)(e:'echo x > SPD-001.md':)"
+            self.assertRefused(line, "Law 1", None, tickets)
+            self.assertRefused(line, "generated", AGENT_C, tickets)
+
+    def test_the_loop_variable_is_doubted(self):
+        """Each name takes the list's words in turn, or the positional parameters, so a command word built from one is
+        refused (with `set -- p`, `for X (echo) $X xv` printed xv and `for X do $X xd; done` ran a command named p)."""
+        for line in ("for X do $X push; done", "for X { $X push }", "for Y X (a git) $X push", "select X $X push",
+                     "select X do $X push; done", "for in (git) $in push", "foreach Y 1 (a git) $1 push; end",
+                     "for do (git) { $do push }"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "cannot resolve")
+                self.assertRefused(line, "cannot resolve", AGENT_C)
+
+    # -- the loop model -----------------------------------------------------------------------------------------------
+    def test_a_cd_in_the_body_is_read_as_a_loops(self):
+        """A relative cd may repeat, so it is unfollowable; an absolute one leaves the union of before and after; a
+        subshell's does not carry out; and a cd after a for's sublist body is outside the loop and followed."""
+        home, out = self.home.path, self.out
+        for form in self.EVIDENCE + ("for f g { %s }", "for in (a b) %s", "select f do %s; done"):
+            with self.subTest(form=form):
+                self.assertRefused((form % "cd docs") + "; echo x > note.txt", "cannot follow", AGENT_C)
+                self.assertRefused((form % ("cd %s/ledger" % home)) + "; echo x > tickets/SPD-001.md", "generated", AGENT_C)
+                self.assertEqual(self.analysis(form % ("cd %s" % out)).cwds, frozenset([str(home), str(out)]))
+        self.assertSilent("for f do (cd %s/ledger); done; echo x > tickets/SPD-001.md" % home, AGENT_C)
+        self.assertEqual(self.analysis("for f do (cd %s); done" % out).cwds, frozenset([str(home)]))
+        for form in ("for a b (1 2) true; %s", "select f true; %s"):
+            with self.subTest(form=form):
+                self.assertSilent(form % ("cd %s; echo x > note.txt" % out))
+                self.assertRefused(form % ("cd %s/ledger; echo x > tickets/SPD-001.md" % home), "generated", AGENT_C)
+
+    def test_the_body_reads_as_the_command_does_alone(self):
+        """The loop runs its body, and its header changes none of the body's words: every finding, redirection target and
+        written operand the body has on its own line, it has after each header."""
+        for body in [w % self.TARGET for w in FOR_ARITH_WRITERS] + ["cat %s" % self.TARGET, "echo (b|c)",
+                                                                    "ls (b|c)(e:'git push':)", "rm -rf docs"]:
+            alone = self.analysis(body)
+            for header in self.EVIDENCE + ("for in (a b) %s", "for f 1 (a b) %s", "select f do %s; done", "for f g { %s }"):
+                line = header % body
+                with self.subTest(line=line):
+                    looped = self.analysis(line)
+                    self.assertEqual(looped.findings, alone.findings)
+                    self.assertEqual([t for t, _c in looped.redirects], [t for t, _c in alone.redirects])
+                    self.assertEqual([w[1] for w in looped.arg_writes], [w[1] for w in alone.arg_writes])
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_names_and_lists_run_nothing(self):
+        """An identifier or a run of digits after a for's names is one more name, a word after `in` or inside `( ... )` a
+        word of the list, a `for` out of command position a word, and a group after the body's command word a pattern:
+        none of them runs."""
+        for line in ("for f git push", "for f g h", "for f git push; done", "foreach f 1 git push; end", "for f 1 2 git",
+                     "echo for f do git push", "for f in git push; do echo $f; done", "select f in git push; do true; done",
+                     "for f (git push) echo $f", "select f (git push) true", "select f ( git push )", "for a b (git push) true",
+                     "for f do echo (b|c); done", "select f echo (b|c)", "for a b (1 2) echo (b|c)"):
+            with self.subTest(line=line):
+                self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+        # select takes one name: the word after it is the body's command, the group after that its glob argument
+        self.assertNotIn(("git", ("push", "push")), self.analysis("select a b (1 2) git push").findings)
+
+    def test_the_other_spellings_keep_their_reading(self):
+        for line in ("for f in a b; do git push; done", "for f (a b) git push", "for f; git push", "for f\ndo git push\ndone",
+                     "select f in a b; do git push; done", "select f (a b) git push", "for (( i=0; i<1; i++ )) git push",
+                     "foreach f (a b) git push; end", "for f\n(git push)", "select f\n(git push)"):
+            self.law_7(line)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("for f do " * 2000 + "git push" + "; done" * 2000, "for f { " * 500 + "git push" + " }" * 500,
+                     "for a " + "b " * 3000 + "(c) git push", "select f " * 2000 + "git push",
+                     "for a " + "b " * 3000 + "do git push; done", "for f in " + "a " * 5000 + "; git push",
+                     "for " * 500, "select " * 500, "for f 1 do " * 1000 + "git push" + "; done" * 1000):
             with self.subTest(line=line[:40]):
                 started = time.monotonic()
                 a = self.analysis(line)
