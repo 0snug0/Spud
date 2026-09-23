@@ -25,8 +25,13 @@ PATH logging its arguments and each line run by /bin/bash -c from a scratch dire
 - xargs: `echo 'vcs a' | xargs -0 sh -c` ran `vcs a`, the whole input being the -c string; `echo 'vcs a' | xargs sh -c`
   ran `vcs` with $0 set to a, its first word being the string.
 
+A word the printers are passed, and a here-string's word, is read through the value the line settled
+(arg_writes.resolved, SPD-148): `X='git push'; echo $X | sh` feeds the shell what `echo 'git push' | sh` does.  The
+masked words no longer tell `$X` from `"$X"`, so where a settled value holds a blank the printer is read as zsh passes the
+word and as bash splits it unquoted, and the text kept only where both print the same (printed_text, _string_text).
+
 What stays unread: standard input the line does not spell -- a file (`sh < f`), another program's output (`cat f | sh`,
-`curl ... | sh`), or text this module cannot decode.  That is the same class as `sh script.sh`, a script the hook does
+`curl ... | sh`), a value the line does not settle or the two readings print apart, or text this module cannot decode.  That is the same class as `sh script.sh`, a script the hook does
 not read either, and Law 7 has that hole for every caller; Spud has filed it as a question for Eric rather than have a
 member refused for it here.
 
@@ -40,7 +45,7 @@ names.
 import os
 import re
 
-from . import directories, expansions, globbing, prepare, syntax
+from . import arg_writes, directories, expansions, globbing, prepare, syntax
 
 # The operands that name the standard input the line gave the shell rather than a script file of its own (probed:
 # `bash /dev/stdin <<< 'vcs a'` and `bash - <<< 'vcs a'` both ran it).
@@ -57,6 +62,9 @@ _ESCAPE_RE = re.compile(r"\\(c|0[0-7]{0,3}|[0-7]{1,3}|x[0-9A-Fa-f]{1,2}|.)", re.
 # The xargs options that hand the utility whole records rather than blank-separated words, so one input is one operand
 # (xargs(1): -0/--null, -d/--delimiter).
 _WHOLE_INPUT_OPTIONS = ("--null", "--delimiter")
+# Where bash's reading of an unquoted expansion splits its value, in word_fields: no shell variable can hold a NUL.
+_FIELD = "\0"
+_PRINTERS = frozenset({"echo", "print", "printf", "cat", "tee"})
 
 
 def joined(before, text):
@@ -64,22 +72,51 @@ def joined(before, text):
     return None if before is None or text is None else before + text
 
 
-def word_text(word):
+def word_text(word, a=None):
     """The text this masked word stands for, or None where the hook cannot say it: an expansion, a substitution, a glob
-    the shell expands, or an operand the line does not spell."""
+    the shell expands, or an operand the line does not spell.  With the line's analysis `a`, a `$NAME` the line settled
+    stands for its value, whole (SPD-148): zsh's reading, which never splits an expansion, and bash's of a quoted one."""
+    if a is not None:
+        word = arg_writes.resolved(word, a, _whole)
     if expansions.expansion_word(word) or globbing.active_glob_word(word) or syntax.unknown_operand(word):
         return None
     return prepare.deglob(word)
 
 
-def command_input(tokens, bodies, piped):
+def word_fields(word, a):
+    """The words bash makes of this masked word were each of its expansions unquoted: a settled value split at its runs of
+    blanks, the default IFS, and an empty field at either end dropped (SPD-148).  [None] where word_text cannot say it."""
+    text = word_text(arg_writes.resolved(word, a, _split))
+    if text is None:
+        return [None]
+    return [f for f in text.split(_FIELD) if f] if _FIELD in text else [text]
+
+
+def _whole(value):
+    return value
+
+
+def _split(value):
+    return syntax._IFS_BLANKS_RE.sub(_FIELD, value)
+
+
+def _readings(words, a):
+    """The words a command is passed as zsh reads them and as bash reads them unquoted -- each a list of texts, None for
+    a word the hook cannot say.  The masked words no longer tell `$X` from `"$X"`, so where a settled value holds a blank
+    the two are the only readings there are, and a caller keeps what they agree on."""
+    return [word_text(w, a) for w in words], [f for w in words for f in word_fields(w, a)]
+
+
+def command_input(tokens, bodies, piped, a=None):
     """The text the simple command `tokens` reads on standard input, or None where the line does not spell it.
 
     The last thing the line puts there wins: a here-document body, which ShellWalk.consume has already taken out of the
     words (`bodies`); a here-string whose word the hook can resolve; or the text the pipeline element before this one
     printed (`piped`).  A file (`sh < f`), a descriptor (`sh <&3`) and a word holding an expansion, a substitution or a
-    glob leave it unknown.  A here-document and a `<` on one command are read in the order the redirections stand, which
-    the body no longer stands in; the body wins, since the hook reads it anyway."""
+    glob leave it unknown, and so does a here-string whose settled value the two shells do not read alike
+    (_string_text).  A here-document and a `<` on one command are read in the order the redirections stand, which
+    the body no longer stands in; the body wins, since the hook reads it anyway.  `a`: the line's analysis, whose settled
+    values a here-string's word is read with (SPD-148)."""
     text = bodies[-1] + "\n" if bodies else piped
     i = 0
     while i < len(tokens):
@@ -88,12 +125,22 @@ def command_input(tokens, bodies, piped):
             fd, i, t = t, i + 1, tokens[i + 1]
         if t in syntax.IN_REDIRECTS:
             if fd in (None, "0") and t not in ("<<", "<<-"):  # a here-document's body is in `bodies`
-                spelled = word_text(tokens[i + 1]) if t == "<<<" and i + 1 < len(tokens) else None
+                spelled = _string_text(tokens[i + 1], a) if t == "<<<" and i + 1 < len(tokens) else None
                 text = None if spelled is None else spelled + "\n"
             i += 2
             continue
         i += 2 if t in syntax.OUT_REDIRECTS else 1
     return text
+
+
+def _string_text(word, a):
+    """A here-string's text, its word read with the line's settled values (`a`): whole, as zsh reads it, where bash's
+    reading of the word unquoted -- its fields joined by a blank -- is the same text, and None where the two differ."""
+    whole = word_text(word, a)
+    if a is None or whole is None or "$" not in word:
+        return whole
+    fields = word_fields(word, a)
+    return whole if None not in fields and " ".join(fields) == whole else None
 
 
 def input_fed(tokens, bodies, piped):
@@ -151,29 +198,51 @@ def reads_commands(words):
     return prepare.deglob(words[i]) in STDIN_OPERANDS
 
 
-def printed_text(tokens, bodies, piped):
+def printed_text(tokens, bodies, piped, a=None):
     """The text the simple command `tokens` prints on standard output, or None where the hook cannot spell it.
 
     Only the commands that print what the line spells are read: echo, zsh's print, printf, a cat of its own input, and
     tee, which passes its input on whatever files it also writes.  A command whose standard output a redirection takes
-    prints nothing into the pipe, and every other command prints text this module does not know."""
+    prints nothing into the pipe, and every other command prints text this module does not know.
+
+    `a`, the line's analysis before this command runs: a `$NAME` the line settled is read as its value (SPD-148), the
+    value the shells expand it to, since the command's own prefix assignments reach none of its words.  The masked words
+    no longer say whether the expansion was quoted, and bash splits an unquoted one at its blanks where zsh never does, so
+    such a command is read both ways (_readings) and its text kept only where the two agree: `X='git push'; echo $X`
+    prints `git push` either way, `X='-n x'; echo $X` and `printf '%s\\n' $X` do not."""
     if _stdout_taken(tokens):
         return None
     words = directories.separate_redirects(tokens)[0]
-    name = word_text(words[0]) if words else None
-    base = os.path.basename(name).casefold() if name else ""
+    if a is None or not any("$" in w for w in words):
+        name = word_text(words[0]) if words else None
+        if not _printer(name):
+            return None
+        return _printed([name] + [word_text(w) for w in words[1:]], tokens, bodies, piped, a)
+    if not _printer(word_text(words[0], a)):
+        return None  # zsh's reading prints nothing this module reads, so bash's cannot agree with a text
+    whole, fields = _readings(words, a)
+    text = _printed(whole, tokens, bodies, piped, a)
+    return text if fields and _printer(fields[0]) and text == _printed(fields, tokens, bodies, piped, a) else None
+
+
+def _printer(name):
+    return bool(name) and os.path.basename(name).casefold() in _PRINTERS
+
+
+def _printed(texts, tokens, bodies, piped, a):
+    """printed_text's reading of one list of words as a shell passes them, `texts`, None for one the hook cannot say;
+    the first is a printer's name."""
+    base, args = os.path.basename(texts[0]).casefold(), texts[1:]
     if base == "echo":
-        return _echo_text(words)
+        return _echo_text(args)
     if base == "print":
-        return _print_text(words)
+        return _print_text(args)
     if base == "printf":
-        return _printf_text(words)
-    if base in ("cat", "tee"):
-        stdin = command_input(tokens, bodies, piped)
-        # tee(1) writes its input to each file and to standard output unchanged, whatever its options; cat prints its
-        # input only when every operand it reads is that input (`cat`, `cat -`), never a file the hook does not read
-        return stdin if base == "tee" or all(word_text(w) == "-" for w in words[1:]) else None
-    return None
+        return _printf_text(args)
+    stdin = command_input(tokens, bodies, piped, a)
+    # tee(1) writes its input to each file and to standard output unchanged, whatever its options; cat prints its
+    # input only when every operand it reads is that input (`cat`, `cat -`), never a file the hook does not read
+    return stdin if base == "tee" or all(t == "-" for t in args) else None
 
 
 def xargs_string(words, consumed, appended, text):
@@ -229,24 +298,21 @@ def _stdout_taken(tokens):
     return False
 
 
-def _spelled_words(words, between=" "):
-    """The words as the command prints them, `between` between them, or None when the hook cannot spell one of them."""
-    text = []
-    for w in words:
-        t = word_text(w)
-        if t is None:
-            return None
-        text.append(t)
-    return between.join(text)
+def _spelled_words(texts, between=" "):
+    """The words' texts as the command prints them, `between` between them, or None when the hook cannot spell one."""
+    return None if None in texts else between.join(texts)
 
 
-def _echo_text(words):
+def _echo_text(args):
     """What `echo` prints: its words, blank-separated, with a newline unless -n, and its escapes decoded -- zsh's
     reading, and bash's under -e -- unless -E asks for them as they stand.  A leading word that starts with `-` and is
-    no option of echo's is text this module does not read: the shells differ over which of those they print."""
-    args, decode, newline = words[1:], True, True
+    no option of echo's is text this module does not read: the shells differ over which of those they print.  `args`:
+    the texts of its words after the command word, None for one the hook cannot say, here and in the printers below."""
+    decode, newline = True, True
     while args:
-        w = prepare.deglob(args[0])
+        w = args[0]
+        if w is None:
+            return None
         if not w.startswith("-") or len(w) == 1:
             break
         if not _ECHO_OPTIONS_RE.fullmatch(w):
@@ -260,13 +326,15 @@ def _echo_text(words):
     return (_decode(text) if decode else text) + ("\n" if newline else "")
 
 
-def _print_text(words):
+def _print_text(args):
     """What zsh's `print` prints: its words with a blank between them, or a newline under -l, decoded unless -r or -R,
     with a trailing newline unless -n (probed: `print -r 'vcs a' | zsh -f` ran a).  Any other option -- -z, -s, -v, -P,
     -f and their kin, which print elsewhere or format -- leaves the text unread."""
-    args, decode, newline, between = words[1:], True, True, " "
+    decode, newline, between = True, True, " "
     while args:
-        w = prepare.deglob(args[0])
+        w = args[0]
+        if w is None:
+            return None
         if not w.startswith("-") or len(w) == 1:
             break
         if w == "--":
@@ -284,17 +352,13 @@ def _print_text(words):
     return (_decode(text) if decode else text) + ("\n" if newline else "")
 
 
-def _printf_text(words):
+def _printf_text(args):
     """What `printf` prints: its format, escapes decoded, applied to its arguments and repeated while any are left
     (printf(1)).  Only `%s`, `%b` and `%%` are applied -- every other directive, a width or a flag among them, and an
     argument the hook cannot spell, leave the text unread -- and so does `-v NAME`, which assigns and prints nothing."""
-    args = words[1:]
-    if not args or prepare.deglob(args[0]) == "-v":
+    if not args or args[0] == "-v" or None in args:
         return None
-    fmt = word_text(args[0])
-    values = [word_text(w) for w in args[1:]]
-    if fmt is None or any(v is None for v in values):
-        return None
+    fmt, values = args[0], args[1:]
     text = []
     while True:
         chunk, used = _printf_once(fmt, values)

@@ -104,7 +104,7 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, pip
     settled = [arg_writes.resolved(t, a) for t in targets]
     for target in settled:
         a.redirects.append((target, cwds))
-    outer_stdin, a.stdin = a.stdin, stdin_text.command_input(tokens, bodies, piped)
+    outer_stdin, a.stdin = a.stdin, stdin_text.command_input(tokens, bodies, piped, a)
     outer_fed, a.stdin_fed = a.stdin_fed, stdin_text.input_fed(tokens, bodies, piped_fed)
     try:
         analyse_words(words, bodies, a, depth, [globbing.GLOB_READING_BUDGET], "shell", False)
