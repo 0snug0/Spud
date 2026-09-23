@@ -1,4 +1,11 @@
-"""shell/prepare: Substitutions, newlines and quoted globs before tokenizing (shell/heredocs takes the bodies out first)."""
+"""shell/prepare: ANSI-C strings, substitutions, newlines and quoted globs before tokenizing (shell/heredocs goes first).
+
+One pass per step analyse_command takes before shlex, each reading the quotes the one before it wrote and the same
+substitution spans, and shell/heredocs prepares the text it asks about with the same steps: kept whole past the ~250-line
+mark (the spudlib-modules size rule), where a module of its own for the ANSI-C pass (SPD-202) would put one more file on
+every hook run's import path for three functions that read the others' spans."""
+
+import re
 
 from . import syntax
 from ..hooks import hookio
@@ -7,6 +14,16 @@ from ..hooks import hookio
 # What a quoted or escaped character becomes: a glob metacharacter's sentinel, or a shell operator character's, so a
 # quoted `;` or `(` stays in its word instead of reaching the walk as the operator.
 _QUOTED_SENTINELS = dict(syntax._GLOB_SENTINELS, **syntax._PUNCT_SENTINELS)
+
+# The escapes zsh 5.9 and bash 3.2 both decode inside `$'...'`, each to the one character it names, beside a code of one to
+# three octal digits or of `x` and one or two hex digits (ansi_c_value).  Probed through tests/probes/shell_probe.py
+# (AnsiCQuotingTest has what each printed): they part on every other escape -- `\u` and `\U`, which bash 3.2 keeps as
+# text, `\c`, an unknown letter, whose backslash zsh drops and bash keeps, a bare `\x`, a backslash-newline -- and on NUL.
+_ANSI_C_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+                   "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_ANSI_C_CODE_RE = re.compile(r"([0-7]{1,3})|x([0-9A-Fa-f]{1,2})")
+_ANSI_C_PAIR_RE = re.compile(r"\\(.)", re.S)
+_COMMENT_AFTER = " \t\n;&|()<>"  # before a `#` that opens a comment, as newlines_as_separators reads one
 
 
 def substitution_end(command, i):
@@ -27,6 +44,112 @@ def backtick_end(command, i):
     """The index of the backtick that closes the one at command[i], or len(command) when none does."""
     j = command.find("`", i + 1)
     return len(command) if j == -1 else j
+
+
+def ansi_c_end(text, i):
+    """The index of the `'` that closes the ANSI-C string whose text starts at text[i], just after its `$'`, or len(text)
+    when none does: a backslash escapes the next character, so `\\'` ends nothing (SPD-202)."""
+    n = len(text)
+    while i < n:
+        c = text[i]
+        if c == "'":
+            return i
+        i += 2 if c == "\\" else 1
+    return n
+
+
+def ansi_c_value(body):
+    """The text `$'body'` stands for, where zsh and bash decode every escape in it alike (_ANSI_C_ESCAPES), or None where
+    they part, or where a code is NUL or past 0x7f, one byte of a character a command line held as text cannot spell."""
+    if "\\" not in body:
+        return body
+    out, i, n = [], 0, len(body)
+    while i < n:
+        c = body[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        escape = body[i + 1 : i + 2]
+        if escape and escape in _ANSI_C_ESCAPES:
+            out.append(_ANSI_C_ESCAPES[escape])
+            i += 2
+            continue
+        m = _ANSI_C_CODE_RE.match(body, i + 1)
+        if m is None:
+            return None
+        code = int(m.group(1), 8) if m.group(1) else int(m.group(2), 16)
+        if not 0 < code < 0x80:
+            return None
+        out.append(chr(code))
+        i = m.end()
+    return "".join(out)
+
+
+def _hex_apostrophe(m):
+    return "\\x27" if m.group(1) == "'" else m.group()
+
+
+def ansi_c_quotes(text):
+    """(the text with each ANSI-C string, `$'...'`, spelled as the steps after this one read it, what makes the text one
+    the hook cannot read or None) -- SPD-202.  zsh and bash read `$'...'` wherever a `$` opens it outside quotes, in an
+    unquoted `${ }` too; a backslash escapes the next character there, so `\\'` does not end it, and shlex, which reads it as
+    plain single quotes, ended it there: `echo $'\\'' ; git push ; echo \\'` read as one echo while both shells pushed.  So:
+
+    - a string both shells decode alike (ansi_c_value) becomes its value in single quotes, a literal, which every reading
+      after this one reads as the word the shells pass (a command word, a git verb, a write target, eval's text);
+    - one whose escapes they decode apart keeps its `$'`, the text the hook does not decode that neutralize_quoted_globs
+      marks, with each escaped apostrophe spelled `\\x27`, the same character, so that it holds no `'` but its closer;
+    - one that never closes stays open, and the text is one the hook cannot read (("$'", the text from it));
+    - after `$$` a quote opens ANSI-C quoting in zsh and single quotes in bash (probed: `echo $$'\\'' > /dev/null ; echo RAN >
+      l/z ; echo '\\''` wrote l/z in zsh alone), which end it apart once a backslash stands before its next `'`: the text
+      is then one the hook cannot read (("$$'", the text from the `$$`)), and it is read on as bash reads it.
+
+    Not in single or double quotes (`"$'a'"` is text in both shells), not after an escaped `$`, not in a comment; a `$( )`
+    or backticks is copied as it stands, over the span split_substitutions lifts out, since its body's own analysis reads
+    its own.  Here-document bodies are out of the text by now (shell/heredocs, which decodes a delimiter itself)."""
+    if "$'" not in text:
+        return text, None
+    out, unreadable = [], None
+    i, n, in_double = 0, len(text), False
+    while i < n:
+        c = text[i]
+        if c == "'" and not in_double:
+            j = text.find("'", i + 1)
+            j = n if j < 0 else j + 1
+        elif c == "\\":
+            j = i + 2
+        elif c == '"':
+            in_double = not in_double
+            j = i + 1
+        elif c == "#" and not in_double and (i == 0 or text[i - 1] in _COMMENT_AFTER):
+            j = text.find("\n", i)
+            j = n if j < 0 else j
+        elif c == "`" or text.startswith("$(", i) and not text.startswith("$((", i):
+            j = (backtick_end(text, i) if c == "`" else substitution_end(text, i)) + 1
+        elif text.startswith("$'", i) and not in_double:
+            end = ansi_c_end(text, i + 2)
+            body = text[i + 2 : end]
+            value = ansi_c_value(body) if end < n else None
+            if value is not None:
+                out.append("'" + value.replace("'", "'\\''") + "'")
+            else:
+                out.append("$'" + _ANSI_C_PAIR_RE.sub(_hex_apostrophe, body) + ("'" if end < n else ""))
+                if end == n and unreadable is None:
+                    unreadable = ("$'", text[i : i + syntax.UNTOKENIZED_KEPT])
+            i = end + 1
+            continue
+        elif text.startswith("$$", i):
+            j = i + 2
+            if text.startswith("'", j) and not in_double and unreadable is None:
+                close = text.find("'", j + 1)
+                if "\\" in text[j + 1 : n if close < 0 else close]:
+                    unreadable = ("$$'", text[i : i + syntax.UNTOKENIZED_KEPT])
+        else:
+            j = i + 1
+        out.append(text[i:j])
+        i = j
+    return "".join(out), unreadable
 
 
 def split_substitutions(command):
@@ -149,7 +272,8 @@ def neutralize_quoted_globs(text):
 
     Beside a `$` it leaves the marks the expansion check reads once shlex has removed the quotes: _LITERAL_DOLLAR after a
     `$` that is single-quoted, escaped, or last in double quotes (no expansion in either shell), _QUOTED_DOLLAR after the `$` of
-    `$'...'` and `$"..."` (text the hook does not decode), and _NAME_END where a quote or an escape continues a word right after a
+    `$'...'` and `$"..."` (text the hook does not decode: ansi_c_quotes has written each `$'...'` it decodes as a literal),
+    and _NAME_END where a quote or an escape continues a word right after a
     bare `$name` (`$X"t"` and `$X\\t` read $X, then t).  After the name of a `$name` in double quotes it leaves
     _QUOTED_NAME (SPD-167): bash splits an unquoted expansion's value at its blanks and never a quoted one's, and zsh splits
     neither, so a reader of the words the shell passes (shell/stdin_text) knows which shell reads a word as one."""

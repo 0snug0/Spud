@@ -221,7 +221,8 @@ def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fres
     line assigned is read as the words the shells give it (variable_readings): one reading replaces it in place (_AGAIN), several
     are each analysed from the start (_STOP), and a doubtful value adds a "var-doubt" finding.  Anything else is not resolved: an
     operator form (`${X:-git}`), zsh's flags and modifiers (`${(L)X}`, `$~X`, `$X:t`), a subscript, a concatenation (`$X$Y`,
-    `g$X`), arithmetic, `$'...'`, a substitution, a variable the line did not assign, or an empty value outside the command word.
+    `g$X`), arithmetic, a `$'...'` whose escapes the shells decode apart (prepare.ansi_c_quotes), a substitution, a variable the
+    line did not assign, or an empty value outside the command word.
     The command word is then a "var" finding, which ends the analysis for a bare variable or a substitution (_STOP) and leaves a
     partial expansion to be dispatched as spelled (_FLAGGED); another word is a "var-word" finding left as spelled (_FLAGGED); a
     wrapper's command word is left for the loop to read once the wrapper is stripped (_FLAGGED, no finding).  Each finding refuses

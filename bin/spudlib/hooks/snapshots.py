@@ -7,6 +7,7 @@ import re
 
 from . import hookio
 from ..core import homeconf
+from ..shell import prepare
 
 
 # Claude Code writes a snapshot of the user's interactive shell -- ~/.claude/shell-snapshots/snapshot-<shell>-<stamp>-<id>.sh
@@ -225,8 +226,10 @@ def unalias_names(line, aliases):
 def unquote_word(text):
     """The text the shell keeps once it has taken one level of quoting off this word, or None when the quoting does not
     close.  What comes out is shell text again, which is what the shell parses when it expands the alias: an `awk
-    '\\''{print $1}'\\''` in a body reaches the analysis as `awk '{print $1}'`, quotes and all.  `$'...'` keeps its text as
-    written, undecoded, as the hook leaves every other ANSI-C string."""
+    '\\''{print $1}'\\''` in a body reaches the analysis as `awk '{print $1}'`, quotes and all.  `$'...'` is its value
+    (SPD-202): zsh prints an alias whose body holds a newline that way (probed: `alias -L` printed `alias nl=$'echo
+    a\\necho b'`), and the body is two commands, not `echo anecho b`.  One whose escapes the hook does not decode
+    (prepare.ansi_c_value; zsh printed a carriage return as `\\C-M`) is quoting it cannot take off, and None."""
     if not text:
         return text
     if "'" not in text and '"' not in text and "\\" not in text:
@@ -241,9 +244,10 @@ def unquote_word(text):
             j = i + 2
             while j < n and text[j] != "'":
                 j += 2 if text[j] == "\\" else 1
-            if j >= n:
+            value = prepare.ansi_c_value(text[i + 2 : j]) if j < n else None
+            if value is None:
                 return None
-            out.append(text[i + 2 : j])
+            out.append(value)
             i = j + 1
         elif c == "'":
             j = text.find("'", i + 1)

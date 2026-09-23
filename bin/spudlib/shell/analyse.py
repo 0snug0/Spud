@@ -16,6 +16,11 @@ def analyse_command(command, analysis=None, depth=0):
         a.doubt.add(m.group(1))
         a.sticky.add(m.group(1))
     text, bodies = heredocs.strip_heredocs(command)
+    text, apart = prepare.ansi_c_quotes(text)
+    if apart is not None and a.unparseable is None:
+        # an ANSI-C string that never closes, or a quote zsh and bash end apart (SPD-202): the words the reading finds are
+        # read on, and the line is refused every caller after the refusals they earn, as one shlex cannot split is (SPD-191)
+        a.unparseable = apart + ("line" if depth == 0 else "shell" if a.shell_reading else "nested",)
     outer, inner = prepare.split_substitutions(prepare.newlines_as_separators(text))
     plain = prepare.neutralize_quoted_globs(outer)
     marked, other = zsh.mark_zsh_patterns(plain)

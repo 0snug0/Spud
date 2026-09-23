@@ -4200,7 +4200,12 @@ class ParameterExpansionCommandWordTest(BashHookCase):
                 self.refused_for_members(cmd, "Law 7")  # bash's reading, the first element: `git push`
 
     def test_ansi_c_and_locale_quoting(self):
-        for cmd in ("$'git' push", "$'\\x67it' push", "$'\\147it' push", "$\"git\" push", "g$'i't push", "git $'push'", "git $'\\x70ush'"):
+        # SPD-202: an ANSI-C string both shells decode alike is read as its value, the command it spells (AnsiCQuotingTest);
+        # one whose escapes they decode apart, and bash's locale string, stay words the hook cannot resolve
+        for cmd in ("$'git' push", "$'\\x67it' push", "$'\\147it' push", "g$'i't push", "git $'push'", "git $'\\x70ush'"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 7")
+        for cmd in ("$\"git\" push", "$'\\u0067it' push", "git $'\\u0070ush'", "g$'\\ci't push"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd)
 
@@ -4456,7 +4461,7 @@ class TrapActionTest(BashHookCase):
     def test_an_expansion_in_the_action_word(self):
         for cmd in ('trap "$X" EXIT', "trap $X EXIT", 'trap "$(echo git push)" EXIT', "trap `echo git push` EXIT",
                     "trap ${X:-'git push'} EXIT", "trap ${X} EXIT", "X=g; trap $X$Y EXIT", "X=it; trap \"g$X\" EXIT",
-                    "trap $'git push' EXIT", 'trap -- "$X" EXIT', "trap \"$(cat f)\" EXIT"):
+                    "trap $'\\u0067it push' EXIT", 'trap -- "$X" EXIT', "trap \"$(cat f)\" EXIT"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd, "cannot resolve")
         for cmd in ("X='git push'; trap \"$X\" EXIT", "X='git push'; trap $X EXIT", "X='git push'; trap ${X} EXIT",
@@ -7904,7 +7909,7 @@ class EvalFlagTest(BashHookCase):
                      "echo ${(e)x}", "echo ${(e)HOME}", "x=$y; echo ${(e)x}", "read x; echo ${(e)x}",
                      "true && x='$(date)'; echo ${(e)x}", "for x in a; do echo ${(e)x}; done",
                      "x='$(date)'; for f in a; do echo ${(e)x}; done", "x='$(date)'; f() { echo ${(e)x}; }; f",
-                     "x=a; x+=b; echo ${(e)x}", "x=$'\\x24(date)'; echo ${(e)x}", "x=(a '$(date)'); echo ${(e)x}",
+                     "x=a; x+=b; echo ${(e)x}", "x=$'\\u0024(date)'; echo ${(e)x}", "x=(a '$(date)'); echo ${(e)x}",
                      "echo ${(e)$(cat f)}", 'echo ${(e)"$(cat f)"}', "echo ${(e):-$y}", "echo ${(e)1} ${(e)@}",
                      "n=HOME; echo ${(Pe)n}", "n=$(cat f); x='$(date)'; echo ${(Pe)n}", "x='\\$(date)'; echo ${(e)${(e)x}}",
                      "x=a; x='$(date)' y=${(e)x}", "x='$(date)'; echo ${x::=b} ${(e)x}", "echo hi > ${(e)x}f",
@@ -8293,7 +8298,7 @@ class AliasEvalTest(BashHookCase):
     def test_a_body_or_a_name_the_hook_cannot_read_is_refused(self):
         for cmd in ("alias gp=\"$UNSET git push\"; eval gp", "alias gp=\"$(echo git push)\"; eval gp",
                     "alias gp=\"`echo git push`\"; eval gp", "X=git; alias gp=\"$X push\"; eval gp",
-                    "alias gp=$'git push'; eval gp", "N=gp; alias $N='git push'; eval gp",
+                    "alias gp=$'\\u0067it push'; eval gp", "N=gp; alias $N='git push'; eval gp",
                     "alias ${N}='git push'; eval gp"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd, "cannot resolve")
@@ -14682,11 +14687,13 @@ class UnreadableLineTest(ShellSnapshotCase):
 
     def test_lines_both_shells_read_whole_are_refused(self):
         """The reading gaps the class's probes found, each a write both shells made while the hook read nothing."""
-        for line in ("git push \\", "echo $'\\'' > %s" % self.TARGET, "echo x > %s \\" % self.TARGET,
-                     "git push; echo $'\\''"):
+        for line in ("git push \\", "echo x > %s \\" % self.TARGET):
             with self.subTest(line=line):
                 self.assertTrue(self.analysis(line).unparseable)
             self.unreadable_for_everyone(line)
+        # SPD-202 reads `$'\\''` as the shells do (AnsiCQuotingTest): the write is Law 1's for Spud, the push Law 7's
+        self.assertRefused("echo $'\\'' > %s" % self.TARGET, "Law 1", agent_id=None)
+        self.assertRefused("git push; echo $'\\''", "Law 7")
 
     # -- text another reading takes -----------------------------------------------------------------------------------
     def test_text_the_line_hands_another_reading_is_held_the_same(self):
@@ -14739,12 +14746,12 @@ class UnreadableLineTest(ShellSnapshotCase):
         "don't"` (the snapshot's `git commit --verbose`) read as unparseable: a member's commit passed before this ticket,
         and was refused to every caller, Spud included, as a line the hook cannot read.  SPD-201 reads each word as the shell
         passes it (AliasWordsTest): the commit is Law 7's for a member and nothing for Spud.  Text the shell itself holds
-        that the hook cannot tokenize -- here a function whose `$'it\\'s'` shlex reads as an open quote -- still earns the
-        reason, which says the text is the shell's."""
+        that the hook cannot read -- here a function whose `$$'\\''` zsh and bash quote apart (AnsiCQuotingTest; its
+        `$'it\\'s'` read as an open quote before SPD-202) -- still earns the reason, which says the text is the shell's."""
         line = "gc -m \"don't\""
         self.assertIn("git commit", self.refused_for_members(line, "Law 7").reason)
         self.assertSilent(line, agent_id=None)
-        self.write_snapshot("snapshot-zsh-1700000000003-dddddd.sh", "ansi () {\n\techo $'it\\'s'\n}\n")
+        self.write_snapshot("snapshot-zsh-1700000000003-dddddd.sh", "ansi () {\n\techo $$'\\''\n}\n")
         r = self.refused_for_members("ansi", UNREADABLE)
         self.assertIn("in the text an alias or function of your shell runs", r.reason)
         self.assertRefused("ansi", UNREADABLE, agent_id=None)
@@ -14876,6 +14883,253 @@ class AliasWordsTest(ShellSnapshotCase):
         line = "alias mk='mkdir -p'; eval %s" % single_quoted("mk \"tests/a b\"")
         self.assertSilent(line, AGENT_A)
         self.assertRefused(line, "Law 1", agent_id=None)
+
+
+class AnsiCQuotingTest(ShellSnapshotCase):
+    """SPD-202, filed by SPD-191's engineer: shlex read ANSI-C quoting, `$'...'`, as plain single quotes, so an escaped
+    apostrophe inside one ended the quote for the hook and not for the shells.  `echo $'\\'' ; git push ; echo \\'` read
+    as one echo of one quoted word -- kinds ['other'], no finding, not unparseable -- while both shells ran the push, and
+    SPD-191's refusal of a line the hook cannot tokenize never reached it, since the misreading stays balanced.  A here-document
+    delimiter spelled that way (`<<$'EOF'`) read as `$EOF`, so the body ran to the end of the text and every line after the
+    real `EOF` was read as body.
+
+    The rule now (prepare.ansi_c_quotes, after the here-documents are taken out): a backslash escapes the next character
+    inside `$'...'`, and the string is read as its value where the shells decode it alike, a single-quoted literal: a
+    command word, a git verb, a write target, eval's and `sh -c`'s text, an alias body, a value zsh's (e) evaluates.  A
+    string holding an escape the shells decode apart keeps the old reading, an expansion the hook cannot resolve, now with its
+    quote read where the shells end it; one that never closes, and a `$$` a quote follows, which zsh and bash quote apart,
+    make the line one the hook cannot read.  A here-document delimiter is decoded the same way, and one the hook cannot know
+    (an escape read apart, bash's `$"..."`, `$$'...'`) gets no body: the lines after it are read as commands.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same, and in GNU bash 3.2.57(1)-release; LANG=C:
+
+    - eval of `echo $'\\'' ; echo RAN > l/r1 ; echo \\'` printed an apostrophe twice and wrote l/r1 in all three.
+    - Both shells decode \\a \\b \\e \\E \\f \\n \\r \\t \\v \\\\ \\' \\" \\?, one to three octal digits (`\\101` A, `\\0101`
+      a backspace then 1, `\\18` \\001 then 8) and one or two hex digits (`\\x41g` Ag, `\\x414` A4) alike (od -c of each value).
+      They part on the rest: `\\u0041` and `\\U...` (zsh A, bash 3.2 the text itself), `\\cA` (zsh cA, bash \\001), an
+      unknown escape (`\\z`: zsh z, bash \\z), a bare `\\x` (zsh NUL, bash \\x), a backslash-newline (zsh drops the
+      backslash, bash keeps it), and NUL (`a\\0b`: zsh keeps a NUL b, bash ends the value at a).  A value past 0x7f
+      (`\\xff`) is one byte, which a command line held as text cannot spell, and the hook leaves it undecoded too.
+    - The value is literal: `echo $'\\x24(touch s1)' $'\\x60touch s2\\x60'` printed both texts and made neither file,
+      `echo $'g*' $'{a,b}' $'~'` printed them as spelled, `echo x > $'f\\x2eo'` wrote f.o and `echo y > $'\\x24HOME'` a
+      file named $HOME; `$'\\x65cho' hi` ran echo, `eval $'echo a;echo b'` ran both, `sh -c $'echo RAN > l/shc\\necho two'`
+      wrote l/shc, `echo x > $'l/a\\x2eb'` wrote l/a.b, `( trap $'echo RAN > l/trap' EXIT; true )` wrote l/trap, and zsh's
+      `x=$'\\x24(touch l/e1)'; echo ${(e)x}` made l/e1 while `echo "$y"` of the same value printed it.
+    - Where it is ANSI-C quoting: not inside double quotes (`"$'a'"` printed $'a', and `echo "$'\\''" > l/dq ; echo RAN >
+      l/dq2` wrote both), not after an escaped `$` (`\\$'a'` printed $a), not in a here-document body (`$'a\\tb'` printed as
+      is), but inside a `$( )` in double quotes (`"$(printf '%s' $'a\\tb')"` held a tab) and in an unquoted `${u:-$'a\\tb'}`.
+      The escaped apostrophe ends nothing in any of them: `echo ${u:-$'\\''} ; echo RAN > l/b1 ; echo \\'`, the same line in
+      backticks and in `x=$( )`, wrote in all three, and so did `echo ${u:-$'\\''} '<<EOF'`, a line `echo RAN > l/hb` and
+      `EOF`, where no here-document opens.
+      After `$$` the shells part: zsh reads `$$'...'` as the pid then ANSI-C quoting and bash as the pid then single quotes,
+      so `echo $$'\\'' > /dev/null ; echo RAN > l/z ; echo '\\''` wrote l/z in zsh alone, as did `$$$$'...'` and `x$$'...'`;
+      `$$$'...'` wrote in all three, and `${$}'...'` and `"$$"'...'` in none.
+    - An unclosed one runs nothing: eval of `echo RAN > u1; echo $'a\\' ; echo RAN > u2` wrote neither file anywhere.
+    - A here-document delimiter: `<<$'EOF'`, `<<$'E\\x4fF'`, `<<x$'y'"z"` and `<<$'E\\'F'` ended at EOF, EOF, xyz and E'F in
+      both shells, `<<-$'EOF'` at a tab and EOF, and `<<\\$'E'` at $E; `<<$'A\\nB'` never ended.  They part on `<<$"EOF"` (zsh at $EOF, bash at EOF) and
+      `<<$$'E'` (zsh at $E, bash at $$E).
+    - `$"..."`: bash translates it (`$"a b"` printed a b), zsh reads `$` then double quotes (`$a b`); inside it both read
+      double-quote rules (`$"a\\"b"`).  The hook keeps reading it as text it does not decode.
+
+    AGENT_A plans home:tests/** and home:bin/spud, AGENT_C home:**, and the home is the cwd."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        target = self.home.path / self.TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def law_7(self, line):
+        """Law 7 for both members, and nothing for Spud, who is never refused git."""
+        for agent_id in (AGENT_A, AGENT_C):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "Law 7", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertSilent(line, agent_id=None)
+
+    def unresolved(self, line):
+        """A member refused a word the hook does not decode; Spud reads on."""
+        for agent_id in (AGENT_A, AGENT_C):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "cannot resolve", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertSilent(line, agent_id=None)
+
+    def unreadable(self, line):
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, UNREADABLE, agent_id)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence(self):
+        push = "echo $'\\'' ; git push ; echo \\'"
+        a = self.analysis(push)
+        self.assertIsNone(a.unparseable)
+        self.assertIn(("git", ("push", "push")), a.findings)
+        self.law_7(push)
+        ledger = "echo $'\\'' ; echo x > %s ; echo \\'" % self.TARGET
+        self.assertRefused(ledger, "Law 1", agent_id=None)
+        self.assertRefused(ledger, "generated", AGENT_C)
+        self.assertRefused("echo $'\\'' ; echo x > note.txt ; echo \\'", "deliverables")
+        self.assertRefused("echo $'\\'' > %s" % self.TARGET, "Law 1", agent_id=None)  # SPD-191 refused it as unreadable
+
+    def test_an_escaped_apostrophe_ends_no_ansi_c_string_wherever_it_stands(self):
+        evidence = "echo $'\\'' ; git push ; echo \\'"
+        for line in ("x=$'\\'' ; git push ; y=\\'", "echo $'it\\'s' ; git push", "echo $'\\\\\\'' ; git push ; echo \\'",
+                     "echo a$'\\''b ; git push ; echo \\'", "echo $'\\'' $'\\'' ; git push", "git push; echo $'\\''",
+                     "eval " + single_quoted(evidence), "sh -c " + single_quoted(evidence), "bash -c " + single_quoted(evidence),
+                     "x=$(%s)" % evidence, "echo \"$(%s)\"" % evidence, "echo `%s`" % evidence,
+                     "sh <<'EOF'\n%s\nEOF" % evidence, "# it's a note\n" + evidence, "cat <<EOF\nit's\nEOF\n" + evidence,
+                     "echo ${u:-$'\\''} ; git push ; echo \\'", "echo $'\\u00e9\\'' ; git push ; echo \\'",
+                     "echo $$$'\\'' ; git push ; echo \\'", "echo ${u:-$'\\''} '<<EOF'\ngit push\nEOF"):
+            with self.subTest(line=line):
+                self.assertIsNone(self.analysis(line).unparseable)
+            self.law_7(line)
+        # an unquoted `${ }`'s ANSI-C string ends where the shells end it before a here-document operator too
+        for agent_id in (AGENT_A, AGENT_C, None):
+            self.assertSilent("echo ${u:-$'\\''} ; cat <<EOF\ngit push\nEOF", agent_id)
+
+    # -- a value both shells decode alike is read as that value ---------------------------------------------------------
+    def test_a_decoded_command_word_is_the_command_it_spells(self):
+        for line in ("$'git' push", "$'\\x67it' push", "$'\\147it' push", "g$'i't push", "git $'push'", "git $'\\x70ush'",
+                     "$'\\x67\\x69\\x74' $'\\x70\\x75\\x73\\x68'", "eval $'git push'", "eval $'echo a\\ngit push'",
+                     "sh -c $'echo a\\ngit push'", "trap $'git push' EXIT", "alias gp=$'git push'; eval gp",
+                     "x=$'git'; $x push", "env $'git' push", "$'\\x67it' $'--no-pager' push"):
+            with self.subTest(line=line):
+                self.law_7(line)
+
+    def test_a_decoded_write_target_is_the_file_it_names(self):
+        for target in ("$'ledger/tickets/SPD-001.md'", "$'ledger\\x2ftickets/SPD-001.md'", "$'\\x6cedger/tickets/SPD-001.md'",
+                       "ledger/tickets/$'SPD-001\\x2emd'", "$'\\154edger'/tickets/SPD-001.md"):
+            for line in ("echo x > %s" % target, "echo x | tee %s" % target, "cp /dev/null %s" % target):
+                with self.subTest(line=line):
+                    self.assertRefused(line, "Law 1", agent_id=None)
+                    self.assertRefused(line, "generated", AGENT_C)
+        self.assertRefused("echo x > $'no\\x74e.txt'", "deliverables")
+        self.assertSilent("echo x > $'tests/\\x6b.py'")
+        # a value zsh's (e) evaluates
+        self.assertRefused("x=$'\\x24(touch note.txt)'; echo ${(e)x}", "deliverables")
+        self.assertSilent("x=$'\\x24(touch tests/k.py)'; echo ${(e)x}")
+
+    def test_a_decoded_value_is_literal(self):
+        """A `$`, a backtick, `;`, a newline or a glob character the value holds is a character of the word."""
+        for line in ("echo $'\\x24(git push)'", "echo $'\\x60git push\\x60'", "echo $'a\\x3b git push'", "echo $'a\\ngit push'",
+                     "echo $'*' $'{a,b}' $'~'", "echo $'a\\'b' \"it's\"", "printf $'%s\\n' x", "echo $'\\x27' ; echo ok",
+                     "echo $'a\\tb' > /dev/null", "echo $'\\x24HOME'", "x=$'\\x24(git push)'; echo \"$x\""):
+            with self.subTest(line=line):
+                self.assertIsNone(self.analysis(line).unparseable)
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+        self.assertAllowed("%s --as %s member log $'it\\'s done\\n'" % (self.spud_cli, AGENT_A))
+        # a target holding a literal `$` reads as the same target single-quoted, whoever writes it
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(agent_id=agent_id):
+                decoded, spelled = self.bash("echo y > $'\\x24HOME'", agent_id), self.bash("echo y > '$HOME'", agent_id)
+                self.assertEqual((decoded.decision, decoded.reason), (spelled.decision, spelled.reason))
+
+    # -- a value the shells decode apart stays unresolved ---------------------------------------------------------------
+    def test_an_escape_the_shells_read_apart_is_not_decoded(self):
+        for word in ("$'\\u0067it'", "$'\\U00000067it'", "$'\\cGit'", "$'\\git'", "$'g\\x'", "$'g\\0it'", "$'g\\x00it'",
+                     "$'\\xe9'", "$'\\351'", "$'g\\\nit'", "$'\\400git'"):
+            with self.subTest(word=word):
+                self.unresolved("%s push" % word)
+                self.unresolved("git %s" % word)
+                self.assertRefused("echo x > %s" % word, "cannot resolve", agent_id=None)
+        self.assertRefused("x=$'\\u0024(date)'; echo ${(e)x}", "zsh's (e) flag")
+
+    def test_an_ansi_c_string_that_never_closes_is_unreadable(self):
+        line = "echo $'it\\'s ; git push"
+        self.assertEqual(self.analysis(line).unparseable[0], "$'")
+        self.unreadable(line)
+        self.assertIn("the `$'` that opens `$'it\\'s ; git push` never closes", self.assertRefused(line, UNREADABLE).reason)
+        self.unreadable("echo x > $'%s" % self.TARGET)
+
+    def test_a_double_dollar_before_a_quote_is_unreadable(self):
+        """zsh reads `$$'...'` as the pid then ANSI-C quoting and bash as the pid then single quotes: where the two end the
+        quote apart, one of them runs what the other reads as text.  The words bash's reading finds are read on, so a push
+        that only bash runs is Law 7's for a member, and one that only zsh runs is refused as a line the hook cannot read."""
+        for line in ("echo $$'\\'' > /dev/null ; git push ; echo '\\'", "echo $$'\\' ; git push ; echo '\\'",
+                     "echo x$$'\\'' ; git push ; echo '\\'", "echo $$$$'\\'' ; git push ; echo '\\'"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).unparseable[0], "$$'")
+            if line.startswith("echo $$'\\' "):  # bash pushes
+                self.refused_for_members(line, "Law 7")
+                self.assertRefused(line, UNREADABLE, agent_id=None)
+            else:  # zsh pushes
+                self.unreadable(line)
+        reason = self.assertRefused("echo $$'\\'' > /dev/null ; git push ; echo '\\'", UNREADABLE).reason
+        self.assertIn("`$$'\\''", reason)
+        self.assertIn("${$}", reason)  # ... and how to spell the pid before a quote
+        # a quote after `$$` that holds no backslash ends at the same place in both, and so does `${$}`'s and `"$$"`'s
+        self.law_7("echo $$'x' ; git push")
+        for line in ("echo ${$}'\\'' > /dev/null ; git push ; echo '\\'", "echo \"$$\"'\\'' > /dev/null ; git push ; echo '\\'"):
+            with self.subTest(line=line):
+                self.assertIsNone(self.analysis(line).unparseable)
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+
+    # -- a here-document delimiter --------------------------------------------------------------------------------------
+    def test_a_here_document_delimiter_is_decoded(self):
+        for line in ("cat <<$'EOF'\nbody\nEOF\ngit push", "cat <<$'E\\x4fF'\nbody\nEOF\ngit push",
+                     "cat <<x$'y'\"z\"\nbody\nxyz\ngit push", "cat <<$'E\\'F'\nbody\nE'F\ngit push",
+                     "sh <<$'EOF'\ngit push\nEOF", "cat <<-$'EOF'\n\tbody\n\tEOF\ngit push"):
+            with self.subTest(line=line):
+                self.assertIsNone(self.analysis(line).unparseable)
+            self.law_7(line)
+        for line in ("cat <<$'EOF'\ngit push\nEOF", "cat <<\\$'E'\nbody\ngit push\n$E", "cat <<$'EOF'\nit's\nEOF"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+
+    def test_a_delimiter_the_hook_cannot_know_reads_no_body(self):
+        """Where the shells end the body apart, or the hook does not decode its delimiter, every line after the operator is
+        read as the commands it may be."""
+        for line in ("cat <<$'\\u0045OF'\nbody\nEOF\ngit push", "cat <<$\"EOF\"\nbody\nEOF\ngit push\n$EOF",
+                     "sh <<$'\\cE'\ngit push\n\\cE", "cat <<$$'E'\nbody\n$E\ngit push\n$$E"):
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertEqual(self.analysis(line).kinds.count("git"), 1)
+        for line in ("cat <<$'\\u0045OF'\nbody\nEOF\ngit push", "cat <<$\"EOF\"\nbody\nEOF\ngit push\n$EOF",
+                     "sh <<$'\\cE'\ngit push\n\\cE"):
+            self.law_7(line)
+        # zsh ends this one at a line `$E`, whose command word refuses a member before the push does
+        self.refused_for_members("cat <<$$'E'\nbody\n$E\ngit push\n$$E", "cannot resolve")
+
+    # -- what stays as it was -------------------------------------------------------------------------------------------
+    def test_a_locale_string_stays_text_the_hook_does_not_decode(self):
+        for line in ("$\"git\" push", "git $\"push\""):
+            self.unresolved(line)
+        self.assertRefused("echo x > $\"notes.txt\"", "cannot resolve", agent_id=None)
+        self.law_7("echo $\"it's\" ; git push")
+        self.law_7("echo $\"a\\\"b\" ; git push")
+
+    def test_no_ansi_c_quoting_inside_double_quotes_or_after_an_escaped_dollar(self):
+        self.law_7("echo \"$'\\''\" ; git push ; echo \"'\"")
+        self.law_7("echo \\$'a' ; git push")
+        for line in ("echo \"it's $'x'\"", "echo \"$'\\''\" > /dev/null"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+
+    def test_an_alias_of_the_shell_in_ansi_c_quoting(self):
+        """zsh prints an alias whose body holds a newline in ANSI-C quoting (`alias -L` printed `alias nl=$'echo a\\necho
+        b'`, probed), and the snapshot keeps that spelling: the body is its value, two commands, not `echo anecho b`.  A
+        body holding an escape the hook does not decode is one it cannot read (zsh printed a carriage return as `\\C-M`)."""
+        self.write_snapshot("snapshot-zsh-1700000000004-eeeeee.sh",
+                            "alias -- nlp=$'echo a\\ngit push'\nalias -- crp=$'git push\\C-M'\n")
+        self.refused_for_members("nlp", "Law 7")
+        self.assertIn("crp", self.refused_for_members("crp", "alias your shell already defines").reason)
 
 
 # =============================================================================

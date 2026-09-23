@@ -11,7 +11,8 @@ expanded, and each (e) expansion in the word is read:
 - a value the line spells but may not hold there -- one it doubts, one a loop or function body reads, one an earlier word
   of the same command assigns, an array -- or one another flag, a modifier or a subscript changes before (e) reads it, is
   read as it is spelled, and refuses a member besides ("eval-flag"): the text zsh evaluates may be another;
-- a value the line does not spell (a substitution's output, a variable it did not assign, `$'...'`) refuses a member, and
+- a value the line does not spell (a substitution's output, a variable it did not assign, a `$'...'` whose escapes the shells
+  decode apart; SPD-202 reads every other one as its value) refuses a member, and
   Spud reads on, as he does past an eval of a word the hook cannot resolve.
 
 Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py (tests/test_hooks.py EvalFlagTest has
@@ -212,7 +213,7 @@ def _variable_texts(name, reading, assigned):
 
 def _value_readings(value):
     """The texts a masked value may spell, [] where the line does not spell it: it holds a substitution's output, an
-    expansion (a `$` not marked literal), or `$'...'` text the hook does not decode.
+    expansion (a `$` not marked literal), or `$'...'` text the hook does not decode (escapes the shells decode apart).
 
     Two where it holds a backslash before a literal `$` or a backtick: shlex leaves the backslash of `"\\$"` and `"\\``"`
     in the word, where the shell takes it off, so `x="\\$(touch h4)"` and `x='\\$(touch h4)'` reach the hook alike,

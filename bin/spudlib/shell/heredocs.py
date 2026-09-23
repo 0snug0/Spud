@@ -54,6 +54,16 @@ class _Frame:
         self.kind, self.strip, self.closer, self.pending, self.opens, self.others, self.depth = kind, strip, closer, [], [], 0, depth
 
 
+def _ansi_c_quoting(stack):
+    """Whether a `$'` in the innermost frame opens ANSI-C quoting: in a command list, and in a `${ }` standing in one, where
+    both shells read it too (SPD-202, probed: `echo ${u:-$'\\''} '<<EOF'`, a line `echo RAN > l/hb` and `EOF` wrote l/hb in
+    zsh and bash); never in double quotes, a `${ }` in them included, where zsh reads it as text."""
+    for frame in reversed(stack):
+        if frame.kind != _BRACED:
+            return frame.kind == _COMMAND
+    return False
+
+
 def strip_heredocs(command):
     """Remove the here-document bodies read at the line's own level from the command text; return (text, bodies), the
     bodies in the order their operators stand."""
@@ -217,7 +227,7 @@ class _Scan:
         if nxt == "[":
             stack.append(_Frame(_ARITH, closer="]", depth=1))
             return i + 2
-        if nxt == "'" and stack[-1].kind == _COMMAND:  # `$'...'`, whose backslash escapes a quote
+        if nxt == "'" and _ansi_c_quoting(stack):  # `$'...'`, whose backslash escapes a quote
             j = i + 2
             while True:
                 m = _ANSI_RE.search(text, j)
@@ -260,12 +270,26 @@ class _Scan:
 
     def delimiter(self, k):
         """(the delimiter the word at text[k] spells, whether any of it is quoted, the index after it): quote removal and
-        nothing else, as both shells read it (probed: `E"O"F`, `'EOF'` and `\\EOF` are EOF, `<<$Z` ends at a line `$Z`)."""
+        nothing else, as both shells read it (probed: `E"O"F`, `'EOF'` and `\\EOF` are EOF, `<<$Z` ends at a line `$Z`).
+        An ANSI-C string is its value (SPD-202, probed: `<<$'EOF'`, `<<$'E\\x4fF'`, `<<x$'y'"z"` and `<<$'E\\'F'` ended
+        at EOF, EOF, xyz and E'F in both shells).  The delimiter is None where the hook cannot know it: a string whose
+        escapes the shells decode apart (prepare.ansi_c_value), bash's `$"..."`, which zsh reads as `$` then double quotes
+        (`<<$"EOF"` ended at EOF in bash and at $EOF in zsh), and `$$'...'` (`<<$$'E'`: $$E in bash, $E in zsh)."""
         text, n = self.text, self.n
-        word, quoted = [], False
+        word, quoted, known = [], False, True
         while k < n and text[k] not in _DELIMITER_END:
             c = text[k]
-            if c == "'":
+            if c == "$" and text.startswith("$'", k):
+                end = prepare.ansi_c_end(text, k + 2)
+                value = prepare.ansi_c_value(text[k + 2 : end]) if end < n else None
+                known = known and value is not None
+                word.append(value or "")
+                quoted, k = True, end + 1
+            elif c == "$" and text.startswith(('$"', "$$'"), k):
+                known = False
+                word.append(c)
+                k += 1
+            elif c == "'":
                 end = text.find("'", k + 1)
                 end = n if end < 0 else end
                 word.append(text[k + 1 : end])
@@ -284,7 +308,7 @@ class _Scan:
             else:
                 word.append(c)
                 k += 1
-        return "".join(word), quoted, min(k, n)
+        return ("".join(word) if known else None), quoted, min(k, n)
 
     def read_bodies(self, frame, i):
         """The bodies of the list's pending here-documents, one after another from text[i], the line after the newline
@@ -296,6 +320,12 @@ class _Scan:
             self.out.append(text[self.mark : i])
         for word, dash, quoted, slot in frame.pending:
             start, end = i, None
+            if word is None:
+                # a delimiter the hook cannot know (delimiter): no body, so every line after the operator's is read as the
+                # commands it may be, which is more than any shell runs, and never less
+                if slot is not None:
+                    self.bodies[slot] = ""
+                continue
             while i < n:
                 line_end = text.find("\n", i)
                 line_end = n if line_end < 0 else line_end
@@ -375,7 +405,7 @@ class _Scan:
 
 def _marked(text):
     """zsh's reading of a line's text (mark_zsh_patterns), prepared as analyse_command prepares it."""
-    outer, _inner = prepare.split_substitutions(prepare.newlines_as_separators(text))
+    outer, _inner = prepare.split_substitutions(prepare.newlines_as_separators(prepare.ansi_c_quotes(text)[0]))
     return zsh.mark_zsh_patterns(prepare.neutralize_quoted_globs(outer))[0]
 
 

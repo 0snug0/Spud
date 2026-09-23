@@ -96,7 +96,8 @@ VAR_WORD_REASON = ("the word %s holds a parameter expansion, arithmetic or a sub
 # The reason for an (e) expansion whose text the hook cannot read (shell/reevaluation, SPD-189).
 EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs the command substitutions, the arithmetic and"
                     " the parameter expansions in it, and the hook cannot read the text it evaluates: a value the line does"
-                    " not spell (a substitution's output, a variable it did not assign, `$'...'`), one it may not hold there"
+                    " not spell (a substitution's output, a variable it did not assign, a `$'...'` whose escapes zsh and bash"
+                    " decode apart), one it may not hold there"
                     " (an assignment that may not run, a loop or function body, a builtin or a word of the same command that"
                     " assigns it, an array), or one another flag, a modifier or a subscript changes first; spell the commands out")
 
@@ -108,9 +109,9 @@ UNREADABLE_REASON = ("the hook cannot read this line: %s%s, so it cannot tell wh
                      " line, runs none of a line it cannot parse, but a line the hook misreads may be whole to zsh, and a"
                      " shell runs every complete line before an unbalanced one in `sh -c` or `bash -c` text, in bash's eval,"
                      " and in a script it reads from a here-document or a file, zsh too. Close every quote -- an apostrophe"
-                     " inside single quotes is '\\'' (or put the text in double quotes), and the hook reads `$'...'` as plain"
-                     " single quotes, so write no \\' inside one -- end no line with a lone backslash, and give a long"
-                     " message a file of its own or a quoted here-document (<<'EOF')")
+                     " inside single quotes is '\\'' (or put the text in double quotes), and the pid before a quote is"
+                     " `${$}` -- end no line with a lone backslash, and give a long message a file of its own or a quoted"
+                     " here-document (<<'EOF')")
 UNREADABLE_WHERE = {
     "line": "",
     "nested": (" in text the line hands another reading (a `$( )` or backtick body, eval's words, a `-c` string, a"
@@ -122,14 +123,19 @@ UNREADABLE_SHOWN = 40  # the most of the text from the quote, or before the back
 
 
 def unreadable_reason(cause):
-    """The reason for ShellAnalysis.unparseable: the quote that never closes and the text from it, or the backslash with
-    nothing to escape and the text before it, shown as the line spells it (the hook's own marks taken off, a lifted body
-    as `$(...)`, every run of blanks and newlines as one space) and cut to UNREADABLE_SHOWN characters."""
+    """The reason for ShellAnalysis.unparseable: the quote that never closes and the text from it (an ANSI-C string's
+    `$'` among them), a `$$` a quote follows that zsh and bash end apart and the text from it (SPD-202), or the backslash
+    with nothing to escape and the text before it, shown as the line spells it (the hook's own marks taken off, a lifted
+    body as `$(...)`, every run of blanks and newlines as one space) and cut to UNREADABLE_SHOWN characters."""
     what, text, where = cause
     shown = " ".join(syntax.shown_operands(prepare.deglob(text)).replace(hookio.SUBST, "$(...)").split())
     if what == "\\":
         shown = shown if len(shown) <= UNREADABLE_SHOWN else "..." + shown[-UNREADABLE_SHOWN:]
         stop = "the backslash that ends `%s` has nothing to escape" % shown
+    elif what == "$$'":
+        shown = shown if len(shown) <= UNREADABLE_SHOWN else shown[:UNREADABLE_SHOWN] + "..."
+        stop = ("zsh reads the quote after the `$$` of `%s` as ANSI-C quoting (`$'...'`, where \\' ends nothing) and"
+                " bash as a single quote, and the two end it apart" % shown)
     else:
         shown = shown if len(shown) <= UNREADABLE_SHOWN else shown[:UNREADABLE_SHOWN] + "..."
         stop = ("the `%s` that opens `%s` never closes" % (what, shown)) if what else "shlex cannot split `%s`" % shown
@@ -389,7 +395,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                     " define no alias on the line" % detail), analysis
         elif kind == "shell-alias":
             return ("the command word %s is an alias your shell already defines whose body the hook cannot read (its quoting"
-                    " does not close in Claude Code's snapshot of your interactive shell, ~/.claude/shell-snapshots/). A shell"
+                    " does not close, or holds a `$'...'` escape zsh and bash decode apart, in Claude Code's snapshot of your"
+                    " interactive shell, ~/.claude/shell-snapshots/). A shell"
                     " expands an alias when it parses the line, so the command that runs is not the one written; spell the"
                     " command out" % detail), analysis
         elif kind == "glob":
@@ -542,8 +549,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         # subagents (SPD-191).  Before, this line passed every law.  Probed through tests/probes/shell_probe.py (zsh 5.9, bash
         # 3.2.57; UnreadableLineTest): the Bash tool runs the line as `zsh -c '... && eval <line>'`, and zsh's eval parses
         # all of its text before it runs any, so a line whose quote truly never closes runs nothing and refusing it costs
-        # nothing; but a line the hook misreads may be whole to zsh (`$'\''`, a quoted `)` in a `$( )`, a lone
-        # backslash at the end all wrote files), and a shell runs every complete line before an unbalanced one in
+        # nothing; but a line the hook misreads may be whole to zsh (`$'\''` before SPD-202, a quoted `)` in a `$( )`, a
+        # lone backslash at the end all wrote files), and a shell runs every complete line before an unbalanced one in
         # `sh -c` and `bash -c` text, in bash's eval, and in a script it reads from a here-document or a file, zsh
         # too -- only zsh's eval and `zsh -c` parse their whole text first.  Spud is refused always, not only where
         # the text holds something his laws cover: which words of it are commands, targets or quoted text is exactly

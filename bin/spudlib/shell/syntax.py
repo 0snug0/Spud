@@ -114,8 +114,9 @@ ZSH_OPEN, ZSH_BAR, ZSH_CLOSE, ZSH_RANGE_OPEN, ZSH_RANGE_CLOSE = (_ZSH_SENTINELS[
 _ZSH_UNSENTINEL = {v: k for k, v in _ZSH_SENTINELS.items()}
 _LITERAL_EQUALS = chr(0xE020)  # a word's leading `=` that zsh's EQUALS is not to expand again (literalize)
 # Marks neutralize_quoted_globs leaves beside a `$`, so an expansion is told from a literal dollar once shlex has taken
-# the quotes away.  `$` then _LITERAL_DOLLAR: single-quoted or escaped, no expansion.  `$` then _QUOTED_DOLLAR: `$'...'` (ANSI-C
-# quoting, both shells) or `$"..."` (bash's locale string), whose text the hook does not decode.  _NAME_END: a quote or an escape
+# the quotes away.  `$` then _LITERAL_DOLLAR: single-quoted or escaped, no expansion.  `$` then _QUOTED_DOLLAR: a `$'...'`
+# (ANSI-C quoting) whose escapes zsh and bash decode apart -- prepare.ansi_c_quotes has written every other one as the literal
+# it is (SPD-202) -- or `$"..."` (bash's locale string), whose text the hook does not decode.  _NAME_END: a quote or an escape
 # right after `$name` ends the name (`$X"t"` is $X then t, which shlex joins as $Xt).  _ARRAY_VALUE opens the value ShellWalk
 # joins for `name=(a b)`: bash reads `$name` as its first element, zsh as all of them.  _QUOTED_NAME follows the name of a
 # `$name` that stands in double quotes (`"$X"`, `"git $X"`), whose value neither shell splits, where bash splits the value
