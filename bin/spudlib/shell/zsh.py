@@ -136,6 +136,32 @@ def _zsh_group(text, i, scan):
     return None
 
 
+def _before_close(word, command):
+    """What zsh reads of `word` before the `}` that closes a `{ list }`, where the word ends in one, else None; `command`:
+    the word stands in command position.  A sole `}` is significant wherever it stands and is its own answer.  A `}` glued
+    to the end of a word is split off it (SPD-132) unless it closes a `{` or `${` opened earlier in the word; in command
+    position each leading `{` is split off first, as the group it opens, and an assignment keeps its `}`.  Probed in zsh 5.9
+    -f and -f -o nobareglobqual (SPD-142, tests/probes/shell_probe.py): `{ echo a}`, `{true}`, `{ echo x > g}` (which made
+    g, not `g}`), `{ echo try}}` (try}), `{ echo x{a,b}}` (xa xb), `{ echo ${x-q}}` (q), `{ [[ -n x ]]}` and `{ case x in
+    x) echo a;; esac}` each closed their group, `{ echo a}b }` printed a}b and `{ x=1}` never closed, and `echo a}` and
+    `for f in a} b` -- a brace that closes no group -- are parse errors.  A quoted or escaped `}` is a sentinel by now, so it
+    never ends the word here."""
+    if word[-1:] != "}":
+        return None
+    if word == "}":
+        return word
+    body = word.lstrip("{") if command else word
+    if command and assignment_words.assignment_word(body):
+        return None
+    depth = 0
+    for c in body[:-1]:
+        if c == "{":
+            depth += 1
+        elif c == "}" and depth:
+            depth -= 1
+    return None if depth else word[:-1]
+
+
 def mark_zsh_patterns(text):
     """zsh's reading of its own glob operators, for the masked outer text of a line: a group `(a|b)` and a numeric range
     `<n-m>` that zsh reads as part of a word are kept in that word with sentinels, where shlex would read a subshell and an
@@ -149,6 +175,13 @@ def mark_zsh_patterns(text):
       after a redirection's target at the start of a command).  bash rejects the pattern line, but the shells place command
       position differently in places (`time -p (` and `coproc NAME (` are bash subshells, `repeat 1 (` a zsh one), so the
       other reading restores the parenthesis for shlex to read as before;
+    - the `}` that closes a `{ list }` -- a sole one, or one zsh splits off the end of a word (_before_close) -- gives command
+      position back (SPD-142), and the try-always form's `always` right after it keeps it: zsh reads `else`, `elif`, `fi`,
+      `then`, `do`, `done` and `esac` after such a brace as the reserved words they are, so `if [[ c ]] { a } elif [[ d ]]
+      ( list )`, `if [[ c ]] { a } else ( list ); fi`, `{ a } always {( list )}` and `if { c } then ( list ) fi` run a
+      subshell.  A `(` right after the brace is a parse error.  After a short loop's `{ }` body zsh leaves command position
+      for good, takes that `(` for a pattern word and rejects the line, as it rejects a `fi` or an `else` there (`if true;
+      then repeat 1 { echo r } fi`), so the subshell read in its place reads a line that runs nothing;
     - glued inside a word, `(` is a pattern in zsh and a syntax error in bash, whole in both readings, except `()` (a function's
       header), `$((`, `name=(` and a reserved word in command position (bash runs `!(`, `{(`, `if(`, `time(`, `then(`, `do(`
       and `else(` as a subshell, zsh `{(` and `else(`);
@@ -173,6 +206,7 @@ def mark_zsh_patterns(text):
     for_list = 0  # 1: the loop's name is next; 2: a `(` here opens its word list
     repeat_count = False  # the next word is a `repeat` count; the body, in command position, follows it
     for_close = -1  # where a `for name (` list closes
+    closed = False  # the word just read ended in the `}` that closes a group (SPD-142: an `always` after it keeps command position)
     cases = []  # per open case command: "subject", "in", "pattern" or "body"
     while i < n:
         c = text[i]
@@ -209,7 +243,7 @@ def mark_zsh_patterns(text):
             other.append(op)
             pos, i = i, i + len(op)
             arith_next = False
-            for_list, repeat_count = 0, False
+            for_list, repeat_count, closed = 0, False, False
             if op in ("<(", ">("):
                 command, target = True, None
             elif op in ("(", "()"):  # a subshell, or a function's header: a command follows (zsh's INOUTPAR)
@@ -300,6 +334,13 @@ def mark_zsh_patterns(text):
         w, i = text[start:j], j
         was_name, was_count = for_list == 1, repeat_count
         arith_next, for_list, repeat_count = False, 0, False
+        after_close, closed = closed, False
+        # SPD-142: a word ending in the `}` that closes a group is read as the word before that brace, which then gives
+        # zsh its command position back -- but inside `[[ ... ]]` and a case's subject or patterns only the `]]` and the
+        # esac that end them close a group with a brace glued on (`{ [[ -n x ]]}`, `{ case ... esac}`)
+        before = _before_close(w, command)
+        if before is not None:
+            w = before
         if heredoc:
             heredoc = False
         if target is not None:
@@ -309,14 +350,18 @@ def mark_zsh_patterns(text):
         elif cond:
             if w == "]]":
                 cond, command = False, True
+            else:
+                before = None
         elif cases and cases[-1] == "subject":
-            cases[-1] = "in"
+            cases[-1], before = "in", None
         elif cases and cases[-1] == "in":
-            cases[-1] = "pattern" if w == "in" else "in"
+            cases[-1], before = ("pattern" if w == "in" else "in"), None
         elif in_pattern:
             if w == "esac":
                 cases.pop()
                 command = True
+            else:
+                before = None
         elif command:
             if w == "case":
                 cases.append("subject")
@@ -330,8 +375,12 @@ def mark_zsh_patterns(text):
                 for_list, repeat_count = 1 if w in ("for", "select") else 0, w == "repeat"
             elif w in ZSH_COMMAND_POSITION_WORDS or assignment_words.assignment_word(w):
                 pass
+            elif w == "always" and after_close:
+                pass  # zsh's try-always form, `{ a } always { b }` (SPD-124): its block follows in command position
             else:
                 command = False
+        if before is not None:
+            command, closed = True, True
         if was_name and not for_list:
             for_list = 2  # the loop's name was read: a `(` now opens its word list, not a pattern
         elif was_count:

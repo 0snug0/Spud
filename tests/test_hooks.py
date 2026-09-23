@@ -4790,10 +4790,10 @@ class ElifShortConditionalTest(BashHookCase):
       one either -- zsh parses neither, and reading them would take a short conditional's body where no condition ended;
     - the long forms ELIF_LONG_FORMS were read correctly before this ticket and must stay that way.
 
-    A `( list )` body after an elif is read as it is after an `if`.  Where an earlier `{ ... }` on the line leaves
-    mark_zsh_patterns outside command position, zsh's reading takes that `( ... )` for one glob pattern word, and the
-    hook doubts a command word it cannot read: main does the same for `if c { a } if [[ -n y ]] ( cd /tmp/o )` and for
-    `{ true } ( cd /tmp/o )`, so the elif only joins them.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+    A `( list )` body after an elif is read as it is after an `if`: since SPD-142 the `}` that closes the if's body gives
+    mark_zsh_patterns its command position back, so zsh's reading takes that `( ... )` for the subshell zsh runs and no
+    longer for one glob pattern word (BraceCloseCommandPositionTest).  AGENT_A plans tests/** and bin/spud; AGENT_C plans
+    **."""
 
     def setUp(self):
         super().setUp()
@@ -5018,6 +5018,328 @@ class ElifShortConditionalTest(BashHookCase):
                 self.assertLess(time.monotonic() - started, 5.0)
                 if "git push" in line:
                     self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-142: the lines in which a closing `}` gives zsh its command position back and a `( list )` read after it runs as a
+# subshell; each form's `%s` is that subshell's list.  Probed 2026-09-22 (BraceCloseCommandPositionTest): with `echo
+# <label>` in the slot zsh 5.9 printed the label for every form, and so it did with `{echo <label>}` (a group glued to its
+# words, SPD-132); with `echo x | tee l/t` there it wrote l/t, and with `cd o` the line ended where it began.
+BRACE_CLOSE_SUBSHELLS = (
+    # a short conditional's `{ }` body, then an elif whose condition ends in `[[ ... ]]` (SPD-136) and whose body is the
+    # subshell
+    "if [[ -z x ]] { true } elif [[ -n y ]] ( %s )",
+    "if [[ -z x ]] { true } elif [[ -n y ]] ( %s ); true",
+    "if [[ -z x ]] { true } elif [[ -n y ]] (%s)",
+    "if [[ -z x ]] { true } elif [[ -z y ]] { true } elif [[ -n z ]] ( %s )",
+    # ... an else whose body is the subshell, closed by fi
+    "if [[ -z x ]] { true } else ( %s ); fi",
+    "if [[ -z x ]] { true } else ( %s ) fi",
+    # ... an elif's or an else's own `{ }` body holding the subshell, apart from its brace or glued to it
+    "if [[ -z x ]] { true } elif [[ -n y ]] { ( %s ) }; true",
+    "if [[ -z x ]] { true } elif [[ -n y ]] { ( %s ) } fi",
+    "if [[ -z x ]] { true } elif [[ -n y ]] {( %s )}; true",
+    "if [[ -z x ]] { true } else { ( %s ) }",
+    "if [[ -z x ]] { true } else {( %s )}",
+    # ... an elif whose condition is the subshell
+    "if [[ -z x ]] { true } elif ( %s ) then true; fi",
+    "if [[ -z x ]] { true } elif ( %s ); then true; fi",
+    "if [[ -z x ]] { true } elif ( %s ) { true }; true",
+    # zsh's try-always form (SPD-124), its always block holding the subshell
+    "{ true } always { ( %s ) }",
+    "{ true } always {( %s )}",
+    "{ { true } always { ( %s ) } }",
+    # a group ending a long form's condition or body, before then, do, else or elif
+    "if { true } then ( %s ) fi",
+    "n=0; while { [[ $((n++)) -lt 1 ]] } do ( %s ) done",
+    "if false; then { true } else ( %s ); fi",
+    "if false; then { true } elif { true } then ( %s ) fi",
+    # the closing brace glued to the word before it, which zsh splits off (SPD-132): a command's last word, a one-word
+    # group, a redirection's target, a condition's `]]` and a case's esac
+    "if [[ -z x ]] { true} elif [[ -n y ]] ( %s )",
+    "if [[ -z x ]] {true} elif [[ -n y ]] ( %s )",
+    "if [[ -z x ]] {true} else ( %s ); fi",
+    "{true} always {( %s )}",
+    "if [[ -z x ]] { true > /tmp/k} elif [[ -n y ]] ( %s )",  # a temp-dir target, open to members in bash's `/tmp/k}` too
+    "if [[ -z x ]] { [[ -n y ]]} else ( %s ); fi",
+    "if [[ -z x ]] { case y in y) true;; esac} else ( %s ); fi",
+)
+# ... and an arithmetic command after such a brace, `%s` the command after it: zsh printed the label and made no file.
+BRACE_CLOSE_ARITHMETIC = (
+    "if [[ -z x ]] { true } elif (( 3 > 2 )) %s",
+    "if [[ -z x ]] { true } elif (( 3 > 2 )) then %s; fi",
+    "if [[ -z x ]] { true } else (( 3 > 2 )) && %s; fi",
+    "if [[ -z x ]] { true } else { (( 3 > 2 )) && %s }",
+    "{ true } always { (( 3 > 2 )) && %s }",
+    "if false; then { true } elif (( 3 > 2 )) then %s; fi",
+)
+# A `(` right after the closing `}`: zsh rejects every one of these lines, so nothing on them runs -- a parse error near
+# `(` after a group, an always block or a function body, near the list's first word after a short conditional's body, and
+# near the whole `( ... )` after a short loop's body, which zsh reads there as a glob pattern word.
+BRACE_CLOSE_PARSE_ERRORS = (
+    "{ true } ( %s )",
+    "{ true } always { true } ( %s )",
+    "f() { true } ( %s )",
+    "if [[ -n x ]] { true } ( %s )",
+    "repeat 1 { true } ( %s )",
+    "n=0; while [[ $((n++)) -lt 1 ]] { true } ( %s )",
+    "for f in a; { true } ( %s )",
+)
+# A pattern after a brace that closes no group -- quoted, escaped, a parameter expansion's, a brace list's, one inside a
+# word -- is a pattern to zsh, which ran each of these (the first four printed `} b c`, `} b c`, `b c` and `b c b c` with
+# files b and c present; the last two failed with "no matches found", a pattern matching nothing).
+BRACE_KEPT_PATTERNS = ("echo '}' (b|c)", "echo \\} (b|c)", "echo ${x} (b|c)", "echo {b,c} (b|c)", "echo }(b|c)", "echo a}(b|c)")
+
+
+class BraceCloseCommandPositionTest(BashHookCase):
+    """SPD-142, found while SPD-136 read the elif of zsh's short conditional: mark_zsh_patterns takes a `(` that opens a word
+    for a subshell in zsh's command position and for one of zsh's glob patterns outside it, and a closing `}` never gave
+    it command position back.  After `{ a }` it was still after the command word `a`, so a reserved word that goes on with
+    the compound command -- `else`, `elif`, `then`, `do`, the try-always form's `always` -- was read as one more argument,
+    the `[[` of an elif's condition opened nothing, and the `( list )` after them became one pattern word, where zsh runs
+    a subshell.
+
+    Probed 2026-09-22 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, which printed the same for every line, and in GNU bash 3.2.57, which rejects every line
+    here (it has no short forms, and a group's `}` wants a terminator before it); an `echo` stood in for each command:
+
+    - BRACE_CLOSE_SUBSHELLS ran their subshell.  zsh's `}` is significant wherever it stands, alone or split off the end
+      of a word (SPD-132): `{ echo a}`, `{true}`, `{ echo x > g}` (which made g, not `g}`), `{ [[ -n x ]]}` and `{ case
+      ... esac}` each closed their group, and after it zsh read `else`, `elif`, `fi`, `then`, `do`, `done`, `esac` and
+      `always` as the reserved words they are.  A brace that closes no group -- `echo a}`, `for f in a} b` -- is a parse
+      error;
+    - the hole: the other reading restores a `(` that opens a word, so a plain `( git push )` in these forms was refused
+      all the same, but that reading is bash's, which keeps a brace glued to a word, and a subshell glued to its `{` stayed
+      a pattern in both readings.  So `( {list} )` in any of these forms, and `{( list )}` after an else, an elif or an
+      always, ran their list in zsh while zsh's reading held one glob command word.  One whose words hold no `/` went
+      unchecked -- `{ true } always {( git push )}`, `... else {( rm -rf docs )}`, `... elif [[ -n y ]] ( {touch note.txt}
+      )`: Law 7, and the path rule (Law 5 for a member, Law 1 for Spud); one holding a `/` could name a file called sqlite
+      and was refused as direct access to the database, the right refusal for a tee into the ledger or a spud call, for the
+      wrong reason;
+    - the friction: the same misreading refused harmless lines to members and Spud alike, the ticket's evidence first
+      (`if [[ -z x ]] { true } elif [[ -n y ]] ( cd /tmp/o )`) and a member's write into its own deliverables beside it;
+      and an arithmetic command after the brace, read as a subshell holding `> 2`, was a write to a file named 2
+      (BRACE_CLOSE_ARITHMETIC, which zsh evaluated without making one);
+    - a brace glued to `]]` or `esac` left the scanner inside the condition or the case, where no `(` is a pattern:
+      `{ [[ -n x ]]}; echo x > (l|x)/t` and `{ case x in x) echo a;; esac}; echo x > (l|x)/t` wrote l/t in zsh, while the
+      hook read the same lines with the ledger in them as a subshell and a target `/tickets/SPD-001.md` (Spud's reading of
+      the esac line named `ledger` instead): after `]]}` Spud's Law 1 went unchecked, and every other refusal named a file
+      the line never writes;
+    - a `(` right after the `}` is a parse error in every form (BRACE_CLOSE_PARSE_ERRORS).  After a short loop's `{ }`
+      body zsh reads it as a pattern word -- the one place it reads a pattern right after a closing `}` -- and rejects the
+      line, as it rejects a `fi` or an `else` there (`if true; then repeat 1 { echo r } fi`): after that brace zsh is out of
+      command position for good.  The hook reads a subshell in all of them, fail closed, since nothing on such a line runs;
+    - a `}` that closes nothing leaves the pattern after it a pattern, as zsh reads and runs it (BRACE_KEPT_PATTERNS).
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        (self.out / "o").mkdir()
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    def every_payload(self, form):
+        for command, needle in self.member_payloads():
+            line = form % command
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertRefused(line, needle, agent_id)
+        for command, needle in self.spud_payloads():
+            line = form % command
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertRefused(line, needle, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_the_subshell_zsh_runs(self):
+        """zsh ran `cd o` there in a subshell and ended where it began; the hook read a glob command word that can name the
+        database and refused everyone."""
+        home = str(self.home.path)
+        line = "if [[ -z x ]] { true } elif [[ -n y ]] ( cd %s/o )" % self.out
+        self.assertEqual(self.m.mark_zsh_patterns(line), (line, line))  # no pattern in either reading
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+        a = self.analysis(line)
+        self.assertEqual((a.findings, a.cwds), ([], frozenset([home])))
+        push = self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] ( git push )")
+        self.assertEqual(push.findings, [("git", ("push", "push"))])  # one reading, one push: no glob command word beside it
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_zsh_reads_every_form_as_the_subshell_it_runs(self):
+        for form in BRACE_CLOSE_SUBSHELLS:
+            for body in ("{git push}", "git push"):
+                line = form % body
+                with self.subTest(line=line):
+                    marked, other = self.m.mark_zsh_patterns(line)
+                    self.assertEqual(marked, other)  # no `(` on the line is a pattern in zsh's reading
+                    self.assertIn("(", marked)
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+
+    def test_a_group_in_the_subshell_is_refused(self):
+        """The hole: `( {git push} )` runs the push in every form (`{echo <label>}` printed its label in the probe), and
+        neither reading found it wherever zsh's reading took that `(` for a pattern."""
+        for form in BRACE_CLOSE_SUBSHELLS:
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+
+    def test_every_payload_in_a_subshell_glued_to_its_brace(self):
+        """`{( list )}` stayed one pattern word in both readings, so every check on the list was lost, not Law 7's alone."""
+        for form in ("if [[ -z x ]] { true } else {( %s )}", "if [[ -z x ]] { true } elif [[ -n y ]] {( %s )}; true",
+                     "{ true } always {( %s )}", "{true} always {( %s )}"):
+            self.every_payload(form)
+
+    def test_every_payload_in_a_group_inside_the_subshell(self):
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] ( {%s} )", "if [[ -z x ]] { true } else ( {%s} ); fi",
+                     "{ true } always { ( {%s} ) }", "if false; then { true } else ( {%s} ); fi"):
+            self.every_payload(form)
+
+    def test_the_path_rule_inside_the_subshell(self):
+        """A write whose words hold no `/` was silent to everyone -- the path rule unchecked -- and one whose words hold a `/`
+        was refused as direct access to the database, a member's write into its own deliverables among them."""
+        for form in ("{ true } always {( %s )}", "if [[ -z x ]] { true } else {( %s )}",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] ( {%s} )", "if [[ -z x ]] { true } else ( {%s} ); fi"):
+            for write in ("echo x | tee note.txt", "touch note.txt", "rm -rf docs"):
+                line = form % write
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")  # AGENT_A plans tests/** and bin/spud
+                    self.assertSilent(line, AGENT_C)
+                    self.assertRefused(line, "Law 1", agent_id=None)
+            line = form % "echo x | tee tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    # -- the friction ---------------------------------------------------------------------------------------------------
+    def test_a_harmless_subshell_is_silent_and_moves_nothing(self):
+        home = str(self.home.path)
+        for form in BRACE_CLOSE_SUBSHELLS:
+            line = form % ("cd %s/o" % self.out)
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+                self.assertEqual(self.analysis(line).cwds, frozenset([home]))  # the subshell's cd does not carry out
+
+    def test_an_arithmetic_command_after_the_brace_writes_nothing(self):
+        for form in BRACE_CLOSE_ARITHMETIC:
+            line = form % "true"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, agent_id=None)
+                self.assertEqual(self.analysis(line).redirects, [])
+            line = form % "git push"
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertSilent(line, agent_id=None)
+
+    # -- a brace glued to ]] or esac -------------------------------------------------------------------------------------
+    def test_a_pattern_after_a_brace_glued_to_a_condition_or_a_case(self):
+        """zsh splits the brace off `]]}` and `esac}` and closes the group: each of these lines, with l/t standing in for the
+        ledger file, wrote l/t in the probe, and the cd into `(l|x)` wrote it too."""
+        for line in ("{ [[ -n x ]]}; echo x > (ledger|x)/tickets/SPD-001.md",
+                     "{ [[ -n x ]]} && echo x > (ledger|x)/tickets/SPD-001.md",
+                     "{ case x in x) true;; esac}; echo x > (ledger|x)/tickets/SPD-001.md",
+                     "{ [[ -n x ]]}; echo x | tee (ledger|x)/tickets/SPD-001.md",
+                     "if [[ -z x ]] { [[ -n y ]]} else { echo x > (ledger|x)/tickets/SPD-001.md }"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_C, None):
+                    r = self.assertRefused(line, "generated", agent_id)
+                    self.assertIn("into (ledger|x)/tickets/SPD-001.md", r.reason)  # the target zsh opens, as the line spells it
+                self.assertIn("Law 1", self.bash(line, None).reason)
+        line = "{ [[ -n x ]]}; cd (ledger|x) && echo x > tickets/SPD-001.md"
+        self.assertRefused(line, "cannot follow", AGENT_C)
+        self.assertEqual(self.m.mark_zsh_patterns("{ [[ -n x ]]}; echo (b|c)")[0].count("("), 0)
+
+    # -- lines zsh rejects ----------------------------------------------------------------------------------------------
+    def test_a_subshell_right_after_the_brace_is_read_fail_closed(self):
+        """Nothing on these lines runs; the hook reads the subshell all the same, after a short loop's body too, where
+        zsh's own reading of the `(` is a pattern it then rejects."""
+        for form in BRACE_CLOSE_PARSE_ERRORS:
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertRefused(line, "Law 7")
+
+    # -- the other direction ----------------------------------------------------------------------------------------------
+    def test_a_pattern_after_a_brace_that_closes_nothing_stays_a_pattern(self):
+        for line in BRACE_KEPT_PATTERNS:
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(self.m.neutralize_quoted_globs(line))  # as analyse_command marks it
+                self.assertNotIn("(", marked)  # zsh's reading holds the group as one pattern word
+                self.assertEqual(self.m.deglob(marked), line)
+        for line in ("tee '}' (ledger|x)/tickets/SPD-001.md", "tee \\} (ledger|x)/tickets/SPD-001.md",
+                     "tee {tests,docs} (ledger|x)/tickets/SPD-001.md"):
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "generated", AGENT_C)  # the pattern still expands to the ledger file
+                self.assertIn("into (ledger|x)/tickets/SPD-001.md", r.reason)
+
+    # -- the directory model --------------------------------------------------------------------------------------------
+    def test_where_each_directory_goes(self):
+        """The try block's cd carries into the always block and past it (probed: `{ cd o } always { ( echo in-$PWD ) }`
+        printed in-.../o and ended in o), the always block's subshell's does not; a short conditional's body may not run."""
+        home, out = str(self.home.path), str(self.out)
+        a = self.analysis("{ cd %s } always { ( cd %s/o ) }; echo x > k.txt" % (out, out))
+        self.assertIn(("k.txt", frozenset([out])), a.redirects)
+        a = self.analysis("if [[ -n x ]] { cd %s } else ( cd %s/o ); fi; echo x > k.txt" % (out, out))
+        self.assertIn(("k.txt", frozenset([home, out])), a.redirects)
+        self.assertRefused("{ cd %s/ledger } always {( true )}; echo x > tickets/SPD-001.md" % home, "generated", AGENT_C)
+
+    # -- controls ---------------------------------------------------------------------------------------------------------
+    def test_a_terminator_or_an_operator_after_the_brace_was_always_read(self):
+        """A `;`, a newline, `&&`, `||` and `|` put the scanner in command position before this ticket too (probed: each
+        ran the subshell after it)."""
+        for form in ("{ true }; ( %s )", "{ true }\n( %s )", "{ true } && ( %s )", "{ false } || ( %s )", "{ true } | ( %s )",
+                     "if [[ -n x ]] { true }; ( %s )", "repeat 1 { true } && ( %s )", "f() { true }; ( %s ); f"):
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("if [[ -z x ]] { true } " + "elif [[ -n y ]] { true } " * 2000 + "elif [[ -n z ]] ( {git push} )",
+                     "{ " * 2000 + "true" + " }" * 2000 + " always {( git push )}",
+                     "{ true" + "}" * 50000 + " always {( git push )}",
+                     "{ " + "a}" * 20000 + " always {( git push )}",
+                     "{ echo " + "${x}" * 20000 + "} always {( git push )}",
+                     "if [[ -z x ]] { true} " + "else ( true ); fi; if [[ -z x ]] { true} " * 1000 + "else ( {git push} ); fi"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
 class AliasEvalTest(BashHookCase):
