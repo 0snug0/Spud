@@ -19,7 +19,7 @@ bin/
     commands/  reportentry · admincmds · vaultlock · vaultinstall · homesync · ghread · prcmds · doctor · schedule · settings_sync · publish · homeinit · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind · vaultcapture
     projects/  sessions · registry · install · agentdef
     hooks/     hookio · worktrees · pathrule · gitrepos · snapshots · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
-    shell/     syntax · prepare · assignment_words · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · runtime_shells · walk · analyse · redirect_globs · inline_programs · interpreter_words · bash_rule · arg_writes · tree_walk · tree_writes · find_xargs · spelled_writes · downloads · script_text · stdin_text · script_files · runner_files · script_runners
+    shell/     syntax · prepare · heredocs · assignment_words · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · runtime_shells · walk · analyse · redirect_globs · inline_programs · interpreter_words · bash_rule · arg_writes · tree_walk · tree_writes · find_xargs · spelled_writes · downloads · script_text · stdin_text · script_files · runner_files · script_runners
     cli/       helptexts · cliparser
 ```
 

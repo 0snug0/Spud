@@ -1,4 +1,4 @@
-"""shell/prepare: Heredocs, substitutions, newlines and quoted globs before tokenizing."""
+"""shell/prepare: Substitutions, newlines and quoted globs before tokenizing (shell/heredocs takes the bodies out first)."""
 
 from . import syntax
 from ..hooks import hookio
@@ -9,24 +9,24 @@ from ..hooks import hookio
 _QUOTED_SENTINELS = dict(syntax._GLOB_SENTINELS, **syntax._PUNCT_SENTINELS)
 
 
-def strip_heredocs(command):
-    """Remove here-document bodies from the command text; return (text, bodies) in order."""
-    lines = command.split("\n")
-    out, bodies = [], []
-    i = 0
-    while i < len(lines):
-        line = lines[i]
-        out.append(line)
-        words = [(m.group(1) if m.group(1) is not None else (m.group(2) if m.group(2) is not None else m.group(3).lstrip("\\"))) for m in syntax.HEREDOC_RE.finditer(line)]
-        i += 1
-        for word in words:
-            body = []
-            while i < len(lines) and lines[i].lstrip("\t") != word:
-                body.append(lines[i])
-                i += 1
-            bodies.append("\n".join(body))
-            i += 1
-    return "\n".join(out), bodies
+def substitution_end(command, i):
+    """The index of the `)` that closes the `$(` at command[i], its parentheses counted, or len(command) when none does."""
+    depth, j, n = 0, i + 1, len(command)
+    while j < n:
+        if command[j] == "(":
+            depth += 1
+        elif command[j] == ")":
+            depth -= 1
+            if depth == 0:
+                break
+        j += 1
+    return j
+
+
+def backtick_end(command, i):
+    """The index of the backtick that closes the one at command[i], or len(command) when none does."""
+    j = command.find("`", i + 1)
+    return len(command) if j == -1 else j
 
 
 def split_substitutions(command):
@@ -58,23 +58,13 @@ def split_substitutions(command):
             i += 1
             continue
         if c == "$" and command.startswith("$(", i) and not command.startswith("$((", i):
-            depth, j = 0, i + 1
-            while j < n:
-                if command[j] == "(":
-                    depth += 1
-                elif command[j] == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                j += 1
+            j = substitution_end(command, i)
             inner.append(command[i + 2 : j])
             out.append(hookio.SUBST)
             i = j + 1
             continue
         if c == "`":
-            j = command.find("`", i + 1)
-            if j == -1:
-                j = n
+            j = backtick_end(command, i)
             inner.append(command[i + 1 : j])
             out.append(hookio.SUBST)
             i = j + 1
@@ -90,7 +80,12 @@ def newlines_as_separators(text):
     glob group, where zsh reads a newline as part of the pattern and a spelled `;` ends the word (SPD-183): the two could not
     be told apart when a newline was written as ` ; `.  A backslash-newline outside single quotes joins the lines.  A
     comment keeps its words (a word the shell ignores is at worst read as one more command) with its quote characters
-    blanked, so an apostrophe in it cannot unbalance shlex, which gets no commenters."""
+    blanked, so an apostrophe in it cannot unbalance shlex, which gets no commenters.
+
+    An unquoted `$( ... )` or backticks is copied as it stands, over the span split_substitutions lifts out (SPD-188): its
+    text is the substitution's own analysis's, which reads its newlines, quotes and here-document bodies itself (in double
+    quotes it always was, the quotes keeping its newlines).  Read here, a body's lines were separators and its apostrophe
+    opened a quote, and the analysis of `x=$(cat <<EOF ... EOF<newline>)` could not find the body at all."""
     out = []
     i, n = 0, len(text)
     state = None  # None, "'", '"' or "#"
@@ -126,6 +121,16 @@ def newlines_as_separators(text):
         elif c == "#" and (i == 0 or text[i - 1] in " \t\n;&|()<>"):
             state = "#"
             out.append(c)
+        elif c == "$" and text.startswith("$(", i) and not text.startswith("$((", i):
+            end = substitution_end(text, i) + 1
+            out.append(text[i:end])
+            i = end
+            continue
+        elif c == "`":
+            end = backtick_end(text, i) + 1
+            out.append(text[i:end])
+            i = end
+            continue
         elif c == "\n":
             out.append(line_break)
         else:

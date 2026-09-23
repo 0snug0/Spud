@@ -213,7 +213,6 @@ ASSIGNING_COMMANDS = {"read", "getopts", "printf", "print", "mapfile", "readarra
 DYNAMIC_VARIABLES = {"_", "PWD", "OLDPWD", "REPLY", "OPTARG", "OPTIND", "MATCH", "MBEGIN", "MEND", "match", "mbegin", "mend", "BASH_REMATCH",
                      "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "LINENO", "BASH_COMMAND", "FUNCNAME", "DIRSTACK",
                      "dirstack", "PIPESTATUS", "pipestatus", "status", "argv", "BASHPID", "COLUMNS", "LINES", "HISTCMD", "psvar", "reply"}
-HEREDOC_RE = re.compile(r"<<-?\s*(?:'([^']*)'|\"([^\"]*)\"|(\\?[A-Za-z_][\w.-]*))")
 # The verbs Law 7 refuses a member by name, whatever git's own command list says: the ones a member would reach for, so
 # the refusal keeps its own reason (`git push` is still "Spud commits" when the hook cannot run git at all).
 # Every other name git answers to is refused by GIT_MEMBER_VERBS below; this table is the named half, not the whole set,

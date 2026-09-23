@@ -7065,7 +7065,7 @@ class GroupNewlineTest(BashHookCase):
       (ZshGlobOperatorTest).
 
     A here-document whose `<<` line goes on into a group is not read here: the body starts after the line the command
-    ends on, which strip_heredocs does not know (proposal 292).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+    ends on (proposal 292, SPD-188's HereDocumentBodyTest).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
 
     TARGET = "ledger/tickets/SPD-001.md"
 
@@ -7216,6 +7216,217 @@ class GroupNewlineTest(BashHookCase):
                 self.assertLess(time.monotonic() - started, 5.0)
                 if line.endswith("git push"):
                     self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-188: what keeps a command going past the line its `<<` operator stands on, each standing in a word of the command
+# (HereDocumentBodyTest has the probes); the body starts after the line on which the command's last word ends.
+HEREDOC_SPANNING = (
+    "'a\nb'",  # a single-quoted word
+    '"a\nb"',  # a double-quoted word
+    "a\\\nb",  # a backslash-newline
+    "$(echo a\n)",  # a command substitution
+    "`echo a\n`",  # backticks
+    "${X:-a\nb}",  # a parameter expansion
+    "<(cat\n)",  # a process substitution
+    "$((1 +\n2))",  # an arithmetic expansion
+    "(ledger|\nx)/tickets/SPD-001.md",  # zsh's glob group, which bash rejects
+)
+
+
+class HereDocumentBodyTest(BashHookCase):
+    """SPD-188, filed by SPD-183's engineer: strip_heredocs took the lines right after the line holding a `<<` operator as its
+    body, where zsh and bash start it after the newline that ends the operator's command.  A quoted word, a `$( )` or a zsh
+    glob group spanning lines keeps the command going, so the hook read the rest of the command as body text and lost its
+    targets.  The ticket's evidence, on the SPD-183 tree: `cat <<EOF | tee ledger/tickets/SPD-001.md 'a<newline>b' >
+    /dev/null` was unparseable (allowed to every caller), the group lines `cat <<EOF > (ledger|<newline>x)/...` and `| tee
+    (ledger|<newline>x)/...` recorded no target, and `cat <<EOF > $(echo ...<newline>)` read the substitution's first line
+    alone.  The operator itself was read from the line's text, so a `<<` in quotes, a comment, an arithmetic shift or a `<<<`
+    hid the lines after it (`echo '<<EOF'<newline>git push` was silent for a member), and a body inside a `$( )` was taken out
+    of the outer text, where no substitution read it (`x=$(sh <<EOF<newline>git push<newline>EOF<newline>)` too).
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory so
+    zsh could write a here-document's file:
+
+    - the body starts after the newline that ends the operator's command: `cat <<EOF | tee l/t 'a<newline>b' > /dev/null`,
+      the same with "a<newline>b" and with a backslash-newline before its `>`, `cat <<EOF > $(echo l/t<newline>)`, `cat
+      <<EOF > \\`echo l/t<newline>\\``, `cat <<EOF | tee l/t <(cat<newline>) > /dev/null` and `cat <<EOF > ${X:-l/t<newline>}`
+      each read the line after the command as the body (into l/t, or a file named l/t and a newline), in all three;
+      zsh's `cat <<EOF > (l|<newline>x)/t`, `| tee (l|<newline>x)/t`, `> (l|<newline>x|<newline>y)/t` and `>
+      (l|<newline>x)/(t|<newline>z)` wrote it into l/t, and so did one whose pattern held a quoted newline; bash rejects
+      each of those lines;
+    - an arithmetic command's newline (`cat <<EOF > l/t; (( n = 1 +<newline>2 ))`, n=3) and a for header's (`for (( i =
+      0;<newline>i < 1; i++ ))`) end no command either, in all three, and zsh's case pattern group (`case a in
+      (a|<newline>b)) echo RAN;; esac`) none in zsh: the body came after that line and the case ran its arm; a subshell's
+      newline does (`(cat <<EOF > l/t<newline>body<newline>EOF<newline>)` wrote body), and so does an array assignment's
+      (`cat <<EOF > l/t; arr=(a<newline>b)`: the body started there and the assignment went on past it, to a parse error);
+    - the bodies of two here-documents follow in the order their operators stand: `cat <<A <<B` read bodyA then bodyB (zsh's
+      multios catted both, bash bodyB alone), and `cat <<A - <(cat <<B<newline>bodyB<newline>B<newline>) > l/t<newline>bodyA
+      <newline>A` wrote bodyA and bodyB, the body of the one in the `<( )` inside it;
+    - a body inside a `$( )` is read inside it: `s=$(cat <<EOF<newline>in<newline>EOF<newline>)` held in, and so did the
+      same in backticks and in double quotes; `s=$(cat <<EOF)` read no body, and the next line ran as a command (in8, EOF:
+      command not found).  bash 3.2 ends the substitution at a body line's `)` (`a)b`, after which it ran the delimiter as a
+      command), zsh does not;
+    - `<<` is no operator in single or double quotes, escaped (`echo \\<<EOF` read a file named EOF), in a comment, in a
+      parameter expansion, in `(( x = 1 <<y ))` (x=2, with its `))` on the next line too) or in `$(( 1 <<y ))`, and `<<<`
+      opens a here-string, quoted or not: the line after each ran;
+    - a here-document inside a `sh -c`, `zsh -f -c` or eval string is that string's (`sh -c 'cat <<EOF > l/t<newline>body
+      <newline>EOF'` wrote body);
+    - the delimiter line matches whole: after `<<`, `EOF ` with a trailing blank and a tab-indented EOF end nothing, and after
+      `<<-` only leading tabs are stripped (`EOF<tab>` ends nothing).  In a body whose delimiter is unquoted a line ending in
+      one backslash joins the next (`a\\` then EOF read aEOF, the body going on to the next EOF), one ending in two does not
+      (the body was `a\\`), and a quoted delimiter's body keeps its backslash and ends at EOF; `E"O"F`, `'EOF'` and `\\EOF`
+      are the delimiter EOF, `<< 'E F'` ends at a line `E F`, `<<$Z` at a line `$Z`, and a body with no delimiter runs to
+      the end of the text;
+    - `sh -s <<EOF 'a<newline>b'` ran the body after that line as its script.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for rel in (self.TARGET, "docs/x.md", "tests/keep.py"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "generated", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """A body the line only reads as data: silent for every caller, and no push found."""
+        with self.subTest(line=line):
+            self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+            for agent_id in (AGENT_A, AGENT_C, None):
+                self.assertSilent(line, agent_id)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_with_its_targets(self):
+        tee = "cat <<EOF | tee ledger/tickets/SPD-001.md 'a\nb' > /dev/null\nbody11\nEOF"
+        self.assertFalse(self.analysis(tee).unparseable)
+        self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(tee).redirects])
+        self.refused_everywhere(tee)
+        for line in ("cat <<EOF > (ledger|\nx)/tickets/SPD-001.md\nbody2\nEOF",
+                     "cat <<EOF | tee (ledger|\nx)/tickets/SPD-001.md\nbody3\nEOF"):
+            with self.subTest(line=line):
+                # zsh's reading first, as GroupNewlineTest reads the group without a here-document
+                targets = [self.m.deglob(t) for t, _c in self.analysis(line).redirects]
+                self.assertEqual(targets[0], "(ledger|\nx)/tickets/SPD-001.md")
+            self.refused_everywhere(line)
+        # the substitution's command, every line of it (a target the line spells only through it is Spud's refusal too)
+        line = "cat <<EOF > $(echo ledger/tickets/SPD-001.md\ngit push\n)\nbody12\nEOF"
+        self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+        self.assertRefused(line, "Law 7")
+        self.assertRefused(line, "Law 7", AGENT_C)
+        self.law_7("cat <<EOF $(echo ledger/tickets/SPD-001.md\ngit push\n) > /dev/null\nbody12\nEOF")
+        self.refused_everywhere("cat <<EOF > $(echo a\ntee ledger/tickets/SPD-001.md < /dev/null\n)\nbody12\nEOF")
+        self.assertEqual(self.m.strip_heredocs("cat <<EOF > $(echo ledger/tickets/SPD-001.md\n)\nbody12\nEOF"),
+                         ("cat <<EOF > $(echo ledger/tickets/SPD-001.md\n)\n", ["body12"]))
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_spanning_word_keeps_the_command_going(self):
+        for spanning in HEREDOC_SPANNING:
+            self.refused_everywhere("cat <<EOF %s | tee ledger/tickets/SPD-001.md > /dev/null\nbody\nEOF" % spanning)
+            self.law_7("cat <<EOF %s; git push\nbody\nEOF" % spanning)
+            self.law_7("sh -s <<EOF %s\ngit push\nEOF" % spanning)  # the body is still the shell's input
+            self.data("cat <<EOF %s > /dev/null\ngit push\nEOF" % spanning)
+
+    def test_an_arithmetic_command_or_header_keeps_it_going(self):
+        for line in ("cat <<EOF; (( n = 1 +\n2 )); echo x > ledger/tickets/SPD-001.md\nbody\nEOF",
+                     "cat <<EOF; for (( i = 0;\ni < 1; i++ )) do echo x > ledger/tickets/SPD-001.md; done\nbody\nEOF",
+                     "cat <<EOF; case a in (a|\nb)) echo x > ledger/tickets/SPD-001.md;; esac\nbody\nEOF"):
+            self.refused_everywhere(line)
+        for line in ("cat <<EOF; (( n = 1 +\n2 )); git push\nbody\nEOF", "cat <<EOF; for (( i = 0;\ni < 1; i++ )) git push\nbody\nEOF",
+                     "cat <<EOF; case a in (a|\nb)) git push;; esac\nbody\nEOF"):
+            self.law_7(line)
+
+    def test_a_newline_that_ends_a_command_starts_the_body(self):
+        """A subshell's newline and an array assignment's end a command line: the body starts after them."""
+        for line in ("(cat <<EOF > /dev/null\ngit push\nEOF\n)", "( cd docs && cat <<EOF > /dev/null\ngit push\nEOF\n)",
+                     "cat <<EOF > /dev/null; arr=(a\ngit push\nEOF\n)", "{ cat <<EOF > /dev/null\ngit push\nEOF\n}"):
+            self.data(line)
+        self.law_7("(cat <<EOF > /dev/null\nbody\nEOF\ngit push)")
+
+    def test_what_is_no_operator_hides_no_line(self):
+        for line in ("echo '<<EOF'\ngit push", 'echo "<<EOF"\ngit push', "echo \\<<EOF\ngit push", "true # <<EOF\ngit push",
+                     "# <<EOF\ngit push", "echo ${X:-<<EOF}\ngit push", "y=1; (( x = 1 <<y ))\ngit push",
+                     "y=1; (( x = 1 <<y\n))\ngit push", "echo $(( 1 <<y ))\ngit push", "cat <<<EOF\ngit push",
+                     "cat <<< EOF\ngit push", "cat <<<'EOF'\ngit push"):
+            self.law_7(line)
+        self.refused_everywhere("echo '<<EOF'\necho x > ledger/tickets/SPD-001.md")
+
+    def test_a_here_document_in_a_string_a_shell_runs(self):
+        for line in ("bash -c 'sh <<EOF\ngit push\nEOF'", "zsh -f -c 'sh <<EOF\ngit push\nEOF'", "eval 'sh <<EOF\ngit push\nEOF'",
+                     "sh -c \"sh <<EOF\ngit push\nEOF\""):
+            self.law_7(line)
+        self.data("bash -c 'cat <<EOF > /dev/null\ngit push\nEOF'")
+
+    def test_a_body_inside_a_substitution_is_read_there(self):
+        for line in ("x=$(sh <<EOF\ngit push\nEOF\n)", "echo $(sh <<EOF\ngit push\nEOF\n)", 'x="$(sh <<EOF\ngit push\nEOF\n)"',
+                     "echo `sh <<EOF\ngit push\nEOF\n`", "cat <<A > /dev/null $(sh <<B\ngit push\nB\n)\nbodyA\nA",
+                     "x=$(cat <<EOF)\ngit push\nEOF"):  # the substitution closed on the operator's line: no body, a command
+            self.law_7(line)
+        for line in ("x=$(cat <<EOF\ngit push\nEOF\n)", "x=$(cat <<'EOF'\nit's git push\nEOF\n)",
+                     'x="$(cat <<\'EOF\'\nit\'s git push\nEOF\n)"', "echo `cat <<EOF\ngit push\nEOF\n`",
+                     "cat <<A > /dev/null $(cat <<B\ngit push\nB\n)\ngit push\nA"):
+            self.data(line)
+
+    def test_bodies_follow_in_operator_order(self):
+        self.assertEqual(self.m.strip_heredocs("cat <<A <<-B\nbodyA\nA\n\tbodyB\n\tB\nnext"),
+                         ("cat <<A <<-B\nnext", ["bodyA", "\tbodyB"]))
+        self.assertEqual(self.m.strip_heredocs("cat <<A - <(cat <<B\nbodyB\nB\n) > f\nbodyA\nA"),
+                         ("cat <<A - <(cat <<B\n) > f\n", ["bodyA", "bodyB"]))
+        self.assertEqual(self.m.strip_heredocs("cat <<'A' \"a\nb\" <<B\nbodyA\nA\nbodyB\nB"),
+                         ("cat <<'A' \"a\nb\" <<B\n", ["bodyA", "bodyB"]))
+        self.law_7("cat <<A <<B | sh\necho a\nA\ngit push\nB")
+
+    def test_the_delimiter_line(self):
+        for line in ("cat <<EOF > /dev/null\n\tEOF\ngit push\nEOF", "cat <<EOF > /dev/null\nEOF \ngit push\nEOF",
+                     "cat <<-EOF > /dev/null\n\tEOF\t\ngit push\nEOF", "cat <<EOF > /dev/null\na\\\nEOF\ngit push\nEOF",
+                     "cat <<E\"O\"F > /dev/null\ngit push\nEOF", "cat <<$Z > /dev/null\ngit push\n$Z",
+                     "cat <<EOF > /dev/null\ngit push"):
+            self.data(line)
+        for line in ("cat <<E\"O\"F > /dev/null\nx\nEOF\ngit push", "cat <<'EOF' > /dev/null\na\\\nEOF\ngit push",
+                     "cat <<EOF > /dev/null\na\\\\\nEOF\ngit push", "cat <<\\EOF > /dev/null\nx\nEOF\ngit push",
+                     "cat <<-EOF > /dev/null\n\t\tx\n\t\tEOF\ngit push", "cat <<$Z > /dev/null\nx\n$Z\ngit push",
+                     "cat << 'E F' > /dev/null\nx\nE F\ngit push"):
+            self.law_7(line)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("cat <<EOF " + "(a|\n" * 3000 + ")" * 3000 + "\ngit push\nEOF",
+                     "cat <<EOF " + "(" * 3000 + "\n" * 3000 + "git push",
+                     "cat " + "<<EOF (\n" * 2000 + "git push",
+                     "(" * 2000 + "cat <<EOF\n" * 2000 + "EOF\n" * 2000 + ")" * 2000 + "\ngit push",
+                     "( " * 3000 + "cat <<EOF\nx\nEOF\n" * 3000 + ")" * 3000 + "\ngit push",
+                     "x=(a " * 1000 + "cat <<EOF\nx\nEOF\n" * 1000 + "\ngit push",
+                     "(( " + "x <<y\n" * 2000 + "))\ngit push",
+                     "cat " + "$(" * 1500 + "<<EOF\n" + ")" * 1500 + "\nbody\nEOF\ngit push",
+                     "cat " + "<(" * 1500 + "<<EOF\n" + ")" * 1500 + "\nbody\nEOF\ngit push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
 
 
 # SPD-184: the process substitutions zsh runs in a case's word and its patterns, `%s` standing for the list.  With a file
