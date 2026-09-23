@@ -21,9 +21,14 @@ def analyse_command(command, analysis=None, depth=0):
     marked, other = zsh.mark_zsh_patterns(plain)
     tokens = syntax.shell_tokens(marked)  # the readings differ only in unquoted characters, so each tokenizes when zsh's does
     if tokens is None:
+        # The text holds a quote that never closes, or ends in a backslash with nothing to escape: nothing of it is read
+        # but its substitutions, and the line is refused every caller (bash_rule, SPD-191).  Recorded before the
+        # substitutions are read, so the reason names this text's own quote rather than one a body of it holds.
+        if a.unparseable is None:
+            where = "line" if depth == 0 else "shell" if a.shell_reading else "nested"
+            a.unparseable = syntax.untokenized(marked) + (where,)
         for sub in inner:
             analyse_isolated(a, sub, depth + 1)
-        a.unparseable = True
         return a
     cwds, variables, loop_depth, aliases = a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases)
     zsh_walk = walk.ShellWalk(a, inner, bodies, depth)

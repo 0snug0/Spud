@@ -1474,9 +1474,12 @@ class PreBashTest(BashHookCase):
         self.assertAllowed("SPUD_HOME=%s %s --as spud board" % (self.home.path, self.spud_cli), agent_id=None)
         self.assertAllowed("%s --as %s member log 'a; b && c'" % (self.spud_cli, AGENT_A))
         self.assertAllowed("%s --as %s member log @- <<'EOF'\nDid a thing; git status was clean.\nEOF" % (self.spud_cli, AGENT_A))
-        for cmd in ("ls -la", "python3.14 -I -S -m unittest discover -s tests -t tests", "%s board | head" % self.spud_cli, "%s bogus" % self.spud_cli, "%s board && ls" % self.spud_cli, "echo 'unterminated"):
+        for cmd in ("ls -la", "python3.14 -I -S -m unittest discover -s tests -t tests", "%s board | head" % self.spud_cli, "%s bogus" % self.spud_cli, "%s board && ls" % self.spud_cli):
             self.assertSilent(cmd)
         self.assertEqual(self.denied(), [])
+        # SPD-191: a line the hook cannot tokenize stood silent here since SPD-008; it passed every law, and is refused now
+        # to every caller (UnreadableLineTest)
+        self.assertRefused("echo 'unterminated", "the hook cannot read this line")
 
     def test_missing_command_is_denied(self):
         p = self.pre_bash("ls")
@@ -14608,6 +14611,155 @@ class ResolvedTargetInShellTextTest(ShellSnapshotCase):
 
     def test_a_target_the_body_does_not_settle_stays_pruned(self):
         self.silent_for_everyone("datavar")
+
+
+UNREADABLE = "the hook cannot read this line"  # SPD-191: the reason a line it cannot tokenize earns, every caller
+
+
+class UnreadableLineTest(ShellSnapshotCase):
+    """SPD-191, filed by SPD-188's engineer: bash_refusal returned no reason for a line the hook could not tokenize
+    (analysis.unparseable), so any line shlex cannot split -- a quote that never closes, or a backslash ending it with
+    nothing to escape -- passed every law, for Spud and members alike.  A body the line hands another reading (a `$( )`,
+    eval's words, a `-c` string, a here-document a shell reads) marked the whole analysis the same way, so `git push; eval
+    "echo 'x"` dropped the push the outer words had already earned.  The ticket's evidence, on the SPD-188 tree: `git
+    push<newline>echo 'x` was allowed a member, and `echo x > $(echo ')' >/dev/null; echo ledger/tickets/SPD-001.md)`,
+    which split_substitutions ends at the quoted paren (SPD-194), was allowed Spud under Law 1.
+
+    The rule now: a line any part of which the hook cannot tokenize is refused to every caller -- a bound member, Spud, a
+    plain session and its subagents -- after every refusal the words it did read already earn, with a reason that names the
+    quote (or the backslash), the text from it, where it stands, and how to spell the line.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same, and in GNU bash 3.2.57; and the Bash tool's own shell, read with `ps` from a
+    member's Bash call: `/bin/zsh -c 'source <snapshot> ... && eval '<line>' < /dev/null && pwd -P >| <file>'`:
+
+    - zsh's eval parses the whole text before it runs any of it: `eval 'echo RAN1 > r1<newline>echo '\\''unbalanced'`
+      wrote nothing in zsh (`(eval):2: unmatched '`), and neither did the same line on one row after `;`, the same inside
+      `zsh -f -c "true && eval '...'"` (the Bash tool's shape), `zsh -f -c` of the text itself, or a `$( )` holding the
+      stray quote; bash's eval wrote r1, and `sh -c`, `bash -c` and `bash -c 'eval ...'` of `echo RAN > r<newline>echo
+      "unbalanced` each wrote r before they failed (`unexpected EOF while looking for matching`).  One row with `;` wrote
+      nothing in bash either.  A script read from a here-document or a file ran its first line in both shells: `sh
+      <<'EOF'`, `zsh -f <<'EOF'` (TMPPREFIX in the probe's directory), `bash -s <<< "..."`, `bash s.sh` and `zsh -f s.sh`
+      of `echo RAN > r<newline>echo 'unbalanced` each wrote r.  So an unbalanced quote at the Bash tool's top level runs
+      nothing, while the same text in bash's hands, or read as a script by either shell, runs every complete line before it.
+    - three lines both shells read whole and the hook could not tokenize, each writing in all three: `echo $'\\'' > l/r1`
+      (ANSI-C quoting, whose `\\'` shlex takes for a closing quote), `echo x > $(echo ')' >/dev/null; echo l/r2)`, and
+      `echo RAN3 > l/r3 \\` (a lone backslash at the end of eval's text).
+
+    AGENT_A plans home:tests/** and home:bin/spud; AGENT_C plans home:**."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        target = self.home.path / self.TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("orig\n", encoding="utf-8")
+        (self.home.path / "docs").mkdir(exist_ok=True)
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def unreadable_for_everyone(self, line):
+        """Refused to both members and to Spud, in the words of a line the hook cannot read."""
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, UNREADABLE, agent_id)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_refused(self):
+        push = "git push\necho 'x"
+        self.assertTrue(self.analysis(push).unparseable)
+        self.assertRefused(push, UNREADABLE)  # the push, for a member
+        self.assertRefused(push, UNREADABLE, AGENT_C)
+        ledger = "echo x > $(echo ')' >/dev/null; echo %s)" % self.TARGET
+        self.assertTrue(self.analysis(ledger).unparseable)  # SPD-194 reads the substitution; this ticket refuses the line
+        self.assertRefused(ledger, UNREADABLE, agent_id=None)  # the ledger write, for Spud
+        self.unreadable_for_everyone(push)
+        self.unreadable_for_everyone(ledger)
+
+    def test_lines_both_shells_read_whole_are_refused(self):
+        """The reading gaps the class's probes found, each a write both shells made while the hook read nothing."""
+        for line in ("git push \\", "echo $'\\'' > %s" % self.TARGET, "echo x > %s \\" % self.TARGET,
+                     "git push; echo $'\\''"):
+            with self.subTest(line=line):
+                self.assertTrue(self.analysis(line).unparseable)
+            self.unreadable_for_everyone(line)
+
+    # -- text another reading takes -----------------------------------------------------------------------------------
+    def test_text_the_line_hands_another_reading_is_held_the_same(self):
+        """A shell runs the complete lines before an unbalanced one (probed): bash in `sh -c` and `bash -c` text and its
+        eval, either shell in a script it reads from a here-document or a here-string.  zsh's eval and `zsh -c` run none of
+        it, and the line is refused all the same: the hook cannot tell a stray quote from one of its own reading gaps."""
+        for line in ('sh -c "git push\necho \'x"', 'bash -c "echo x > %s\necho \'x"' % self.TARGET, "zsh -c \"echo 'x\"",
+                     "sh <<'EOF'\ngit push\necho 'x\nEOF", "bash -s <<< \"git push\necho 'x\"", 'eval "git push\necho \'x"',
+                     "x=$(echo 'x)", "echo `echo 'x`", "echo \"$(git push\necho 'x)\"", "echo $(eval \"echo 'x\")"):
+            with self.subTest(line=line):
+                self.assertTrue(self.analysis(line).unparseable)
+            self.unreadable_for_everyone(line)
+
+    def test_a_refusal_the_read_words_earn_keeps_its_reason(self):
+        """A body the hook cannot read no longer takes the outer words' refusals with it: the one they earn stands, and a
+        line that earns none is refused as one the hook cannot read."""
+        for line in ('git push; eval "echo \'x"', "git push; sh -c \"echo 'x\"", "git push $(echo 'x)"):
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertRefused(line, UNREADABLE, agent_id=None)  # Spud is never refused git
+        line = "echo x > %s; eval \"echo 'x\"" % self.TARGET
+        self.assertRefused(line, "Law 1", agent_id=None)
+        self.assertRefused(line, "generated", AGENT_C)
+        self.assertRefused("echo x > docs/x.md; eval \"echo 'x\"", "deliverables")
+
+    # -- the reason ---------------------------------------------------------------------------------------------------
+    def test_the_reason_names_what_stops_the_reading_and_where(self):
+        reason = self.assertRefused("echo ok; echo 'unbalanced", UNREADABLE).reason
+        self.assertIn("the `'` that opens `'unbalanced` never closes", reason)
+        self.assertIn("'\\''", reason)  # ... and how to spell an apostrophe in single quotes
+        reason = self.assertRefused("echo \"it's", UNREADABLE).reason
+        self.assertIn("the `\"` that opens `\"it's` never closes", reason)
+        reason = self.assertRefused("echo x \\", UNREADABLE).reason
+        self.assertIn("the backslash that ends `echo x \\` has nothing to escape", reason)
+        reason = self.assertRefused("echo 'x" + "y" * 200, UNREADABLE).reason
+        self.assertIn("the `'` that opens `'x%s...` never closes" % ("y" * 38), reason)  # a long text is cut
+        reason = self.assertRefused("echo 'a\n\tb", UNREADABLE).reason
+        self.assertIn("the `'` that opens `'a b` never closes", reason)  # its blanks and newlines read as one space
+        reason = self.assertRefused("echo $(echo 'x)", UNREADABLE).reason
+        self.assertIn("the `'` that opens `'x` never closes in text the line hands another reading", reason)
+        reason = self.assertRefused("echo x > 'a*b", UNREADABLE).reason
+        self.assertIn("`'a*b`", reason)  # the text as the line spells it, the hook's own marks taken off
+        reason = self.assertRefused("echo 'a $(b) c", UNREADABLE).reason
+        self.assertIn("`'a $(b) c`", reason)
+
+    def test_an_alias_expansion_the_hook_cannot_read_is_refused_to_a_member(self):
+        """The words after an alias of the shell's are read again after its body without their quotes, so `gc -m "don't"`
+        (the snapshot's `git commit --verbose`) read as unparseable and a member's commit passed.  The line is refused now,
+        and the reason says the text is the alias's."""
+        line = "gc -m \"don't\""
+        r = self.refused_for_members(line, UNREADABLE)
+        self.assertIn("in the text an alias or function of your shell runs", r.reason)
+
+    # -- what stays as it was -----------------------------------------------------------------------------------------
+    def test_a_line_the_hook_reads_is_answered_as_before(self):
+        """An apostrophe the line quotes, escapes or holds in a comment or a here-document body is no stray quote."""
+        for line in ("echo \"it's\"", "echo 'it'\\''s'", "echo it\\'s", "# it's a note\necho x", "cat <<'EOF'\nit's\nEOF",
+                     "x=\"$(cat <<'EOF'\nit's\nEOF\n)\"", "echo \"$(echo \"it's\")\"", "echo \"a\\\"b\"", "echo x \\\n  y",
+                     "sh -c \"echo it\\'s\"", "eval \"echo 'it'\"", "echo \"it's\" > /dev/null"):
+            with self.subTest(line=line):
+                self.assertFalse(self.analysis(line).unparseable)
+                self.assertSilent(line)
+                self.assertSilent(line, agent_id=None)
+
+    def test_a_spud_call_the_hook_cannot_read_is_no_longer_silent(self):
+        """The allow was never given (all_spud holds no unreadable line), but the call stood silent and the harness's
+        rules decided it; it is refused now, and a readable one keeps its allow."""
+        self.assertAllowed("%s --as %s member log \"it's done\"" % (self.spud_cli, AGENT_A))
+        self.assertAllowed("%s --as spud board" % self.spud_cli, agent_id=None)
+        self.assertRefused("%s --as %s member log \"it's done" % (self.spud_cli, AGENT_A), UNREADABLE)
+        self.assertRefused("%s --as spud board 'x" % self.spud_cli, UNREADABLE, agent_id=None)
 
 
 # =============================================================================

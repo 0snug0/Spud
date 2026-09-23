@@ -493,7 +493,12 @@ class ShellAnalysis:
         # program of its own runs whatever stands there, and reads a terminal where nothing does (shell/inline_programs).
         self.stdin_fed = False
         self.cwds = frozenset([cwd]) if cwd else None
-        self.unparseable = False
+        # What stopped the hook tokenizing text it reads for this line, or None (SPD-191): (what -- the quote character
+        # that never closes, or a backslash that ends the text with nothing to escape; the text from that quote on, or up
+        # to that backslash, as untokenized gives it; where -- "line" for the line itself, "nested" for a body the line
+        # hands another reading, "shell" for text the Bash tool's shell already holds).  The first one found is kept, and
+        # bash_rule refuses every caller a line that holds one.
+        self.unparseable = None
         self.loop_depth = 0  # inside a loop or a function body, where a relative cd may repeat
         self.cd_uncertain = False  # the last directory change may not happen (a target that does not exist now)
         self.isolated_done = set()  # (command, depth, starting state) of every body analysed in its own process
@@ -577,6 +582,36 @@ def shell_tokens(text):
         return list(lx)
     except ValueError:
         return None
+
+
+UNTOKENIZED_KEPT = 160  # the most of the text untokenized keeps, from the quote on or up to the backslash
+
+
+def untokenized(text):
+    """What stops shell_tokens splitting this text, by shlex's own posix rules: (the quote character that never closes,
+    and the text from it on), or ("\\\\", the text up to and with a backslash that ends it with nothing to escape).  A
+    backslash escapes the next character outside single quotes, and inside double quotes too, where shlex keeps it; a
+    backslash that ends the text inside an open quote is the quote's.  ("", the text) when neither is the cause, which
+    only text shlex splits reaches."""
+    i, n, quote, start = 0, len(text), None, 0
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif c == "\\":
+            if i + 1 == n and quote is None:
+                return "\\", text[max(0, i + 1 - UNTOKENIZED_KEPT):]
+            i += 1
+        elif quote == '"':
+            if c == '"':
+                quote = None
+        elif c in "'\"":
+            quote, start = c, i
+        i += 1
+    if quote is not None:
+        return quote, text[start:start + UNTOKENIZED_KEPT]
+    return "", text[:UNTOKENIZED_KEPT]
 
 
 def operator_parts(token):

@@ -592,6 +592,21 @@ class BashHookProjectTest(ProjectHookCase):
         self.assertDenied(self.bash(self.PLAIN, "cat %s" % (self.home.path / ".spud" / "ledger.db")), STATE_WORDING)
         self.assertDenied(self.bash(self.PLAIN, "%s --as %s member result done" % (self.spud_cli, AGENT_A)), LAW_5)
 
+    def test_a_line_the_hook_cannot_read_is_refused_in_a_plain_session(self):
+        """SPD-191: a plain session and Eric's own subagents keep the ledger's own refusals -- the database, `spud hook`,
+        Laws 5 and 6, no write in the home -- and a line the hook cannot tokenize hid every one of them (it was silent).
+        It is refused there as it is to every caller (UnreadableLineTest), and a line the hook reads keeps its answer."""
+        for agent_id in (None, AGENT_D):
+            with self.subTest(agent_id=agent_id):
+                hidden = "%s --as spud ticket new --title x\necho 'x" % self.spud_cli
+                r = self.assertDenied(self.bash(self.PLAIN, hidden, agent_id), "the hook cannot read this line", hidden)
+                self.assertIn("the `'` that opens `'x` never closes", r.reason)
+                into_home = "echo x > %s \\" % (self.home.path / "CLAUDE.md")
+                self.assertDenied(self.bash(self.PLAIN, into_home, agent_id), "the hook cannot read this line", into_home)
+                self.assertDenied(self.bash(self.PLAIN, "echo x > %s" % (self.home.path / "CLAUDE.md"), agent_id), NOT_SPUD)
+                readable = "echo \"it's\" > %s" % (self.bad / "notes.txt")
+                self.assertHookSilent(self.bash(self.PLAIN, readable, agent_id), readable)
+
     def test_law_7_binds_members_and_not_erics_own_subagents(self):
         for command in ("git commit -m x", "git push", "git checkout -b feat/x"):
             with self.subTest(command=command):

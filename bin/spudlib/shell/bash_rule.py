@@ -101,6 +101,41 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
                     " assigns it, an array), or one another flag, a modifier or a subscript changes first; spell the commands out")
 
 
+# The reason a line earns when the hook cannot tokenize text it reads for it (ShellAnalysis.unparseable, SPD-191): what
+# stopped the reading and where it stands, then how to spell the line so that the hook can read it.
+UNREADABLE_REASON = ("the hook cannot read this line: %s%s, so it cannot tell which of its words are commands, operators or"
+                     " quoted text, and a line it cannot read is refused whatever it holds. zsh, which runs the Bash tool's"
+                     " line, runs none of a line it cannot parse, but a line the hook misreads may be whole to zsh, and a"
+                     " shell runs every complete line before an unbalanced one in `sh -c` or `bash -c` text, in bash's eval,"
+                     " and in a script it reads from a here-document or a file, zsh too. Close every quote -- an apostrophe"
+                     " inside single quotes is '\\'' (or put the text in double quotes), and the hook reads `$'...'` as plain"
+                     " single quotes, so write no \\' inside one -- end no line with a lone backslash, and give a long"
+                     " message a file of its own or a quoted here-document (<<'EOF')")
+UNREADABLE_WHERE = {
+    "line": "",
+    "nested": (" in text the line hands another reading (a `$( )` or backtick body, eval's words, a `-c` string, a"
+               " here-document or here-string a shell reads)"),
+    "shell": (" in the text an alias or function of your shell runs, read with the words after it (Claude Code's snapshot"
+              " of your interactive shell, ~/.claude/shell-snapshots/); spell the command out instead of its alias"),
+}
+UNREADABLE_SHOWN = 40  # the most of the text from the quote, or before the backslash, a reason shows
+
+
+def unreadable_reason(cause):
+    """The reason for ShellAnalysis.unparseable: the quote that never closes and the text from it, or the backslash with
+    nothing to escape and the text before it, shown as the line spells it (the hook's own marks taken off, a lifted body
+    as `$(...)`, every run of blanks and newlines as one space) and cut to UNREADABLE_SHOWN characters."""
+    what, text, where = cause
+    shown = " ".join(syntax.shown_operands(prepare.deglob(text)).replace(hookio.SUBST, "$(...)").split())
+    if what == "\\":
+        shown = shown if len(shown) <= UNREADABLE_SHOWN else "..." + shown[-UNREADABLE_SHOWN:]
+        stop = "the backslash that ends `%s` has nothing to escape" % shown
+    else:
+        shown = shown if len(shown) <= UNREADABLE_SHOWN else shown[:UNREADABLE_SHOWN] + "..."
+        stop = ("the `%s` that opens `%s` never closes" % (what, shown)) if what else "shlex cannot split `%s`" % shown
+    return UNREADABLE_REASON % (stop, UNREADABLE_WHERE.get(where, ""))
+
+
 def inline_program_reason(detail):
     """The refusal an interpreter run earns a member for a program the line spells: (the command word as spelled, the
     option that carries the program, or None where the interpreter reads it on standard input)."""
@@ -239,8 +274,6 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     if hookio.DB_PATH_RE.search(command):
         return db_reason % "the command names ledger.db or .spud/", None
     analysis = analyse.analyse_command(command, syntax.ShellAnalysis(cwd=cwd, home=str(ctx.home), launcher=str(ctx.launcher)))
-    if analysis.unparseable:
-        return None, analysis
     plain = mode == "plain"
     strict = bool(caller_agent_id) and not (plain and caller_member is None)
     who = ("%s (agent_id %s)" % (lookup.member_ref(con, caller_member["id"]), caller_agent_id)) if caller_member else ("agent_id %s" % caller_agent_id if caller_agent_id else "Spud")
@@ -503,4 +536,18 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                 # among the findings as spelled, for the same reason an inline program is: what the same input writes
                 # (`xargs perl -pi -e s/a/b/ < list`) keeps its own reason.
                 return VAR_WORD_REASON % detail, analysis
+    if analysis.unparseable:
+        # Last of all, so a refusal the words the hook did read already earn keeps its own reason (a Law 7 verb before a
+        # stray quote in an eval string), and then for every caller: a bound member, Spud, a plain session and its
+        # subagents (SPD-191).  Before, this line passed every law.  Probed through tests/probes/shell_probe.py (zsh 5.9, bash
+        # 3.2.57; UnreadableLineTest): the Bash tool runs the line as `zsh -c '... && eval <line>'`, and zsh's eval parses
+        # all of its text before it runs any, so a line whose quote truly never closes runs nothing and refusing it costs
+        # nothing; but a line the hook misreads may be whole to zsh (`$'\''`, a quoted `)` in a `$( )`, a lone
+        # backslash at the end all wrote files), and a shell runs every complete line before an unbalanced one in
+        # `sh -c` and `bash -c` text, in bash's eval, and in a script it reads from a here-document or a file, zsh
+        # too -- only zsh's eval and `zsh -c` parse their whole text first.  Spud is refused always, not only where
+        # the text holds something his laws cover: which words of it are commands, targets or quoted text is exactly
+        # what the hook could not read, so a scan for a write, a tee, a spud or sqlite3 call, a git call or a generated
+        # path would guess over the same text and match nearly every line he runs anyway.
+        return unreadable_reason(analysis.unparseable), analysis
     return None, analysis
