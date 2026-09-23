@@ -34,7 +34,8 @@ class ShellFrame:
     `{ list }` group, whose fork the `coproc` before it makes), "loop" a for, select, repeat, while or until,
     "cond" an if, "case" a case, "func" a function body."""
 
-    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints")
+    __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints",
+                 "procsub")
 
     def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
@@ -58,6 +59,10 @@ class ShellFrame:
         # called, nor for a process substitution, whose output goes to the file it stands for.
         # `stdin` carries two flags beside those two texts: whether anything at all stands on that input.
         self.printed, self.earlier, self.stdin, self.prints = "", "", (None, None, False, False), kind != "func"
+        # an input process substitution, `<( list )`: the command around it is handed a file name it stands for
+        # (/dev/fd/N), a word the line does not spell, which ShellWalk.pop puts among that command's words (SPD-145:
+        # `bash <(curl ...)` runs that file's text as a script).
+        self.procsub = False
 
 
 class ShellWalk:
@@ -173,6 +178,8 @@ class ShellWalk:
         after = frame.saved if frame.kind == "sub" else (inner if frame.kind == "group" else directories.union_dirs(frame.seen, inner))
         (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words,
          self.skip, self.header, self.expect_body) = frame.outer
+        if frame.procsub:
+            self.words.append(hookio.SUBST)  # the file name `<( list )` hands the command, as `$( ... )` stands in a word
         self.a.cwds = after
         if after != frame.saved and self.conditional:
             self.uncertain = True
@@ -570,6 +577,7 @@ class ShellWalk:
                 self.function_next = False
                 self.push("sub", ")")
                 self.stack[-1].prints = t == "("  # a process substitution's output goes to the file it stands for
+                self.stack[-1].procsub = t == "<("
             elif t == ")":
                 self.close_sublists()
                 if self.stack and self.stack[-1].closer == ")":

@@ -37,6 +37,9 @@ AGENT_A = "ac8c90dafa6697045"  # the spike's background probe
 AGENT_B = "adb9ecf5d69362ddd"  # the spike's foreground probe
 AGENT_C = "a0cfc2d597e041e6b"
 AGENT_D = "0123456789abcdef0"
+# SPD-145: a member's shell whose commands come from a file -- a script operand, `source`, a path run as a command, standard
+# input the line does not spell -- refused, fail closed (shell/script_files; ScriptFileTest)
+SCRIPT_WORDING = "the hook reads no file's commands"
 
 # What post_agent_completed's tool_response reports beside the child's text, as the ledger keeps it in
 # usage_json.completion (SPD-021).  totalTokens and usage cover the final request only.
@@ -1609,7 +1612,10 @@ class SpudAllowIdentityTest(BashHookCase):
                                  ("%s/python3.14" % other, None), ("cd %s && ./python3.14" % other, None)):
             with self.subTest(interpreter=interpreter, cwd=cwd):
                 spelled = "%s -I -S %s {tail}" % (interpreter, launcher)
-                self.assertSilentForBoth(spelled, cwd)
+                # SPD-145: a file in the temp roots run by its path is one a member may have written (`other`'s is a shell
+                # script), so the lead is refused it; Spud's unvouched call stays silent
+                self.assertRefused(spelled.format(tail=self.log), SCRIPT_WORDING, AGENT_A, cwd)
+                self.assertSilent(spelled.format(tail="--as spud board"), None, cwd)
                 self.assertStillRefused(spelled, cwd)
         # SPD-062: a PATH the line changes, and a name it hashes, no longer merely withhold the vouch -- the interpreter the
         # hook read by name is not the one the shell would run, so a member is refused outright.  Spud, whom Law 7 does not
@@ -2886,10 +2892,16 @@ class GlobCommandWordTest(BashHookCase):
                    "[[ x == g?t ]] && echo y", "case g?t in g?t) echo y;; esac", "arr=(g?t push); echo $arr", "echo $((1*2))",
                    "x=$((2*3)); echo $x", "[ -f tests/keep.py ] && echo y", "for f in tests/*.py; do echo $f; done", "echo g?t push",
                    "git branch --list 'feat*'", "git tag -l v1.*", "python3.14 -I -S -m unittest discover -s tests -t tests",
-                   "command -v g?t", "find . -name '*.py'", "(cd %s && echo x > note.txt)" % out, "bash tests/*.sh",
-                   "python3 tests/k*.py", "env FOO=1 ls *.py", "git -C tests/* status", "/usr/bin/nomatch-spd-041* push"):
+                   "command -v g?t", "find . -name '*.py'", "(cd %s && echo x > note.txt)" % out,
+                   "python3 tests/k*.py", "env FOO=1 ls *.py", "git -C tests/* status"):
             with self.subTest(ok):
                 self.assertSilent(ok)
+        # SPD-145: a shell's script operand and a path run as a command are a member's file of commands; a glob in either may
+        # name a file anywhere, so it is refused whatever it matches, and Spud's reading is unchanged
+        for cmd in ("bash tests/*.sh", "/usr/bin/nomatch-spd-041* push"):
+            with self.subTest(cmd):
+                self.assertRefused(cmd, SCRIPT_WORDING)
+                self.assertSilent(cmd, agent_id=None)
         self.assertRefused("(cd %s) && echo x > note.txt" % out, "deliverables")
         self.assertAllowed("%s --as %s member log 'a*b (c|d) =e {f,g}'" % (self.spud_cli, AGENT_A))
         self.assertRefused("git push", "Law 7")
@@ -4378,9 +4390,12 @@ class TrapActionTest(BashHookCase):
                 self.refused_for_members(cmd)
         for ok in ("env trap 'git push' EXIT", "nohup trap 'git push' EXIT", "exec trap 'git push' EXIT",
                    "sudo trap 'git push' EXIT", "xargs trap 'git push' EXIT", "nice trap 'git push' EXIT",
-                   "/usr/bin/trap 'git push' EXIT", "./trap 'git push' EXIT", "TRAP 'git push' EXIT",
+                   "/usr/bin/trap 'git push' EXIT", "TRAP 'git push' EXIT",
                    "traps 'git push' EXIT", "echo trap 'git push' EXIT"):
             self.silent_for_everyone(ok)
+        # no trap either, but a file of the checkout's run by its path: a member's file of commands since SPD-145
+        self.refused_for_members("./trap 'git push' EXIT", SCRIPT_WORDING)
+        self.assertSilent("./trap 'git push' EXIT", None)
 
     def test_a_coproc_or_a_pipeline_forks_a_shell_where_the_builtin_runs(self):
         """Round 2 of Spud's review: `coproc` is not an external wrapper -- it runs its command in a forked shell of its
@@ -5231,8 +5246,9 @@ class ShellStandardInputTest(BashHookCase):
 
     Standard input the line does not spell keeps main's reading: a file (`sh < f`), another program's output
     (`cat f | sh`, `curl ... | sh`), or text this reading cannot decode.  That is the same class as `sh script.sh`, a
-    script the hook does not read either -- a hole in Law 7 for every caller, which Spud has filed as a question for
-    Eric rather than have a member refused for it here."""
+    script the hook does not read either -- a hole in Law 7 for every caller, which Spud filed as a question for Eric
+    rather than have a member refused for it here.  Eric's call on SPD-145 was to fail closed: the text is still not
+    read, and a member is refused the shell that runs it (ScriptFileTest)."""
 
     # Each line feeds a shell one `git push` through a shape the shells probed above run.
     FED = ("echo 'git push' | sh", "echo 'git push' | bash", "echo 'git push' | zsh -f", "echo 'git push' | dash",
@@ -5278,10 +5294,24 @@ class ShellStandardInputTest(BashHookCase):
                 self.assertEqual(self.verbs(command), ["push", "commit"])
 
     def test_input_the_line_does_not_spell_is_read_as_it_was(self):
+        """Read no further than main read it -- and, since SPD-145, a shell whose commands come from input the line does not
+        spell or from a script of its own refuses a member (ScriptFileTest) -- `| xargs sh` among them, whose first word from
+        xargs is its script -- while `| cat`, which runs no such text, stays silent."""
         for command in self.UNREAD:
             with self.subTest(command):
-                self.assertEqual(self.analysis(command).findings, [])
-                self.assertSilent(command)
+                findings = self.analysis(command).findings
+                self.assertEqual([f for f in findings if f[0] not in ("script", "var-word")], [])
+                if command.endswith("| cat"):
+                    self.assertEqual(findings, [])
+                    self.assertSilent(command)
+                elif "<(" in command:
+                    # the file `<( list )` hands the shell is a word the line does not spell, where a shell's operand is
+                    # read by name: refused as any such word is, before the script is
+                    self.assertRefused(command, "spell the words out")
+                else:
+                    self.assertRefused(command, SCRIPT_WORDING)
+                if ">" not in command:  # Spud's own write of tests/out.txt is Law 1's, as it was
+                    self.assertSilent(command, agent_id=None)
         # An interpreter is no shell, so nothing the line puts on python's standard input is read as commands here; since
         # SPD-150 such a line is refused a member for the program python runs there instead (InlineProgramTest).
         self.assertEqual(self.verbs("echo 'git push' | python3 -"), [])
@@ -5370,18 +5400,23 @@ class SettledStandardInputTest(BashHookCase):
         self.assertSilent("X='git status'; echo $X | sh")
 
     def test_a_value_the_line_does_not_settle_stays_unread(self):
+        # ... and so is text the line does not spell, which since SPD-145 refuses a member (fail closed) and leaves Spud be
         for command in self.UNSETTLED:
             with self.subTest(command):
                 self.assertNotIn("push", self.verbs(command))
-                self.assertSilent(command)
+                self.assertRefused(command, SCRIPT_WORDING)
+                self.assertSilent(command, agent_id=None)
 
     def test_a_value_the_two_shells_print_apart_stays_unread(self):
         """`$X` and `"$X"` reach the reading alike, so a value bash's split of an unquoted expansion would print
-        otherwise than zsh does is text the hook cannot say, as it was."""
+        otherwise than zsh does is text the hook cannot say, as it was -- and a shell reading it refuses a member (SPD-145)."""
         for command in self.SPLIT:
             with self.subTest(command):
-                self.assertEqual(self.analysis(command).findings, [])
-                self.assertSilent(command)
+                findings = self.analysis(command).findings
+                self.assertEqual([f for f in findings if f[0] != "script"], [])
+                self.assertEqual([d[0] for k, d in findings if k == "script"], ["stdin"])
+                self.assertRefused(command, SCRIPT_WORDING)
+                self.assertSilent(command, agent_id=None)
 
     def test_a_spud_call_and_a_write_are_read_through_it_too(self):
         cli = self.spud_cli
@@ -5389,6 +5424,196 @@ class SettledStandardInputTest(BashHookCase):
         self.assertRefused("T=ledger/tickets/SPD-001.md; echo \"echo x > $T\" | sh", "generated")
         self.assertRefused("D=docs/x.md; echo touch $D | sh", "deliverables")
         self.assertSilent("T=tests/out.txt; echo \"echo x > $T\" | sh")
+
+
+class ScriptFileTest(BashHookCase):
+    """SPD-145: a member's shell whose commands come from a file.  Main (0a1bf00) read none of `sh x.sh`, `bash ./x.sh`,
+    `source x.sh`, `. x.sh`, `sh < x.sh`, `cat x.sh | sh`, `curl ... | sh` or `./x.sh`: a member that wrote `git push` into a
+    script in its scratchpad and ran it pushed past Law 7, and the same for a spud call (Law 6) or a write (Law 5).
+
+    Eric's call (option 3): fail closed.  A member is refused each of these, the reason naming Law 7 and the readable forms
+    (`sh -c '...'`, a here-document); Spud keeps every one.  A repository script the ticket's project allow-lists
+    (`spud --as spud project edit --allow-script`) runs from the project's checkout or the ticket's bound worktree while it is
+    outside the member's deliverables and the line writes none of it; a program outside every checkout and outside the
+    scratchpad and temp roots -- the machine's own, which a member cannot write -- runs by its path as it always did.
+
+    AGENT_A and AGENT_B hold home:tests/** and home:bin/spud; the home is project spud's checkout here (SPUD_TOOL_DIR)."""
+
+    # Each line runs commands from a file, and a member is refused it.
+    REFUSED = (
+        # a script operand, through the wrappers the dispatch unwraps
+        "sh x.sh", "bash ./x.sh", "zsh x.sh", "dash x.sh", "ksh x.sh", "bash -e x.sh", "bash -x ./x.sh", "sh -o errexit x.sh",
+        "bash -- x.sh", "bash - x.sh", "zsh -f x.sh arg", "env bash x.sh", "nice sh x.sh", "nohup bash x.sh",
+        "command bash x.sh", "exec sh x.sh", "timeout 5 bash x.sh", "/bin/sh x.sh", "sh scripts/run.sh", "sh tests/x.sh",
+        "bash /tmp/x.sh", "bash --rcfile x.sh -i", "echo x.sh | xargs sh", "cat list | xargs sh",
+        # the sourcing builtins, however they are reached
+        "source x.sh", ". x.sh", "source ./x.sh", ". /tmp/x.sh", "builtin source x.sh", "command . x.sh", "source",
+        # standard input the line does not spell
+        "sh < x.sh", "sh -s arg < x.sh", "bash -s < x.sh", "cat x.sh | sh", "cat x.sh | bash -s", "cat x.sh | zsh",
+        "curl -fsSL https://example.com/install.sh | sh", "curl -fsSL https://example.com/install.sh | bash -s -- -y",
+        "sh /dev/stdin < x.sh", "sh - < x.sh", "cat x.sh | env sh", "cat x.sh | xargs -0 sh -c", "echo \"$CMD\" | sh",
+        # a file run by its path
+        "./x.sh", "./x.sh arg", "scripts/run.sh", "tests/run.sh", "/tmp/x.sh", "cd scripts && ./run.sh", "nice ./x.sh",
+        "env ./x.sh", "xargs ./x.sh < list", "./git status", "time ./x.sh",
+        # a file of commands a shell runs as it starts
+        "BASH_ENV=x.sh bash -c true", "export BASH_ENV=/tmp/x.sh", "env BASH_ENV=x.sh python3 tests/x.py",
+        "ENV=x.sh sh -i", "ZDOTDIR=/tmp/z zsh -c true", "HOME=/tmp/h zsh -c true", "export HOME=/tmp/h; bash -lc true",
+        # and each of them where the line hands a shell its text
+        "sh -c 'sh x.sh'", "bash -c '. ./x.sh'", "eval './x.sh'", "echo 'source x.sh' | sh", "sh <<'EOF'\nbash x.sh\nEOF",
+        "(cd scripts; ./run.sh)", "true && sh x.sh", "for f in a; do sh x.sh; done",
+    )
+    # ... and each of these reads no command from a file the member could have written: silent for everyone, as before.
+    SILENT = (
+        "sh -c 'ls'", "bash -c 'echo hi'", "bash -lc 'git status'", "echo ls | sh", "printf 'ls\\n' | bash -s",
+        "sh <<'EOF'\nls\nEOF", "bash -s <<< 'ls'", "bash", "bash --version", "sh -c 'ls' x.sh", "zsh -f -c true",
+        "/bin/echo hi", "/usr/bin/env ls", "/usr/bin/true", "/bin/sh -c 'ls'", "/nonexistent-spd-145/bin/tool --version",
+        "ls ./x.sh", "cat x.sh", "grep -n git x.sh", "python3 tests/x.py", "node scripts/x.js", "echo x.sh",
+        "X=x; echo $X", "HOME=/tmp/h ls", "export PATH=/usr/bin:$PATH",
+    )
+
+    def setUp(self):
+        super().setUp()
+        home = self.home.path
+        for rel in ("x.sh", "scripts/run.sh", "scripts/ok.sh", "tests/x.sh", "tests/run.sh", "tests/x.py"):
+            (home / rel).parent.mkdir(parents=True, exist_ok=True)
+            (home / rel).write_text("#!/bin/sh\ngit push\n", encoding="utf-8")
+            (home / rel).chmod(0o755)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def forms(self, command):
+        """The forms of the script findings this line records, in the order the analysis finds them."""
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def allow(self, *paths, key="spud", check=True):
+        args = ["project", "edit", key]
+        for p in paths:
+            args += ["--allow-script", p]
+        return self.home.run(*args, actor="spud", check=check)
+
+    def test_every_shape_is_refused_a_member_and_left_to_spud(self):
+        for command in self.REFUSED:
+            with self.subTest(command):
+                r = self.assertRefused(command, SCRIPT_WORDING)
+                self.assertIn("Law 7", r.reason)
+                self.assertSilent(command, agent_id=None)
+
+    def test_what_reads_no_file_is_silent_for_everyone(self):
+        for command in self.SILENT:
+            with self.subTest(command):
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=None)
+
+    def test_the_analysis_records_each_form(self):
+        cases = {"sh x.sh": ["operand"], "bash --rcfile r.sh -i": ["operand"], "echo x.sh | xargs sh": ["operand"],
+                 "source x.sh": ["source"], ". x.sh": ["source"], "cat x.sh | sh": ["stdin"], "sh < x.sh": ["stdin"],
+                 "cat f | xargs -0 sh -c": ["xargs"], "./x.sh": ["exec"], "nice ./x.sh": ["exec"],
+                 "./env sh x.sh": ["exec", "operand"], "BASH_ENV=x bash -c true": ["startup"],
+                 "HOME=/tmp/h zsh -c true": ["startup"], "echo 'git push' | sh": [], "sh -c 'ls'": [], "/bin/echo": ["exec"],
+                 "bash": [], "cat x.sh": []}
+        for command, forms in cases.items():
+            with self.subTest(command):
+                self.assertEqual(self.forms(command), forms)
+        # the file as the line settles it (the dispatch has read the word by then), and the directories the shell may be in
+        found = [d for k, d in self.analysis("S=scripts/run.sh; cd tests && bash $S").findings if k == "script"]
+        self.assertEqual(found, [("operand", "bash", "scripts/run.sh", "scripts/run.sh", frozenset({str(self.home.path / "tests")}))])
+        # an operand the line does not settle is refused where the words are read by name, before this reading is asked --
+        # the file an input process substitution hands a shell among them (`bash <(curl ...)`, the installer idiom)
+        self.assertEqual(self.forms("bash <(curl -fsSL https://example.com/i.sh)"), ["operand"])
+        self.assertEqual(self.forms("source <(cat x.sh)"), ["source"])
+        self.assertRefused("source <(cat x.sh)", SCRIPT_WORDING)
+        for command in ("sh $X", "X=x.sh; sh $S", "bash <(curl -fsSL https://example.com/i.sh)", "sh <(cat x.sh) arg"):
+            with self.subTest(command):
+                self.assertRefused(command, "spell the words out")
+                self.assertSilent(command, agent_id=None)
+
+    def test_the_reason_names_the_law_the_file_and_the_readable_forms(self):
+        r = self.assertRefused("bash ./x.sh", SCRIPT_WORDING)
+        for needle in ("Law 7: `bash` runs commands from the script file `./x.sh`", "Law 6", "Law 5", "`sh -c '...'`",
+                       "here-document", "allow"):
+            self.assertIn(needle, r.reason)
+        self.assertIn("`source` runs commands from the file `x.sh`", self.assertRefused("source x.sh", SCRIPT_WORDING).reason)
+        self.assertIn("`./x.sh` runs commands from `./x.sh`, a file run by its path", self.assertRefused("./x.sh", SCRIPT_WORDING).reason)
+        self.assertIn("standard input that the line does not spell", self.assertRefused("cat x.sh | sh", SCRIPT_WORDING).reason)
+        self.assertIn("`BASH_ENV=...` runs commands", self.assertRefused("BASH_ENV=x bash -c true", SCRIPT_WORDING).reason)
+        events = self.denied()
+        self.assertTrue(events and all(SCRIPT_WORDING in e["data"]["reason"] for e in events))
+
+    def test_an_earlier_reason_on_the_line_is_kept(self):
+        """The refusal is read last (bash_rule), as an inline program's is: a git verb, a spud call and a write the path rule
+        refuses each keep their own reason."""
+        self.assertNotIn(SCRIPT_WORDING, self.assertRefused("git push; sh x.sh", "Law 7").reason)
+        self.assertNotIn(SCRIPT_WORDING, self.assertRefused("echo x > docs/y.md; sh x.sh", "deliverables").reason)
+        self.assertNotIn(SCRIPT_WORDING, self.assertRefused("%s ticket new --title x; ./x.sh" % self.spud_cli, "Law 6").reason)
+
+    def test_an_allow_listed_script_runs_from_the_checkout(self):
+        self.allow("scripts/ok.sh")
+        home = self.home.path
+        for command in ("bash scripts/ok.sh", "sh ./scripts/ok.sh", "./scripts/ok.sh", "scripts/ok.sh arg", "source ./scripts/ok.sh",
+                        ". scripts/ok.sh", "cd scripts && ./ok.sh", "cd scripts && bash ok.sh", "nice bash scripts/ok.sh",
+                        "%s/scripts/ok.sh" % home, "bash %s/scripts/ok.sh" % home, "S=scripts/ok.sh; bash $S",
+                        "./scripts/ok.sh && git status", "sh -c './scripts/ok.sh'"):
+            with self.subTest(command):
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=AGENT_B)
+                self.assertSilent(command, agent_id=None)
+        # the list names that script and no other, and never the shapes that read standard input or search PATH
+        for command in ("bash scripts/run.sh", "./scripts/run.sh", "cat scripts/ok.sh | sh", "sh < scripts/ok.sh",
+                        "cd scripts && source ok.sh", "bash scripts/o*.sh", "./scripts/ok.sh; ./x.sh"):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WORDING)
+
+    def test_an_allow_listed_script_under_the_members_globs_is_refused(self):
+        """tests/** is the members' own: an allowed name there is text the member writes, so it runs for nobody but Spud."""
+        self.allow("tests/run.sh")
+        for command in ("bash tests/run.sh", "./tests/run.sh", "source ./tests/run.sh"):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WORDING)
+                self.assertSilent(command, agent_id=None)
+
+    def test_an_allow_listed_script_that_leaves_the_checkout_is_refused(self):
+        """A symlink under an allowed name that points into the temp roots is a file a member may write; a copy of the
+        checkout's script elsewhere is no checkout's."""
+        target = Path(tempfile.mkdtemp(prefix="spud-script-")).resolve()
+        self.addCleanup(shutil.rmtree, target, True)
+        (target / "evil.sh").write_text("git push\n", encoding="utf-8")
+        (self.home.path / "scripts" / "link.sh").symlink_to(target / "evil.sh")
+        shutil.copyfile(self.home.path / "scripts" / "ok.sh", target / "ok.sh")
+        self.allow("scripts/link.sh", "scripts/ok.sh")
+        for command in ("bash scripts/link.sh", "./scripts/link.sh", "bash %s/ok.sh" % target, "cd %s && ./ok.sh" % target):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WORDING)
+
+    def test_a_line_that_writes_the_script_is_refused(self):
+        """What the line writes is read before the script runs: a write the path rule refuses keeps its reason, and the
+        written paths the allow-list is held against name the script or a directory above it."""
+        self.allow("scripts/ok.sh")
+        m = load_spud_module()
+        for command, reason in (("echo 'git push' > scripts/ok.sh; ./scripts/ok.sh", "deliverables"),
+                                ("cp /tmp/x scripts/ok.sh && bash scripts/ok.sh", "deliverables"),
+                                ("rm -rf scripts; bash scripts/ok.sh", "deliverables")):
+            with self.subTest(command):
+                self.assertRefused(command, reason)
+                analysis = self.analysis(command)
+                written = m.written_targets(analysis, m.written_paths(analysis.arg_writes)[0])
+                self.assertTrue(m.written_over(str(self.home.path / "scripts" / "ok.sh"), written), written)
+        self.assertFalse(m.written_over("/a/bc", ["/a/b"]))
+        self.assertTrue(m.written_over("/a/b/c", ["/a/b/"]))
+
+    def test_an_unbound_agent_in_a_spud_session_has_no_allow_list(self):
+        self.allow("scripts/ok.sh")
+        for command in ("bash scripts/ok.sh", "./scripts/ok.sh"):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WORDING, agent_id=AGENT_D)
+                self.assertSilent(command, agent_id=None)
+
+    def test_an_interpreter_run_from_a_file_is_unchanged(self):
+        """SPD-150's rule: a program from a file is read as it was, a shell script operand being the one this refuses."""
+        for command in ("python3 tests/x.py", "python3.14 -I -S tests/x.py", "node scripts/x.js", "perl tests/x.pl", "ruby tests/x.rb"):
+            with self.subTest(command):
+                self.assertSilent(command)
 
 
 INLINE_WORDING = "the hook reads no inline program"
@@ -6031,8 +6256,12 @@ class ShellSnapshotTest(ShellSnapshotCase):
         self.silent_for_everyone("sudo gp")  # a wrapper takes the command position: no chaining through it
 
     def test_the_command_position_alone(self):
-        for cmd in ("command gp", "./gp", "echo gp", "builtin gp", "env gp", "x=gp", "git log --grep gp"):
+        for cmd in ("command gp", "echo gp", "builtin gp", "env gp", "x=gp", "git log --grep gp"):
             self.silent_for_everyone(cmd)
+        # `./gp` is no alias either, but a file run by its path: a member's file of commands since SPD-145
+        r = self.refused_for_members("./gp", SCRIPT_WORDING)
+        self.assertNotIn("snapshot", r.reason)
+        self.assertSilent("./gp", None)
         self.assertEqual(self.expansion("command gp"), [])
 
     def test_a_function_that_runs_a_git_write(self):
@@ -7424,11 +7653,14 @@ class PathInForceTest(BashHookCase):
 
     def test_a_command_run_by_a_path_stays_silent(self):
         # PATH is not searched for a word holding a slash, so the program the hook read is the one that runs.
-        for ok in ("PATH=/tmp/x:$PATH /usr/bin/git status", "PATH=/tmp/x:$PATH ./git status",
+        for ok in ("PATH=/tmp/x:$PATH /usr/bin/git status",
                    "PATH=/tmp/x:$PATH /bin/sh -c 'echo hi'", "PATH=/tmp/x:$PATH /usr/bin/tee /tmp/out"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
+        # ... and a file of the checkout's run by its path is, since SPD-145, a member's file of commands
+        self.assertRefused("PATH=/tmp/x:$PATH ./git status", SCRIPT_WORDING)
+        self.assertSilent("PATH=/tmp/x:$PATH ./git status", agent_id=None)
 
     def test_a_name_the_hook_grants_nothing_for_stays_silent(self):
         for ok in ("PATH=/tmp/x ls", "PATH=/tmp/x:$PATH ls -la", "PATH=/tmp/x echo hi", "PATH=/tmp/x:$PATH cd /tmp",
@@ -7621,10 +7853,13 @@ class SubscriptAssignmentTest(BashHookCase):
         self.assertEqual(self.analysis("cdpath[1]=/tmp").vars, {"cdpath": "$"})
 
     def test_a_name_run_by_path_or_granted_nothing_stays_silent(self):
-        for ok in ("path[1]=/tmp/x; /usr/bin/git status", "PATH[1]=/tmp/x ./git status", "path[1]=/tmp/x ls",
+        for ok in ("path[1]=/tmp/x; /usr/bin/git status", "path[1]=/tmp/x ls",
                    "PATH[0]=/tmp/x; ls -la", "path[1]=/tmp/x", "path[1,0]=(/tmp/x)", "typeset 'path[1]=/tmp/x'"):
             with self.subTest(ok):
                 self.silent_for_everyone(ok)
+        # a file of the checkout's run by its path: a member's file of commands since SPD-145
+        self.refused_for_members("PATH[1]=/tmp/x ./git status", SCRIPT_WORDING)
+        self.assertSilent("PATH[1]=/tmp/x ./git status", None)
 
     def test_an_element_of_an_untracked_variable_changes_nothing(self):
         for ok in ("x[1]=y; git status", "arr[2]=v git status", "x[1]=y", "mine[k]=(a b); git log", "x[1]+=y git diff",
@@ -7635,10 +7870,17 @@ class SubscriptAssignmentTest(BashHookCase):
 
     def test_words_that_are_no_assignment_stay_as_they_were(self):
         # a quoted bracket, a blank in the subscript, and text after the subscript are no assignment in any shell
-        for ok in ("echo path[1]", "echo path[1]=/tmp/x", "'path[1]'=/tmp/x; git status", "grep -n 'path[1]=' README",
-                   "echo 'PATH[0]=/tmp/x'", "path[1]x=/tmp/x", "printf '%s\\n' path[1]=x"):
+        for ok in ("echo path[1]", "echo path[1]=/tmp/x", "grep -n 'path[1]=' README",
+                   "echo 'PATH[0]=/tmp/x'", "printf '%s\\n' path[1]=x"):
             with self.subTest(ok):
                 self.silent_for_everyone(ok)
+        # ... and the two such words in command position name a command holding a slash, which the shell runs as the path
+        # it is (`path[1]x=/tmp/x` is the file `x` in the directory `path[1]x=` under this one): a member's file of commands
+        # since SPD-145
+        for cmd in ("'path[1]'=/tmp/x; git status", "path[1]x=/tmp/x"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, SCRIPT_WORDING)
+                self.assertSilent(cmd, None)
         self.assertEqual(self.analysis("'path[1]'=/tmp/x; git status").vars, {})
         self.assertEqual(self.analysis("path[1][1]=/tmp/x").vars, {})
 
@@ -7783,13 +8025,16 @@ class FunctionShadowTest(BashHookCase):
 
     def test_a_call_by_path_or_a_bypassing_prefix_stays_silent(self):
         # the function is looked up in command position; a path is not, and command/builtin/env/nice resolve their own word
-        for ok in ("git() { true; }; /usr/bin/git status", "git() { true; }; ./git status",
+        for ok in ("git() { true; }; /usr/bin/git status",
                    "git() { true; }; command git status", "git() { true; }; builtin git status",
                    "git() { true; }; nice git status", "git() { true; }; env git status",
                    "git() { true; }; nice env git status", "git() { true; }; sudo git status"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
+        # ... and a file in the checkout run by its path is no function's, but since SPD-145 a member's file of commands
+        self.assertRefused("git() { true; }; ./git status", SCRIPT_WORDING)
+        self.assertSilent("git() { true; }; ./git status", agent_id=None)
 
     def test_a_bypassing_prefix_keeps_the_words_own_refusal(self):
         # command/nice bypass the function, but a write verb behind them still earns Law 7 -- its own reason, not the function's
@@ -8109,9 +8354,13 @@ class WrapperCommandWordTest(BashHookCase):
                 self.assertIn("git push", r.reason)
 
     def test_the_word_is_dispatched_by_its_base_name(self):
-        self.assertEqual(self.finding("nice x=./git push"), [("git", ("push", "push"))])
-        self.assertEqual(self.finding("nice x=../bin/git push"), [("git", ("push", "push"))])
-        self.assertEqual(self.finding("nice x=/usr/bin/git push"), [("git", ("push", "push"))])
+        # ... and, being a path, recorded as the file it is (SPD-145), which bash_rule reads after Law 7's verb
+        for word in ("x=./git", "x=../bin/git", "x=/usr/bin/git"):
+            with self.subTest(word):
+                found = self.finding("nice %s push" % word)
+                self.assertEqual([f for f in found if f[0] != "script"], [("git", ("push", "push"))])
+                self.assertEqual([d[:3] for k, d in found if k == "script"], [("exec", word, word)])
+                self.assertNotIn(SCRIPT_WORDING, self.refused_for_members("nice %s push" % word).reason)
 
     def test_env_sudo_time_and_nocorrect_still_read_the_word_as_environment(self):
         # env and sudo take NAME=value as the command's environment; `time` is a reserved word and zsh's `nocorrect` keeps
@@ -8127,11 +8376,16 @@ class WrapperCommandWordTest(BashHookCase):
                 self.refused_for_members(refused)
 
     def test_an_assignment_shaped_word_with_a_harmless_base_stays_silent(self):
-        for ok in ("nice x=./ls", "nice x=./ls -la", "nohup x=./make all", "command x=./echo hi",
-                   "timeout 5 x=/bin/echo hi", "nice x=1 ls", "nice FOO=1 ls"):
+        for ok in ("nice x=1 ls", "nice FOO=1 ls"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
+        # a word holding a slash is a file the wrapper runs by its path (`x=./ls` is ls in the directory `x=.`), which since
+        # SPD-145 is a member's file of commands whatever its base name
+        for cmd in ("nice x=./ls", "nice x=./ls -la", "nohup x=./make all", "command x=./echo hi", "timeout 5 x=/bin/echo hi"):
+            with self.subTest(cmd):
+                self.assertRefused(cmd, SCRIPT_WORDING)
+                self.assertSilent(cmd, agent_id=None)
 
     def test_a_wrapper_no_longer_reads_its_word_as_an_assignment(self):
         # The shell looks for a program named `GIT_PAGER=less` and runs nothing: neither git nor the pager (probed), so the
@@ -12229,7 +12483,7 @@ class SqlTest(SpudTestCase):
             proc = self.home.run("sql", "--readonly", stmt, check=False)
             self.assertEqual(proc.returncode, EXIT_ERROR, stmt)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM name_pool WHERE name = 'X'"), 0)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 6)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), 7)
 
     def test_one_statement_no_flag_no_actor_needed(self):
         proc = self.home.run("sql", "SELECT 1", check=False)

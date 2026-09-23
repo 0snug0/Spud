@@ -32,8 +32,8 @@ word and as bash splits it unquoted, and the text kept only where both print the
 
 What stays unread: standard input the line does not spell -- a file (`sh < f`), another program's output (`cat f | sh`,
 `curl ... | sh`), a value the line does not settle or the two readings print apart, or text this module cannot decode.  That is the same class as `sh script.sh`, a script the hook does
-not read either, and Law 7 has that hole for every caller; Spud has filed it as a question for Eric rather than have a
-member refused for it here.
+not read either.  Eric's call on SPD-145 (fail closed): a member is refused both, a shell reading standard input the
+line does not spell and a shell given a script file (script_operand below), by shell/script_files; Spud is not.
 
 Kept whole past 250 lines (the package's look-again point): it answers one question -- what text stands on a
 command's standard input and standard output -- and the two halves are the same reading from either end.  `input_fed`
@@ -173,8 +173,36 @@ def reads_commands(words):
     """Whether this shell command runs the commands it reads on standard input: no `-c` string, and either `-s`, which
     forces it whatever the operands, or no script operand -- or an operand that is that same input, `-`, `/dev/stdin` or
     `/dev/fd/0` (probed).  An operand the hook cannot resolve is read as a script of its own, so a line whose own shell
-    reads a file stays as unread as `sh script.sh` is."""
-    i, forced = 1, False
+    reads a file is refused a member as `sh script.sh` is (script_operand, shell/script_files)."""
+    i, forced, dash_c, _files = _shell_options(words)
+    if dash_c:
+        return False  # its commands are the -c string, which the dispatch reads
+    if forced or i >= len(words):
+        return True
+    return prepare.deglob(words[i]) in STDIN_OPERANDS
+
+
+def script_operand(words):
+    """The word this shell command reads as a script file of its own (masked, as the line spells it), or None: no `-c`
+    string, no `-s`, and a first operand that is not the standard input the line gives it (reads_commands).  `sh x.sh`,
+    `bash -e ./x.sh`, `zsh -- x.sh`; and `bash - x.sh`, whose lone `-` ends the options as `--` does."""
+    i, forced, dash_c, _files = _shell_options(words)
+    if dash_c or forced or i >= len(words) or prepare.deglob(words[i]) in STDIN_OPERANDS:
+        return None
+    return words[i]
+
+
+def startup_files(words):
+    """The files bash's `--rcfile` and `--init-file` name among this shell command's options, which an interactive bash
+    runs before anything else (bash(1)): each is a file of commands, whatever else the line runs."""
+    return _shell_options(words)[3]
+
+
+def _shell_options(words):
+    """(the index of the first operand, or len(words); whether `-s` forces standard input; whether a `-c` string gives the
+    commands; the words `--rcfile` and `--init-file` name) for a shell command's words, read as bash(1), sh(1) and
+    zsh(1) read their options."""
+    i, forced, files = 1, False, []
     while i < len(words):
         w = prepare.deglob(words[i])
         if w in ("--", "-"):  # the end of the options, and on its own bash's standard input
@@ -184,18 +212,18 @@ def reads_commands(words):
             break
         if w.startswith("--"):
             if w in _VALUE_OPTIONS:
+                if i + 1 < len(words):
+                    files.append(words[i + 1])
                 i += 1
         else:
             letters = w[1:]
             if "c" in letters:
-                return False  # its commands are the -c string, which the dispatch reads
+                return i, forced, True, files
             forced = forced or "s" in letters
             if letters[-1] in "oO":  # `sh -o errexit`, `bash -O globstar`: the next word is the option's value
                 i += 1
         i += 1
-    if forced or i >= len(words):
-        return True
-    return prepare.deglob(words[i]) in STDIN_OPERANDS
+    return i, forced, False, files
 
 
 def printed_text(tokens, bodies, piped, a=None):

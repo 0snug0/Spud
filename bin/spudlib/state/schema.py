@@ -461,6 +461,16 @@ ALTER TABLE tickets_new RENAME TO tickets;
 CREATE INDEX tickets_board ON tickets(status, priority);
 """
 
+# A project's allow-list of repository scripts (SPD-145): the Bash rule refuses a member every shell whose commands come
+# from a file -- `sh x.sh`, `source x.sh`, `./x.sh` -- and lets through only a script named here, by its path relative to
+# the project's checkout, run from that checkout or the ticket's bound worktree while the member cannot write it
+# (shell/script_files).  A JSON list of those paths, set by `spud --as spud project edit --allow-script/--drop-script`.
+# A plain ADD COLUMN: no CHECK changes, so neither the views nor events need rebuilding.
+DDL_0007 = """
+ALTER TABLE projects ADD COLUMN scripts TEXT NOT NULL DEFAULT '[]'
+  CHECK (CASE WHEN json_valid(scripts) THEN json_type(scripts) = 'array' ELSE 0 END);  -- repository paths, relative to the checkout
+"""
+
 MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003), ("0004_ticket_worktree", DDL_0004),
-              ("0005_pull_requests", DDL_0005), ("0006_owner_origin", DDL_0006)]
+              ("0005_pull_requests", DDL_0005), ("0006_owner_origin", DDL_0006), ("0007_project_scripts", DDL_0007)]
 SCHEMA_VERSION = len(MIGRATIONS)

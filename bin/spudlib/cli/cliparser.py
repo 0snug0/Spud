@@ -151,8 +151,12 @@ def build_parser():
     q = ps.add_parser("show", help="one project")
     q.add_argument("key")
     q.set_defaults(func=registry.cmd_project_show)
-    q = ps.add_parser("edit", help="change a project's name, landing, sessions, default branch, root, or its prefixes before its first ticket (Spud's)")
+    q = ps.add_parser("edit", help="change a project's name, landing, sessions, default branch, root, allowed scripts, or its prefixes before its first ticket (Spud's)")
     q.add_argument("key")
+    q.add_argument("--allow-script", action="append", metavar="PATH",
+                   help="a repository script a member may run (`sh PATH`, `./PATH`, `source ./PATH`) from the checkout or its ticket's bound"
+                        " worktree while it is outside the member's deliverables: relative to the checkout, a file in the main checkout (repeatable)")
+    q.add_argument("--drop-script", action="append", metavar="PATH", help="take a script off the allow-list (repeatable)")
     q.add_argument("--name")
     q.add_argument("--landing", choices=("merge", "pr"))
     q.add_argument("--sessions", choices=("claim", "always"))
