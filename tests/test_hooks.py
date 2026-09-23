@@ -5959,6 +5959,175 @@ class GluedReservedWordTest(BashHookCase):
                 self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
+# SPD-178: a `for (( ... ))` header where it may stand, `%s` its short body.  With l/t present, zsh 5.9 (-f, and -f -o
+# nobareglobqual) wrote l/t for `echo <label> | ` and each of these with `tee (l|x)/t` in the slot (ForArithmeticBodyTest).
+FOR_ARITH_HEADERS = (
+    "for (( i=0; i<1; i++ )) %s",
+    "for ((i=0; i<1; i++)) %s",
+    "for (( i=0; i<1; i++ )) for (( j=0; j<1; j++ )) %s",
+    "repeat 1 for (( i=0; i<1; i++ )) %s",
+    "if true; then for (( i=0; i<1; i++ )) %s; fi",
+    "f() { for (( i=0; i<1; i++ )) %s }; f",
+    "for (( i=0; i<1; i++ )) if (( 1 )) %s",
+    "for (( i=0; i<1; i++ )) { %s }",
+)
+# A short body writing through a group right after its command word, `%s` the target: with l/t present and `(l|x)/t` in
+# the slot, zsh wrote, appended to, touched or removed l/t after the first header for each.
+FOR_ARITH_WRITERS = ("tee %s", "tee -a %s", "echo x > %s", "touch %s", "rm %s")
+
+
+class ForArithmeticBodyTest(BashHookCase):
+    """SPD-178, filed by SPD-173's engineer: mark_zsh_patterns reads `for` and `select` as a loop whose name comes next and
+    whose `for name ( word ... )` list may follow that name, and its arithmetic branch cleared none of it.  After a `for ((
+    ... ))` header the short body's first word was taken for the loop's name, and a `(` opening the word after it for the
+    word list: the glob pattern zsh expands there was read as a subshell, and the rest of its word as a command.  The target
+    of a tee or another writer into the pattern was lost -- Law 1 unchecked for Spud, and members refused for a path the
+    line never writes -- and the code of a glob qualifier after the group went unread (Law 7 and the path rule).
+
+    Probed 2026-09-22 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line but the qualifier's, and in GNU bash 3.2.57, which rejects every
+    short form, near its body's first word:
+
+    - the proposer's evidence: with l/t present, `echo new | for (( i=0; i<1; i++ )) tee (l|x)/t` wrote new to l/t, and `for
+      (( i=0; i<1; i++ )) echo (b|c)` printed `b c`, as the long form `do echo (b|c); done` did.  The hook on the SPD-173
+      tree read the ticket's two tee lines as a tee into /tickets/SPD-001.md: silent for Spud, and refused to a member as a
+      path outside every registered project;
+    - every header of FOR_ARITH_HEADERS wrote l/t with `tee (l|x)/t` as its body, and so did the first in eval, in `$( ...
+      )` and in `zsh -f -c`; after it each of FOR_ARITH_WRITERS wrote, appended to, touched or removed l/t, and `cat
+      (l|x)/t` printed it;
+    - the qualifier: with files b and c present, zsh -f ran the code of `for (( i=0; i<1; i++ )) ls (b|c)(e:'echo
+      QRAN-$REPLY':)` once for each, and `(e:'echo q > w':)` wrote w; zsh -f -o nobareglobqual read a second pattern and
+      found no match;
+    - the two other states the arithmetic branch now clears with the loop's name are never pending there on a line zsh runs:
+      `((` right after `repeat` opens its count word, not an arithmetic command (`repeat (( 1+1 )) echo rep` printed rep
+      twice, and `echo rt | repeat (( 1 )) tee (l|x)/t` wrote l/t, read so before this ticket), and right after a closing
+      brace it is a parse error (`{ echo a } (( 1 ))`, `{ echo a } (( 1 )) always { echo b }`, `if [[ -n x ]] { echo a }
+      (( 1 ))` and `{ echo a } always { echo b } (( 1 ))` each failed near ` 1 `);
+    - `select` has no arithmetic form: `select (( 1 )) tee (l|x)/t` and `select (( 1 )) git push` failed near `(( 1 ))`,
+      and `select (( i=0; i<1; i++ )) tee (l|x)/t` near `(( i=0`.  Nothing on those lines runs; the hook reads the body
+      after the `))` all the same, fail closed.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "(ledger|x)/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, named as the line spells it, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                r = self.assertRefused(line, "generated", agent_id)
+                self.assertIn(self.TARGET, r.reason)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_reads_the_pattern_zsh_expands(self):
+        for line in ("for (( i=0; i<1; i++ )) tee %s" % self.TARGET, "echo x | for (( i=0; i<1; i++ )) tee %s" % self.TARGET):
+            with self.subTest(line=line):
+                marked, _other = self.m.mark_zsh_patterns(line)
+                self.assertEqual(marked.count("("), 1)  # the header's own: the group is part of the tee's word
+                self.assertEqual(self.m.deglob(marked), line)
+                self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(line).redirects])
+            self.refused_everywhere(line)
+        # the ticket's controls, refused so before it
+        for line in ("for (( i=0; i<1; i++ )) echo x > %s" % self.TARGET, "for i in 1; do tee %s; done" % self.TARGET):
+            self.refused_everywhere(line)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_header_reads_its_body(self):
+        for header in FOR_ARITH_HEADERS:
+            self.refused_everywhere(header % ("tee %s" % self.TARGET))
+
+    def test_every_enclosing_text_reads_its_body(self):
+        for line in ("eval 'for (( i=0; i<1; i++ )) tee %s'", "x=$(for (( i=0; i<1; i++ )) tee %s)",
+                     "zsh -f -c 'for (( i=0; i<1; i++ )) tee %s'"):
+            self.refused_everywhere(line % self.TARGET)
+
+    def test_every_writer_reads_its_target(self):
+        for writer in FOR_ARITH_WRITERS:
+            self.refused_everywhere("for (( i=0; i<1; i++ )) " + writer % self.TARGET)
+
+    def test_the_qualifier_code_is_read(self):
+        line = "for (( i=0; i<1; i++ )) ls (b|c)(e:'git push':)"
+        self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+        r = self.assertRefused(line, "Law 7")
+        self.assertIn("git push", r.reason)
+        self.assertRefused(line, "Law 7", AGENT_C)
+        self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+        # ... and a write there is held to the path rule, run in the tickets directory as GluedReservedWordTest runs its
+        # own, so the code holds no `/`
+        line = "for (( i=0; i<1; i++ )) ls (b|c)(e:'echo x > SPD-001.md':)"
+        tickets = str(self.home.path / "ledger" / "tickets")
+        self.assertRefused(line, "Law 1", None, tickets)
+        self.assertRefused(line, "generated", AGENT_C, tickets)
+        self.assertRefused(line, "generated", AGENT_A, tickets)
+
+    def test_the_body_reads_as_the_command_does_alone(self):
+        """The loop runs its body, and its header changes none of the body's words: every finding, redirection target and
+        written operand the body has on its own line, it has after each header."""
+        for body in [w % self.TARGET for w in FOR_ARITH_WRITERS] + ["cat %s" % self.TARGET, "echo (b|c)",
+                                                                    "ls (b|c)(e:'git push':)"]:
+            alone = self.analysis(body)
+            for header in FOR_ARITH_HEADERS[:6]:
+                line = header % body
+                with self.subTest(line=line):
+                    looped = self.analysis(line)
+                    self.assertEqual(looped.findings, alone.findings)
+                    self.assertEqual([t for t, _c in looped.redirects], [t for t, _c in alone.redirects])
+                    self.assertEqual([w[1] for w in looped.arg_writes], [w[1] for w in alone.arg_writes])
+
+    # -- lines zsh rejects --------------------------------------------------------------------------------------------
+    def test_a_select_with_an_arithmetic_header_is_read_fail_closed(self):
+        """zsh rejects each of these lines at its `((`, so nothing on them runs; the hook reads the body after the `))`."""
+        for line in ("select (( 1 )) tee %s" % self.TARGET, "select (( i=0; i<1; i++ )) tee %s" % self.TARGET):
+            self.refused_everywhere(line)
+        self.assertRefused("select (( 1 )) git push", "Law 7")
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_a_loop_name_and_word_list_are_still_read(self):
+        """A `for name ( word ... )` list is still a list, never a glob, with a command after it (ZshShortLoopTest), and a
+        group after the body's command word is a pattern there too (probed: `for f (a) echo (b|c)` printed `b c`, and `echo
+        fa | for f (a) tee (l|x)/t` wrote l/t); `repeat (( 1 ))` counts once, its body a body (`repeat (( 1 )) ( echo
+        rsub )` and `repeat (( 1 )) echo rlist` each printed their label once)."""
+        for line in ("for f (a b) (git push)", "for f (a b) git push",
+                     "for (( i=0; i<1; i++ )) ( git push )", "for (( i=0; i<1; i++ )) do git push; done",
+                     "for (( i=0; i<1; i++ )) { git push }", "for (( i=0; i<1; i++ )); git push",
+                     "repeat (( 1 )) git push", "repeat (( 1 )) ( git push )"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+        for line in ("for f (a) tee %s" % self.TARGET, "repeat (( 1 )) tee %s" % self.TARGET,
+                     "for (( i=0; i<1; i++ )) tee -a %s" % self.TARGET):
+            self.refused_everywhere(line)
+        for line in ("for (( i=0; i<1; i++ )) echo (b|c)", "for f (a) echo (b|c)"):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_C)
+                self.assertSilent(line, agent_id=None)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("for (( i=0; i<1; i++ )) " * 2000 + "tee %s" % self.TARGET,
+                     "echo x | " + "repeat 1 for (( i=0; i<1; i++ )) " * 1000 + "tee %s" % self.TARGET,
+                     "for (( i=0; i<1; i++ )) " + "tee (a|b) " * 5000 + self.TARGET):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in a.redirects])
+
+
 class AliasEvalTest(BashHookCase):
     """SPD-059 (Burbank's SPD-054 proposal): `alias NAME=body` stores shell text the hook never read, and `eval NAME` on the
     same line ran it, so a member's VCS write behind an alias reached the hook with no finding (Law 7).  Probed in bash 3.2,

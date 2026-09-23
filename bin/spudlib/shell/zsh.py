@@ -188,7 +188,9 @@ def mark_zsh_patterns(text):
       and a `(` as it does at the start of a command, so the body of a short if, elif, while or until whose condition ends
       in one -- `if (( c )) ( list )`, `while (( c )) ( list )`, `if [[ c ]] { a } elif (( d )) ( list )`, `if (( c ))
       then ( list ) fi`, `if (( c )) {( list )}; b` -- is a subshell.  With no compound command around it `(( c )) (
-      list )` is a parse error, so the subshell read in its place reads a line that runs nothing;
+      list )` is a parse error, so the subshell read in its place reads a line that runs nothing.  No loop name and no
+      word list follow a for loop's `(( ... ))` header: its short body's first word is a command word, and a group opening
+      the word after that a pattern (SPD-178: `echo new | for (( i=0; i<1; i++ )) tee (l|x)/t` wrote l/t);
     - glued inside a word, `(` is a pattern in zsh and a syntax error in bash, whole in both readings, except `()` (a function's
       header), `$((`, `name=(` and a reserved word in command position.  There zsh splits every brace off a run of them
       opening the word, so `{(` and `{{(` run a subshell in their groups, read so in both readings; every other reserved
@@ -217,7 +219,7 @@ def mark_zsh_patterns(text):
     heredoc = cond = arith_next = punctuation_next = False
     # zsh's `for name ( word ... )` word list is not a glob (`for f (a|b)` is a parse error), and a command follows
     # it and a `repeat` count, so `for f (a b) (git push)` and `repeat 1 (git push)` open subshells, not patterns.
-    for_list = 0  # 1: the loop's name is next; 2: a `(` here opens its word list
+    for_list = 0  # 1: the loop's name is next; 2: a `(` here opens its word list; a `for (( ... ))` header clears it
     repeat_count = False  # the next word is a `repeat` count; the body, in command position, follows it
     for_close = -1  # where a `for name (` list closes
     closed = False  # the word just read ended in the `}` that closes a group (SPD-142: an `always` after it keeps command position)
@@ -245,6 +247,14 @@ def mark_zsh_patterns(text):
                 # ( echo a )` and `if (( 1 )) then ( echo a ) fi` ran the subshell, `if (( 1 )) (( 3 > 2 )) && echo a`
                 # made no file 2, and `(( 1 )) (( 1 ))` failed near the second ` 1 `, its `((` read as arithmetic
                 i, command, arith_next = end, True, False
+                # ... and what the word before it left pending ends here, as it ends at any word or operator (SPD-178).
+                # A `for (( ... ))` header has no name and no word list, so its short body's first word is its command
+                # word and a `(` opening the word after that a pattern: in the same shells, with l/t present, `echo new |
+                # for (( i=0; i<1; i++ )) tee (l|x)/t` wrote l/t and `for (( i=0; i<1; i++ )) echo (b|c)` printed `b c`
+                # (tests/probes/shell_probe.py).  A repeat count and a closing brace are never pending here on a line
+                # zsh runs: `((` right after `repeat` opens its count word, not an arithmetic command, and right after a
+                # closing brace it is a parse error (`{ echo a } (( 1 ))` failed near ` 1 `).
+                for_list, repeat_count, closed = 0, False, False
                 continue
             if for_list == 2 and i in parens:  # `for f ( a b )`: the loop's word list
                 for_close = parens[i]
