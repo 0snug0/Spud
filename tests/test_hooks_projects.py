@@ -26,7 +26,7 @@ from pathlib import Path
 
 from helpers import EXIT_ERROR, SPUD, HookResult
 from test_hooks import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split
-from test_hooks import GIT_DIR_WORDING, GIT_HOOK_WORDING, GIT_NESTED_WORDING, GIT_SCOPE_WORDING, SPUD_PLANTED_WORDING, plant_git_dir
+from test_hooks import GIT_DIR_WORDING, GIT_HOOK_WORDING, GIT_NESTED_WORDING, GIT_SCOPE_WORDING, SCRIPT_WORDING, SPUD_PLANTED_WORDING, plant_git_dir
 
 KEY = "badtakes"
 TICKET_PREFIX = "BAD"
@@ -1099,3 +1099,53 @@ class FailurePolicyProjectTest(ProjectHookCase):
             with self.subTest(event=event):
                 r = self.hook_in(self.PLAIN, event, payload)
                 self.assertEqual((r.code, r.stdout), (0, ""), r)
+
+
+class ScriptFileProjectTest(ProjectHookCase):
+    """SPD-145 in another project: badtakes allow-lists `scripts/worktree-init.sh` (the ticket's own example), and a member of
+    BAD-001, bound to bad_wt with `src/**`, runs it from the worktree the ticket is bound to or from the main checkout,
+    and nowhere else -- not from another worktree of badtakes, not a copy of it, and never a script the list does not
+    name.  Spud and Eric's plain session keep today's answer: silent."""
+
+    SCRIPT = "scripts/worktree-init.sh"
+
+    def setUp(self):
+        super().setUp()
+        self.other_wt = self.add_worktree(self.bad, "bad-002-other")
+        for root in (self.bad, self.bad_wt, self.other_wt):
+            for rel in (self.SCRIPT, "scripts/other.sh", "src/run.sh"):
+                path = root / rel
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("#!/bin/sh\necho init\n", encoding="utf-8")
+                path.chmod(0o755)
+        self.cli("project", "edit", KEY, "--allow-script", self.SCRIPT, "--allow-script", "src/run.sh", actor="spud")
+        self.spawn_in(self.CLAIMED, self.plan_bad(name="Russet"), AGENT_A)
+
+    def bash(self, s, command, agent_id=None):
+        return self.hook_in(s, "PreToolUse", self.bash_p(s, command, agent_id))
+
+    def test_the_allowed_script_runs_from_the_bound_worktree_and_the_main_checkout(self):
+        for root in (self.bad_wt, self.bad):
+            s = self.CLAIMED._replace(cwd=root)
+            for command in ("bash %s" % self.SCRIPT, "./%s" % self.SCRIPT, "sh %s/%s" % (root, self.SCRIPT), "source ./%s" % self.SCRIPT):
+                with self.subTest(root=str(root), command=command):
+                    self.assertHookSilent(self.bash(s, command, AGENT_A), command)
+                    self.assertHookSilent(self.bash(s, command), command)
+
+    def test_it_is_refused_anywhere_else_and_for_any_other_name(self):
+        in_wt = self.CLAIMED._replace(cwd=self.bad_wt)
+        other = self.CLAIMED._replace(cwd=self.other_wt)
+        for s, command in ((other, "bash %s" % self.SCRIPT), (in_wt, "bash %s/%s" % (self.other_wt, self.SCRIPT)),
+                           (in_wt, "./scripts/other.sh"), (in_wt, "cat %s | sh" % self.SCRIPT),
+                           (in_wt, "bash src/run.sh"),  # allowed by name, but under the member's own src/**
+                           (in_wt, "bash %s/%s" % (self.home.path, self.SCRIPT))):
+            with self.subTest(cwd=str(s.cwd), command=command):
+                self.assertDenied(self.bash(s, command, AGENT_A), SCRIPT_WORDING, command)
+                self.assertHookSilent(self.bash(s, command), command)  # Spud
+
+    def test_a_plain_session_and_its_own_subagents_keep_todays_answer(self):
+        plain_wt = self.PLAIN._replace(cwd=self.bad_wt)
+        for command in ("bash scripts/other.sh", "./scripts/other.sh", "cat x.sh | sh"):
+            with self.subTest(command):
+                self.assertHookSilent(self.bash(plain_wt, command), command)
+                self.assertHookSilent(self.bash(plain_wt, command, AGENT_D), command)

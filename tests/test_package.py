@@ -33,7 +33,8 @@ DISPATCH = "hooks.dispatch"
 # commands it runs (SPD-139), shell.inline_programs for the program an interpreter run spells rather than reads from a
 # file (SPD-150), shell.interpreter_words for the words such a run is read with -- one the line cannot settle where an
 # option may stand, and one an xargs reads from its input (SPD-152), shell.runtime_shells for the shell text a runtime's or a
-# package manager's subcommand runs (SPD-154).
+# package manager's subcommand runs (SPD-154), shell.script_files for a shell whose commands come from a file and the
+# project allow-list of repository scripts (SPD-145).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
@@ -43,7 +44,7 @@ HOOK_PATH = {
     "shell.analyse", "shell.arg_writes", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
     "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.globbing", "shell.inline_programs",
     "shell.interpreter_words", "shell.prepare", "shell.redirect_globs", "shell.runtime_shells", "shell.spud_calls",
-    "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
+    "shell.script_files", "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
     "shell.walk", "shell.zsh",
 }
 

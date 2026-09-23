@@ -74,8 +74,8 @@ class MigrateOwnerOriginTest(unittest.TestCase):
         tickets = self.home.rows("SELECT * FROM tickets ORDER BY id")
         events = self.home.rows("SELECT * FROM events ORDER BY id")
         out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0006_owner_origin"], 6))
-        self.assertEqual(len(out["backups"]), 1)
+        self.assertEqual((out["applied"], out["user_version"]), (["0006_owner_origin", "0007_project_scripts"], 7))
+        self.assertEqual(len(out["backups"]), 2)
         self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0006_owner_origin\.db$")
         backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
         try:
@@ -159,7 +159,7 @@ class MigrateOwnerOriginTest(unittest.TestCase):
         self.addCleanup(other.cleanup)
         out = other.init()
         self.assertEqual((out["applied"], out["user_version"], out["backups"]),
-                         (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin"], 6, []))
+                         (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts"], 7, []))
         self.assertIn("CHECK (origin IN ('owner','proposal'))", other.scalar("SELECT sql FROM sqlite_master WHERE name = 'tickets'"))
 
 

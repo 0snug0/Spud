@@ -2,7 +2,7 @@
 
 import os
 
-from . import analyse, arg_writes, git_config, prepare, redirect_globs, spud_calls, syntax
+from . import analyse, arg_writes, git_config, prepare, redirect_globs, script_files, spud_calls, syntax
 from ..hooks import hookio, pathrule, worktrees
 from ..state import lookup
 
@@ -140,6 +140,27 @@ def redirection_paths(target, cwds):
     if cwds is None:
         return None
     return [os.path.join(c, target) for c in sorted(cwds)]
+
+
+def written_targets(analysis, written):
+    """Every absolute path the line writes -- a redirection or tee target, a git call's own write, a write by argument
+    (`written`, arg_writes.written_paths' entries) -- in its lexical and its real reading, a directory standing for all
+    it holds: what shell/script_files holds an allow-listed script against, so a line that writes one never runs it.  A
+    target the hook cannot resolve never reaches this for a member, whose line it has already refused."""
+    entries = ([(t, c) for t, c in analysis.redirects] + [(t, c) for _n, t, c in analysis.git_writes]
+               + [(t, c) for _n, t, c, _d in written])
+    out = set()
+    for target, cwds in entries:
+        spelled = prepare.deglob(target)
+        if target_has_active_glob(target):
+            expansion = redirect_globs.expand_redirect_target(target, cwds)
+            paths = list(expansion[0]) if expansion else []
+        else:
+            paths = redirection_paths(spelled, cwds) or []
+        for path in paths:
+            p = os.path.expanduser(path)
+            out.update((os.path.normpath(p), os.path.realpath(p)))
+    return sorted(out)
 
 
 def target_has_active_glob(target):
@@ -446,7 +467,17 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         # hook cannot read what runs, so every refusal the line has already earned keeps its own reason -- a git verb, a
         # database call, a spud call, a program git would run, and each write the path rule refuses above, which is
         # what the readings of perl and sed as writers still answer with.
+        # A shell whose commands come from a file (shell/script_files) is read here too, for the same reason; an
+        # allow-listed repository script is let through only where the line writes none of it first.
+        allow, line_writes = [], None
         for kind, detail in analysis.findings:
+            if kind == "script":
+                if line_writes is None:
+                    line_writes = written_targets(analysis, written)
+                reason = script_files.script_reason(ctx, con, caller_agent_id, caller_member, cwd, mode, detail, line_writes, allow)
+                if reason:
+                    return reason, analysis
+                continue
             if kind == "inline":
                 return inline_program_reason(detail), analysis
             if kind == "inline-word":

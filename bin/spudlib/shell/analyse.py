@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, inline_programs, interpreter_words, prepare, runtime_shells, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, inline_programs, interpreter_words, prepare, runtime_shells, script_files, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -245,6 +245,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 a.cwds = directories.wrapped_directories(chdir, rest, a)
                 moved.append(chdir)
             for aname, avalue in env_assignments:
+                script_files.read_assignment(a, aname)  # `env BASH_ENV=x ...`: a file of commands a shell under it runs
                 if aname.startswith(assignment_words.ENV_FUNCTION_PREFIX):
                     a.findings.append(("env-function", prepare.deglob(aname)))  # a function bash and sh import
                 # `env GIT_CONFIG_*/HOME/GIT_PAGER/GIT_SSH_COMMAND/GIT_DIR/PATH/GIT_TRACE=... git ...`
@@ -254,6 +255,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                     a.vars[aname] = avalue
                     a.doubt.add(aname)  # the command's environment, not the shell's
             path_names.append(w)
+            script_files.read_path_word(a, w)  # `./env git status` runs whatever ./env holds, not env
             prefixed = True
             # only zsh's `time` keeps the command position an alias is expanded in (probed: `eval 'time gp'` ran the
             # alias, `eval 'command gp'` and `eval 'env gp'` ran nothing)
@@ -305,9 +307,15 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(x)))
     if cmd in ("source", ".", "trap"):
         a.all_doubt = True  # code the hook does not read may assign any variable
+    if cmd in ("source", "."):
+        # the file's commands run in this shell, whatever runs the builtin (shell/script_files)
+        script_files.record_script(a, "source", cmd, words[1] if len(words) > 1 else None)
     base = os.path.basename(cmd).casefold()
-    if base != "spud" and "/" in cmd and spud_calls.any_spud_launcher(cmd, a.cwds):
+    launcher = "/" in cmd and spud_calls.any_spud_launcher(cmd, a.cwds)
+    if base != "spud" and launcher:
         base = "spud"  # a symlink to bin/spud run by its path, whatever its own name
+    if not launcher:
+        script_files.read_path_word(a, cmd)  # a file run by its path, never a program found on PATH
     if base in runtime_shells.RUNNERS:
         # A runtime's or a package manager's subcommand that hands a shell its text (`bun exec`, `npm exec -c`, `deno task
         # --eval`, ...) or runs its words as a command (`npx --package=x -- git push`): read where an `sh -c` string and a
@@ -359,7 +367,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         if not read_points(lambda ws, start: expansions.option_point(expansions.shell_read_index(ws, start))):
             return
         a.kinds.append("shell")
-        i, dash_c = 1, False
+        i, dash_c, string = 1, False, None
         while i < len(words):
             w = words[i]
             if w.startswith("-") and "c" in w[1:] and not w.startswith("--"):
@@ -381,6 +389,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             # With no -c string and no script of its own the shell runs what it reads on standard input, and
             # the line spells that text: `echo 'git push' | sh`, `bash -s <<< 'git push'`, `cat <<'EOF' | sh`
             analyse_new_shell(a, stdin, depth + 1)
+        # ... and every shell whose commands come from a file: a script operand, standard input the line does not spell,
+        # an xargs string from such input, a HOME of the line's own (shell/script_files, refused a member in bash_rule)
+        script_files.read_shell(words, a, dash_c, string, xargs_input, stdin, fed, bodies)
     elif base == "eval":
         a.kinds.append("eval")
         before = a.cwds
@@ -623,6 +634,7 @@ def record_assignment(a, found):
     line would, a name the hook cannot read standing for all of them; and a BASH_FUNC_ variable is refused
     outright."""
     name, subscript, append, value = found
+    script_files.read_assignment(a, name)  # BASH_ENV, ENV, ZDOTDIR: a file of commands a shell started later runs
     if name.startswith(assignment_words.ENV_FUNCTION_PREFIX):
         a.findings.append(("env-function", name))
     special = assignment_words.special_bindings(name, subscript, append, value)

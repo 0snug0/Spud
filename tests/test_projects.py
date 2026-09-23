@@ -3,10 +3,11 @@
 BadTakes with the key badtakes and the prefixes BAD / BADS (Eric, 2026-09-14)."""
 
 import json
+import sqlite3
 import unittest
 from pathlib import Path
 
-from helpers import EXIT_ERROR, EXIT_OK, EXIT_USAGE, Home, RepoMixin, SpudTestCase, git, load_spud_module
+from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE, Home, RepoMixin, SpudTestCase, git, load_spud_module
 
 spud = load_spud_module()
 
@@ -195,6 +196,117 @@ class ProjectEditRemoveTest(RepoMixin, SpudTestCase):
         second = self.make_repo("second-")
         proc = self.add_project(second, "second", "BAD", "SECS", check=False)
         self.assertIn("project badtakes's", proc.stderr)
+
+
+class ProjectScriptsTest(RepoMixin, SpudTestCase):
+    """SPD-145: a project's allow-list of repository scripts, which the Bash hook lets a member of that project's tickets run
+    (tests/test_hooks.py ScriptFileTest): set by Spud with `project edit --allow-script/--drop-script`, kept in
+    projects.scripts, and printed by `project show` and `project list`."""
+
+    def setUp(self):
+        super().setUp()
+        self.other = self.make_repo("badtakes-")
+        for rel in ("scripts/worktree-init.sh", "scripts/seed.sh", "tools/b.sh"):
+            (self.other / rel).parent.mkdir(parents=True, exist_ok=True)
+            (self.other / rel).write_text("#!/bin/sh\n", encoding="utf-8")
+        self.add_project(self.other)
+
+    def scripts(self):
+        return json.loads(self.home.scalar("SELECT scripts FROM projects WHERE key = 'badtakes'"))
+
+    def test_a_new_project_allows_no_script(self):
+        self.assertEqual(self.scripts(), [])
+        self.assertEqual(self.cli_json("project", "show", "badtakes")["project"]["scripts"], [])
+        self.assertIn("scripts         -", self.cli("project", "show", "badtakes").stdout)
+
+    def test_spud_allows_and_drops_scripts(self):
+        out = self.cli_json("project", "edit", "badtakes", "--allow-script", "scripts/worktree-init.sh", "--allow-script", "tools/b.sh", actor="spud")
+        self.assertEqual(out["changed"], ["scripts"])
+        self.assertEqual(out["project"]["scripts"], ["scripts/worktree-init.sh", "tools/b.sh"])
+        self.assertEqual(self.scripts(), ["scripts/worktree-init.sh", "tools/b.sh"])
+        self.assertIn("scripts         scripts/worktree-init.sh, tools/b.sh", self.cli("project", "show", "badtakes").stdout)
+        listing = self.cli("project", "list").stdout
+        self.assertIn("scripts", listing.splitlines()[0])
+        self.assertIn("scripts/worktree-init.sh, tools/b.sh", listing)
+        self.assertEqual(self.cli_json("project", "edit", "badtakes", "--allow-script", "tools/b.sh", actor="spud")["changed"], [])  # already there
+        out = self.cli_json("project", "edit", "badtakes", "--drop-script", "tools/b.sh", "--allow-script", "scripts/seed.sh", actor="spud")
+        self.assertEqual(out["project"]["scripts"], ["scripts/seed.sh", "scripts/worktree-init.sh"])
+        events = self.home.json("events", "--kind", "project.edited")["events"]
+        self.assertEqual(len(events), 2)
+        self.assertEqual(events[-1]["data"]["fields"], ["scripts"])
+        self.assertEqual(json.loads(events[-1]["data"]["to"]["scripts"]), ["scripts/seed.sh", "scripts/worktree-init.sh"])
+
+    def test_a_path_that_is_no_repository_script_is_refused(self):
+        for path, code, needle in (("/etc/profile", EXIT_USAGE, "not a repository path"), ("../x.sh", EXIT_USAGE, "not a repository path"),
+                                   ("./scripts/seed.sh", EXIT_USAGE, "not a repository path"), ("scripts/", EXIT_USAGE, "not a repository path"),
+                                   ("~/x.sh", EXIT_USAGE, "not a repository path"), (".git/hooks/pre-commit", EXIT_USAGE, "not a repository path"),
+                                   (".spud/x.sh", EXIT_USAGE, "not a repository path"), ("a,b.sh", EXIT_USAGE, "not a repository path"),
+                                   ("scripts/missing.sh", EXIT_ERROR, "no file in project badtakes's main checkout")):
+            with self.subTest(path):
+                proc = self.cli("project", "edit", "badtakes", "--allow-script", path, actor="spud", check=False)
+                self.assertEqual(proc.returncode, code, proc)
+                self.assertIn(needle, proc.stderr)
+        proc = self.cli("project", "edit", "badtakes", "--drop-script", "scripts/seed.sh", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("allows no script scripts/seed.sh", proc.stderr)
+        self.assertEqual(self.scripts(), [])
+
+    def test_a_member_may_not_set_the_list(self):
+        t = self.new_ticket("Home", status="active")
+        m = self.new_member(t["key"])
+        proc = self.cli("project", "edit", "badtakes", "--allow-script", "scripts/seed.sh", actor=m["ref"], check=False)
+        self.assertEqual(proc.returncode, EXIT_OWNERSHIP, proc)
+        self.assertIn("Spud's", proc.stderr)
+        self.assertEqual(self.scripts(), [])
+
+    def test_the_column_refuses_anything_but_a_json_list(self):
+        con = self.home.connect()
+        try:
+            for value in ("x", "{}", "\"a\""):
+                with self.subTest(value):
+                    with self.assertRaises(sqlite3.IntegrityError):
+                        with con:
+                            con.execute("UPDATE projects SET scripts = ? WHERE key = 'badtakes'", (value,))
+        finally:
+            con.close()
+
+    def test_projects_md_carries_the_list_and_imports_it_back(self):
+        self.cli("project", "edit", "badtakes", "--allow-script", "scripts/seed.sh", "--allow-script", "tools/b.sh", actor="spud")
+        self.home.json("render", actor="spud")
+        text = (self.home.path / "ledger" / "Projects.md").read_text(encoding="utf-8")
+        self.assertIn("| Archived | Scripts |", text)
+        self.assertIn("| scripts/seed.sh, tools/b.sh |", text)
+        fresh = Home()
+        self.addCleanup(fresh.cleanup)
+        fresh.init()
+        con = fresh.connect()
+        try:
+            with con:
+                inserted = spud.import_projects_file(con, "2026-09-22T10:00:00-07:00", self.home.path / "ledger" / "Projects.md", "ledger/Projects.md")
+        finally:
+            con.close()
+        self.assertEqual(inserted, 1)
+        self.assertEqual(json.loads(fresh.scalar("SELECT scripts FROM projects WHERE key = 'badtakes'")), ["scripts/seed.sh", "tools/b.sh"])
+
+    def test_a_projects_md_from_before_the_list_imports_with_none(self):
+        self.home.json("render", actor="spud")
+        path = self.home.path / "ledger" / "Projects.md"
+        # every table line without its last cell, the Scripts column 0007_project_scripts added
+        old = "\n".join(line[: line[:-1].rstrip().rfind("|") + 1] if line.startswith("|") else line
+                        for line in path.read_text(encoding="utf-8").split("\n"))
+        self.assertIn("| Remote | Archived |\n", old)
+        legacy = self.home.path / "legacy-Projects.md"
+        legacy.write_text(old, encoding="utf-8")
+        fresh = Home()
+        self.addCleanup(fresh.cleanup)
+        fresh.init()
+        con = fresh.connect()
+        try:
+            with con:
+                self.assertEqual(spud.import_projects_file(con, "2026-09-22T10:00:00-07:00", legacy, "legacy-Projects.md"), 1)
+        finally:
+            con.close()
+        self.assertEqual(fresh.scalar("SELECT scripts FROM projects WHERE key = 'badtakes'"), "[]")
 
 
 class TicketProjectTest(RepoMixin, SpudTestCase):

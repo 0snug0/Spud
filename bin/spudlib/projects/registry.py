@@ -131,6 +131,7 @@ def project_dict(ctx, con, p):
         "settings_file": settings, "installed": settings_sync.settings_hold_hooks(ctx, settings, p["key"]),
         "install_record": None if record is None else {k: v for k, v in record.items() if k != "original"},
         "created_at": p["created_at"], "archived_at": p["archived_at"],
+        "scripts": json.loads(p["scripts"] or "[]"),
     }
 
 
@@ -144,6 +145,7 @@ def format_project(d):
         "sessions        %s" % d["sessions"],
         "remote          %s" % (d["remote"] or "-"),
         "installed       %s (%s)" % ("yes" if d["installed"] else "no", d["settings_file"]),
+        "scripts         %s" % (", ".join(d["scripts"]) or "-"),
     ]
     return "\n".join(lines)
 
@@ -190,10 +192,11 @@ def cmd_project_list(ctx, args):
         rows = [project_dict(ctx, con, p) for p in con.execute("SELECT * FROM projects ORDER BY id").fetchall()]
     finally:
         con.close()
-    shown = [dict(r, installed_text="yes" if r["installed"] else "no", archived=kernel.fm_date(r["archived_at"])) for r in rows]
+    shown = [dict(r, installed_text="yes" if r["installed"] else "no", archived=kernel.fm_date(r["archived_at"]),
+                  scripts_text=", ".join(r["scripts"])) for r in rows]
     return kernel.Result({"projects": rows}, kernel.table(shown, [("key", "key"), ("name", "name"), ("tickets", "ticket_prefix"), ("teams", "team_prefix"), ("root", "root"),
                                                     ("branch", "default_branch"), ("landing", "landing"), ("sessions", "sessions"), ("installed", "installed_text"),
-                                                    ("archived", "archived")]))
+                                                    ("archived", "archived"), ("scripts", "scripts_text")]))
 
 
 def cmd_project_show(ctx, args):
@@ -203,6 +206,36 @@ def cmd_project_show(ctx, args):
     finally:
         con.close()
     return kernel.Result({"project": d}, format_project(d))
+
+
+def script_path(ctx, project, spelled):
+    """A repository script's path as the allow-list keeps it (SPD-145): relative to the project's checkout, normalized,
+    inside it, never in a git directory or the ledger's state directory, and a file in the main checkout now."""
+    rel = spelled.replace("\\", "/")
+    parts = rel.split("/")
+    if (not rel or os.path.isabs(rel) or rel.startswith("~") or os.path.normpath(rel) != rel or "," in rel
+            or ".." in parts or any(p.casefold() in (".git", ".spud") for p in parts)):
+        raise kernel.SpudError(kernel.EXIT_USAGE, "%r is not a repository path: name the script relative to project %s's checkout, as"
+                               " `scripts/worktree-init.sh`, with no `.`, `..`, trailing `/`, comma, .git or .spud component"
+                               % (spelled, project["key"]))
+    if not os.path.isfile(os.path.join(worktrees.project_root(ctx, project), rel)):
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s is no file in project %s's main checkout (%s); a script is allowed once it has landed there"
+                               % (rel, project["key"], worktrees.project_root(ctx, project)))
+    return rel
+
+
+def edited_scripts(ctx, project, allow, drop):
+    """The project's allow-list as JSON text after adding `allow` and removing `drop`, sorted; a path to drop that the list
+    does not hold is an error, so a typo never reads as done."""
+    scripts = set(json.loads(project["scripts"] or "[]"))
+    for spelled in drop:
+        rel = os.path.normpath(spelled.replace("\\", "/"))
+        if rel not in scripts:
+            raise kernel.SpudError(kernel.EXIT_ERROR, "project %s allows no script %s (it allows: %s)" % (project["key"], rel, ", ".join(sorted(scripts)) or "none"))
+        scripts.discard(rel)
+    for spelled in allow:
+        scripts.add(script_path(ctx, project, spelled))
+    return json.dumps(sorted(scripts))
 
 
 def cmd_project_edit(ctx, args):
@@ -231,6 +264,8 @@ def cmd_project_edit(ctx, args):
                 if clash:
                     raise kernel.SpudError(kernel.EXIT_ERROR, "%s is already the root of project %s" % (root, clash["key"]))
                 updates["root_path"] = root
+            if args.allow_script or args.drop_script:
+                updates["scripts"] = edited_scripts(ctx, p, args.allow_script or [], args.drop_script or [])
             if args.ticket_prefix is not None or args.team_prefix is not None:
                 if project_one:
                     raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is project 1, whose prefixes come from spud.config.json"

@@ -92,7 +92,11 @@ def render_member(con, m, pricing=None):
 
 # ledger/Projects.md: the projects table, generated, and the disaster-recovery import source for it.
 PROJECTS_NOTE = "ledger/Projects.md"
-PROJECTS_COLUMNS = ("Key", "Name", "Ticket prefix", "Team prefix", "Root", "Default branch", "Landing", "Sessions", "Remote", "Archived")
+PROJECTS_COLUMNS = ("Key", "Name", "Ticket prefix", "Team prefix", "Root", "Default branch", "Landing", "Sessions", "Remote", "Archived",
+                    "Scripts")
+# The header before migration 0007_project_scripts added the allow-list (SPD-145), which an export from then still carries
+# and imports with no script allowed.
+PROJECTS_COLUMNS_V6 = PROJECTS_COLUMNS[:-1]
 
 
 def table_cell(value):
@@ -126,7 +130,7 @@ def render_projects(con):
     lines = [kernel.MARKER, "# Projects", "", "| %s |" % " | ".join(PROJECTS_COLUMNS), "|%s" % ("---|" * len(PROJECTS_COLUMNS))]
     for p in rows:
         cells = (p["key"], p["name"], p["ticket_prefix"], p["team_prefix"], p["root_path"], p["default_branch"], p["landing"], p["sessions"],
-                 p["remote"], kernel.fm_date(p["archived_at"]))
+                 p["remote"], kernel.fm_date(p["archived_at"]), ", ".join(json.loads(p["scripts"] or "[]")))
         lines.append("| %s |" % " | ".join(table_cell(c) for c in cells))
     return markdown.emit_frontmatter([("tags", ("list", ["projects"]))]) + "\n".join(lines) + "\n"
 
@@ -135,24 +139,26 @@ def import_projects_file(con, at, path, rel):
     """Projects.md into the projects table, before any ticket (a ticket finds its project by its prefix): every row but the
     home's, which config sync keeps, and any key already in the ledger.  Returns how many rows it inserted."""
     table_rows = [cells for cells in (table_cells(line) for line in path.read_text(encoding="utf-8").split("\n")) if cells is not None]
-    if not table_rows or tuple(table_rows[0]) != PROJECTS_COLUMNS:
+    columns = tuple(table_rows[0]) if table_rows else ()
+    if columns not in (PROJECTS_COLUMNS, PROJECTS_COLUMNS_V6):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s: the table's header is not %s" % (rel, " | ".join(PROJECTS_COLUMNS)))
     inserted = 0
     for cells in table_rows[1:]:
         if all(re.fullmatch(r":?-+:?", c) for c in cells):
             continue
-        if len(cells) != len(PROJECTS_COLUMNS):
-            raise kernel.SpudError(kernel.EXIT_ERROR, "%s: a row has %d cells, not %d" % (rel, len(cells), len(PROJECTS_COLUMNS)))
-        row = dict(zip(PROJECTS_COLUMNS, cells))
+        if len(cells) != len(columns):
+            raise kernel.SpudError(kernel.EXIT_ERROR, "%s: a row has %d cells, not %d" % (rel, len(cells), len(columns)))
+        row = dict(zip(columns, cells))
+        scripts = sorted({s.strip() for s in row.get("Scripts", "").split(",") if s.strip()})
         if row["Key"] == "spud" or con.execute("SELECT 1 FROM projects WHERE key = ?", (row["Key"],)).fetchone():
             continue
         if row["Landing"] not in ("merge", "pr") or row["Sessions"] not in ("always", "claim"):
             raise kernel.SpudError(kernel.EXIT_ERROR, "%s: project %s has landing %r and sessions %r, outside the schema's values" % (rel, row["Key"], row["Landing"], row["Sessions"]))
         con.execute(
-            "INSERT INTO projects (key, name, root_path, remote, ticket_prefix, team_prefix, created_at, default_branch, landing, sessions, archived_at)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO projects (key, name, root_path, remote, ticket_prefix, team_prefix, created_at, default_branch, landing, sessions, archived_at,"
+            " scripts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (row["Key"], row["Name"] or row["Key"], row["Root"], row["Remote"] or None, row["Ticket prefix"], row["Team prefix"], at,
-             row["Default branch"] or "main", row["Landing"], row["Sessions"], row["Archived"] or None),
+             row["Default branch"] or "main", row["Landing"], row["Sessions"], row["Archived"] or None, json.dumps(scripts)),
         )
         inserted += 1
     ledgerdb.write_event(con, at, "import", "import", "imported %s" % rel, data={"source": rel, "projects": inserted})
