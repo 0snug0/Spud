@@ -1,6 +1,6 @@
 """shell/expansions: Parameter expansions and a command's read points."""
 
-from . import analyse, globbing, prepare, spud_calls, syntax
+from . import analyse, git_verbs, globbing, prepare, spud_calls, syntax
 from ..hooks import hookio, snapshots
 
 
@@ -257,44 +257,58 @@ def first_read_index(words, start):
     return next((j for j in range(start, len(words)) if active_read_word(words[j])), None)
 
 
-def git_read_index(words, start=1):
-    """The index, from `start`, of the first word git's option scan, its verb, the arguments git_refused reads, or the options
-    that name a program on the verbs of syntax.GIT_VERB_PROGRAM_OPTIONS reads that holds a glob or an expansion, or
-    None."""
+def git_read_point(words, start=1):
+    """The read point, from `start`, of the first word git's option scan, its verb, the arguments git_refused reads, or an
+    option of its verb (verb_option_read_index) reads that holds a glob or an expansion, or None.  A verb's option is read
+    with the options that name a path git writes under that verb, so glob_readings reads a glob that may become one as
+    it (`--outp?t=<path>`) and holds it unsettled."""
     i = 1
     while i < len(words):
         w = words[i]
         if i >= start and active_read_word(w):
-            return i
+            return option_point(i)
         if w in syntax.GIT_GLOBAL_VALUE_FLAGS:
             if i + 1 < len(words) and i + 1 >= start and active_read_word(words[i + 1]):
-                return i + 1
+                return option_point(i + 1)
             i += 2
             continue
         if w.startswith("-"):
             i += 1
             continue
         if w in ("stash", "worktree", "remote", "reflog"):
-            return i + 1 if i + 1 < len(words) and i + 1 >= start and active_read_word(words[i + 1]) else None
+            return option_point(i + 1 if i + 1 < len(words) and i + 1 >= start and active_read_word(words[i + 1]) else None)
         if w in ("branch", "tag", "config"):
-            return first_read_index(words, max(i + 1, start))
-        if w in syntax.GIT_VERB_PROGRAM_OPTIONS:
-            return verb_option_read_index(words, i, start)
-        return None
+            return option_point(first_read_index(words, max(i + 1, start)))
+        k = verb_option_read_index(words, i, start)
+        return None if k is None else (k, {"dash": True, "shift": True, "options": git_verbs.git_file_options(w)})
     return None
 
 
 def verb_option_read_index(words, verb_at, start):
-    """The index, from `start`, of the first option-shaped argument of the verb at `verb_at`, which carries a program-naming
-    option, that holds a glob or an expansion, or None.  Only the words before `--` that are spelled with a leading
-    `-` are read, so `git ls-remote --upload-pac? cmd .` is read as --upload-pack while a pattern or a path a member greps
-    for (`git grep '*.py'`) is left as the argument it is."""
-    for k in range(verb_at + 1, len(words)):
+    """The index, from `start`, of the first argument of the verb at `verb_at` that holds a glob or an expansion and may be
+    one of the verb's options that name a program or a path git writes, or None.  Only the words before `--` are read,
+    and of them: on a verb of syntax.GIT_VERB_PROGRAM_OPTIONS, a word spelled with a leading `-`, so `git ls-remote
+    --upload-pac? cmd .` is read as --upload-pack while a pattern or a path a member greps for (`git grep '*.py'`) is
+    left as the argument it is; on any verb, such a word whose literal head may still become an option that names a path
+    git writes (git_verbs.may_become_file_option: `git log --outp?t=<path>`, never `--grep=$P`); and on a verb of
+    syntax.GIT_VERB_FILE_OPTIONS also a word that starts with its expansion (`git archive $OPT HEAD`), which may become
+    any option at all.  The value a literal file option takes as the next word is a path, not an option, and is left
+    to the path rule (`git archive -o $T HEAD`)."""
+    verb = words[verb_at]
+    longs, shorts = git_verbs.git_file_options(verb)
+    program, table = verb in syntax.GIT_VERB_PROGRAM_OPTIONS, verb in syntax.GIT_VERB_FILE_OPTIONS
+    k = verb_at + 1
+    while k < len(words):
         w = words[k]
         if w == "--":
             return None
-        if w.startswith("-") and k >= start and active_read_word(w):
-            return k
+        if active_read_word(w):
+            dash = w.startswith("-")
+            if k >= start and ((program and dash) or ((dash or table) and git_verbs.may_become_file_option(w, longs, shorts))):
+                return k
+        elif (git_verbs.file_option_spelling(w, longs, shorts) or (None, False))[1]:
+            k += 1  # the path a spaced file option names
+        k += 1
     return None
 
 

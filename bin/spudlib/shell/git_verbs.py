@@ -166,31 +166,72 @@ def git_write_option_targets(words):
     verb, args = git_verb(words)
     if verb is None or verb in syntax.GIT_WRITE_VERBS:
         return []
-    longs, shorts = syntax.GIT_VERB_FILE_OPTIONS.get(verb, ((), ""))
-    longs = tuple(longs) + syntax.GIT_FILE_OPTIONS
+    longs, shorts = git_file_options(verb)
     out, i = [], 0
     while i < len(args):
         w = args[i]
         if w == "--":
             break  # nothing after the end-of-options marker is an option (a path or a revision, not a target)
-        key, sep, attached = w.partition("=")
-        if key.startswith("--") and len(key) >= 3 and any(opt.startswith(key) for opt in longs):
-            value = attached if sep else (args[i + 1] if i + 1 < len(args) else None)
-            if value:
-                out.append(("%s %s" % (verb, w if sep else "%s %s" % (key, value)), value))
-            i += 1 if sep else 2
+        spelled = file_option_spelling(w, longs, shorts)
+        if spelled is None:
+            i += 1
             continue
-        if shorts and w.startswith("-") and not w.startswith("--") and len(w) > 1:
-            k = next((j for j in range(1, len(w)) if w[j] in shorts), None)
-            if k is not None:
-                rest = w[k + 1 :]
-                value = rest or (args[i + 1] if i + 1 < len(args) else None)
-                if value:
-                    out.append(("%s %s" % (verb, w if rest else "%s %s" % (w, value)), value))
-                i += 1 if rest else 2
-                continue
-        i += 1
+        value, spaced = spelled
+        if spaced:
+            value = args[i + 1] if i + 1 < len(args) else None
+        if value:
+            out.append(("%s %s" % (verb, "%s %s" % (w, value) if spaced else w), value))
+        i += 2 if spaced else 1
     return out + git_write_positional_targets(verb, args)
+
+
+def git_file_options(verb):
+    """(long options, short-option letters) that name a path git writes under `verb`: its entry in
+    syntax.GIT_VERB_FILE_OPTIONS, and syntax.GIT_FILE_OPTIONS, which every verb is read for."""
+    longs, shorts = syntax.GIT_VERB_FILE_OPTIONS.get(verb, ((), ""))
+    return tuple(longs) + syntax.GIT_FILE_OPTIONS, shorts
+
+
+def file_option_spelling(word, longs, shorts):
+    """How a word as git gets it spells one of these options: None when it spells none, else (the value it carries
+    attached, whether its value is the next word instead).  Any `--`-prefix of a long option counts, git's parse-options
+    resolving an unambiguous one, and a short cluster holding one of the letters takes the rest of the cluster or the
+    next word (`-so D`)."""
+    key, sep, attached = word.partition("=")
+    if key.startswith("--") and len(key) >= 3 and any(opt.startswith(key) for opt in longs):
+        return (attached, False) if sep else (None, True)
+    if shorts and word.startswith("-") and not word.startswith("--") and len(word) > 1:
+        k = next((j for j in range(1, len(word)) if word[j] in shorts), None)
+        if k is not None:
+            rest = word[k + 1 :]
+            return (rest, False) if rest else (None, True)
+    return None
+
+
+def literal_head(word):
+    """The text a masked word starts with before anything the shell expands in it: up to its first glob character,
+    parameter expansion or substitution."""
+    ends = [len(word)]
+    for m in (syntax.GLOB_RE.search(word), syntax._EXPANDING_DOLLAR_RE.search(word)):
+        if m:
+            ends.append(m.start())
+    if hookio.SUBST in word:
+        ends.append(word.index(hookio.SUBST))
+    return prepare.deglob(word[: min(ends)])
+
+
+def may_become_file_option(word, longs, shorts):
+    """True when a word the shell expands may reach git as one of these options, whatever its expansion leaves git to
+    read: its literal head is empty or `-` alone, or `--` and a prefix of a long option with no `=` yet (git takes any
+    unambiguous prefix, and a glob's `?` or `*` can itself become the `=`: `--outp?t=y` matched a file `--outp=t=y`,
+    probed), or a single `-` when the verb has a short letter any later character may be.  A head that has settled its
+    option already (`--grep=`, `-S`, `--oneline`) is read as spelled."""
+    head = literal_head(word)
+    if head in ("", "-"):
+        return True
+    if head.startswith("--"):
+        return "=" not in head and any(opt.startswith(head) for opt in longs)
+    return head.startswith("-") and bool(shorts)
 
 
 def git_write_positional_targets(verb, args):

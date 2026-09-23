@@ -8997,6 +8997,86 @@ class GitFileWriteTest(BashHookCase):
         self.assertRefused("git bundle create $F HEAD", "Law 7", AGENT_A)
         self.assertSilent("git bundle create $F HEAD", agent_id=None)
 
+    # -- a glob or an expansion that becomes one of the options (SPD-089) -------------------
+
+    # One line per verb of syntax.GIT_VERB_FILE_OPTIONS, and `git log` for GIT_FILE_OPTIONS on a verb with no entry:
+    # (the line, {opt} where the option goes; its long option or None; its short letter or None).
+    FILE_OPTION_LINES = (
+        ("git archive {opt} HEAD", "--output", "o"),
+        ("git format-patch {opt} -1", "--output-directory", "o"),
+        ("git bugreport {opt}", "--output-directory", "o"),
+        ("git diagnose {opt}", "--output-directory", "o"),
+        ("git checkout-index -a {opt}", "--prefix", None),
+        ("git mailsplit {opt} mbox", None, "o"),
+        ("git index-pack {opt} p.pack", None, "o"),
+        ("git read-tree {opt} HEAD", "--index-output", None),
+        ("git fast-export {opt} HEAD", "--export-marks", None),
+        ("git commit-graph write {opt}", "--object-dir", None),
+        ("git multi-pack-index {opt} write", "--object-dir", None),
+        ("git repack {opt}", "--expire-to", None),
+        ("git credential-store {opt} get", "--file", None),
+        ("git log {opt}", "--output", None),
+    )
+
+    def refused_to_members(self, command):
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, "", agent_id)
+
+    def test_a_glob_that_expands_to_a_file_option_is_read(self):
+        """SPD-049 read every literal spelling of these options, but a word that becomes one only once the shell has
+        expanded it was read as spelled: `git archive --outp?t=<path> HEAD` passed.  Probed with tests/probes/shell_probe.py
+        (zsh -f -o nobareglobqual, zsh -f, bash 3.2), printf standing in for git: with a directory `--output=` holding
+        etc/x, `--outp?t=/etc/x` became `--output=/etc/x`, which git reads as --output with the absolute value /etc/x;
+        `--outp?t=x` became `--output=x` and `-?x.tar` became `-ox.tar` from files of those names; and `--outp?t=y`
+        matched a file `--outp=t=y`, a `?` standing for the `=` itself, which git reads as --outp=<t=y>.  So which option
+        such a glob becomes, and with which value, is the files' to decide: a member is refused it whatever it may
+        become, and Spud's call is read as each option its key can match, so Law 1 still holds his path."""
+        note = "%s/ledger/tickets/SPD-001.md" % self.home.path
+        for line, long, short in self.FILE_OPTION_LINES:
+            spellings = []
+            if long:
+                spellings += ["%s? %s" % (long[:-1], note), "%s?%s=%s" % (long[:-2], long[-1], note)]
+            if short:
+                spellings += ["-? %s" % note]
+            for spelling in spellings:
+                command = line.format(opt=spelling)
+                self.refused_to_members(command)
+                with self.subTest(command=command, agent_id="spud"):
+                    self.assertRefused(command, "Law 1", agent_id=None)
+
+    def test_an_expansion_that_may_become_a_file_option_is_read(self):
+        """`git archive $OPT HEAD`: git's read points stopped at every verb outside GIT_VERB_PROGRAM_OPTIONS, so the word
+        was never read.  On a verb of GIT_VERB_FILE_OPTIONS a word that starts with its expansion may become any option,
+        so an unsettled one refuses a member (Spud reads on, as for SPD-051's options), and a settled one is read as
+        the value the line gave it (probed: `OPT='--output=/tmp/a'; printf '[%s]' $OPT` printed `--output=/tmp/a`)."""
+        note = "%s/ledger/tickets/SPD-001.md" % self.home.path
+        for line, long, short in self.FILE_OPTION_LINES:
+            if line.startswith("git log"):
+                continue  # a verb with no entry: its words are read only where spelled with a leading `-` (below)
+            command = line.format(opt="$OPT")
+            self.refused_to_members(command)
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+            settled = "OPT=%s; %s" % ("%s=%s" % (long, note) if long else "-%s%s" % (short, note), command)
+            with self.subTest(command=settled, agent_id="spud"):
+                self.assertRefused(settled, "Law 1", agent_id=None)
+        for command in ("git log -$X", "git log --outp$X=d.txt", "git diff --o$(echo utput)=d.txt"):
+            self.refused_to_members(command)
+
+    def test_a_word_that_cannot_become_a_file_option_is_left_as_spelled(self):
+        # Its literal head has settled it already (an option with its `=`, a short option that names no file, a path),
+        # or it stands where a spaced option takes its value, which the path rule reads.
+        for ok in ("git log --grep=$P", "git log --author=$ME -1", "git log -S$X", "git diff $A $B", "git show HEAD:$F",
+                   "git log --oneline src/*.py", "git format-patch --subject-prefix=$P -1", "git archive HEAD src/*.py",
+                   "git log --format=%h*"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        self.assertSilent("git format-patch -o tests/out -1")  # inside AGENT_A's deliverables (Law 1 refuses Spud)
+        self.assertRefused("git archive -o $T HEAD", "cannot resolve", AGENT_A)
+        self.assertRefused("git format-patch -o $D -1", "cannot resolve", AGENT_A)
+
     def test_a_relative_target_after_a_directory_the_hook_cannot_follow_is_refused(self):
         for command in ("popd; git archive -o a.tar HEAD", "cd -; git mailinfo m.txt p.patch",
                         "source x.sh; git diff --output=d.txt", "cd $DIR; git format-patch -o out -1"):
@@ -9192,12 +9272,15 @@ class GitVerbAllowlistTest(BashHookCase):
 
     def test_a_glob_that_can_expand_to_a_refused_verb_is_read_as_it(self):
         # `stage` is one of Law 7's own, so GLOB_SAMPLES holds it and the glob is read as the verb itself.  A name the
-        # allowlist refuses is not sampled and needs no sample: the reading as spelled is not one of git's commands
-        # either, which is SPD-047's refusal, so the glob is closed whatever it could expand to.
+        # allowlist refuses needs no sample: the reading as spelled is not one of git's commands either, which is
+        # SPD-047's refusal, so the glob is closed whatever it could expand to.  `read-tree` is sampled since SPD-089 (it
+        # names the file its --index-output writes), so its glob is read as the verb, and Law 7 names it.
         r = self.refused_for_members("git stag?")
         self.assertIn("git stage", r.reason)
-        r = self.refused_for_members("git read-tre?", "not one of git's own commands")
-        self.assertIn("read-tre?", r.reason)
+        r = self.refused_for_members("git read-tre?")
+        self.assertIn("git read-tree", r.reason)
+        r = self.refused_for_members("git ls-tre?", "not one of git's own commands")
+        self.assertIn("ls-tre?", r.reason)
         for command in ("git st?ge .", "git sta*", "git ini?-db x", "git updat?-index --refresh", "git *tree"):
             with self.subTest(command):
                 self.refused_for_members(command)
