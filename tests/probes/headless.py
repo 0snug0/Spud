@@ -47,6 +47,10 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+sys.dont_write_bytecode = True  # probe_env comes from this directory, and the checkout keeps no bytecode
+sys.path.insert(0, str(Path(__file__).resolve().parent))  # `python3.14 -I -S` puts no script directory on sys.path
+import probe_env  # noqa: E402  SPD-101: the isolation every probe's scratch home runs under
+
 REPO = Path(__file__).resolve().parent.parent.parent
 SPUD = REPO / "bin" / "spud"
 # The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks and
@@ -286,13 +290,12 @@ def build_home(root, scenario):
     config = write_config(home)
     for d in ("tests", "docs", ".claude"):
         (home / d).mkdir()
-    env = dict(os.environ)
-    env.pop("CLAUDECODE", None)
-    # The probe session sets the session id its own Bash and hooks see (SPD-018); the one inherited from the session
-    # running this driver would otherwise be stamped on the rows `member new` plans here, and on the probe's own.
-    env.pop("CLAUDE_CODE_SESSION_ID", None)
-    env["SPUD_HOME"] = str(home)
-    spud(env, home, "init")
+    # SPD-101: helpers.Home's isolation, from the one helper every probe shares -- the home pointer, ~/.claude, the
+    # LaunchAgents directory and launchctl all the scratch's, so neither this driver's `spud` nor the session's reaches
+    # this Mac's own; it also drops CLAUDECODE and the session id the driver's session would otherwise stamp on the rows
+    # `member new` plans here (SPD-018).  The home is the tool: its bin/ is the copy above.  Init skips step 8.
+    env = probe_env.isolated_env(home, scratch=root)
+    spud(env, home, "init", "--no-schedule")
     seed_project_one(home, config)
     spud(env, home, "--as", "spud", "ticket", "new", "--title", "Probe %s" % scenario, "--status", "active")
     for name, persona, model in SCENARIOS[scenario]["members"]:
@@ -406,7 +409,7 @@ def init_probe_env(root, target_home):
     env.update(SPUD_HOME=str(target_home), SPUD_CONFIG_DIR=str(root / "config"), SPUD_USER_CLAUDE_DIR=str(root / "user-claude"),
                SPUD_LAUNCH_AGENTS_DIR=str(root / "launchagents"), SPUD_LAUNCHCTL=str(launchctl),
                SPUD_INIT_PROBE_LAUNCHCTL_STATE=str(launchctl_state))
-    return env
+    return probe_env.assert_isolated(env)  # SPD-101: the shared check, although the fake launchctl here is this scenario's own
 
 
 def transcript_used_bash(stdout):

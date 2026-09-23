@@ -26,12 +26,19 @@ WATCHER_BEHIND_LINE = "render watcher: %s unrendered, the oldest %s; the vault i
 # a watcher that has stopped doing its work, alive or not.  Small enough that the next session sees a stall that started
 # minutes ago, large enough that a long pass, a busy database or a clock a second out never raises it.
 RENDER_LAG_SECONDS = 120
+# Where launchd reads this Mac's user agents from, and so the one directory commands/schedule writes into for no home but
+# the machine's own (SPD-101).  SPUD_LAUNCH_AGENTS_DIR moves it, for tests and probes.
+DEFAULT_AGENTS_DIR = "~/Library/LaunchAgents"
+
+
+def agents_dir():
+    """$SPUD_LAUNCH_AGENTS_DIR, default ~/Library/LaunchAgents, made absolute."""
+    return Path(os.path.abspath(os.path.expanduser(os.environ.get("SPUD_LAUNCH_AGENTS_DIR") or DEFAULT_AGENTS_DIR)))
 
 
 def agent_plist_path(agent):
-    """$SPUD_LAUNCH_AGENTS_DIR/<label>.plist for `backup` or `render`, default ~/Library/LaunchAgents."""
-    agents = os.environ.get("SPUD_LAUNCH_AGENTS_DIR") or "~/Library/LaunchAgents"
-    return Path(os.path.abspath(os.path.expanduser(agents))) / (LABELS[agent] + ".plist")
+    """<agents_dir()>/<label>.plist for `backup` or `render`."""
+    return agents_dir() / (LABELS[agent] + ".plist")
 
 
 def watch_lock_path(ctx):

@@ -141,7 +141,9 @@ it runs.  local.spud.render runs `spud --as spud render --watch` at load and aga
 the vault follows the database within seconds; its log is <home>/.spud/logs/render.log, started afresh at each start with the previous run's kept in render.log.1.
 The plists are $SPUD_LAUNCH_AGENTS_DIR/<label>.plist (default ~/Library/LaunchAgents), launchctl is $SPUD_LAUNCHCTL
 (default /bin/launchctl), and the backup's output goes to ~/Library/Logs/spud-backup.log.  Every verb is Spud's
-(--as spud) and handles both agents.
+(--as spud) and handles both agents.  install and uninstall reach this Mac's own agents whenever either default is in
+use, and then only for the home ~/.config/spud/home names, run by the tool that home runs (no SPUD_TOOL_DIR, not a
+linked worktree); anything else is refused with exit 3 before a plist is written or launchctl runs (SPD-101).
 """
 
 HOME_MOVE_DESCRIPTION = """\

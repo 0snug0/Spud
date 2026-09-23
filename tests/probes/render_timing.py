@@ -21,10 +21,10 @@ from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-# The config a scratch home starts from: the template the tool ships for a real home, rendered with the suite's marks --
-# the pair tests/helpers.py builds every Home from (SPW-001, which deleted the suite's own copy of the config).
-CONFIG = os.path.join(ROOT, "share", "spud.config.json")
-CONFIG_MARKS = os.path.join(ROOT, "tests", "fixtures", "config_marks.json")
+sys.dont_write_bytecode = True  # probe_env comes from this directory, and the checkout keeps no bytecode
+sys.path.insert(0, HERE)  # `python3.14 -I -S` puts no script directory on sys.path
+import probe_env  # noqa: E402  SPD-101: the isolation every probe's scratch home runs under
+
 PY = sys.executable
 
 
@@ -33,18 +33,6 @@ def run(launcher, env, *args):
     if proc.returncode:
         sys.exit("%s: exit %d %s" % (" ".join(args), proc.returncode, proc.stderr))
     return json.loads(proc.stdout)
-
-
-def write_config(home):
-    """Render the shipped config template into `home`/spud.config.json; returns it parsed."""
-    with open(CONFIG, encoding="utf-8") as f:
-        text = f.read()
-    with open(CONFIG_MARKS, encoding="utf-8") as f:
-        for mark, value in json.load(f).items():
-            text = text.replace(mark, value)
-    with open(os.path.join(home, "spud.config.json"), "w", encoding="utf-8") as f:
-        f.write(text)
-    return json.loads(text)
 
 
 def seed_project_one(home, config):
@@ -70,11 +58,11 @@ def main():
     per_ticket = int(args.pop(0)) if args and args[0].isdigit() else 3
     launcher = os.path.abspath(args[0]) if args else os.path.join(ROOT, "bin", "spud")
     home = tempfile.mkdtemp(prefix="spud-render-timing-")
-    config = write_config(home)
-    env = {k: v for k, v in os.environ.items() if k not in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR")}
-    env.update(SPUD_HOME=home, SPUD_TOOL_DIR=home, SPUD_USER_CLAUDE_DIR=os.path.join(home, ".user-claude"), SPUD_CONFIG_DIR=os.path.join(home, ".user-config"))
+    config = probe_env.write_config(home)
+    env = probe_env.isolated_env(home)  # SPD-101: the home plays the tool, and nothing of this Mac's is reachable
+    probe_env.link_share(home)  # init writes the vault scaffolding from the tool's share/ (SPW-001)
     try:
-        run(launcher, env, "init")
+        run(launcher, env, "init", "--no-schedule")
         seed_project_one(home, config)
         for n in range(tickets):
             t = run(launcher, env, "--as", "spud", "ticket", "new", "--title", "Ticket %d" % n, "--status", "active", "--brief", "b", "--sizing", "s")["ticket"]
