@@ -10,6 +10,7 @@ from . import assignment_words, syntax
 # position off, these and an assignment keep it; probed with `time (cd x)`, `! (cd x)`, `if (cd x)`, `{ (cd x) }`).
 ZSH_COMMAND_POSITION_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "done", "{", "}", "!", "time", "coproc", "nocorrect"}
 _PLAIN_RUN_RE = re.compile(r"[^\s;&|<>()'\"\\$]+")  # characters a word copies as they are
+_BRACE_RUN_RE = re.compile(r"\{+")  # the braces a word opens with, each a group of its own in command position
 # How the text of an arithmetic command `(( ... ))` and of an arithmetic expansion `$(( ... ))` is marked.  Both
 # shells evaluate it as arithmetic and run no command in it, so every character shlex, separate_redirects or ShellWalk would
 # otherwise read as an operator is replaced with an arithmetic sentinel (syntax._ARITH_SENTINELS), every glob metacharacter
@@ -189,8 +190,15 @@ def mark_zsh_patterns(text):
       then ( list ) fi`, `if (( c )) {( list )}; b` -- is a subshell.  With no compound command around it `(( c )) (
       list )` is a parse error, so the subshell read in its place reads a line that runs nothing;
     - glued inside a word, `(` is a pattern in zsh and a syntax error in bash, whole in both readings, except `()` (a function's
-      header), `$((`, `name=(` and a reserved word in command position (bash runs `!(`, `{(`, `if(`, `time(`, `then(`, `do(`
-      and `else(` as a subshell, zsh `{(` and `else(`);
+      header), `$((`, `name=(` and a reserved word in command position.  There zsh splits every brace off a run of them
+      opening the word, so `{(` and `{{(` run a subshell in their groups, read so in both readings; every other reserved
+      word glued to `(` -- `else(`, `then(`, `do(`, `time(`, `!(`, `}(` and the rest -- is one glob word to zsh wherever it
+      stands, its group a pattern or, with bareglobqual, glob qualifiers whose code runs for each file the word matches
+      (SPD-174, tests/probes/shell_probe.py: with a file named else present, zsh -f printed QRAN-else for `if true; then :;
+      else(e:'echo QRAN-$REPLY':); fi` and zsh -f -o nobareglobqual found no match; GluedReservedWordTest has the rest),
+      while bash runs `!(`, `if(`, `then(`, `else(`, `elif(`, `while(`, `until(`, `do(` and `time(` as the reserved word
+      and a subshell where that word belongs.  zsh's reading keeps such a group in its word, and the other reading
+      restores the parenthesis;
     - `>(` and `2>(` stay a process substitution; `&>(` and `>|(` open a pattern target;
     - case patterns, `[[ ... ]]`, `${...}` and here-document delimiters are left as they are.
 
@@ -273,6 +281,7 @@ def mark_zsh_patterns(text):
         # a word: copy it, marking the groups and ranges zsh reads in it; the other reading restores a range and a group that
         # opens the word, and keeps a group glued inside it whole
         start, j, word, alternative, state = i, i, [], [], None
+        braced = _BRACE_RUN_RE.match(text, i).end() if c == "{" else i  # where the braces the word opens with end
         while j < n:
             ch = text[j]
             if state == "'":
@@ -312,17 +321,24 @@ def mark_zsh_patterns(text):
                     punctuation_next = True
                     break
                 else:
-                    reserved = command and 0 < j - start <= 9 and text[start:j] in ZSH_COMMAND_POSITION_WORDS  # `{(`, `else(`: a subshell
+                    # A reserved word glued to `(` in command position (SPD-174; GluedReservedWordTest has the probes).
+                    # zsh splits every brace off a run of them opening the word, so `{(` and `{{(` open their groups and
+                    # a subshell, in both readings.  Any other -- `else(`, `then(`, `do(`, `time(`, `!(`, `}(` -- is
+                    # one glob word to zsh, whose group bareglobqual reads as qualifiers that may run code, and bash runs
+                    # it as the reserved word and a subshell where that word belongs: zsh's reading keeps the group in the
+                    # word, and the other reading restores the parenthesis.
+                    brace_run = command and start < j == braced
+                    reserved = command and not brace_run and 0 < j - start <= 9 and text[start:j] in ZSH_COMMAND_POSITION_WORDS
                     # `name=(`, `name+=(` and `name[1,0]=(`: an array assignment's parenthesis, never a group
                     array = target is None and j > start and text[j - 1] == "=" and assignment_words.array_head(text[start:j])
                     group = None
-                    if not (cond or heredoc or reserved or array or text.startswith("()", j)):
+                    if not (cond or heredoc or brace_run or array or text.startswith("()", j)):
                         group = _zsh_group(text, j, scan)
                     if group is None:
                         punctuation_next = True  # the walk reads this parenthesis in the plain reading
                         break
                     word.append(group[0])
-                    alternative.append(text[j : group[1]] if j == start else group[0])
+                    alternative.append(text[j : group[1]] if j == start or reserved else group[0])
                     j = group[1]
                     continue
             else:

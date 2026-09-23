@@ -2493,13 +2493,29 @@ class ZshGlobOperatorTest(BashHookCase):
         self.assertRefused("cat <1-2> ledger/tickets/SPD-001.md", "Law 1", agent_id=None)
 
     def test_a_subshell_either_shell_runs_is_still_read(self):
-        """bash runs `!(...)`, `{(...)}`, `if(...)`, `time(...)`, `then(...)`, `do(...)`, `else(...)` and `time -p (...)` as
-        subshells, zsh `{(...)}`, `else(...)` and `f()(...)` (probed): their commands are checked, whatever zsh's reading."""
+        """bash runs `!(...)`, `{(...)}`, `if(...)`, `time(...)`, `then(...)`, `do(...)`, `else(...)`, `time -p (...)`,
+        `f()(...)` and `g () (...)` as subshells, and zsh `{(...)}`, `f()(...)` and `g () (...)` only: zsh reads every other
+        reserved word glued to `(` as one glob word, `else(` included, which in `if false; then :; else(...); fi` stands in
+        the then-body (SPD-174, probed 2026-09-22 through tests/probes/shell_probe.py, `echo <label>` for the push: bash 3.2
+        printed the label for each of those ten; zsh 5.9, under -f and -f -o nobareglobqual alike, for `{(`, `f()(` and
+        `g () (` alone -- `!(` and `time(` failed with "no matches found" under nobareglobqual and "missing end of string"
+        under -f, the group read as glob qualifiers, the else line printed nothing, and `if(...) then :; fi`, `then(` and
+        `do(` in their places were parse errors, near fi and near done).  Their commands are checked in the other reading,
+        whatever zsh's; GluedReservedWordTest reads zsh's."""
         for cmd in ("!(git push)", "{(git push)}", "if(git push) then :; fi", "time(git push)", "if true; then(git push); fi",
                     "for i in 1; do(git push); done", "if false; then :; else(git push); fi", "time -p (git push)", "f()(git push); f",
                     "g () (git push)", "coproc CO (git push)", "echo a; (git push)"):
             with self.subTest(cmd):
                 self.assertRefused(cmd, "Law 7")
+        m = load_spud_module()
+        for cmd in ("{(git push)}", "f()(git push); f", "g () (git push)"):  # a subshell in zsh's reading too
+            with self.subTest(cmd):
+                self.assertEqual(m.mark_zsh_patterns(cmd), (cmd, cmd))
+        for cmd in ("!(git push)", "time(git push)", "if false; then :; else(git push); fi"):  # one glob word in zsh's
+            with self.subTest(cmd):
+                marked, other = m.mark_zsh_patterns(cmd)
+                self.assertEqual((m.deglob(marked), other), (cmd, cmd))
+                self.assertNotIn("(", marked)
         self.assertRefused("{(echo x > ledger/tickets/SPD-001.md)}", "generated", AGENT_C)
         self.assertRefused("time -p (echo x > ledger/tickets/SPD-001.md)", "generated", AGENT_C)
 
@@ -5653,6 +5669,289 @@ class ArithmeticCommandPositionTest(BashHookCase):
                      "if (( 1 )) { " * 1000 + "( {git push} )" + " }" * 1000,
                      "if " + "(( 1 )) && " * 2000 + "(( 1 )) ( {git push} )",
                      "if " + "((" * 2000 + " 1 " + "))" * 2000 + " ( {git push} )"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-174: the reserved words the scanner keeps command position after (zsh.ZSH_COMMAND_POSITION_WORDS) but `{`.  With a
+# `(` glued to one, zsh reads one glob word, and with a file of that name present zsh -f ran the code of the word's
+# `(e:'echo <label>':)` at the start of a line and in a then-body, for every one of these (GluedReservedWordTest).
+GLUED_RESERVED_WORDS = ("if", "then", "else", "elif", "fi", "while", "until", "do", "done", "}", "!", "time", "coproc", "nocorrect")
+# The places a command word stands in, `%s` the glued word: `else(e:'echo <label>':)` ran its code in every one.
+GLUED_WORD_PLACES = (
+    "%s",
+    "true; %s",
+    "true && %s",
+    "false || %s",
+    "echo | %s",
+    "if %s; then :; fi",
+    "if true; then %s; fi",
+    "if true; then :; %s; fi",
+    "if false; then :; else %s; fi",
+    "{ %s; }",
+    "( %s )",
+    "x=1 %s",
+    "! %s",
+    "time %s",
+    "nocorrect %s",
+    "repeat 1 %s",
+    "for f (a) %s",
+    "if [[ -n x ]] %s",
+    "if (( 1 )) %s",
+    "> /dev/null %s",
+    "case x in x) %s;; esac",
+    "f() { %s }; f",
+)
+# The qualifier spellings whose code ran as `else(<qualifier>)` in a then-body, `%s` the code.
+GLUED_QUALIFIERS = ("e:'%s':", "e{%s}", "e[%s]", "oe:'%s':", ".e:'%s':", 'e:"%s":')
+
+
+class GluedReservedWordTest(BashHookCase):
+    """SPD-174, filed by SPD-142's engineer: mark_zsh_patterns' docstring and ZshGlobOperatorTest said zsh runs `else(` as
+    a subshell, as it runs `{(`.  It does not.  zsh reads a reserved word with a `(` glued to it as one glob word, its
+    group a pattern or, with bareglobqual (zsh's default), glob qualifiers, and the code of an `e` or `+` qualifier runs
+    for each file the word matches.  The scanner took every reserved word it keeps command position after, glued to a `(`
+    in command position, for that word and a subshell, in both readings, so that code went unread.
+
+    Probed 2026-09-22 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f and under -f -o
+    nobareglobqual, and in GNU bash 3.2.57; an `echo <label>` stood in for each command:
+
+    - the proposer's evidence: `if false; then :; else(echo else-glued-ran); fi` printed nothing in zsh and else-glued-ran
+      in bash; `if true; then :; else(echo NOT-this); fi` failed in zsh -f -o nobareglobqual with "no matches found:
+      else(echo NOT-this)", a pattern, and in zsh -f with "missing end of string", its group read as qualifiers (an `e`
+      whose string, delimited by `c`, never ends); `{(echo brace-glued-top)}` ran its subshell in all three;
+    - the hole: with a file named after the word present, zsh -f ran the code of `W(e:'echo <label>':)` for every word of
+      GLUED_RESERVED_WORDS, at the start of a line and in a then-body, `else(e:'echo <label>':)` in every one of
+      GLUED_WORD_PLACES, `else(...)` with every one of GLUED_QUALIFIERS, and `else(+f)`, `then(+f)` and `fi(+f)`,
+      which ran the function f.  A write there made its file (`else(e:'echo x > l/t':)` wrote l/t), and a cd there moved
+      the shell the line goes on in (`else(e:'cd d':) ; pwd` printed .../d).  zsh -f -o nobareglobqual read each group as a
+      pattern and ran nothing, and bash runs the word and a subshell where the word belongs (`!(`, `if(`, `then(`,
+      `else(`, `elif(`, `while(`, `until(`, `do(` and `time(` ran their subshell there) and rejects it anywhere else;
+    - a second hole beside it: zsh splits every brace off a run of them opening a word in command position, so
+      `{{(echo <label>)}}` ran its subshell in its two groups, at the start of a line and after `true;`, `time`, `!` and
+      a `then` (and a cd there stayed there), where the scanner took only a lone `{` for a group and read one pattern word
+      in both readings; bash rejects the line;
+    - zsh rejects the glued word after a closing `}` (`if [[ -z x ]] { : } else(...)`, `{ : } else(...)`), as a group's
+      last word (`{ :; }(...)`), in then's and do's own place (`if true; then(...); fi`, `for i in 1; do(...); done`), and
+      `{{{( list )}}}` (a parse error near `}}`): nothing on those lines runs, and the hook reads them fail closed.
+
+    The words the scanner never kept command position after -- `esac`, `always`, `case`, `for`, `select`, `repeat`,
+    `foreach`, `function` -- ran their code the same way (`esac(e:'echo <label>':)` at the start of a line), and were
+    already read as glob words.  zsh's reading now holds such a group in its word, where the walk reads its qualifier
+    code (globbing.qualifier_code) and the word as the glob command word it is, and the other reading restores the
+    parenthesis, bash's subshell, as before; a run of braces before a `(` is a run of groups and a subshell in both.
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        (self.out / "o").mkdir()
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it, the directory it runs in): Law 7, Law 6, Law 5's --as, and Law 1
+        through a redirection and through tee -- none holding a quote, so each fits between a qualifier's quotes.  The
+        writes run in the tickets directory, their targets holding no `/`: in a glued word's group a `/` is a bad pattern
+        to zsh (probed: `else(e:'echo x > sub/t':)` failed so under -f -o nobareglobqual, while -f ran the code), and the
+        hook's reading of a glob command word takes it for a directory's, the pattern after it naming any command, the
+        database's first -- refused all the same, but in the database's words rather than the path rule's."""
+        spud, tickets = self.spud_cli, str(self.home.path / "ledger" / "tickets")
+        return (("git push", "Law 7", None),
+                ("%s ticket new --title x" % spud, "Law 6", None),
+                ("%s --as spud member log hi" % spud, "Law 6", None),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as", None),
+                ("echo x > SPD-001.md", "generated", tickets),
+                ("echo x | tee SPD-001.md", "generated", tickets))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        spud, tickets = self.spud_cli, str(self.home.path / "ledger" / "tickets")
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as", None),
+                ("echo x > SPD-001.md", "Law 1", tickets),
+                ("echo x | tee SPD-001.md", "Law 1", tickets))
+
+    def every_payload(self, form):
+        for command, needle, cwd in self.member_payloads():
+            line = form % command
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertRefused(line, needle, agent_id, cwd)
+        for command, needle, cwd in self.spud_payloads():
+            line = form % command
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertRefused(line, needle, None, cwd)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_one_glob_word_in_zsh(self):
+        """zsh's reading holds `else` and its group as one word, and the other reading is the line as bash reads it, the
+        word and a subshell; `{(` is a group and a subshell in both."""
+        for line in ("if false; then :; else(echo else-glued-ran); fi", "if true; then :; else(echo NOT-this); fi"):
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(line)
+                self.assertNotIn("(", marked)  # the group is part of the word
+                self.assertEqual(self.m.deglob(marked), line)
+                self.assertEqual(other, line)
+        line = "{(echo brace-glued-top)}"
+        self.assertEqual(self.m.mark_zsh_patterns(line), (line, line))
+        self.assertRefused("{(git push)}", "Law 7")
+
+    def test_the_tickets_qualifier_corner(self):
+        """With a file named else present, zsh -f ran the code of `else(e:'...':)` and `else(+f)` in a then-body."""
+        line = "if true; then :; else(e:'git push':); fi"
+        self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+        r = self.assertRefused(line, "Law 7")
+        self.assertIn("git push", r.reason)
+        self.assertRefused(line, "Law 7", AGENT_C)
+        self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+        # ... and a write there is held to the path rule (in the tickets directory: see member_payloads)
+        line = "if true; then :; else(e:'echo x > SPD-001.md':); fi"
+        tickets = str(self.home.path / "ledger" / "tickets")
+        self.assertRefused(line, "Law 1", None, tickets)
+        self.assertRefused(line, "generated", AGENT_C, tickets)
+        line = "if true; then :; else(e:'echo x > k.txt':); fi"
+        self.assertRefused(line, "deliverables", AGENT_A)  # AGENT_A plans tests/** and bin/spud
+        self.assertSilent(line, AGENT_C)
+        self.assertRefused(line, "Law 1", agent_id=None)  # a file in the home that is not Spud's own
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_glued_word_reads_its_qualifier_code(self):
+        # every word the scanner keeps command position after but `{`: a word added there is probed and added here
+        self.assertEqual(set(GLUED_RESERVED_WORDS), self.m.ZSH_COMMAND_POSITION_WORDS - {"{"})
+        for word in GLUED_RESERVED_WORDS:
+            for form in ("%s", "if true; then :; %s; fi"):
+                line = form % ("%s(e:'git push':)" % word)
+                with self.subTest(line=line):
+                    marked, other = self.m.mark_zsh_patterns(line)
+                    self.assertNotIn("(", marked)  # zsh's reading: one glob word
+                    self.assertEqual(self.m.deglob(marked), line)
+                    self.assertEqual(other, line)  # the other reading: bash's, the word and a subshell
+                    r = self.assertRefused(line, "Law 7")
+                    self.assertIn("git push", r.reason)
+                    self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_every_place_reads_the_qualifier_code(self):
+        for place in GLUED_WORD_PLACES:
+            line = place % "else(e:'git push':)"
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_every_qualifier_spelling_reads_its_code(self):
+        for qualifier in GLUED_QUALIFIERS:
+            line = "if true; then :; else(%s); fi" % (qualifier % "git push")
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_every_payload_in_the_code(self):
+        """zsh -f ran the code of each form with `echo <label>` in the slot (`x=1 do(` and `true && fi(` too)."""
+        for form in ("if true; then :; else(e:'%s':); fi", "then(e:'%s':)", "time(e:'%s':)", "!(e:'%s':)", "x=1 do(e:'%s':)",
+                     "{ :; }(e:'%s':); }", "true && fi(e:'%s':)"):
+            self.every_payload(form)
+
+    def test_a_cd_in_the_code_is_not_followed(self):
+        """zsh runs the code in the shell that expands the word, once for every file it matches, so the directory after it
+        is one the hook cannot follow, as after any qualifier's cd (probed in zsh -f: `else(e:'cd d':) ; pwd` printed .../d,
+        `then(e:'cd e':); echo x > g` made e/g, `if true; then :; else(e:'cd d':); echo x > h; fi` made d/h, and
+        `time(e:'cd d':) > f` made d/f, the word expanded before its redirection opened)."""
+        for line in ("else(e:'cd ledger':); echo x > tickets/SPD-001.md",
+                     "if true; then :; else(e:'cd ledger':); echo x > tickets/SPD-001.md; fi",
+                     "time(e:'cd ledger':) > tickets/SPD-001.md"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "cannot follow", AGENT_C)
+
+    # -- a run of braces --------------------------------------------------------------------------------------------------
+    def test_a_run_of_braces_opens_its_groups_and_the_subshell(self):
+        for line in ("{{(git push)}}", "true; {{(git push)}}", "time {{(git push)}}", "! {{(git push)}}",
+                     "if true; then {{(git push)}}; fi"):
+            with self.subTest(line=line):
+                self.assertEqual(self.m.mark_zsh_patterns(line), (line, line))  # no pattern in either reading
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertSilent(line, agent_id=None)
+        self.every_payload("{{(%s)}}")
+        self.every_payload("true; {{(%s)}}")
+
+    def test_a_cd_in_the_braced_subshell_stays_there(self):
+        home = str(self.home.path)
+        line = "{{(cd %s/o)}}" % self.out
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+        self.assertEqual(self.analysis(line).cwds, frozenset([home]))
+        self.assertSilent("{{(cd %s/ledger)}}; echo x > tests/zzone/k.py" % home, AGENT_C)
+
+    # -- lines zsh rejects ----------------------------------------------------------------------------------------------
+    def test_a_glued_word_zsh_rejects_is_read_fail_closed(self):
+        """Nothing on these lines runs in zsh; the hook reads the glued word's code all the same, and the subshell bash runs
+        after then and do."""
+        for line in ("if [[ -z x ]] { : } else(e:'git push':)", "{ : } else(e:'git push':)", "{ :; }(e:'git push':)",
+                     "if true; then(e:'git push':); fi", "for i in 1; do(e:'git push':); done", "{{{(git push)}}}"):
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertRefused(line, "Law 7")
+
+    # -- the other reading ------------------------------------------------------------------------------------------------
+    def test_bashs_subshell_is_still_read(self):
+        """bash ran the word and a subshell for each of these, `echo <label>` for the push, and zsh ran none of them, reading
+        one glob word (the if, then, do, while and until lines were parse errors near fi or done): both readings are
+        checked."""
+        for line in ("if false; then :; else(git push); fi", "if true; then(git push); fi", "for i in 1; do(git push); done",
+                     "if(git push) then :; fi", "time(git push)", "!(git push)", "if false; then :; elif(git push) then :; fi",
+                     "while(git push) do break; done", "until(git push) do :; done"):
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(line)
+                self.assertEqual(other, line)
+                self.assertNotIn("(", marked)
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    # -- controls -----------------------------------------------------------------------------------------------------------
+    def test_a_glued_word_already_read_as_one_still_is(self):
+        """Outside command position, and after a reserved word the scanner never kept command position after, a glued group
+        was always read as part of its word (probed: `esac(e:'echo <label>':)` ran its code at the start of a line, and
+        `always(`, `case(`, `for(`, `select(`, `repeat(`, `foreach(` and `function(` too)."""
+        for line in ("echo else(e:'git push':)", "esac(e:'git push':)", "always(e:'git push':)", "case(e:'git push':)",
+                     "for(e:'git push':)", "select(e:'git push':)", "repeat(e:'git push':)", "foreach(e:'git push':)",
+                     "function(e:'git push':)"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+
+    def test_the_line_after_a_glued_word_is_read_as_before(self):
+        """A parameter expansion and a group after the glued word are read as they always were."""
+        for line in ("else(e:'true':); x=git; ${x} push", "time(e:'true':) && x=git && ${x} push",
+                     "!(e:'true':); { git push }", "{{(true)}}; x=git; ${x} push", "if true; then :; fi(N); x=git; ${x} push"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+
+    def test_harmless_lines_stay_silent(self):
+        for line in ("if false; then :; else(true); fi", "if false; then :; else (true); fi", "time (true)", "! (true)",
+                     "{ (true) }", "{(true)}", "{{(true)}}", "if true; then :; else(N); fi", "echo else(e:'true':)"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("if true; then :; " + "else(e:'true':); " * 2000 + "else(e:'git push':); fi",
+                     "else(" * 20000 + "; then(e:'git push':)",
+                     "{" * 2000 + "(git push)" + "}" * 2000,
+                     "{" * 2000 + "a" + "(b)" * 20000 + "; time(e:'git push':)",
+                     "true; " + "!(e:'true':) " * 1000 + "&& then(e:'git push':)"):
             with self.subTest(line=line[:40]):
                 started = time.monotonic()
                 a = self.analysis(line)
