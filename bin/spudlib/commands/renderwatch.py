@@ -13,7 +13,7 @@ import time
 
 from . import publish
 from ..core import kernel, launchagents
-from ..state import ledgerdb
+from ..state import ledgerdb, schema
 
 WATCH_INTERVAL = 2.0  # seconds between two reads of the event log
 
@@ -39,11 +39,55 @@ def truncate_log():
             os.ftruncate(fd, 0)
 
 
+def file_stamp(path):
+    """(mtime_ns, size) of a file, or None when it is gone: what changes when a merge rewrites it."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_mtime_ns, st.st_size
+
+
+def program_stamps():
+    """{path: stamp} for every file of the program this process loaded: the entry and each module of spudlib.  A merge into
+    the tool's main rewrites some of them under a watcher that keeps running what it loaded (SPD-119)."""
+    stamps = {}
+    for name, module in list(sys.modules.items()):
+        path = getattr(module, "__file__", None)
+        if path and (name == "spud_ledger" or name.startswith("spudlib.")):
+            stamps[path] = file_stamp(path)
+    return stamps
+
+
+def changed_program_file(stamps):
+    """The first loaded file whose stamp is not the one it had at start, or None: the code on disk is not the code running."""
+    return next((path for path, stamp in sorted(stamps.items()) if file_stamp(path) != stamp), None)
+
+
+def database_ahead(ctx):
+    """Whether the database's user_version is past the schema this process loaded: a newer spud migrated it, so no tick of
+    this process can ever connect again.  False when the version cannot be read (the next tick says why)."""
+    try:
+        con = ledgerdb.open_connection(ctx.db_path)
+        try:
+            return con.execute("PRAGMA user_version").fetchone()[0] > schema.SCHEMA_VERSION
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return False
+
+
 def cmd_render_watch(ctx, args):
     """render --watch: every `interval` seconds compare the highest non-render event id with the id the last pass rendered
     through; when the database is ahead, run one pass under the render lock.  The watermark lives in this process (the last
     pass's mark at start, then the id read before each pass), so a pass that changes nothing writes no row.  Runs until
-    SIGTERM or SIGINT, or `ticks` reads (tests).  Refused while another watcher holds the lock."""
+    SIGTERM or SIGINT, or `ticks` reads (tests).  Refused while another watcher holds the lock.
+
+    It also ends, logging why, when this process can no longer be the right one to render (SPD-119): when a file of the
+    program it loaded changed on disk -- a merge into the tool's main is a deploy, and this is the one process that outlives
+    it -- or when the database is ahead of the schema it loaded, which `ledgerdb.connect` refuses on every tick forever.
+    Before, that refusal was logged and the loop went round again: the lock stayed held and nothing rendered.  Ending is
+    the fix, because the LaunchAgent's KeepAlive starts the watcher again on the code now on disk."""
     if args.out or args.discard:
         raise kernel.SpudError(kernel.EXIT_USAGE, "--watch renders into the home on its own: no --out, no --discard")
     if not ctx.db_path.is_file():
@@ -59,9 +103,14 @@ def cmd_render_watch(ctx, args):
         signal.signal(sig, lambda signum, frame: stop.append(signum))
     truncate_log()
     log_line("watching %s every %.2f s" % (ctx.db_path, args.interval))
-    passes, ticks, seen = 0, 0, None
+    passes, ticks, seen, ended = 0, 0, None, None
+    loaded = program_stamps()
     try:
         while not stop and (args.ticks is None or ticks < args.ticks):
+            changed = changed_program_file(loaded)
+            if changed:
+                ended = "the program changed on disk (%s)" % changed
+                break
             try:
                 con = ledgerdb.connect(ctx)
                 try:
@@ -80,6 +129,9 @@ def cmd_render_watch(ctx, args):
                     con.close()
             except (kernel.SpudError, sqlite3.Error) as e:
                 log_line("error: %s" % (e.message if isinstance(e, kernel.SpudError) else e))
+                if database_ahead(ctx):
+                    ended = "the database is ahead of this program's schema %d" % schema.SCHEMA_VERSION
+                    break
             ticks += 1
             slept = 0.0
             while not stop and slept < args.interval:
@@ -88,6 +140,6 @@ def cmd_render_watch(ctx, args):
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-    why = ("signal %d" % stop[0]) if stop else ("%d ticks" % ticks)
+    why = ("signal %d" % stop[0]) if stop else ended or ("%d ticks" % ticks)
     log_line("stopped after %d pass(es): %s" % (passes, why))
     return kernel.Result({"passes": passes, "ticks": ticks, "stopped_by": why}, "")

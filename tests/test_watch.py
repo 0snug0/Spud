@@ -10,6 +10,7 @@ behind.  VaultLagTest needs no watcher process for any of them.
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -163,6 +164,60 @@ class DoctorAndBoardTest(LaunchdMixin, WatchCase):
         self.assertIn("import --file ledger/tickets/SPD-001.md", proc.stderr)
         self.assertIn("render --discard ledger/tickets/SPD-001.md", proc.stderr)
         self.assertIn("ledger/tickets/SPD-001.md", proc.stdout)
+
+
+class DeployTest(WatchCase):
+    """SPD-119: a merge into the tool's main is a deploy, and the watcher is the one process that does not restart with it.
+    On 2026-09-17 SPD-077's merge added migration 0005; the database was migrated past the schema the running watcher had
+    loaded, `ledgerdb.connect` refused it on every tick, the loop logged the refusal and went round again, and for an hour the
+    watcher held its lock and rendered nothing.  A watcher now ends when the program it loaded changed on disk, or when the
+    database is ahead of it, so that launchd's KeepAlive starts it again on the code the database was migrated by."""
+
+    def finished(self, proc):
+        """The watcher's exit code and output once it has ended on its own; None while it is still running."""
+        if not self.wait_for(lambda: proc.poll() is not None):
+            return None
+        out, err = proc.communicate(timeout=10)
+        return proc.returncode, out, err
+
+    def test_a_database_ahead_of_the_watcher_ends_it_rather_than_stalling_it(self):
+        self.new_ticket("Before")
+        base = self.render_events()
+        proc = self.watcher()
+        self.assertTrue(self.wait_for(lambda: self.render_events() == base + 1), "the first pass renders")
+        con = self.home.connect()
+        try:
+            version = con.execute("PRAGMA user_version").fetchone()[0]
+            con.execute("PRAGMA user_version = %d" % (version + 1))  # what a newer spud's migration leaves behind
+        finally:
+            con.close()
+        ended = self.finished(proc)
+        self.assertIsNotNone(ended, "a watcher whose schema is behind the database must end, not log the refusal every tick")
+        code, out, err = ended
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertEqual(out.count("error: the database is ahead of this CLI"), 1, out)
+        self.assertIn("stopped after 1 pass(es): the database is ahead of this program", out)
+        self.assertFalse(spud.watcher_alive(self.ctx()))
+
+    def test_a_watcher_whose_program_changed_on_disk_ends(self):
+        tool = self.home.path / "deployed"
+        shutil.copytree(SPUD.parent, tool / "bin", ignore=shutil.ignore_patterns("__pycache__"))
+        self.new_ticket("Before")
+        base = self.render_events()
+        proc = subprocess.Popen([sys.executable, "-I", "-S", str(tool / "bin" / "spud"), "--as", "spud", "render", "--watch", "--interval", "0.05"],
+                                env=self.home.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(self.stop, proc)
+        self.assertTrue(self.wait_for(lambda: self.render_events() == base + 1), "the first pass renders")
+        time.sleep(0.3)
+        self.assertIsNone(proc.poll(), "an unchanged program keeps watching")
+        changed = tool / "bin" / "spudlib" / "render" / "notefiles.py"  # what SPD-116's merge changed under the watcher
+        changed.write_text(changed.read_text(encoding="utf-8") + "\n# deployed\n", encoding="utf-8")
+        ended = self.finished(proc)
+        self.assertIsNotNone(ended, "a watcher running code that is no longer on disk must end so launchd starts the new code")
+        code, out, err = ended
+        self.assertEqual((code, err), (0, ""), out)
+        self.assertIn("stopped after 1 pass(es): the program changed on disk (%s)" % changed, out)
+        self.assertFalse(spud.watcher_alive(self.ctx()))
 
 
 BEHIND_LINE = "render watcher: %s unrendered, the oldest %s; the vault is stale (spud render brings it up to date)"
