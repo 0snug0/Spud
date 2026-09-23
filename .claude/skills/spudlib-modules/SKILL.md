@@ -12,14 +12,14 @@ bin/
   spud               the launcher: loads the entry by path, with today's bytecode rule
   spud_ledger.py     the entry: the finder, the public surface, HookCall, main, the refusal
   spudlib/           the program in nine directories, no __init__.py
-    core/      kernel · lazy · markdown · homeconf · launchagents
+    core/      kernel · lazy · markdown · homeconf · launchagents · shipped
     state/     schema · ledgerdb · lookup · actors · ops · transcripts · backup
     render/    prices · teamcard · workedon · sectiontext · notefiles
     imports/   noteimport · bulkimport · accept
-    commands/  reportentry · admincmds · doctor · schedule · settings_sync · publish · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind
+    commands/  reportentry · admincmds · vaultlock · vaultinstall · homesync · ghread · prcmds · doctor · schedule · settings_sync · publish · homeinit · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind · vaultcapture
     projects/  sessions · registry · install · agentdef
-    hooks/     hookio · worktrees · pathrule · gitrepos · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
-    shell/     syntax · prepare · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · walk · analyse · redirect_globs · inline_programs · interpreter_words · bash_rule
+    hooks/     hookio · worktrees · pathrule · gitrepos · snapshots · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
+    shell/     syntax · prepare · assignment_words · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · runtime_shells · walk · analyse · redirect_globs · inline_programs · interpreter_words · bash_rule · arg_writes · tree_walk · tree_writes · find_xargs · spelled_writes · downloads · script_text · stdin_text · script_files · runner_files · script_runners
     cli/       helptexts · cliparser
 ```
 
@@ -106,7 +106,7 @@ One more property worth not breaking: a handler module that fails to import is s
 
 ## 5. The one import cycle
 
-These `shell/` modules are one strongly connected component: `analyse`, `bash_rule`, `directories`, `expansions`, `git_config`, `git_programs`, `git_verbs`, `globbing`, `redirect_globs`, `walk`. That is real recursion — `analyse_words` builds a `ShellWalk` whose segments call `analyse_words` again — not tangled layering, and breaking it would take either one large module or function-local imports that hide the edges.
+These `shell/` modules are one strongly connected component: `analyse`, `arg_writes`, `bash_rule`, `directories`, `downloads`, `expansions`, `find_xargs`, `git_config`, `git_programs`, `git_verbs`, `globbing`, `inline_programs`, `interpreter_words`, `redirect_globs`, `runner_files`, `runtime_shells`, `script_files`, `script_runners`, `script_text`, `spelled_writes`, `stdin_text`, `tree_walk`, `tree_writes`, `walk`. That is real recursion — `analyse_words` builds a `ShellWalk` whose segments call `analyse_words` again — not tangled layering, and breaking it would take either one large module or function-local imports that hide the edges.
 
 It is safe under one condition the guard test enforces: **no module reads another module's name while that module is being imported, unless the module read cannot reach the reader.** In practice, a cross-module read belongs **inside a function body**. These run at import time and can fail depending on which module a run imports first:
 
