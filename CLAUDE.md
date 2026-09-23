@@ -43,6 +43,7 @@ Either way the suite runs entirely against scratch homes built from the rendered
 - `session_diff.py LAUNCHER_A LAUNCHER_B` — scripted CLI and hook calls compared step by step after masking; run after a refactor meant to leave behavior alone.
 - `render_timing.py [TICKETS] [MEMBERS_PER_TICKET] [LAUNCHER]` — a full pass and a no-change pass of `spud render` over a synthetic ledger, timed.
 - `headless.py <scenario> [--root DIR] [--model haiku]` and `headless_projects.py <scenario>` — real `claude -p` sessions against a scratch home, real API usage (roughly $0.10 to $0.50 a scenario on haiku); run one scenario at a time.
+- `shell_probe.py [FILE | -]` — runs a snippet under `zsh -f -o nobareglobqual`, `zsh -f` and `/bin/bash` in a throwaway directory, inside a `sandbox-exec` profile that lets it run no git, xcrun, python or launcher, write nothing outside that directory, read nothing under your home, and reach no network, and prints each shell's version, status, stdout and stderr; the way a member in a worktree, refused every command that runs zsh or bash, gets live shell evidence (SPD-094). Exits 3 without running anything where the sandbox cannot apply.
 - `context_limit.py SIZE [--filler ascii|latin|emoji] [--model haiku] [--root DIR]` — a real `claude -p` session measuring how large a SessionStart hook's `additionalContext` reaches the model whole, and whether the harness counts code points, UTF-16 units or bytes; real API usage, a few cents a run on haiku; run one size at a time.
 
 ## Landing

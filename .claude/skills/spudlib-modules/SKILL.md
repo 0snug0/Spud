@@ -163,3 +163,10 @@ Its reach has known gaps (SPD-079): it does not see an alias shadowed by a neste
 3. If you touched the hook path: `HOOK_PATH` updated, and `tests/probes/hook_timing.py` within 1 ms of main.
 4. If you changed how the program is loaded or how a hook answers: `python3.14 -I -S tests/probes/session_diff.py "$main/bin/spud" "$PWD/bin/spud"` — main's launcher (`$main` as in §3) and this worktree's, scripted CLI and hook calls against both, every step identical after masking.
 5. If you added a module or grew one: `tests/probes/module_sizes.py`, and the reason written down.
+6. If a comment or test you wrote says what a shell does: a live probe behind it, named where the claim is — which shell, which options, what it printed. A member in a worktree is refused every command that runs zsh or bash, so it asks through the probe runner, which runs the snippet in the three shells the `shell/` comments cite, sandboxed so that it can run no git and write nothing outside its own directory:
+
+   ```bash
+   python3.14 -I -S tests/probes/shell_probe.py snippet.sh   # zsh -f -o nobareglobqual, zsh -f, /bin/bash; or the snippet on stdin
+   ```
+
+   Pass the snippet as a file (a scratchpad path) when its text names git: the Bash hook reads a here-document fed to the probe and refuses one that does. Cite the versions it prints with what it printed.
