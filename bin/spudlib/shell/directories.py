@@ -7,11 +7,21 @@ from . import globbing, prepare, syntax
 from ..hooks import hookio
 
 
+# The most directories the shell may be in that the hook tracks before it gives up and reads the rest with the
+# directory unknown (SPD-193): a line of relative conditional `cd`s doubles the set with each step (`cd a && ...; cd b
+# && ...` may leave the shell in the original directory, a/, b/, a/b/, ...), so without a bound the reading is 2^n; no
+# real line puts the shell in this many places, and past it a write target relative to the directory is refused (the
+# path rule's unfollowable reading), which is the fail-closed answer a member spells around with an absolute path.
+CWDS_CAP = 256
+
+
 def union_dirs(a, b):
-    """The directories the shell may be in when it may be in either set; None (not known) absorbs everything."""
+    """The directories the shell may be in when it may be in either set; None (not known) absorbs everything, and a
+    union past CWDS_CAP becomes None too, so a line of many conditional relative cds is read in bounded time (SPD-193)."""
     if a is None or b is None:
         return None
-    return a | b
+    both = a | b
+    return both if len(both) <= CWDS_CAP else None
 
 
 def redirect_descriptor(operator, operand):

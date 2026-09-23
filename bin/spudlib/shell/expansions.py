@@ -42,6 +42,8 @@ def assign_variable(a, name, value, append=False):
     or persist here (a.unsure) or runs in a loop or function body, which may assign again later (sticky); a certain assignment
     settles an earlier doubt."""
     a.vars[name] = ("$" if name in ("CDPATH", "cdpath") else hookio.SUBST) if append else value
+    if not append and syntax.POSITIONAL_RE.search(prepare.deglob(value)) is not None:
+        a.member_vars.add(name)  # a value holding a positional fills the name with the call's words (SPD-205)
     a.assigned.append(name)
     if a.unsure or a.loop_depth:
         a.doubt.add(name)

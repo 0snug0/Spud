@@ -1,11 +1,14 @@
 """shell/walk: ShellFrame and ShellWalk: one pass over a line's tokens."""
 
 from . import (analyse, assignment_words, directories, globbing, heredocs, positional, prepare, reevaluation, script_files,
-               stdin_text, syntax)
+               stdin_text, syntax, unread)
 from ..hooks import hookio
 
 # The loops whose header names a variable, one header grammar to zsh (its parser's par_for; ShellWalk.names_end)
 _NAMED_LOOPS = ("for", "select", "foreach")
+# The sentinel mark_zsh_patterns leaves for the `(` inside an arithmetic command's `((`, so the token after its outer
+# `(` begins with it and no other subshell's does (SPD-177): the walk tells an arithmetic condition from a plain one.
+_ARITH_OPEN = syntax._ARITH_SENTINELS["("]
 # The word ShellWalk.pop puts among a command's words for the file name a `<( list )` hands it (SPD-145): hookio.SUBST,
 # which every reader of it takes for a word the line does not spell, marked (syntax.PROCSUB_MARK) so that
 # ShellWalk.consume pairs it with no lifted body.  As SUBST alone it took the first `$( )` after it on the line, analysed
@@ -45,7 +48,7 @@ class ShellFrame:
     `do ... done` (resolve_body)."""
 
     __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints",
-                 "procsub", "serial", "bare", "defines")
+                 "procsub", "serial", "bare", "defines", "arith")
 
     def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
@@ -83,6 +86,9 @@ class ShellFrame:
         # it opens a command, no word before it, so that the words after its closer are its own redirections: not so for
         # a process substitution, nor for a `(` after words.
         self.serial, self.bare = 0, False
+        # this `( ... )` frame is the subshell mark_zsh_patterns leaves for an arithmetic command `(( ... ))` (its outer
+        # parenthesis kept, its inside marked), so its close ends a condition it stands at the end of (SPD-177)
+        self.arith = False
 
 
 class ShellWalk:
@@ -413,6 +419,13 @@ class ShellWalk:
             self.a.dashless_loops.difference_update(names)
         else:
             self.a.dashless_loops.update(names)
+        # a list holding a positional parameter (`for a in "$@"`), or -- once shell/positional has set the call's words
+        # where the body reads them -- one of the member's own words, fills the loop variable with what the member wrote,
+        # so a finding on it is the member's own inside a function body (SPD-205, analyse_shell_text's prune).  Only the
+        # word just read is tested, so a long list stays linear: each word reaches this once as `t`.
+        word = prepare.deglob(t)
+        if syntax.POSITIONAL_RE.search(word) is not None or word in self.a.shell_words:
+            self.a.member_vars.update(names)
 
     def end_header(self):
         """The loop's header, or an if/while/until condition ending in `]]`, is complete.  Its body may follow with no `do`
@@ -492,6 +505,8 @@ class ShellWalk:
                     body = self.bodies.pop(0)
                     if self.expanded.pop(0):
                         ran = reevaluation.read_expanded_body(body, self.a, self.depth + 1)
+                        # bash expands the body's substitutions with the command's own prefix, zsh with the outer value (SPD-211)
+                        ran = reevaluation.read_body_with_prefix(body, self.a, self.depth + 1, words) or ran
                         values = values or reevaluation.body_values(self.a, words)
                         body = heredocs.received_body(body, values)
                         if ran:
@@ -505,11 +520,18 @@ class ShellWalk:
 
     def substitution_input(self):
         """(the text, whether anything stands there) on the standard input a command substitution in the words being read
-        runs on: the input of the list the command stands in, which is the compound command's (SPD-210) -- zsh's reading
-        inside a pipeline element too.  Not the command's own redirections, which the shells perform after they expand
-        its words, and not the pipe into its element, which bash's reading takes there and this one does not yet (probed:
-        CompoundInputTest; SPD-210's proposal 320)."""
-        return self.frame_stdin, self.frame_stdin_fed
+        runs on.  zsh expands a substitution in the shell running the list it stands in, so it reads that list's input, the
+        compound command's (SPD-210); bash expands one in a pipeline element in the subshell the pipe feeds, so there it
+        reads the pipe (SPD-213, CompoundInputTest): `printf ... | echo $(sh)` runs the pipe's text in bash.  Not the
+        command's own redirections, which the shells perform after they expand its words.  Where a list has no input its
+        substitution reads nothing (a spelled empty text, never a refusal); where the two shells' readings differ the text
+        is a MultiosText holding each, and each_reading gives a shell each."""
+        zsh_text = self.frame_stdin if self.frame_stdin_fed else ""
+        if self.pipe_feeds:
+            bash_text, fed = (self.piped_text if self.piped_fed else ""), self.frame_stdin_fed or self.piped_fed
+        else:
+            bash_text, fed = zsh_text, self.frame_stdin_fed
+        return stdin_text._paired(bash_text, zsh_text), fed
 
     def discard(self):
         self.consume(self.words)
@@ -749,6 +771,8 @@ class ShellWalk:
                 j = i + 1
                 while j < len(toks) and toks[j] != ")":
                     j += 1
+                if unread.process_sub_in(toks[i + 1 : j]):  # SPD-198: a `<( )`, `>( )` or `=( )` in an array value, unread
+                    unread.record_unread(self.a, "procsub-list", unread.unread_shown("".join(toks[i : j + 1])))
                 # name=(a b), name=(), name[1,0]=(a): one assignment word, marked an array
                 self.words[-1] += assignment_words.array_value(toks[i + 1 : j])
                 i = j
@@ -765,6 +789,8 @@ class ShellWalk:
                     if depth == 0:
                         break
                     j += 1
+                if unread.process_sub_in(toks[i : j + 1]):  # SPD-198: a `<( )`, `>( )` or `=( )` in a for/foreach list, unread
+                    unread.record_unread(self.a, "procsub-list", unread.unread_shown("".join(toks[i : j + 1])))
                 self.words.append("".join(toks[i : j + 1]))
                 i = j
                 # `for (( ... ))`, `repeat (( ... ))`, or a `for`, `select` or `foreach` list after its names closed: its
@@ -778,10 +804,18 @@ class ShellWalk:
                 self.stack[-1].prints = t == "("  # a process substitution's output goes to the file it stands for
                 self.stack[-1].procsub = t == "<("
                 self.stack[-1].bare = self.stack[-1].bare and t == "("  # a word in the command around it, not a command
+                # mark_zsh_patterns keeps an arithmetic command's outer parenthesis and marks its inside, so `(( ... ))`
+                # opens this frame with a next token that begins with the arithmetic sentinel for `(` (SPD-177)
+                self.stack[-1].arith = t == "(" and i + 1 < len(toks) and toks[i + 1].startswith(_ARITH_OPEN)
             elif t == ")":
                 self.close_sublists()
                 if self.stack and self.stack[-1].closer == ")":
+                    arith = self.stack[-1].arith
                     self.pop()
+                    if arith and self.stack and self.stack[-1].kind in ("cond", "loop") and self.stack[-1].body == "cond":
+                        # SPD-177: an arithmetic command ending an if/while/until condition ends it as a `]]` does, so a
+                        # short body after the `))` -- a `cd` among it -- runs conditionally, in either directory
+                        self.end_header()
                 else:
                     self.finish()
             elif t in ("&&", "||"):

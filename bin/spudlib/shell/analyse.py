@@ -1,9 +1,18 @@
 """shell/analyse: analyse_command and analyse_words."""
 
 import os
+import re
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, heredocs, inline_programs, interpreter_words, positional, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, heredocs, inline_programs, interpreter_words, positional, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
 from ..hooks import hookio
+
+_MEMBER_VAR_RE = re.compile(r"\$\{?#?([A-Za-z_][A-Za-z0-9_]*)")  # a `$NAME` a tolerated finding names (SPD-205)
+
+
+# The most levels of command substitution, `eval`, `-c` string or here-document the hook reads into: past it the
+# innermost text is dropped, so a member is refused it as text the hook never read (SPD-195, unread_reason "depth"), the
+# bound staying so the reading stays bounded.  reevaluation.EVALUATION_DEPTH mirrors it for a value zsh's (e) flag reads.
+READING_DEPTH = 6
 
 
 def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
@@ -13,8 +22,17 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
     anything stands there (as syntax.ShellAnalysis.stdin and stdin_fed say them), which the commands in it read where
     no redirection or pipe of their own replaces it -- a `-c` string's and eval's, their command's (SPD-210)."""
     a = analysis or syntax.ShellAnalysis()
-    if depth > 6:
+    if depth > READING_DEPTH:
+        unread.record_unread(a, "depth", (READING_DEPTH, unread.unread_shown(command)))  # SPD-195: past the bound, refused a member
         return a
+    if depth == 0 and not command.isascii() and unread.has_marker(command):
+        # SPD-199: a private-use marker the member typed into the reading's own alphabet, on the raw line before any pass
+        # writes one; recorded and read on, so a refusal the readable words earn keeps its own reason.
+        unread.record_unread(a, "placeholder", unread.marker_shown(command))
+    if "${" in command and unread.brace_depth_exceeds(command, unread.BRACE_DEPTH):
+        # SPD-103: a `${ }` nested past the bound; recorded (a member's refusal) and read on, so Spud's own refusal on an
+        # unresolvable target still stands.  The scan stops at the bound, so a run of openings is refused at once.
+        unread.record_unread(a, "braces", (unread.BRACE_DEPTH, unread.unread_shown(command)))
     for m in syntax._ASSIGNING_EXPANSION_RE.finditer(command):  # `${X:=git}` assigns X wherever it is expanded (probed)
         a.doubt.add(m.group(1))
         a.sticky.add(m.group(1))
@@ -25,6 +43,14 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         # read on, and the line is refused every caller after the refusals they earn, as one shlex cannot split is (SPD-191)
         a.unparseable = apart + ("line" if depth == 0 else "shell" if a.shell_reading else "nested",)
     outer, inner = prepare.split_substitutions(prepare.newlines_as_separators(text))
+    for sub in inner:
+        if unread.substitution_incomplete(sub):  # SPD-194: a `$( )` whose closing `)` the reader cannot place
+            unread.record_unread(a, "subst-end", unread.unread_shown(sub))
+    if inner and outer.count(hookio.SUBST) - outer.count(walk.PROCSUB_FILE) > len(inner):
+        # SPD-199: more placeholders than lifted bodies (a `<( )`'s file name carries a placeholder that pairs with no
+        # body, so it is not counted, as consume does not), so the member typed one; with a real substitution present it
+        # steals that body in consume's pairing.  Recorded and read on; the raw line spells the placeholder for the reason.
+        unread.record_unread(a, "placeholder", unread.marker_shown(command))
     plain = prepare.neutralize_quoted_globs(outer)
     marked, other = zsh.mark_zsh_patterns(plain)
     tokens = syntax.shell_tokens(marked)  # the readings differ only in unquoted characters, so each tokenizes when zsh's does
@@ -406,6 +432,8 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                     # the string (`xargs -I% sh -c 'rm %'`) or as the whole string (`xargs -0 sh -c`)
                     string = input_string if string is None else string.replace(syntax.INPUT_OPERAND, input_string)
                 if string is not None:
+                    if unread.escaped_substitution(string):
+                        unread.record_unread(a, "escaped-subst", unread.escaped_shown(string))  # SPD-196
                     # read with its own quotes, `sh -c 'g?t push'`, and on the shell's standard input, which its commands
                     # read where nothing of their own replaces it: `sh -c sh < x.sh` runs x.sh (SPD-210, CompoundInputTest)
                     analyse_new_shell(a, string, depth + 1, stdin, fed)
@@ -431,9 +459,12 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         a.kinds.append("eval")
         before = a.cwds
         a.alias_scope += 1  # an alias the line defined is expanded where eval parses its words again
+        eval_text = prepare.deglob(" ".join(words[1:]))
+        if unread.escaped_substitution(eval_text):
+            unread.record_unread(a, "escaped-subst", unread.escaped_shown(eval_text))  # SPD-196
         try:
             # eval reads its words again, their quotes gone, and runs them on its own standard input (SPD-210)
-            analyse_command(prepare.deglob(" ".join(words[1:])), a, depth + 1, stdin, fed)
+            analyse_command(eval_text, a, depth + 1, stdin, fed)
         finally:
             a.alias_scope -= 1
         a.cwds = directories.settle(effect, before, a.cwds)
@@ -578,7 +609,9 @@ def read_shell_name(words, a, depth, stdin=None, fed=False):
 
     A function the line itself defines under that name reads the call's standard input, `stdin` (`fed`: whether anything
     stands there): its body is read with it where the line defines it, the line being walked again (walk.read_call and
-    walk_line, SPD-212).
+    walk_line, SPD-212).  An alias's body and a snapshot function's -- which no walk of the line defines -- read that same
+    input here, so `xs < x.sh` (alias xs=sh) and `shfn < x.sh` (a snapshot `shfn(){ sh }`) read the file's program as
+    `sh < x.sh` does, past SPD-145 and SPD-150 (SPD-215); a body is read once per call's words and standard input both.
 
     The call's words reach a function's body as its positional parameters, so the body is read with them set where it
     reads those (shell/positional, SPD-203): `gitfn push`, whose body is `command git "$@"`, is `git push`.  It is read
@@ -596,7 +629,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False):
     if expanded:
         a.expanding.extend(name for name, _ in expanded)
         try:
-            analyse_shell_text(a, text, depth + 1, own_words)
+            analyse_shell_text(a, text, depth + 1, own_words, stdin=stdin, fed=fed)
         finally:
             del a.expanding[len(a.expanding) - len(expanded):]
         return True
@@ -604,18 +637,19 @@ def read_shell_name(words, a, depth, stdin=None, fed=False):
     body = expansions.shell_function(cmd, a)
     if body is not None:
         text, sound = positional.substituted(body, words[1:])
-        read, reads = (text, tuple(words[1:])), a.bodies_read.setdefault(cmd, set())
+        key = stdin_text.reading_key(stdin, fed)  # a body is read once per call's words and standard input (SPD-215)
+        read, reads = (text, tuple(words[1:]), key), a.bodies_read.setdefault(cmd, set())
         if read not in reads and len(reads) >= positional.READINGS_PER_NAME:
             text, sound = body, False
-            read = (body, bool(words[1:]) and (a.shell_reading == 0 or bool(a.shell_words)))
+            read = (body, bool(words[1:]) and (a.shell_reading == 0 or bool(a.shell_words)), key)
         if read not in reads:
             a.shell_expanded.append((cmd, "a shell function"))
             reads.add(read)
-            analyse_shell_text(a, text, depth + 1, words[1:], own_process=True, substituted=sound)
+            analyse_shell_text(a, text, depth + 1, words[1:], own_process=True, substituted=sound, stdin=stdin, fed=fed)
     return False
 
 
-def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted=None):
+def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted=None, stdin=None, fed=False):
     """Read text the shell itself holds: an alias's body, which is the line's own text once the shell has parsed it, or a
     function's, whose directory changes and assignments stay its own (own_process).  `own_words` are the member's own
     words of the line that reach this text, as the line's reading tokenized them -- the words after the alias the shell
@@ -649,6 +683,7 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted
     does not reach it: a body that writes `$data` after assigning it goes to the path rule like any spelled path, while the
     harness's `"$_cc_bin"` and the environment it reads, which no line settles, stay as unresolvable as they were."""
     outermost = a.shell_reading == 0
+    line_vars = frozenset(a.assigned) if outermost else frozenset()  # what the line assigned before this text (SPD-205)
     if outermost:
         a.shell_words = list(own_words)
     marks = (len(a.findings), len(a.redirects), len(a.git_writes), len(a.arg_writes))
@@ -656,10 +691,11 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted
     try:
         if own_process:
             # not analyse_isolated's cache: a body read before without the member's words had its findings pruned, and
-            # read_shell_name reads each call's once
-            isolated(a, lambda: analyse_command(text, a, depth))
+            # read_shell_name reads each call's once.  On the call's standard input, so a body running a shell or an
+            # interpreter reads the file the call feeds it (SPD-215)
+            isolated(a, lambda: analyse_command(text, a, depth, stdin, fed))
         else:
-            analyse_command(text, a, depth)
+            analyse_command(text, a, depth, stdin, fed)
     finally:
         a.shell_reading -= 1
     if substituted is not None and own_words and a.shell_words:
@@ -667,15 +703,29 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted
                             and (not substituted or positional.REFERENCE_RE.search(a.findings[i][1])))
     if not outermost:
         return
-    unread = [member_spelling(w) for w in own_words if unreadable_word(w)]
+    unread_words = [member_spelling(w) for w in own_words if unreadable_word(w)]
+    # the variables the line assigned before the text (always the member's), and, where the call passed words, those its
+    # positional parameters filled inside the body (SPD-205); with no call words there is nothing of the member's to fill one
+    member = line_vars | (a.member_vars if own_words else frozenset())
     kept, a.shell_kept, a.shell_words = a.shell_kept, set(), []
     a.findings[marks[0]:] = [f for i, f in enumerate(a.findings[marks[0]:], marks[0])
                              if f[0] not in syntax.SHELL_TEXT_TOLERATED or i in kept
-                             or any(spells_member_word(f[1], spelled) for spelled in unread)]
+                             or (f[0] != "var" and names_member_var(f[1], member))
+                             or any(spells_member_word(f[1], spelled) for spelled in unread_words)]
     supplied = frozenset(prepare.deglob(w) for w in own_words)
     a.redirects[marks[1]:] = [e for e in a.redirects[marks[1]:] if keeps_write(e[0], supplied)]
     a.git_writes[marks[2]:] = [e for e in a.git_writes[marks[2]:] if keeps_write(e[1], supplied)]
     a.arg_writes[marks[3]:] = [e for e in a.arg_writes[marks[3]:] if keeps_write(e[1], supplied)]
+
+
+def names_member_var(detail, member):
+    """Whether a finding names a variable the member's words fill (SPD-205): its detail holds a `$NAME` whose NAME the
+    call's positional parameters filled (a for/select list over `$@`, a value holding a positional) or the line assigned
+    before the function's text.  Such a variable is the member's own, so the finding is kept, not dropped as the body's,
+    and refuses the member on doubt as the same reference does on a plain line.  The caller excludes a bare "var" (a
+    command word from a variable), where the harness's own shadows dispatch through their `$_cc_bin` and loop variables
+    over the member's words the same way, so keeping those would refuse every grep a member runs."""
+    return bool(member) and isinstance(detail, str) and any(name in member for name in _MEMBER_VAR_RE.findall(detail))
 
 
 def unreadable_word(word):
