@@ -93,6 +93,14 @@ VAR_WORD_REASON = ("the word %s holds a parameter expansion, arithmetic or a sub
                    " that writes by argument); spell the words out")
 
 
+# The reason for an (e) expansion whose text the hook cannot read (shell/reevaluation, SPD-189).
+EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs the command substitutions, the arithmetic and"
+                    " the parameter expansions in it, and the hook cannot read the text it evaluates: a value the line does"
+                    " not spell (a substitution's output, a variable it did not assign, `$'...'`), one it may not hold there"
+                    " (an assignment that may not run, a loop or function body, a builtin or a word of the same command that"
+                    " assigns it, an array), or one another flag, a modifier or a subscript changes first; spell the commands out")
+
+
 def inline_program_reason(detail):
     """The refusal an interpreter run earns a member for a program the line spells: (the command word as spelled, the
     option that carries the program, or None where the interpreter reads it on standard input)."""
@@ -332,6 +340,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
             return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
         elif kind == "var-word":
             return VAR_WORD_REASON % detail, analysis
+        elif kind == "eval-flag":
+            return EVAL_FLAG_REASON % detail, analysis
         elif kind == "var-doubt":
             return ("the variable %s may not hold the value this line assigned it (the assignment may not run or does not persist: a"
                     " condition, a compound command, a loop or function body, a pipeline, a background job, a subshell or substitution,"

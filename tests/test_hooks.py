@@ -7719,6 +7719,259 @@ class CaseSubstitutionTest(BashHookCase):
                 self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
+# SPD-189: the words in which zsh's (e) flag evaluates the value of x, which the line settles, each read as the text zsh
+# runs (EvalFlagTest has the probes): the flag alone, repeated, beside `@`, nested either way, through (P), and in every
+# place a word stands -- an argument, one glued to text, an assignment's value, a command's prefix, a case's word and
+# pattern, a condition, a for list, arithmetic, a here-string.
+EVAL_FLAG_WORDS = (
+    "echo ${(e)x}", 'echo "${(e)x}"', 'echo "e1=${(e)x}"', "echo a${(e)x}b", "echo ${(ee)x}", "echo ${(@e)x}",
+    "echo ${(e)${x}}", "echo ${${(e)x}}", 'echo ${(e)"${x}"}', "n=x; echo ${(Pe)n}", "n=x; echo ${(e)${(P)n}}",
+    "y=${(e)x}", "y=${(e)x} true", ": ${(e)x}", "echo ${(e)x} > /dev/null", "case ${(e)x} in *) true;; esac",
+    "case q in ${(e)x}) true;; esac", "[[ -n ${(e)x} ]]", "for f in ${(e)x}; do true; done", "echo $(( ${(e)x} + 1 ))",
+    "(( ${(e)x} ))", "cat <<< ${(e)x}",
+)
+# ... and the ones whose other flags, modifiers or subscripts change the value before (e) evaluates it: the hook reads
+# the value as it is spelled and refuses a member besides, since the text zsh evaluates may differ (a case flag, a removal
+# that takes a backslash away, a replacement that writes a `$`)
+EVAL_FLAG_CHANGED = (
+    "echo ${(ej:,:)x}", "echo ${(Le)x}", "echo ${(e)x:-z}", "echo ${(e)x[1,40]}", "echo ${(e)~x}", "echo ${(e)^x}",
+    "echo ${(Qe)x}", "echo ${(%e)x}",
+)
+# The value's spellings, `%s` its command.  (e) reads the value as the inside of double quotes -- its quotes are text,
+# a backslash escapes the next character -- and runs every `$( )` and backtick body in it, a default word's and an
+# arithmetic expansion's included, and the value of an (e) expansion it holds.
+EVAL_FLAG_VALUES = (
+    "x='$(%s)'", 'x="\\$(%s)"', "x='`%s`'", 'x="\\`%s\\`"', "x='\"$(%s)\"'", "x=\"'\\$(%s)'\"", "x='\\\\$(%s)'",
+    "x='${zz:-$(%s)}'", "x='$((1+$(%s)))'", "x='$(true\n%s)'", "y='$(%s)'; x='${(e)y}'", "x='$(true)'; x='$(%s)'",
+)
+
+
+class EvalFlagTest(BashHookCase):
+    """SPD-189, filed by SPD-184's engineer: zsh's (e) parameter flag performs parameter expansion, command substitution
+    and arithmetic expansion on the value it expands, so a line that assigns shell text and expands it with (e) runs that
+    text, and the hook read nothing of it.  The ticket's evidence: `x='$(git push)'; echo ${(e)x}` and the same with `case
+    ${(e)x} in *) true;; esac` recorded no finding (Law 7 for members), and a value the line does not spell (`x=$(cat f)`)
+    is the same hole.  Unquoted, the hook did not even see the expansion: shlex ended the word at the flags' `(`, so
+    `echo ${(e)x}` was read as `echo ${`, a subshell running `e`, and a command named `x}`.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line, and GNU bash 3.2.57, which fails every one of them with "bad
+    substitution", each value a `$(touch <file>)`:
+
+    - (e) runs the value's substitutions wherever the expansion stands: an argument (`echo ${(e)x}`, quoted or not, glued
+      to text), a redirection's target, an assignment's value, a command's prefix assignment, a case's word and pattern,
+      `[[ ]]`, a for list, `:`'s argument, a here-string, an arithmetic expansion and an arithmetic command (`$((
+      ${(e)x} + 1 ))`, `(( ${(e)x} ))`), and inside eval, a substitution, backticks, a branch, a group, a function body,
+      a loop, a subshell, a pipeline, `time`, and `zsh -f -c` with x exported (every word of EVAL_FLAG_WORDS and of
+      EVAL_FLAG_CHANGED and each enclosing text of test_every_enclosing_text made its file, and so did each value of
+      EVAL_FLAG_VALUES under `echo "${(e)x}"`, its double-quoted backtick as `x="\\`touch h5\\`"`);
+    - with other flags too -- `(ee)`, `(@e)`, `(Pe)` through a name, `(ej:,:)`, `(Qe)`, `(%e)`, and `(Le)` and `(eL)`,
+      the case flag applied first (`$(TOUCH R9)` made r9) -- and nested, `${(e)${x}}`, `${${(e)x}}`, `${(e)"${x}"}`,
+      `${(e)${(P)n}}`, `${(e)${:-...}}`, `${(e):-...}`, and `${(e)${(e)x}}`, which evaluates twice (`\\$(touch k4)` made
+      k4); with modifiers and subscripts, which change the text first: `${(e)x:-z}`, `${(e)x[1,20]}`, `${(e)~x}`,
+      `${(e)^x}`, and `${(e)x#\\\\}` and `${(e)x/X/\\$}` made a substitution the value did not hold (`\\$(touch r11)` and
+      `X(touch r13)`), while `(l(10)(x)e)` cut the `$` off `$(touch k9)` and ran nothing;
+    - (e) reads the value as the inside of double quotes: `'$(touch re3)'`, `"$(touch re5)"`, `"$(touch q9)` and backticks
+      ran, their quotes printed as text; `\\$(touch re4)` did not run and printed `$(touch re4)`, `\\\\$(touch q2)` ran;
+      a default word's substitution (`${zz:-$(touch q5)}`), one inside arithmetic (`$((1+$(touch q6; echo 1)))`) and each
+      line of a value that holds a newline ran; an (e) expansion in the value ran its own (`x='${(e)y}'`), a plain `$y`
+      there did not (`$(touch re9)` printed); a value that expands itself (`x='${(e)x}'`) never returned;
+    - `(j:e:)` ran nothing: the `e` there is the separator, not a flag; `${(e)#x}` printed the length and `(qe)` the quoted
+      value, running nothing, and `${(P)n}` printed x's value unevaluated; `(foo bar)` failed "error in flags";
+    - a command's prefix assignment does not reach its own words (`x=a; x='$(touch w2)' echo "${(e)x}"` printed a, and a
+      redirection made `aw3f`), while an assignment-only command's later word sees an earlier one (`x=a; x='$(touch w1)'
+      y=${(e)x}` made w1), so the hook reads both values and refuses a member.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans home:**."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def unreadable(self, line):
+        """Both members are refused the value the hook cannot read; Spud reads on."""
+        with self.subTest(line=line):
+            self.assertIn("eval-flag", [kind for kind, _detail in self.analysis(line).findings])
+            self.assertRefused(line, "zsh's (e) flag")
+            self.assertRefused(line, "zsh's (e) flag", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_zsh_runs_it(self):
+        for line in ("x='$(git push)'; echo ${(e)x}", "x='$(git push)'; case ${(e)x} in *) true;; esac"):
+            self.law_7(line)
+        self.unreadable("x=$(cat f); echo ${(e)x}")
+        line = "x='$(touch re1)'; echo \"e1=${(e)x}\""
+        with self.subTest(line=line):
+            self.assertRefused(line, "deliverables")
+            self.assertSilent(line, AGENT_C)
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def test_the_word_stays_whole(self):
+        """shlex ended an unquoted word at the flags' `(`: the flags are read as part of the expansion, in both readings."""
+        line = "echo ${(e)x} a${(Pe)n}b ${(j:,:)x} ${(e)${(P)n}} ${(l(10)(x)e)x} \"${(e)x}\""
+        words = [self.m.deglob(t) for t in self.m.shell_tokens(self.m.mark_zsh_patterns(line)[0])]
+        self.assertEqual(words, ["echo", "${(e)x}", "a${(Pe)n}b", "${(j:,:)x}", "${(e)${(P)n}}", "${(l(10)(x)e)x}", "${(e)x}"])
+        self.assertEqual(self.m.mark_zsh_patterns(line)[0], self.m.mark_zsh_patterns(line)[1])
+        self.assertEqual(self.analysis("echo ${(e)x}").findings, [("eval-flag", "${(e)x}")])
+        self.assertEqual(self.analysis("echo ${(P)n} ${(L)x}").findings, [])
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_word_that_evaluates_a_settled_value(self):
+        for word in EVAL_FLAG_WORDS:
+            self.law_7("x='$(git push)'; " + word)
+
+    def test_every_spelling_of_the_value(self):
+        for value in EVAL_FLAG_VALUES:
+            for word in EVAL_FLAG_WORDS:
+                line = value % "git push" + "; " + word
+                with self.subTest(line=line):
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            for word in ("echo ${(e)x}", "case ${(e)x} in *) true;; esac", "(( ${(e)x} ))"):
+                self.law_7(value % "git push" + "; " + word)
+
+    def test_a_changed_value_is_read_as_spelled_and_refuses_a_member(self):
+        for word in EVAL_FLAG_CHANGED:
+            self.law_7("x='$(git push)'; " + word)
+            self.unreadable("x='$(date)'; " + word)
+        # a removal that takes the escaping backslash away runs what the value only spells (probed: r11), which the hook
+        # reads as it reads every escaped `$` (test_an_escaped_dollar_is_read_both_ways); a replacement that writes a `$`
+        # (r13) it cannot read
+        self.law_7("x='\\$(git push)'; echo ${(e)x#\\\\}")
+        self.unreadable("x='X(git push)'; echo ${(e)x/X/\\$}")
+
+    def test_every_enclosing_text(self):
+        for form in ("eval 'echo %s'", "echo $(echo %s)", "echo `echo %s`", "if true; then echo %s; fi", "{ echo %s }",
+                     "f() { echo %s; }; f", "for f in a; do echo %s; done", "(echo %s)", "true && echo %s",
+                     "echo %s | cat", "time echo %s"):
+            self.law_7("x='$(git push)'; " + form % "${(e)x}")
+        self.law_7("export x='$(git push)'; zsh -f -c 'echo ${(e)x}'")
+
+    def test_every_payload(self):
+        """Law 7, Law 6, Law 5's --as, the database and Law 1 for both members; for Spud, the checks that apply to him."""
+        home, spud, form = self.home.path, self.spud_cli, 'x="\\$(%s)"; echo ${(e)x}'
+        writes = (("echo x > ledger/tickets/SPD-001.md", "generated"), ("echo x | tee ledger/tickets/SPD-001.md", "generated"),
+                  ("touch ledger/tickets/SPD-001.md", "generated"))
+        for command, needle in (("git push", "Law 7"), ("%s ticket new --title x" % spud, "Law 6"),
+                                ("%s --as spud member log hi" % spud, "Law 6"),
+                                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly")) + writes:
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=form % command, agent_id=agent_id):
+                    self.assertRefused(form % command, needle, agent_id)
+        for command, needle in (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly")):
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, needle, agent_id=None)
+        for command, _needle in writes:
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, "Law 1", agent_id=None)
+
+    def test_the_path_rule_in_the_value(self):
+        for word in ("echo ${(e)x}", "case q in ${(e)x}) true;; esac", "y=${(e)x}", "echo \"${(e)${x}}\""):
+            for write in ("touch note.txt", "rm -rf docs"):
+                line = "x='$(%s)'; %s" % (write, word)
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")
+                    self.assertSilent(line, AGENT_C)
+                    self.assertRefused(line, "Law 1", agent_id=None)
+            line = "x='$(touch tests/zzone/k.py)'; " + word
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_a_value_the_line_does_not_settle_refuses_a_member(self):
+        for line in ("x=$(cat f); echo ${(e)x}", "x=`cat f`; echo ${(e)x}", 'x="$(cat f)"; echo "${(e)x}"',
+                     "echo ${(e)x}", "echo ${(e)HOME}", "x=$y; echo ${(e)x}", "read x; echo ${(e)x}",
+                     "true && x='$(date)'; echo ${(e)x}", "for x in a; do echo ${(e)x}; done",
+                     "x='$(date)'; for f in a; do echo ${(e)x}; done", "x='$(date)'; f() { echo ${(e)x}; }; f",
+                     "x=a; x+=b; echo ${(e)x}", "x=$'\\x24(date)'; echo ${(e)x}", "x=(a '$(date)'); echo ${(e)x}",
+                     "echo ${(e)$(cat f)}", 'echo ${(e)"$(cat f)"}', "echo ${(e):-$y}", "echo ${(e)1} ${(e)@}",
+                     "n=HOME; echo ${(Pe)n}", "n=$(cat f); x='$(date)'; echo ${(Pe)n}", "x='\\$(date)'; echo ${(e)${(e)x}}",
+                     "x=a; x='$(date)' y=${(e)x}", "x='$(date)'; echo ${x::=b} ${(e)x}", "echo hi > ${(e)x}f",
+                     "x='$(date)'; echo $(( ${(e)x} )) ${(e)x#a}", "x='$(date)'; echo ${(e)#x}", "x='$(date)'; echo ${(qe)x}",
+                     "x='$(date)'; echo ${(e)x", "x='$(date)'; echo \"${(foo bar)x}\""):
+            with self.subTest(line=line):
+                self.assertIn("eval-flag", [kind for kind, _detail in self.analysis(line).findings])
+                self.assertRefused(line, "zsh's (e) flag")
+                self.assertRefused(line, "zsh's (e) flag", AGENT_C)
+        for line in ("x=$(cat f); echo ${(e)x}", "echo ${(e)HOME}", "true && x='$(date)'; echo ${(e)x}",
+                     "x=a; x='$(date)' y=${(e)x}", "n=HOME; echo ${(Pe)n}"):
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertSilent(line, agent_id=None)
+
+    def test_spud_reads_every_value_the_line_spells(self):
+        """A value the line spells but may not hold where it is expanded is read all the same, for Spud's writes: the
+        member's refusal says only that the hook cannot be sure of it."""
+        for line in ("true && x='$(echo x > ledger/tickets/SPD-001.md)'; echo ${(e)x}",
+                     "x='$(echo x > ledger/tickets/SPD-001.md)'; f() { echo ${(e)x}; }; f",
+                     "x=a; x='$(echo x > ledger/tickets/SPD-001.md)' y=${(e)x}",
+                     "x='$(echo x > ledger/tickets/SPD-001.md)'; echo ${(Le)x}"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 1", agent_id=None)
+                self.assertRefused(line, "(e) flag")
+
+    def test_an_escaped_dollar_is_read_both_ways(self):
+        """shlex leaves the backslash of `"\\$"` in the word, where the shell takes it off, so `x="\\$(git push)"`, which
+        (e) runs (probed: `x="\\$(touch h4)"` made h4), reaches the hook as `x='\\$(git push)'` does, which (e) does not
+        run (re4): both are read as the first, fail closed, until the masked word holds what the shell passes (proposal
+        301, filed with SPD-189).  The same for a backtick (`x="\\`touch h5\\`"` made h5)."""
+        for value in ("x='\\$(git push)'", 'x="\\$(git push)"', "x='\\`git push\\`'", 'x="\\`git push\\`"'):
+            self.law_7(value + "; echo ${(e)x}")
+
+    def test_what_evaluates_to_nothing_it_runs(self):
+        """Probed (see the class): a plain parameter expansion in the value, a separator that spells `e`, a literal or
+        escaped expansion, no (e) at all."""
+        for line in ("x='$y'; y='$(git push)'; echo ${(e)x}", "x='$(git push)'; echo ${x}",
+                     "x=$(cat f); echo ${(j:e:)x}", "x='$(git push)'; echo '${(e)x}'", "x='$(git push)'; echo \\${(e)x}",
+                     "x=hello; echo ${(e)x}", "x='$HOME/a'; echo \"${(e)x}\"", "x='$(date)'; echo ${(e)x}",
+                     "x='$(git push)'; n=x; echo ${(L)x} ${(P)n}", "x=\"'\"; echo ${(e)x}"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [])
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+                self.assertSilent(line, agent_id=None)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        """A value that expands itself never returns in zsh (probed), and a chain of values each expanding the next one is
+        read to the analysis's depth bound: past it a member is refused, as it is for a value it cannot read."""
+        chain = "; ".join(["y0='$(git push)'"] + ["y%d='${(e)y%d}'" % (k, k - 1) for k in range(1, 40)])
+        for line, finding in (("x='${(e)x}'; echo ${(e)x}", "eval-flag"),
+                              ("x='$(git push)'; echo " + "${(e)x} " * 3000, "git"),
+                              ("x='$(git push)'; echo " + "${(e)" * 3000 + "x" + "}" * 3000, "eval-flag"),
+                              ("x='" + "${(e)x}" * 3000 + "'; echo ${(e)x}", "eval-flag"),
+                              ("x='$(git push)'; y='" + "${(e)x}" * 3000 + "'" + "; echo ${(e)y}" * 50, "git"),
+                              ("x='" + "$(" * 2000 + "git push" + ")" * 2000 + "'; echo ${(e)x}", None),
+                              (chain + "; echo ${(e)y39}", "eval-flag"),
+                              ("echo " + "${(e" * 3000, None),
+                              ("echo " + "${(j:" * 3000, None),
+                              ("echo " + "${(l(" * 3000 + "e)x}", None),
+                              ("echo " + "${(e)x}" * 3000 + " " + "${(j" + ":" * 3000, None)):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                if finding is not None:
+                    self.assertIn(finding, [kind for kind, _detail in a.findings], line[:40])
+
+
 class AliasEvalTest(BashHookCase):
     """SPD-059 (Burbank's SPD-054 proposal): `alias NAME=body` stores shell text the hook never read, and `eval NAME` on the
     same line ran it, so a member's VCS write behind an alias reached the hook with no finding (Law 7).  Probed in bash 3.2,

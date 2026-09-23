@@ -1,4 +1,4 @@
-"""shell/zsh: zsh's own glob operators, and the arithmetic both shells read as arithmetic."""
+"""shell/zsh: zsh's own glob operators, the flag group of its `${(...)...}`, and the arithmetic both shells read as arithmetic."""
 
 import bisect
 import re
@@ -50,6 +50,16 @@ _ARITH_WORD = str.maketrans(dict(_ARITH_MARKS, **{c: syntax._ARITH_SENTINELS[c] 
 _GROUP_MARKS = syntax._ZSH_SENTINELS
 _PATTERN_MARKS = {c: syntax._ARITH_SENTINELS[c] for c in "(|)<> \t;\n"}
 _WORD_END = " \t;&|>)" + syntax.LINE_BREAK  # what ends a word the scan copies, when no quote holds it
+# zsh's parameter expansion flags (zshexpn(1)), the group in parentheses right after `${`: the characters a flag is spelled
+# with, the flags that take a delimited argument (`j:,:`, `s/x/`, `l:10::0:` -- `l` and `r` up to three, each opened by
+# the first one's delimiter), the closer of a delimiter that opens a pair, and how far an argument's closer is looked for.
+_FLAG_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0#%@~*-+_")
+_FLAG_ARGUMENTS = "gIjlrsZ_"
+_FLAG_CLOSERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
+_FLAG_ARGUMENT_LIMIT = 256
+# A flag group's parentheses as mark_zsh_patterns writes them: a quoted operator character's sentinel, which keeps them in
+# the word and deglob restores (SPD-189).
+_FLAG_MARKS = str.maketrans({c: syntax._PUNCT_SENTINELS[c] for c in "()"})
 # The states of mark_zsh_patterns' case stack that read a case's word or one of its patterns (SPD-184): a process
 # substitution opened there is a list zsh runs, and its `)` is never the pattern's.  Beside them the stack holds "body",
 # and, for SPD-184, "proc" (the list of a process substitution opened in one of these states), "inner" (a parenthesis
@@ -202,6 +212,57 @@ def _before_close(word, command):
     return None if depth else word[:-1]
 
 
+def flag_group(text, k):
+    """The parameter expansion flags zsh reads in the group that opens a `${`, text[k] being the character after its `(`:
+    (the flag letters, the index after the group's `)`), or None where no group ends there: a character no flag is
+    spelled with, which zsh rejects (probed in zsh 5.9 -f: `${(foo bar)x}` failed "error in flags"), or a delimited
+    argument that does not close within _FLAG_ARGUMENT_LIMIT characters, the hook's own bound, which keeps a line of
+    unclosed groups linear (EvalFlagTest's pathological input).  An argument's text is no flag: `(j:e:)`
+    joins with `e` and evaluates nothing (probed: `x='$(touch q13)'; echo ${(j:e:)x}` made no q13), and `(l(10)(x)e)`
+    holds the flags `l` and `e` (SPD-189)."""
+    letters, n = [], len(text)
+    while k < n:
+        c = text[k]
+        if c == ")":
+            return "".join(letters), k + 1
+        if c not in _FLAG_CHARS:
+            return None
+        letters.append(c)
+        k += 1
+        if c in _FLAG_ARGUMENTS:
+            opener = text[k : k + 1]
+            for count in range(3 if c in "lr" else 1):
+                if text[k : k + 1] != opener or opener in ("", ")"):
+                    if count == 0:
+                        return None
+                    break
+                end = text.find(_FLAG_CLOSERS.get(opener, opener), k + 1, k + 1 + _FLAG_ARGUMENT_LIMIT)
+                if end < 0:
+                    return None
+                k = end + 1
+    return None
+
+
+def _flag_groups(piece):
+    """A `${...}` a word copies whole, with the parentheses of each flag group in it marked (SPD-189): zsh reads the
+    flags after `${` as part of the expansion (`${(e)x}`, `${(Pe)n}`, `${(j:,:)x}`, a nested `${(e)${(P)n}}`), where
+    shlex ended the word at their `(` and the walk read `echo ${(e)x}` as `echo ${`, a subshell running `e` and a command
+    named `x}`.  A quoted or escaped `${(` is no expansion and has its sentinels already; a group flag_group cannot read
+    is left as it was.  Both readings mark it: bash rejects the expansion ("bad substitution") and runs nothing of it."""
+    if "${(" not in piece:
+        return piece
+    out, k, p = [], 0, piece.find("${(")
+    while p >= 0:
+        found = flag_group(piece, p + 3)
+        if found is not None:
+            out.append(piece[k : p + 2])
+            out.append(piece[p + 2 : found[1]].translate(_FLAG_MARKS))
+            k = found[1]
+        p = piece.find("${(", max(k, p + 3))
+    out.append(piece[k:])
+    return "".join(out)
+
+
 def _optional_list(text, k):
     """zsh's reading of a `=( ... )` that opens the content of a case pattern's optional parentheses, the `(` just before
     text[k] (SPD-184): (both readings' text for it, the index after it), or None where no `=(` opens that content.  zsh
@@ -299,7 +360,8 @@ def mark_zsh_patterns(text):
       word (SPD-183: `echo x | tee (l|<newline>x)/t` wrote l/t, and _zsh_group has the probes), and everywhere else the `;`
       it ends a command with, as the walk always read it; bash rejects such a group, and the other reading, restoring
       one that opens a word, reads its newline as `;` too;
-    - `[[ ... ]]`, `${...}` and here-document delimiters are left as they are.
+    - `[[ ... ]]`, `${...}` and here-document delimiters are left as they are, but for the parentheses of a `${...}`'s
+      flag group (`${(e)x}`), which stay in the word in both readings (_flag_groups, SPD-189).
 
     An arithmetic command `(( ... ))` and an arithmetic expansion `$(( ... ))` are marked too, with the arithmetic
     sentinels rather than the pattern ones: both shells evaluate what stands between the parentheses, so an operator there is
@@ -459,6 +521,11 @@ def mark_zsh_patterns(text):
                 break
             elif ch == "$" and text.startswith("${", j):
                 piece = text[j : braces[j + 1] + 1] if j + 1 in braces else text[j:]
+                marked = _flag_groups(piece)  # its flags stay in the word (SPD-189)
+                word.append(marked)
+                alternative.append(marked)
+                j += len(piece)
+                continue
             elif ch == "<":
                 m = None if (cond or heredoc) else syntax.ZSH_RANGE_RE.match(text, j)
                 if not m:

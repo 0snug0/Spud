@@ -35,7 +35,8 @@ DISPATCH = "hooks.dispatch"
 # option may stand, and one an xargs reads from its input (SPD-152), shell.runtime_shells for the shell text a runtime's or a
 # package manager's subcommand runs (SPD-154), shell.script_files for a shell whose commands come from a file and the
 # project allow-list of repository scripts (SPD-145), shell.script_runners and shell.runner_files for a script runner and the project allow-list
-# of runner names (SPD-168), shell.heredocs for where a here-document's body starts, taken out of shell.prepare (SPD-188).
+# of runner names (SPD-168), shell.heredocs for where a here-document's body starts, taken out of shell.prepare (SPD-188),
+# shell.reevaluation for the text zsh's (e) flag evaluates in a word (SPD-189).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
@@ -44,7 +45,7 @@ HOOK_PATH = {
     "hooks.snapshots", "hooks.stophook", "hooks.subagent_stop", "hooks.worktrees",
     "shell.analyse", "shell.arg_writes", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
     "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.globbing", "shell.heredocs", "shell.inline_programs",
-    "shell.interpreter_words", "shell.prepare", "shell.redirect_globs", "shell.runner_files", "shell.runtime_shells", "shell.spud_calls",
+    "shell.interpreter_words", "shell.prepare", "shell.redirect_globs", "shell.reevaluation", "shell.runner_files", "shell.runtime_shells", "shell.spud_calls",
     "shell.script_files", "shell.script_runners", "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
     "shell.walk", "shell.zsh",
 }

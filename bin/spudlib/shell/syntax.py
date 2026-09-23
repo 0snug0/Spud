@@ -179,7 +179,7 @@ ALIAS_KEY = "\x00alias\x00"
 # pkill and rg each dispatch through `"$_cc_bin"`, so reading those as refusals would refuse every `grep` a member runs.
 # Everything the hook *can* read there -- a git verb, a program git runs, a database call, a spud call, a file the text
 # names and writes -- is the finding it would be on the line.
-SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias"})
+SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias", "eval-flag"})
 # A positional parameter, which is how a function receives the words the member wrote (`mkdir -p $@` in a body is
 # the member's own path).  A write target holding one is never pruned from text the shell holds, whatever else is: `$@`,
 # `$*`, `$0`..`$9` and every braced form of them (`${@}`, `${@:2}`, `${@:$#}`, `${1:-x}`, `${#@}`, `${1+"$@"}`).  `$HOME`

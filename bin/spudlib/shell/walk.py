@@ -1,6 +1,6 @@
 """shell/walk: ShellFrame and ShellWalk: one pass over a line's tokens."""
 
-from . import analyse, assignment_words, directories, globbing, prepare, stdin_text, syntax
+from . import analyse, assignment_words, directories, globbing, prepare, reevaluation, stdin_text, syntax
 from ..hooks import hookio
 
 # The loops whose header names a variable, one header grammar to zsh (its parser's par_for; ShellWalk.names_end)
@@ -396,8 +396,10 @@ class ShellWalk:
 
     # -- simple commands ----------------------------------------------------------------
     def consume(self, words):
-        """Analyse the substitutions in these words (expanded before the command runs, each in its own process) and take the
+        """Analyse the substitutions in these words (expanded before the command runs, each in its own process), and the
+        text zsh's (e) flag evaluates in them with the variables the line holds here (shell/reevaluation), and take the
         here-document bodies their `<<` operators read; return the words without the operators and their delimiters."""
+        reevaluation.read_eval_words(words, self.a, self.depth)
         for w in words:
             for _ in range(w.count(hookio.SUBST)):
                 if self.inner:
