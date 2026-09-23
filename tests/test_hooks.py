@@ -5782,6 +5782,107 @@ class InterpreterWordTest(BashHookCase):
         self.assertRefused("echo 'git push' | xargs -0 sh -c", "Law 7")  # SPD-143's string, unchanged
 
 
+class RuntimeShellTest(BashHookCase):
+    """SPD-154: the shell command a runtime's or a package manager's subcommand runs, read where an `sh -c` string is.
+
+    `bun exec "git push"` handed bun's own shell a command the analysis never read: the JS row took `exec` for the
+    program's file and recorded nothing.  shell/runtime_shells tables each subcommand the survey found to run shell text
+    or a command's words -- `bun exec` (bun --help, exec_command.rs), `npm exec`/`npm x`/`npx` with `-c`/`--call` or
+    with the command as words (npm-exec(1), npx(1), libnpmexec), `npm explore PKG -- CMD` (npm-explore(1)),
+    `deno task --eval` (deno task --help), `pnpm exec`, `pnpm dlx -c` and the implicit `pnpm CMD` (pnpm.io), and
+    `yarn exec` (yarnpkg.com, berry's executePackageShellcode) -- and analyse reads the text with analyse_new_shell and
+    the words as a wrapper's command.  A command a file holds (`npm run`, `deno task <name>`, `bun run`, `pnpm run`,
+    `yarn <script>`) is SPD-145's and unchanged."""
+
+    # Each runs a git write verb through the subcommand: Law 7 for a member, Spud's own for him.
+    WRITES = (
+        "bun exec 'git push'", 'bun exec "git commit -m x"', "bun --silent exec 'git push'", "bun --cwd /tmp exec 'git push'",
+        "bun --cwd=/tmp exec 'git push'",
+        "npm exec -c 'git push'", "npm exec --call 'git push'", "npm exec --call='git push'", "npm x -c 'git push'",
+        "npm exe -c 'git push'", "npm exec --cal 'git push'", "npm -c 'git push' exec", "npm exec --package=x -c 'git push'",
+        "npm exec --package x -- git push", "npm exec -- git push", "npm x --yes -- git push", "npm exec -w a -c 'git push'",
+        "npx -c 'git push'", "npx --call='git push'", "npx -p x -c 'git push'", "npx --package=x git push", "npx git push",
+        "npx --yes git push", "npx -c'git push'", "npx --unknown-option value git push", "npx -- git push",
+        "npm explore x -- git pull origin master", "npm explore x -- 'git push'", "npm explo x -- git push",
+        "deno task --eval 'git push'", "deno task --eval git push", "deno task --cwd /tmp --eval 'git push'",
+        "deno -q task --eval 'git push'",
+        "pnpm exec git push", "pnpm exec -c 'git push'", "pnpm -c exec 'git push'", "pnpm --shell-mode exec 'git push'",
+        "pnpm dlx -c 'git push'", "pnpm --package=x dlx -c 'git push'", "pnpm git push", "pnpm -r exec git push",
+        "pnpm --filter x exec git push", "pnpm -C /tmp exec git push",
+        "yarn exec 'git push'", "yarn exec git push", "yarn --cwd /tmp exec git push",
+        "echo 'git push' | xargs -0 bun exec", "echo 'git push' | xargs -0 npx -c", "cd /tmp && npx -c 'git push'",
+        "env FOO=1 npx -c 'git push'",
+    )
+    # ... and a read verb through the same subcommands, allowed as `sh -c 'git status'` is.
+    READS = (
+        "bun exec 'git status'", "npm exec -c 'git log --oneline'", "npm x --call='git diff'", "npx -c 'git diff'",
+        "npx git status", "npm exec -- git status", "npm explore x -- git status", "deno task --eval 'git status'",
+        "deno task --eval 'echo hi'", "pnpm exec git status", "pnpm exec -c 'git log | head'", "pnpm dlx -c 'git log'",
+        "pnpm git status", "yarn exec 'git status'", "yarn exec git diff",
+    )
+    # A command a file holds, a package's own binary, or no shell at all: unchanged, for every caller.
+    UNCHANGED = (
+        "npm test", "npm run build", "npm install", "npm run-script build", "npx tsc --noEmit", "npm exec", "npm explore x",
+        "deno task dev", "deno task", "bun run build", "bun run scripts/x.ts", "bun exec", "bun install", "bunx prettier .",
+        "pnpm run build", "pnpm install", "pnpm test", "pnpm dlx create-vite x", "yarn build", "yarn install", "yarn exec",
+    )
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_a_write_verb_through_a_subcommand_is_refused_for_a_member_and_allowed_for_spud(self):
+        for command in self.WRITES:
+            with self.subTest(command):
+                self.assertIn("git", self.analysis(command).kinds)
+                self.assertRefused(command, "Law 7")
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_read_verb_through_a_subcommand_is_allowed(self):
+        for command in self.READS:
+            with self.subTest(command):
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_command_a_file_holds_and_a_package_binary_are_unchanged(self):
+        for command in self.UNCHANGED:
+            with self.subTest(command):
+                self.assertNotIn("git", self.analysis(command).kinds)
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=None)
+
+    def test_text_the_hook_cannot_read_is_unknown_as_for_sh_c(self):
+        """An unsettled variable or a substitution where the text or the subcommand stands: the command word the hook
+        cannot resolve, refused for a member exactly as `sh -c "$X"` is, and Spud's."""
+        for command in ('bun exec "$X"', "npx -c \"$(printf 'git push')\"", 'deno task --eval "$CMD"', 'yarn exec "$X"',
+                        'npm exec -c "$X"', "sh -c \"$X\"", "cat f | xargs npx -c", "cat f | xargs bun exec"):
+            with self.subTest(command):
+                self.assertRefused(command, "the hook cannot resolve")
+                self.assertSilent(command, agent_id=None)
+        for command in ("npm $SUB -c 'git push'", "bun $SUB 'git push'", "npx -$X 'git push'"):
+            with self.subTest(command):  # the subcommand or an option the line cannot settle
+                self.assertRefused(command, "the hook cannot resolve")
+        self.assertRefused("SUB=exec; npm $SUB -c 'git push'", "Law 7")  # a settled one is read as its value
+
+    def test_what_the_text_runs_is_read_as_a_shell_reads_it(self):
+        """The text is a shell's, so every other reading reaches into it: an inline program, a write the path rule
+        holds, a database call, and a spud call."""
+        self.assertRefused("npx -c \"node -e 'x'\"", INLINE_WORDING)
+        self.assertRefused("bun exec 'python3 -c 1'", INLINE_WORDING)
+        self.assertRefused("bun exec 'echo x > CLAUDE.md'", "deliverables")
+        self.assertRefused("pnpm exec -c 'sqlite3 x.db'", "spud sql --readonly")
+        self.assertRefused("yarn exec 'git push; ls'", "Law 7")
+        self.assertRefused("npm explore x -- 'ls; git push'", "Law 7")
+        self.assertRefused("deno task --eval 'ls && git commit -m x'", "Law 7")
+
+    def test_deno_task_eval_is_a_shell_not_an_inline_program(self):
+        """SPD-152 read `deno task --eval` as deno's `--eval` carrying a program; it is a task's text, read as a shell."""
+        self.assertEqual([f for f in self.analysis("deno task --eval 'echo hi'").findings if f[0] == "inline"], [])
+        self.assertSilent("deno task --eval 'echo hi'")
+        self.assertRefused("deno eval 'x'", INLINE_WORDING)  # deno's own eval is still a program
+        self.assertRefused("deno task --eval \"deno eval 'x'\"", INLINE_WORDING)
+
+
 # A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
 # files on this Mac are 4,100 lines and 124 KB; nothing here reads them, and a test never touches ~/.claude.
 SHELL_SNAPSHOT = """\

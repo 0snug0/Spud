@@ -2,7 +2,7 @@
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, inline_programs, interpreter_words, prepare, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, inline_programs, interpreter_words, prepare, runtime_shells, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, walk, zsh
 from ..hooks import hookio
 
 
@@ -308,6 +308,21 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     base = os.path.basename(cmd).casefold()
     if base != "spud" and "/" in cmd and spud_calls.any_spud_launcher(cmd, a.cwds):
         base = "spud"  # a symlink to bin/spud run by its path, whatever its own name
+    if base in runtime_shells.RUNNERS:
+        # A runtime's or a package manager's subcommand that hands a shell its text (`bun exec`, `npm exec -c`, `deno task
+        # --eval`, ...) or runs its words as a command (`npx --package=x -- git push`): read where an `sh -c` string and a
+        # wrapper's command are, before the dispatch below reads the run for what it is itself (shell/runtime_shells)
+        if not read_points(lambda ws, start: expansions.option_point(runtime_shells.runner_read_index(base, ws, start))):
+            return
+        for form, body in runtime_shells.runner_readings(base, words + unspelled):
+            if form == "words":
+                analyse_words(body, bodies, a, depth, budget, "process", True, len(body))
+            elif form == "text" and syntax.INPUT_OPERAND in body and input_string is None:
+                a.findings.append(("var", runtime_shells.runner_shown(words + unspelled)))  # text an xargs reads, unspelled
+            elif form == "text":
+                analyse_new_shell(a, body.replace(syntax.INPUT_OPERAND, input_string or ""), depth + 1)
+            else:
+                a.findings.append(("var", body))
     if base == "git":
         if not read_points(lambda ws, start: expansions.option_point(expansions.git_read_index(ws, start))):
             return
