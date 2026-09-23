@@ -73,10 +73,12 @@ WRAPPER_VALUE_OPTIONS = {
 WRAPPER_CHDIR_OPTIONS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
 DURATION_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?|\.\d+[smhd]?")
 # The shell's operators, longest first: shlex (punctuation_chars) returns a run of them such as `)>` or `;;&` as one token.
-SHELL_OPERATORS = (";;&", "&>>", "<<<", "<<-", ";;", ";&", "&&", "||", "|&", "&>", ">>", ">|", ">&", "<&", "<>", "<<", "<(", ">(",
-                   ";", "&", "|", "(", ")", "<", ">")
+# `;|` is zsh's: it ends a case arm and goes on testing the patterns after it, and anywhere else it is a parse error in zsh
+# (probed in zsh 5.9 -f: `echo a;| cat` failed near `;|`) and in bash, which reads `;` then `|` (SPD-181).
+SHELL_OPERATORS = (";;&", "&>>", "<<<", "<<-", ";;", ";&", ";|", "&&", "||", "|&", "&>", ">>", ">|", ">&", "<&", "<>", "<<", "<(",
+                   ">(", ";", "&", "|", "(", ")", "<", ">")
 SHELL_PUNCTUATION = frozenset("();<>|&")
-LIST_TERMINATORS = {";", ";;", ";&", ";;&"}
+LIST_TERMINATORS = {";", ";;", ";&", ";|", ";;&"}
 # What may stand between a complete header or condition and the body that follows it with no `do` or `then`: a terminator
 # separates the two, and a list operator says the condition is not complete after all, so the `]]` that looked
 # like its end was not (probed: `if [[ -n x ]] && [[ -n y ]] echo both` and `if true && [[ -n x ]] echo both` ran

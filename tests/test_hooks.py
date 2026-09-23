@@ -6772,6 +6772,253 @@ class ForSelectHeaderTest(BashHookCase):
                     self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
+# SPD-181: case patterns that hold a glob group, `%s` the arm's body.  With `( {echo <label>} )`, `{echo <label>}` and `{(
+# echo <label> )}` in the slot every one printed its label in zsh 5.9 -f and -f -o nobareglobqual, and with l/t present
+# `echo <label> | <the line with tee (l|x)/t > /dev/null in the slot>` wrote the label to l/t for every one but the two
+# extendedglob lines, whose pipe fed setopt (tests/probes/shell_probe.py, 2026-09-23); bash 3.2.57 rejected every one, near
+# its group, its `;&` or its `;|`.
+CASE_GROUP_PATTERNS = (
+    # a group opening the pattern's first word: `((x))` (the ticket's first line), the optional parenthesis around a group;
+    # `(x|y))` (its third), a group that is the pattern itself
+    "case x in ((x)) %s;; esac",
+    "case x in (x|y)) %s;; esac",
+    "case x in (x)) %s;; esac",
+    "case x in (((x))) %s;; esac",
+    "case x in ((x|y)) %s;; esac",
+    "case x in (a|(x|y))) %s;; esac",
+    "case x in ((x) | y) %s;; esac",
+    "case x in ( (x) ) %s;; esac",
+    "case ab in (a)(b)) %s;; esac",
+    "case xy in (x)y) %s;; esac",
+    "case 5 in (<1-9>)) %s;; esac",
+    "setopt extendedglob; case X in (#i)x) %s;; esac",
+    "setopt extendedglob; case X in ((#i)x)) %s;; esac",
+    # a group after a bar, or glued inside a word, an assignment's spelling among them
+    "case x in x|(y)) %s;; esac",
+    "case x in (x)|y) %s;; esac",
+    "case x in (x) | (y)) %s;; esac",
+    "case ab in a(b|c)) %s;; esac",
+    "case mode=x in mode=(a|x)) %s;; esac",
+    # a pattern after `;;` (the ticket's second line), `;&` and `;|`, glued to its terminator, or on a line of its own
+    "case x in a) true;; ((x)) %s;; esac",
+    "case x in a) true;; (x|y)) %s;; esac",
+    "case x in x) true;& ((x)) %s;; esac",
+    "case x in x) true;& (x|y)) %s;; esac",
+    "case x in x) true;| ((x)) %s;; esac",
+    "case x in x) true;| (x|y)) %s;; esac",
+    "case x in y) ;;((x)) %s;; esac",
+    "case x in\n((x)) %s;; esac",
+    "case x in\n  (x|y))\n    %s\n  ;;\nesac",
+    "case x in ((x))\n%s;; esac",
+    # a newline inside the group, which zsh reads as part of the pattern
+    "case x in ((x|\ny)) %s;; esac",
+    "case x in (x|\ny)) %s;; esac",
+)
+# ... and the places such a case may stand, `%s` its body: each printed its label too.
+CASE_GROUP_ENCLOSED = (
+    "eval 'case x in ((x)) %s;; esac'",
+    "x=$(case x in ((x)) %s;; esac)",
+    "echo `case x in (x|y)) %s;; esac`",
+    "zsh -f -c 'case x in ((x)) %s;; esac'",
+    "f() { case x in (x|y)) %s;; esac }; f",
+    "if true; then case x in ((x)) %s;; esac; fi",
+    "case x in x) case y in ((y)) %s;; esac;; esac",
+    "{ case x in (x|y)) %s;; esac }",
+    "for f (a) case x in ((x)) %s;; esac",
+    "time case x in (x|y)) %s;; esac",
+)
+
+
+class CasePatternGroupTest(BashHookCase):
+    """SPD-181, filed by SPD-178's engineer: mark_zsh_patterns ended a case pattern at the first `)` it met, so after a
+    pattern holding a glob group, `((x))` or `(x|y))`, the arm's body started outside command position: a `( {list} )`
+    subshell there was one glob word in zsh's reading and a command named `{git` in bash's, its commands unread.  After `;;`
+    its arithmetic branch took `((x))` for an arithmetic command and left the pattern open to the next `)`, so a tee into a
+    group in the body lost its target.  The proposer's evidence, on the SPD-178 tree: `case x in ((x)) ( {git push} );;
+    esac` and `case x in (x|y)) ( {git push} );; esac` recorded no finding (Law 7 for members), and `case x in a) true;;
+    ((x)) tee (ledger|x)/tickets/SPD-001.md;; esac` recorded only /tickets/SPD-001.md (silent for Spud, Law 1).
+
+    Probed 2026-09-22 (the proposer) and 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0)
+    under -f -o nobareglobqual and under -f, which printed the same for every line, and in GNU bash 3.2.57:
+
+    - zsh reads a pattern word whole, its groups with the blanks, bars and newlines in them, and the pattern ends at the
+      `)` after it (`(x|y)) echo C`, `(x)) echo I`, `x|(y)) echo E` and `(x)y) echo S16` each ran their body).  A first word
+      that starts and ends with a group and is followed by anything but a `)` or a `|` is the pattern in its optional
+      parentheses (`((x)) echo B`, `( (x) ) echo T`, `(x) echo A`), and its body starts after it in command position:
+      `((x)) { echo Z13 }`, `((x)) if true; then echo Z14; fi`, a `((` there an arithmetic command (`((x)) (( 3 > 2 ))
+      && echo Z28` made no file 2).  Anything else there is a parse error (`(x)|(y) ( echo P21 )`, `z|(x) echo Z7`);
+    - after `;;`, `;&` and `;|` a pattern is read, never an arithmetic command: `case y in a) true;; ((x)) echo wrong;;
+      esac` printed nothing and `case y in ((x)) echo wrong2;; ((y)) echo W;; esac` printed W.  `;|` is a terminator of
+      zsh's own (`echo a;| cat` failed near `;|`), which the hook read as `;` and `|`;
+    - a group in a pattern runs nothing: `case x in ((echo P2)) true;; esac`, `(echo P3|x))`, `x) true;| (echo P1))` and
+      `x) ;& (echo P4) )` printed nothing, and zsh generates no file names from a case's word or its patterns, so no glob
+      qualifier there runs code (`(x)(e:"echo QUAL":))`, `((x)(e:"echo QUAL2":))`, `x(e:"echo QUAL3":))`,
+      `(x|(e:"echo QUAL4":)))` with a file x present, `(x)(e:"echo QUAL":)|y)`, and the word `f*(e:"echo SUBJ":)` with a
+      file f1 present printed no QUAL or SUBJ under -f);
+    - `mode=(a|x)` is a group there, no array (`case mode=x in mode=(a|x)) echo m4;; esac` printed m4);
+    - bash rejects a group in a pattern, `;&` and `;|`, and reads the POSIX spellings as zsh does.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "(ledger|x)/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def every_payload(self, form):
+        """Law 7, Law 6, Law 5's --as, the database and Law 1 through a redirection and a tee for both members; for Spud, the
+        checks that apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        for command, needle in (("git push", "Law 7"), ("%s ticket new --title x" % spud, "Law 6"),
+                                ("%s --as spud member log hi" % spud, "Law 6"),
+                                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                                ("echo x | tee ledger/tickets/SPD-001.md", "generated")):
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=form % command, agent_id=agent_id):
+                    self.assertRefused(form % command, needle, agent_id)
+        for command, needle in (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1")):
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, needle, agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, named as the line spells it, and to Spud on Law 1."""
+        with self.subTest(line=line):
+            self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(line).redirects])
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                r = self.assertRefused(line, "generated", agent_id)
+                self.assertIn(self.TARGET, r.reason)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def path_rule(self, line):
+        """A write with no `/` in its words: refused to AGENT_A, whose deliverables are tests/** and bin/spud, allowed to
+        AGENT_C, and refused to Spud, whose own files these are not."""
+        with self.subTest(line=line):
+            self.assertRefused(line, "deliverables")
+            self.assertSilent(line, AGENT_C)
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_zsh_runs_it(self):
+        # zsh ran each subshell (`{echo case-sub}` and its kin printed their labels), and the hook found no push in the first
+        # two; the third was refused before, and checking the arithmetic branch alone would have made it silent
+        for line in ("case x in ((x)) ( {git push} );; esac", "case x in (x|y)) ( {git push} );; esac",
+                     "case x in a) true;; ((x)) ( {git push} );; esac"):
+            self.law_7(line)
+        # the pattern stays one word and the subshell's parentheses stay the shell's
+        marked, _other = self.m.mark_zsh_patterns("case x in (x|y)) ( {git push} );; esac")
+        self.assertEqual((marked.count("("), marked.count(")")), (1, 2))
+        # `((x))` after `;;` is a pattern (`case y in a) true;; ((x)) echo wrong;; esac` printed nothing): its optional
+        # parentheses are the shell's, the tee's group a pattern zsh expands (with l/u present, `echo cu | case x in a) ;;
+        # ((x)) tee (l|x)/u;; esac` wrote cu to l/u)
+        line = "case x in a) true;; ((x)) tee %s;; esac" % self.TARGET
+        marked, _other = self.m.mark_zsh_patterns(line)
+        self.assertEqual(marked.count("("), 1)
+        self.assertEqual(self.m.deglob(marked), line)
+        self.refused_everywhere(line)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_pattern_reads_its_body(self):
+        for form in CASE_GROUP_PATTERNS:
+            for body in ("( {%s} )", "{( %s )}", "{%s}", "( %s )", "%s"):
+                self.law_7(form % (body % "git push"))
+            self.refused_everywhere(form % ("tee " + self.TARGET))
+
+    def test_every_enclosing_text_reads_its_body(self):
+        for form in CASE_GROUP_ENCLOSED:
+            self.law_7(form % "( {git push} )")
+            self.law_7(form % "{( git push )}")
+            self.refused_everywhere(form % ("tee " + self.TARGET))
+
+    def test_every_payload_for_every_caller(self):
+        for form in ("case x in ((x)) ( {%s} );; esac", "case x in (x|y)) ( {%s} );; esac",
+                     "case x in a) true;; ((x)) ( {%s} );; esac", "case x in x) true;| (x|y)) {( %s )};; esac"):
+            self.every_payload(form)
+
+    def test_the_path_rule_in_the_body(self):
+        for form in ("case x in ((x)) ( {%s} );; esac", "case x in (x|y)) ( {%s} );; esac",
+                     "case x in a) true;; ((x)) ( {%s} );; esac", "case x in ((x|\ny)) {( %s )};; esac"):
+            for write in ("echo x | tee note.txt", "touch note.txt", "rm -rf docs"):
+                self.path_rule(form % write)
+            line = form % "echo x | tee tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_an_arithmetic_command_opens_the_body(self):
+        """After the pattern `((` is an arithmetic command, whose `>` opens no file (probed: `((x)) (( 3 > 2 )) && echo Z28`,
+        `(x|y)) (( 3 > 2 )) && echo A1` and `(x) (( 3 > 2 )) && echo A2` ran their echo and made no file 2)."""
+        for line in ("case x in ((x)) (( 3 > 2 )) && git push;; esac", "case x in (x|y)) (( 3 > 2 )) && git push;; esac",
+                     "case x in a) true;; ((x)) (( 3 > 2 )) && git push;; esac", "case x in (x) (( 3 > 2 )) && git push;; esac"):
+            self.law_7(line)
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).redirects, [])
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_a_pattern_runs_nothing(self):
+        """A group in a pattern is matched against the case's word, never run, and no glob qualifier in a pattern runs code.
+        The line after `;|` was refused before this ticket, which read `;|` as `;` then `|` and the group after it as a
+        subshell; the glued qualifier was refused, its code read as a glob's."""
+        for line in ("case x in ((git push)) true;; esac", "case x in (git push|x)) true;; esac",
+                     "case x in x) true;| (git push)) true;; esac", "case x in x) ;& (git push) ) true;; esac",
+                     "case x in x(e:'git push':)) true;; esac", "case x in ((x)(e:'git push':)) true;; esac",
+                     "case x in (x)(e:'git push':)|y) true;; esac", "case x in (x|(e:'git push':))) true;; esac"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [])
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_the_posix_spellings_keep_their_reading(self):
+        """bash reads these too, and they are marked as they are spelled, or read as they were."""
+        for line in ("case x in (x) git push;; esac", "case x in x) git push;; esac", "case x in (x|y) git push;; esac",
+                     "case x in ( x | y ) git push;; esac", "case x in x|y) git push;; esac",
+                     "case x in (x) ( {git push} );; esac", "case x in y) true;; (x) git push;; esac",
+                     "case x in x)\n(git push);; esac", "case x in x) true;; y) git push;; esac"):
+            self.law_7(line)
+        for line in ("case x in (x) git push;; esac", "case x in y) true;; (x) git push;; esac", "case x in x|y) true;; esac"):
+            with self.subTest(line=line):
+                self.assertEqual(self.m.mark_zsh_patterns(line), (line, line))
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("case x in " + "((x)) true;; " * 2000 + "(x|y)) ( {git push} );; esac",
+                     "case x in " + "(" * 3000 + "x" + ")" * 3000 + " ( {git push} );; esac",
+                     "case x in " + "x) true;| " * 2000 + "(x|y)) ( {git push} );; esac",
+                     "case x in (" + "a|" * 5000 + "x)) ( {git push} );; esac",
+                     "case x in " + "(x) | " * 2000 + "(y)) ( {git push} );; esac",
+                     "case x in " + "(" * 5000 + "x ( {git push} );; esac",
+                     "case x in " + "((x| ; " * 2000 + "y" + "))" * 2000 + " ( {git push} );; esac"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                if ")) ( {" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
 class AliasEvalTest(BashHookCase):
     """SPD-059 (Burbank's SPD-054 proposal): `alias NAME=body` stores shell text the hook never read, and `eval NAME` on the
     same line ran it, so a member's VCS write behind an alias reached the hook with no finding (Law 7).  Probed in bash 3.2,

@@ -40,14 +40,23 @@ _ARITH_MARKS = dict({c: syntax._ARITH_SENTINELS[c] for c in "()<>|&;\n"},
                     **{"$": "$" + syntax._LITERAL_DOLLAR})
 _ARITH_COMMAND = str.maketrans(_ARITH_MARKS)
 _ARITH_WORD = str.maketrans(dict(_ARITH_MARKS, **{c: syntax._ARITH_SENTINELS[c] for c in " \t"}))
+# How _zsh_group marks a group's parentheses, bars, blanks and range brackets.  In a word zsh expands, with the zsh
+# sentinels: active glob syntax, which the hook expands against the tree and whose trailing qualifiers' code it reads.  In a
+# case pattern (SPD-181) with the inert arithmetic ones: zsh matches a pattern against the case's word and generates no file
+# names from it, so it expands nothing there and runs no qualifier's code (probed in zsh 5.9 -f: with a file f1 present,
+# `case f*(e:"echo SUBJ":) in f1) ...` took the `*)` arm, and the patterns `(x)(e:"echo QUAL":))`, `((x)(e:"echo
+# QUAL2":))` and `x(e:"echo QUAL3":))` printed nothing).  A `;` a pattern's group holds is marked too (_zsh_group).
+_GROUP_MARKS = syntax._ZSH_SENTINELS
+_PATTERN_MARKS = {c: syntax._ARITH_SENTINELS[c] for c in "(|)<> \t;"}
 
 
 def _scan_pairs(text):
     """One pass over a line's masked outer text, quotes and escapes skipped: the index of the `)` matching each
-    unquoted `(` and of the `}` matching each unquoted `{`, and the sorted indexes of the unquoted characters a zsh glob group
-    cannot hold (`;` `&` `>`, a newline, a `<` that opens no range).  Marking a line reads groups through it, in time linear in
-    the line's length: scanning from every `(` of a line of unbalanced ones was quadratic."""
-    parens, braces, bad, opened, braced = {}, {}, [], [], []
+    unquoted `(` and of the `}` matching each unquoted `{`, the sorted indexes of the unquoted characters a zsh glob group
+    cannot hold (`&` `>`, a newline, a `<` that opens no range), and those of its unquoted `;`s, which a group in a case
+    pattern may hold (_zsh_group).  Marking a line reads groups through it, in time linear in the line's length: scanning
+    from every `(` of a line of unbalanced ones was quadratic."""
+    parens, braces, bad, semicolons, opened, braced = {}, {}, [], [], [], []
     state, i, n = None, 0, len(text)
     while i < n:
         c = text[i]
@@ -76,24 +85,34 @@ def _scan_pairs(text):
                 i = m.end()
                 continue
             bad.append(i)
-        elif c in ";&>\n":
+        elif c == ";":
+            semicolons.append(i)
+        elif c in "&>\n":
             bad.append(i)
         i += 1
-    return parens, braces, bad
+    return parens, braces, bad, semicolons
 
 
-def _zsh_group(text, i, scan):
+def _zsh_group(text, i, scan, pattern=False):
     """(the marked text, the index after it) of the zsh glob group opening at text[i], or None where zsh reads none: unbalanced,
     or holding an unquoted `;` `&` `>` or a `<` that opens no range, which zsh rejects as a parse error (probed).  Blanks, bars,
     nested groups and ranges are part of the pattern; quoted and escaped characters stay as they are.  `scan` is the line's
-    _scan_pairs."""
-    parens, _braces, bad = scan
+    _scan_pairs.
+
+    `pattern`: the group stands in a case pattern (SPD-181), marked with _PATTERN_MARKS, and a `;` in it is part of the
+    pattern: it is a newline newlines_as_separators wrote as ` ; `, which zsh reads as part of the pattern there (probed in
+    zsh 5.9 -f and -f -o nobareglobqual: `case x in ((x|<newline>y)) ( echo NL1 );; esac` and `case x in (x|<newline>y)) (
+    echo NL2 );; esac` ran their subshells), since a `;` spelled in a pattern's group is a parse error (`case x in ((x;y))
+    echo S8;; esac` failed near `;`), a line that runs nothing."""
+    parens, _braces, bad, semicolons = scan
     end = parens.get(i)
     if end is None:
         return None
-    k = bisect.bisect_right(bad, i)
-    if k < len(bad) and bad[k] < end:
-        return None
+    for held in (bad,) if pattern else (bad, semicolons):
+        k = bisect.bisect_right(held, i)
+        if k < len(held) and held[k] < end:
+            return None
+    marks = _PATTERN_MARKS if pattern else _GROUP_MARKS
     out, depth, n, state, j = [], 0, end + 1, None, i
     while j < n:
         c = text[j]
@@ -112,23 +131,23 @@ def _zsh_group(text, i, scan):
             out.append(c)
         elif c == "(":
             depth += 1
-            out.append(syntax.ZSH_OPEN)
+            out.append(marks["("])
         elif c == ")":
             depth -= 1
-            out.append(syntax.ZSH_CLOSE)
+            out.append(marks[")"])
             if depth == 0:
                 return "".join(out), j + 1
-        elif c == "|":
-            out.append(syntax.ZSH_BAR)
-        elif c in " \t":
-            out.append(syntax._ZSH_SENTINELS[c])
+        elif c in "| \t":
+            out.append(marks[c])
         elif c == "<":
             m = syntax.ZSH_RANGE_RE.match(text, j)
             if not m:
                 return None
-            out.append(syntax.ZSH_RANGE_OPEN + text[j + 1 : m.end() - 1] + syntax.ZSH_RANGE_CLOSE)
+            out.append(marks["<"] + text[j + 1 : m.end() - 1] + marks[">"])
             j = m.end()
             continue
+        elif c == ";" and pattern:
+            out.append(marks[";"])
         elif c in ";&>\n":
             return None
         else:
@@ -209,7 +228,15 @@ def mark_zsh_patterns(text):
       and a subshell where that word belongs.  zsh's reading keeps such a group in its word, and the other reading
       restores the parenthesis;
     - `>(` and `2>(` stay a process substitution; `&>(` and `>|(` open a pattern target;
-    - case patterns, `[[ ... ]]`, `${...}` and here-document delimiters are left as they are.
+    - a case pattern is read as zsh's lexer reads it (SPD-181): each of its words whole, a group in it with the blanks, bars
+      and newlines it holds, so the pattern ends at the `)` after its last word (`(x|y))`, `(x))`, `x|(y))`, `(x)y)`); a word
+      that starts and ends with a group, followed by anything but a `)` or a `|`, is the pattern in its optional
+      parentheses (`((x))`, `( (x) )`, `(x)`) and ends the pattern itself.  No word of a pattern stands in command
+      position -- `((` after `;;`, `;&` or `;|` is a pattern, never an arithmetic command, and `mode=(` a group, never an
+      array -- and the body after it does.  zsh generates no file names from a pattern, so its groups are marked with the
+      inert _PATTERN_MARKS; bash rejects a group in a pattern, and the other reading restores one that opens a word
+      (CasePatternGroupTest has the probes);
+    - `[[ ... ]]`, `${...}` and here-document delimiters are left as they are.
 
     An arithmetic command `(( ... ))` and an arithmetic expansion `$(( ... ))` are marked too, with the arithmetic
     sentinels rather than the pattern ones: both shells evaluate what stands between the parentheses, so an operator there is
@@ -269,7 +296,8 @@ def mark_zsh_patterns(text):
                 for_close = parens[i]
                 word_start = False
             else:
-                word_start = not (command or cond or heredoc or in_pattern or text.startswith("()", i)) and _zsh_group(text, i, scan) is not None
+                # a case pattern stands outside command position (SPD-181), so a group opens its word there as anywhere else
+                word_start = not (command or cond or heredoc or text.startswith("()", i)) and _zsh_group(text, i, scan, in_pattern) is not None
         else:
             word_start = c == "<" and not (cond or heredoc) and syntax.ZSH_RANGE_RE.match(text, i) is not None
         punctuation_next = False
@@ -292,10 +320,13 @@ def mark_zsh_patterns(text):
             elif op in syntax.OUT_REDIRECTS or op in syntax.IN_REDIRECTS:
                 target = command if target is None else target
                 command, heredoc = False, op in ("<<", "<<-")
-            elif not in_pattern:  # ; ;; ;& ;;& & && || | |&
+            elif not in_pattern:  # ; ;; ;& ;| ;;& & && || | |&
                 command, target, heredoc = True, None, False
-                if op in (";;", ";&", ";;&") and cases and cases[-1] == "body":
-                    cases[-1] = "pattern"
+                if op in (";;", ";&", ";|", ";;&") and cases and cases[-1] == "body":
+                    # the next arm's pattern, out of command position (SPD-181): a `((` there is its word, not an
+                    # arithmetic command (probed in zsh 5.9 -f and -f -o nobareglobqual: `case y in a) true;; ((x)) echo
+                    # wrong;; esac` printed nothing and `case y in ((x)) echo wrong2;; ((y)) echo W;; esac` printed W)
+                    cases[-1], command = "pattern", False
             continue
         # a word: copy it, marking the groups and ranges zsh reads in it; the other reading restores a range and a group that
         # opens the word, and keeps a group glued inside it whole
@@ -348,11 +379,13 @@ def mark_zsh_patterns(text):
                     # word, and the other reading restores the parenthesis.
                     brace_run = command and start < j == braced
                     reserved = command and not brace_run and 0 < j - start <= 9 and text[start:j] in ZSH_COMMAND_POSITION_WORDS
-                    # `name=(`, `name+=(` and `name[1,0]=(`: an array assignment's parenthesis, never a group
-                    array = target is None and j > start and text[j - 1] == "=" and assignment_words.array_head(text[start:j])
+                    # `name=(`, `name+=(` and `name[1,0]=(`: an array assignment's parenthesis, never a group -- but no
+                    # word of a case pattern assigns (SPD-181: `case mode=x in mode=(a|x)) echo m4;; esac` printed m4)
+                    array = target is None and not in_pattern and j > start and text[j - 1] == "=" \
+                        and assignment_words.array_head(text[start:j])
                     group = None
                     if not (cond or heredoc or brace_run or array or text.startswith("()", j)):
-                        group = _zsh_group(text, j, scan)
+                        group = _zsh_group(text, j, scan, in_pattern)
                     if group is None:
                         punctuation_next = True  # the walk reads this parenthesis in the plain reading
                         break
@@ -373,13 +406,34 @@ def mark_zsh_patterns(text):
                 other.append(c)
                 i += 1
             continue
-        out.append("".join(word))
-        other.append("".join(alternative))
+        zsh_word, other_word = "".join(word), "".join(alternative)
         w, i = text[start:j], j
         another = more_names and for_list == 2 and syntax.loop_name(w)  # a for's or a foreach's next name, after its first
         was_name, was_count, several = for_list == 1 or another, repeat_count, more_names
         arith_next, for_list, repeat_count, more_names = False, 0, False, False
         after_close, closed = closed, False
+        if in_pattern and zsh_word[:1] == _PATTERN_MARKS["("] and zsh_word[-1:] == _PATTERN_MARKS[")"]:
+            k = j
+            while k < n and text[k] in " \t":
+                k += 1
+            if text[k : k + 1] not in (")", "|"):
+                # SPD-181: zsh's lexer reads a pattern's word whole, and where the first starts and ends with a group and
+                # neither a `)` nor a `|` follows, its outer parentheses are the pattern's optional ones: the pattern
+                # ends with the word, and the body after it stands in command position.  Probed in zsh 5.9 -f and -f -o
+                # nobareglobqual: `case x in ((x)) ( {echo case-sub} );; esac` ran its subshell, `((x)) { echo Z13 }`
+                # its group and `((x)) (( 3 > 2 )) && echo Z28` its arithmetic command, making no file 2, and the pattern
+                # `(a)(x)` read as `a)(x` (a bad pattern); followed by a `)` or a `|` the word is itself the pattern or
+                # its first alternative (`(x|y)) echo C` and `(x) | y) echo Z3` ran).  Any word but the first is a parse
+                # error there (`(x)|(y) ( echo P21 )`, `z|(x) echo Z7`), and so read too: a comment's words, which
+                # newlines_as_separators keeps, may stand before the first.  The optional parentheses are the shell's
+                # in zsh's reading, for the walk to open and close the pattern with; bash, which reads `(x) body` alike,
+                # rejects every other such word, and the other reading restores the group as it restores any opening a word.
+                out.append("(" + zsh_word[1:-1] + ")")
+                other.append(other_word)
+                cases[-1], command = "body", True
+                continue
+        out.append(zsh_word)
+        other.append(other_word)
         # SPD-142: a word ending in the `}` that closes a group is read as the word before that brace, which then gives
         # zsh its command position back -- but inside `[[ ... ]]` and a case's subject or patterns only the `]]` and the
         # esac that end them close a group with a brace glued on (`{ [[ -n x ]]}`, `{ case ... esac}`)
