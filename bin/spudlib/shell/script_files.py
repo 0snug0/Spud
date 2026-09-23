@@ -25,8 +25,12 @@ the shell may be in):
   text the line spells counts as well (`sh <<'EOF' < x.sh`, `cat x.sh | sh <<'EOF'`): zsh feeds a command every input
   its redirections name in turn, after its pipe (stdin_text.command_input).  Since SPD-210 so does such input given to
   the command around the shell: a `-c` string, eval, a group, a subshell, a loop, a conditional (`sh -c sh < x.sh`,
-  `{ sh; } < x.sh`, `(sh) < x.sh`), and a command substitution in their commands' words.
+  `{ sh; } < x.sh`, `(sh) < x.sh`), and a command substitution in their commands' words.  Since SPD-212 so does the
+  input a call hands a function the line defines (`f() { sh; }; f < x.sh`, walk.walk_line).
 - "xargs": a shell's `-c` string an xargs reads from input the line does not spell (`cat f | xargs -0 sh -c`).
+- "function": a call given input of a function the line defines in text whose reading is over before the call -- an
+  `eval` string's (`eval 'f() { sh; }'; f < x.sh`) -- whose body no walk reads again on that input (SPD-212,
+  walk.read_call); a function the line defines anywhere else is read on each call's input (walk.walk_line).
 - "startup": a variable that names a file of commands a shell runs when it starts -- BASH_ENV (any non-interactive
   bash, a script's `#!/bin/bash` included), ENV and ZDOTDIR -- assigned anywhere on the line, and HOME assigned on a line
   that starts a shell, whose ~/.zshenv (and an interactive shell's rc files) then come from the line's own directory.
@@ -80,6 +84,8 @@ HOW = {
              " a command substitution's output in an unquoted here-document, or a variable's value there that the line"
              " does not settle)",
     "xargs": "from a `-c` string xargs reads from input the line does not spell",
+    "function": "from the body of a function the line defines inside an `eval` string, on the standard input the call hands"
+                " it, which the hook does not read there",
     "startup": "from a file of commands a shell runs as it starts (BASH_ENV, ENV and ZDOTDIR name one, and HOME holds"
                " a shell's own startup files)",
 }

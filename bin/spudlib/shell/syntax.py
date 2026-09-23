@@ -547,6 +547,14 @@ class ShellAnalysis:
         # parameter binds the same names (`functions[git]=body`, `functions+=(git body)`), and UNKNOWN_NAME stands
         # for one whose name the hook cannot read.
         self.functions = set()
+        # The bodies of those definitions, which a call reads with the standard input it is given (SPD-212,
+        # walk.walk_line): `function_bodies`, each name -> the (reading, definition) pairs a call of it may run -- the
+        # reading of the line (walk_line) the definition stands in, and its number there (ShellWalk.define) -- every
+        # definition kept and scoped as `functions` is; `function_inputs`, reading -> definition -> {the input's
+        # stdin_text.reading_key: (the text, whether anything stands there)}, what the calls hand that body, in order;
+        # `walking`, the readings under way, whose walk_line will still read a body on a call's input; `body_walks`, the
+        # walks the whole analysis has made to read bodies on calls' inputs, which positional.READINGS_PER_NAME bounds.
+        self.function_bodies, self.function_inputs, self.walking, self.body_walks = {}, {}, set(), 0
 
     @property
     def all_spud(self):

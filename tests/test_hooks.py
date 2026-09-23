@@ -8187,6 +8187,129 @@ class CompoundInputTest(BashHookCase):
             self.data(line)
 
 
+class FunctionInputTest(BashHookCase):
+    """SPD-212, filed by SPD-210's engineer: a function the line defines was read once, where it is defined, on the input
+    that place stands on, and never with the input a call of it is given, so a shell in its body reading that input ran
+    unread.  On the SPD-210 tree analyse_command recorded no finding for the proposer's `f() { sh; }; f < x.sh`, while
+    `{ sh; } < x.sh` records a script "stdin" finding, and read nothing of the here-string in `g() { sh; }; g <<< 'touch
+    g1'`.  SPD-210 covered a redirection on the definition itself (`fn() { sh; } < x.sh`), not on the call.
+
+    The rule (walk.walk_line): a call of a function the line defines, in command position, hands the function's body the
+    standard input the call is given (its pipe and its own input redirections, as SPD-209 reads a command's), and the line
+    is walked again with that input standing where the body opens, once per distinct input, as SPD-210 walks it again for
+    a compound command's own input.  A call the second walk finds (in a body, in a group given input) is read the same
+    way.  These walks are bounded as SPD-203's per-call readings are (READINGS_PER_NAME), across the whole analysis: past
+    the bound a line's bodies are read once more on input the line does not spell, refused a member on doubt.  A
+    function an `eval` string defines is defined in the shell that runs the line, but its text's reading is over before
+    the call: a call of it given input is refused a member as such input is (script_files, "function"); a function a
+    substitution or a `-c` string defines stays in its own process.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory, each file and
+    body a `touch`:
+
+    - all three made the file for `g() { sh; }; g <<< 'touch g1'`, `f() { sh; }; f < x.sh`, a here-document fed to the call,
+      `printf 'touch p1\\n' | p` (p's body `sh`), `k() if true; then sh; fi; k <<< ...`, `s() ( sh ); s <<< ...`, `function
+      fk { sh; }` and `function fp () { sh; }` called with a here-string, `a() { sh; }; b() { a; }; b <<< ...`, a chain of
+      four such functions, `c() { sh; }; { c; } <<< ...`, `m <<< 'touch m1'; m <<< 'touch m2'` (both), `echo $(q <<<
+      ...)`, `eval "e <<< ..."`, `eval e < x.sh`, `r <<< ... > /dev/null`, `time t <<< ...`, `u() { v <<< 'touch
+      inner1'; }` called with other input (v's body `sh`), `f() { sh -c sh; }` and `h() { { sh; }; }` called with a
+      here-string, a definition and its call inside one subshell and inside one `sh -c` string, and a body that calls
+      itself with a here-string;
+    - zsh made d1 for `d() { sh; } <<< 'true'; d <<< 'touch d1'`, and `d() { cat; } < def.txt; d < call.txt` printed
+      call then def: zsh reads the call's input and then each of the definition's own in turn; bash read the
+      definition's alone (def, and no d1);
+    - zsh made z1 for its `z() sh; z <<< 'touch z1'` (bash: a syntax error), and `z() cat < def.txt; z < call.txt`
+      printed def alone: a simple command's own input replaces the call's, as it does in a `{ }` body (`f() { sh <<<
+      'true'; }; f <<< 'touch own1'` made nothing in any of the three);
+    - all three made ev2 for `eval 'ev() { sh; }'; ev <<< 'touch ev2'`;
+    - none made anything for `command cw <<< ...` (command runs no function), for `(o() { sh; }); o <<< ...` or `x=$(xf()
+      { sh; }; echo); xf <<< ...` (the definition stays in its subshell), or for a call with no input."""
+
+    EVIDENCE = ("g() { sh; }; g <<< 'touch g1'", "f() { sh; }; f < x.sh")  # the proposer's lines
+    SPELLED = "f() { sh; }; f <<'EOF'\ngit push\nEOF"  # a here-document body the inner shell runs as its program
+
+    # CompoundInputTest's readings of the analysis and its asserts, which this class makes of the same findings
+    analysis, verbs, forms = CompoundInputTest.analysis, CompoundInputTest.verbs, CompoundInputTest.forms
+    law_7, unspelled, data = CompoundInputTest.law_7, CompoundInputTest.unspelled, CompoundInputTest.data
+
+    def writes(self, command):
+        return sorted(str(e[1]) for e in self.analysis(command).arg_writes)
+
+    def test_the_tickets_evidence_is_refused_a_member(self):
+        touched, unspelled = self.EVIDENCE
+        # the here-string is the inner shell's program: the call reads as `sh <<< 'touch g1'` does
+        self.assertEqual(self.writes(touched), self.writes("sh <<< 'touch g1'"))
+        self.assertTrue(self.writes(touched))
+        self.assertEqual(self.bash(touched).reason, self.bash("sh <<< 'touch g1'").reason)
+        self.assertRefused(touched, "deliverables")
+        self.unspelled(unspelled)
+        self.assertEqual(self.forms(unspelled), ["stdin"])
+        self.law_7(self.SPELLED)
+
+    def test_every_input_a_call_is_given_reaches_the_body(self):
+        for line in ("f() { sh; }; f <<< 'git push'", "p() { sh; }; echo 'git push' | p",
+                     "k() if true; then sh; fi; k <<< 'git push'", "s() ( sh ); s <<< 'git push'",
+                     "function fk { sh; }; fk <<< 'git push'", "function fp () { sh; }; fp <<< 'git push'",
+                     "z() sh; z <<< 'git push'", "a() { sh; }; b() { a; }; b <<< 'git push'",
+                     "f1() { sh; }; f2() { f1; }; f3() { f2; }; f4() { f3; }; f4 <<< 'git push'",
+                     "c() { sh; }; { c; } <<< 'git push'", "m() { sh; }; m <<< 'git status'; m <<< 'git push'",
+                     "q() { sh; }; echo $(q <<< 'git push')", "e() { sh; }; eval \"e <<< 'git push'\"",
+                     "r() { sh; }; r <<< 'git push' > /dev/null", "t() { sh; }; time t <<< 'git push'",
+                     "v() { sh; }; u() { v <<< 'git push'; }; u <<< 'true'", "f() { sh -c sh; }; f <<< 'git push'",
+                     "f() { { sh; }; }; f <<< 'git push'", "(f() { sh; }; f <<< 'git push')",
+                     "f() { sh; f <<< 'git push'; }; f", "sh -c 'f() { sh; }; f <<< \"git push\"'"):
+            self.law_7(line)
+        for line in ("f() { sh; }; cat x.sh | f", "s() ( sh ); s < x.sh", "a() { sh; }; b() { a; }; b < x.sh",
+                     "c() { sh; }; { c; } < x.sh", "e() { sh; }; eval e < x.sh", "sh -c 'f() { sh; }; f < x.sh'",
+                     "z() sh; z < x.sh"):
+            self.unspelled(line)
+
+    def test_zsh_reads_the_calls_input_then_the_definitions(self):
+        """A definition's own input redirections (SPD-210) with a call's: zsh reads the call's and then each of them,
+        bash the definition's last alone, which SPD-210 already read."""
+        self.law_7("d() { sh; } <<< 'true'; d <<< 'git push'")
+        self.unspelled("d() { sh; } <<< 'true'; d < x.sh")
+        self.law_7("d() { sh; } <<< 'git push'; d <<< 'true'")
+
+    def test_the_readings_of_one_body_have_a_bound(self):
+        """READINGS_PER_NAME distinct inputs are each read; one more, or a chain of calls longer than that, reads every
+        body on the line once more on input the line does not spell: refused a member on doubt, Spud reading on."""
+        cap = load_spud_module().READINGS_PER_NAME
+        inputs = "m() { sh; }; " + "; ".join("m <<< 'true %d'" % k for k in range(1, cap + 1))
+        self.data(inputs)
+        self.unspelled(inputs + "; m <<< 'git push'")
+        chain = "f1() { sh; }; " + "; ".join("f%d() { f%d; }" % (k + 1, k) for k in range(1, cap + 2))
+        self.unspelled(chain + "; f%d <<< 'git push'" % (cap + 2))
+        # the bound holds across the analysis, so a line nested in a body read on each input cannot multiply the walks
+        nested = "f() { echo $(g() { sh; }; %s); }; " % "; ".join("g <<< 'true %d'" % k for k in range(1, cap + 1))
+        nested += "; ".join("f <<< 'true %d'" % k for k in range(1, cap + 1))
+        self.assertEqual(self.analysis(nested).body_walks, cap)
+        self.unspelled(nested)
+
+    def test_a_function_an_eval_defines_is_refused_on_doubt(self):
+        """Its body stands in text whose reading is over before the call: a call given input is refused a member."""
+        for line in ("eval 'f() { sh; }'; f <<< 'git push'", "eval 'f() { sh; }'; f < x.sh"):
+            with self.subTest(line=line):
+                self.assertEqual(self.forms(line), ["function"])
+                r = self.assertRefused(line, SCRIPT_WORDING)
+                self.assertIn("inside an `eval` string", r.reason)
+                self.assertSilent(line, agent_id=None)
+        self.law_7("eval 'f() { sh; }; f <<< \"git push\"'")  # the call inside the same string is read
+        self.data("eval 'f() { sh; }'; f")
+
+    def test_the_controls_read_as_before(self):
+        """A wrapper that runs no function, a definition kept in its subshell, a call before the definition or with no
+        input, a body that only prints its input, a body whose shell has input of its own, and a line zsh and bash read
+        apart, whose definitions each reading binds for itself."""
+        for line in ("cw() { sh; }; command cw <<< 'git push'", "(o() { sh; }); o <<< 'git push'",
+                     "x=$(f() { sh; }; echo); f <<< 'git push'", "f <<< 'git push'; f() { sh; }", "f() { sh; }; f",
+                     "f() { cat; }; f <<< 'git push'", "f() { sh <<< 'true'; }; f <<< 'git push'",
+                     "z() sh <<< 'true'; z <<< 'git push'", "f() { sh; }; f <<< 'git status'; {true}"):
+            self.data(line)
+        self.law_7("f() { sh; }; f <<< 'git push'; {true}")
+
+
 # SPD-184: the process substitutions zsh runs in a case's word and its patterns, `%s` standing for the list.  With a file
 # touched in place of %s, zsh 5.9 made it for each (CaseSubstitutionTest has the probes).
 CASE_EQUALS_FORMS = (

@@ -57,7 +57,9 @@ MOVES_RE = re.compile(r"(?:^|[\s;&|({!])(?:shift|set)(?=[\s;&|)}]|\Z)"
                       r"|\bfunction\s|(?:^|[\s;&|({])[^\s;&|(){}<>'\"=$`]*\(\s*\)|<<(?!<)")
 # The most bodies of one function name a line reads with the words set, one per call's words (analyse.read_shell_name):
 # a body that calls functions with words of its own reads each of those once per words, so a profile could multiply the
-# readings through every level of the analysis's depth.  Past it the body is read once more as it stands.
+# readings through every level of the analysis's depth.  Past it the body is read once more as it stands.  The same
+# bound holds the walks an analysis makes to read the bodies of the functions a line defines on their calls' inputs
+# (SPD-212, walk.walk_line): past it such a line's bodies are read once more on input the line does not spell.
 READINGS_PER_NAME = 8
 _SEPARATORS = " \t\n;&|()<>"  # what ends a word unquoted, and before a `#` opens a comment (prepare._COMMENT_AFTER)
 _NUMBER_RE = re.compile(r"[1-9][0-9]*\Z")

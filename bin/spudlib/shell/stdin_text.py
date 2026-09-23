@@ -39,7 +39,8 @@ That input reaches the commands a command runs inside itself wherever nothing of
 string's commands and eval's start from their command's (analyse.analyse_command's `stdin`), the commands in a compound
 command from its own input redirections, read as a simple command's are (walk.walk_line), and a command substitution
 from the input of the list it stands in (walk.ShellWalk.substitution_input).  So `sh -c sh < f`, `{ sh; } < f` and
-`(sh) <<'EOF'` read as `sh < f` and `sh <<'EOF'` do.
+`(sh) <<'EOF'` read as `sh < f` and `sh <<'EOF'` do.  A function the line defines runs its body on each call's input
+(SPD-212, walk.walk_line): `f() { sh; }; f < x` reads as `sh < x` does.
 
 What stays unread: standard input the line does not spell -- a file (`sh < f`), another program's output (`cat f | sh`,
 `curl ... | sh`), a value the line does not settle, a command substitution's output or such a value in an unquoted

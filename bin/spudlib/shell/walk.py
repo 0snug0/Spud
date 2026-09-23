@@ -1,6 +1,7 @@
 """shell/walk: ShellFrame and ShellWalk: one pass over a line's tokens."""
 
-from . import analyse, assignment_words, directories, globbing, heredocs, prepare, reevaluation, stdin_text, syntax
+from . import (analyse, assignment_words, directories, globbing, heredocs, positional, prepare, reevaluation, script_files,
+               stdin_text, syntax)
 from ..hooks import hookio
 
 # The loops whose header names a variable, one header grammar to zsh (its parser's par_for; ShellWalk.names_end)
@@ -44,15 +45,18 @@ class ShellFrame:
     `do ... done` (resolve_body)."""
 
     __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints",
-                 "procsub", "serial", "bare")
+                 "procsub", "serial", "bare", "defines")
 
     def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
         self.pattern = kind == "case"  # a case command reads a pattern first, and again after each ;;
         self.mark = mark  # how many assignments the line had made when it opened
-        # the functions defined before a `( ... )` subshell opened, restored when it closes; None for every other
-        # frame kind, whose function definitions reach a call after it and are kept.
+        # the functions defined before a `( ... )` subshell opened, with their bodies (ShellAnalysis.functions and
+        # function_bodies), restored when it closes; None for every other frame kind, whose function definitions reach a
+        # call after it and are kept.
         self.funcs = funcs
+        # the function definition whose body this compound command is (ShellWalk.define), or None (SPD-212)
+        self.defines = None
         # a loop's or a conditional's body form.  None for anything but a for, select, repeat or foreach (which starts
         # at "header") and an if, while or until (which starts at "cond", its condition list); then "pending" or "cond-pending"
         # once that is complete, until the body's first word, and then "long" (`do ... done`, `then ... fi`, a foreach's list
@@ -114,9 +118,12 @@ class ShellWalk:
     - every command on the line starts from the standard input the line is run on -- `stdin`, None where the line does not
       spell it, and `fed`, whether anything stands there: a `-c` string's is its shell's (SPD-210) -- and a compound
       command's own input redirections stand where it opens, as a simple command's do (walk_line); a substitution in a
-      command's words reads the input of the list it stands in (substitution_input)."""
+      command's words reads the input of the list it stands in (substitution_input);
+    - a function's body runs on the input its call is given, not on the one where it is defined (SPD-212): `calls`, each
+      definition -> the (text, whether anything stands there) this walk reads its body with, one call's input that an
+      earlier walk of the line found (walk_line), and `line`, the reading those definitions are bound to (define)."""
 
-    def __init__(self, a, inner, bodies, expanded, depth, glued=True, stdin=None, fed=False, inputs=None):
+    def __init__(self, a, inner, bodies, expanded, depth, glued=True, stdin=None, fed=False, inputs=None, calls=None, line=None):
         self.a, self.inner, self.bodies, self.depth = a, list(inner), list(bodies), depth
         self.expanded = list(expanded)  # whether the shell expands each body (heredocs.strip_heredocs)
         self.glued = glued  # zsh's reading: a brace glued to a word opens or closes a group where a lone one would
@@ -144,6 +151,9 @@ class ShellWalk:
         # of the line found, which push reads where each compound opens (walk_line).  `closed`: the compound whose closer
         # the walk has just read, while the words after it are read.
         self.found, self.inputs, self.closed, self.opened = {}, inputs or {}, None, 0
+        # The function definitions (SPD-212): the numbers define gave the ones read so far, in order -- the same in every
+        # walk of one line's tokens -- the one whose body is still to come, and the calls' inputs this walk reads bodies with.
+        self.defined, self.defining, self.calls, self.line = [], None, calls or {}, line
         self.start_list()
 
     # -- lists and pipelines ------------------------------------------------------------
@@ -182,9 +192,12 @@ class ShellWalk:
     def push(self, kind, closer):
         outer = (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words,
                  self.skip, self.header, self.expect_body)
-        funcs = set(self.a.functions) if kind == "sub" else None  # a subshell's own function definitions do not escape
+        # a subshell's own function definitions do not escape, nor their bodies
+        funcs = (set(self.a.functions), bodies_copy(self.a.function_bodies)) if kind == "sub" else None
         frame = ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned), funcs)
         frame.serial, frame.bare, self.opened, self.closed = self.opened, not self.words, self.opened + 1, None
+        if frame.bare:  # the compound command a definition's header is followed by, and not a `<( )` in a command's words
+            frame.defines, self.defining = self.defining, None
         # what the element around it printed so far is kept for after the compound command, and the standard
         # input that element was given is the input every list inside it starts from -- with the compound's own input
         # redirections, where an earlier walk of the line found any after its closer, read as a simple command's are,
@@ -197,6 +210,16 @@ class ShellWalk:
             redirects, bodies = self.inputs[frame.serial]
             self.frame_stdin = stdin_text.command_input(redirects, bodies, self.piped_text, self.pipe_feeds, self.a)
             self.frame_stdin_fed = stdin_text.input_fed(redirects, bodies, self.piped_fed)
+        if frame.defines in self.calls:
+            # a function's body, read on a call's input in place of what stands where it is defined (SPD-212); with input
+            # redirections of the definition's own, zsh reads the call's and then each of them in turn, and bash their last
+            # alone -- the call's input taking the place of a pipe into the compound (probed: FunctionInputTest)
+            text, fed = self.calls[frame.defines]
+            if frame.serial in self.inputs:
+                redirects, bodies = self.inputs[frame.serial]
+                self.frame_stdin, self.frame_stdin_fed = stdin_text.command_input(redirects, bodies, text, True, self.a), True
+            else:
+                self.frame_stdin, self.frame_stdin_fed = text, fed
         self.stack.append(frame)
         if kind in ("loop", "func"):
             self.a.loop_depth += 1
@@ -212,7 +235,7 @@ class ShellWalk:
         self.frame_printed = frame.earlier
         self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed, self.pipe_feeds = frame.stdin
         if frame.kind == "sub":
-            self.a.functions = frame.funcs  # a function defined in a subshell does not reach a call after it
+            self.a.functions, self.a.function_bodies = frame.funcs  # a function defined in a subshell does not reach a call after it
         if frame.kind in ("loop", "func"):
             self.a.loop_depth -= 1
         assigned = self.a.assigned[frame.mark :]
@@ -522,8 +545,14 @@ class ShellWalk:
         stdin = stdin_text.command_input(words, bodies, self.piped_text, self.pipe_feeds, a)
         if self.function_next:  # zsh's `name () command`: a body that runs when called, perhaps more than once
             self.function_next = False
+            defining, self.defining, piped_fed = self.defining, None, self.piped_fed
+            if defining in self.calls:
+                # read on a call's input (SPD-212), which the command's own input redirections replace (probed: `z() cat
+                # < def.txt; z < call.txt` printed def alone in zsh)
+                text, piped_fed = self.calls[defining]
+                stdin = stdin_text.command_input(words, bodies, text, False, a)
             a.loop_depth += 1
-            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, self.piped_fed)
+            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, piped_fed)
             a.loop_depth -= 1
             a.cwds = directories.union_dirs(before, a.cwds)
         else:
@@ -543,6 +572,18 @@ class ShellWalk:
         """A case command is reading its subject, `in` or a pattern: no command position, so no word there opens a group."""
         return bool(self.stack) and self.stack[-1].kind == "case" and self.stack[-1].pattern
 
+    def define(self, words):
+        """A function definition's header was read, `words` its name words: bind its names to a shell function
+        (ShellAnalysis.functions), and to this definition's body, which a call reads with the input it is given (SPD-212,
+        walk_line).  The definition is numbered in the order the walk reads them, the same in every walk of the line's
+        tokens, and its body is the compound command the walk opens next (push), or zsh's one simple command (finish)."""
+        names = _function_names(words)
+        self.a.functions.update(names)
+        self.defining = len(self.defined)
+        self.defined.append(self.defining)
+        for name in names:
+            self.a.function_bodies.setdefault(name, set()).add((self.line, self.defining))
+
     def open_brace(self):
         """Open the `{ list }` a `{` read now begins, and say whether it did: in command position a group, or a function's
         body after `name ()` and zsh's anonymous `()`; after `function name` a function's body; after only `coproc`,
@@ -552,7 +593,7 @@ class ShellWalk:
             self.function_next = False
             return True
         if self.skip and self.function_next:  # function name {
-            self.a.functions.update(_function_names(self.words))  # a function defined here shadows a later call's name
+            self.define(self.words)  # a function defined here shadows a later call's name
             self.discard()
             self.skip, self.header = False, None
             self.push("func", "}")
@@ -712,7 +753,7 @@ class ShellWalk:
                 self.words[-1] += assignment_words.array_value(toks[i + 1 : j])
                 i = j
             elif t == "(" and i + 1 < len(toks) and toks[i + 1] == ")" and not self.skip:
-                self.a.functions.update(_function_names(self.words))  # name (), name() and zsh's `a b () ...`
+                self.define(self.words)  # name (), name() and zsh's `a b () ...`
                 self.discard()  # name (): a function definition's header
                 self.function_next = True
                 i += 1
@@ -799,25 +840,92 @@ def walk_line(a, tokens, inner, bodies, expanded, depth, start, glued=True, stdi
     first learnt stays -- doubt, a function's or a hashed name, an alias the hook cannot read, each of which only makes
     the reading stricter -- and a body read in its own process is read once per starting state (analyse_isolated), so
     the first walk's findings stand beside the second's, which adds the ones the input earns.  Returns the walk whose
-    reading stands, for analyse_command to ask whether zsh split a brace off a word."""
-    first = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed)
-    first.walk(tokens)
-    if not first.found:
-        return first
-    restore_reading(a, start)
-    again = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, first.found)
-    again.walk(tokens)
-    return again
+    reading stands, for analyse_command to ask whether zsh split a brace off a word.
+
+    A function the line defines runs its body on the input each call of it is given (SPD-212), which the walk reads where
+    the body stands, before any call: the calls a walk finds record their inputs (read_call), and the line is walked again
+    with each body read on one of them (ShellWalk.push, and finish for zsh's `name () command`), once per distinct input,
+    until no call has handed a body input it has not been read with -- a call inside a body, or in a compound given input,
+    shows its own only in the walk that reads it so.  Each such walk reads every body with its next unread input at once.
+    The walks are bounded as SPD-203's per-call readings of a function are (positional.READINGS_PER_NAME), across the
+    whole analysis (ShellAnalysis.body_walks), so a line nested in a body cannot multiply them: once they are spent, a
+    line with a call's input still unread is walked once more with every body on it on input the line does not spell,
+    which refuses a member a shell or an interpreter reading it there, as SPD-145 refuses one anywhere."""
+    line = object()  # this reading of the line, which its definitions are bound to (ShellWalk.define)
+    a.walking.add(line)
+    try:
+        return _walks(a, line, tokens, inner, bodies, expanded, depth, start, glued, stdin, fed)
+    finally:
+        a.walking.discard(line)
+
+
+def _walks(a, line, tokens, inner, bodies, expanded, depth, start, glued, stdin, fed):
+    """walk_line's walks of one reading of a line, `line`; the last one's reading stands."""
+    walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, line=line)
+    walk.walk(tokens)
+    found, defined, read, again = walk.found, walk.defined, {}, bool(walk.found)
+    while True:
+        calls = unread_inputs(a.function_inputs.get(line, {}), read)
+        if not (calls or again):
+            return walk
+        spent = bool(calls) and a.body_walks >= positional.READINGS_PER_NAME
+        if spent:
+            calls = dict.fromkeys(defined, (None, True))  # every body on the line, on input the line does not spell
+        elif calls:
+            a.body_walks += 1
+        restore_reading(a, start)
+        walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, found, calls, line)
+        walk.walk(tokens)
+        if spent:
+            return walk
+        again = False
+
+
+def unread_inputs(inputs, read):
+    """definition -> the first input its calls hand its body (ShellAnalysis.function_inputs) that no walk has read it
+    with yet, each marked read in `read`, definition -> the reading keys read."""
+    calls = {}
+    for number, given in inputs.items():
+        seen = read.setdefault(number, set())
+        for key, pair in given.items():
+            if key not in seen:
+                seen.add(key)
+                calls[number] = pair
+                break
+    return calls
+
+
+def read_call(a, name, stdin, fed):
+    """A call of `name` in command position, on standard input `stdin` (fed: whether anything stands there): the input each
+    body the line defines under that name is handed, for walk_line to read it with (SPD-212).  A call on nothing hands the
+    body nothing its reading where it is defined lacks.  A body in text whose reading is over -- an `eval` string's,
+    which defines the function in the shell that runs the line -- is read on no call's input after it: the call is
+    refused a member as a shell reading input the line does not spell is (script_files, "function")."""
+    if not fed:
+        return
+    key = stdin_text.reading_key(stdin, fed)
+    for line, number in a.function_bodies.get(name, ()):
+        if line in a.walking:
+            a.function_inputs.setdefault(line, {}).setdefault(number, {}).setdefault(key, (stdin, fed))
+        else:
+            script_files.record_script(a, "function", name)
 
 
 def reading_start(a):
     """The state a walk reads a line's commands with, and changes as it goes, that restore_reading puts back: the
-    directories, the variables, the loop depth, the aliases and the loop names read as dashless."""
-    return a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases), set(a.dashless_loops)
+    directories, the variables, the loop depth, the aliases, the loop names read as dashless, and the function bodies
+    bound to their names (SPD-212: each walk of the line binds its own definitions again, and zsh's reading's do not
+    stand for bash's reading's while it walks)."""
+    return a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases), set(a.dashless_loops), bodies_copy(a.function_bodies)
 
 
 def restore_reading(a, start):
     """Put back reading_start's state, copied, so one start serves every walk of the line."""
-    cwds, variables, loop_depth, aliases, dashless = start
+    cwds, variables, loop_depth, aliases, dashless, function_bodies = start
     a.cwds, a.vars, a.loop_depth, a.cd_uncertain = cwds, dict(variables), loop_depth, False
-    a.aliases, a.dashless_loops = dict(aliases), set(dashless)
+    a.aliases, a.dashless_loops, a.function_bodies = dict(aliases), set(dashless), bodies_copy(function_bodies)
+
+
+def bodies_copy(function_bodies):
+    """A copy of ShellAnalysis.function_bodies that a definition added to it does not reach."""
+    return {name: set(found) for name, found in function_bodies.items()}

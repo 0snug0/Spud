@@ -50,10 +50,12 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
     # word (`{git` is a command, `{ cd /tmp}` a cd into `/tmp}`), which is how the hook read every line before.
     # Every command and target either reading finds is checked, zsh's first; the directories and variables after the line are
     # those of both.  The quotes are the same, so both tokenize.
-    zsh_cwds, zsh_vars, zsh_aliases = a.cwds, a.vars, a.aliases
+    zsh_cwds, zsh_vars, zsh_aliases, zsh_bodies = a.cwds, a.vars, a.aliases, a.function_bodies
     walk.restore_reading(a, start)
     walk.walk_line(a, tokens if other == marked else syntax.shell_tokens(other) or [], inner, bodies, expanded, depth, start,
                    False, stdin, fed)
+    for name, found in zsh_bodies.items():  # a function body either reading defines (SPD-212, walk.read_call)
+        a.function_bodies.setdefault(name, set()).update(found)
     a.cwds = directories.union_dirs(zsh_cwds, a.cwds)
     a.doubt.update(set(zsh_vars) ^ set(a.vars))  # a variable only one reading assigns
     for name, value in zsh_vars.items():
@@ -88,7 +90,9 @@ def analyse_isolated(a, command, depth, stdin=None, fed=False):
     if key in a.isolated_done:
         return
     a.isolated_done.add(key)
+    bodies, a.function_bodies = a.function_bodies, walk.bodies_copy(a.function_bodies)
     isolated(a, lambda: analyse_command(command, a, depth, stdin, fed))
+    a.function_bodies = bodies  # a function the body defines stays in its process, and no call after it runs it (SPD-212)
 
 
 def analyse_new_shell(a, command, depth, stdin=None, fed=False):
@@ -319,7 +323,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             if doubtful:  # after the body, so a refusal the body itself earns keeps its own reason
                 a.findings.append(("alias", prepare.deglob(cmd)))
             return
-    if command_position and read_shell_name(words, a, depth):
+    if command_position and read_shell_name(words, a, depth, stdin, fed):
         # The shell this line runs in already defines the command word as an alias, whose body took the command
         return
     if cmd in syntax.ASSIGNING_COMMANDS:
@@ -566,11 +570,15 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     shadowed_name(a, cmd, path_names)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason
 
 
-def read_shell_name(words, a, depth):
+def read_shell_name(words, a, depth, stdin=None, fed=False):
     """A command word the shell the Bash tool starts already defines, read for what it actually runs: an alias,
     whose body and the words after it are analysed as the text the shell put there -- and True, since that text is the
     command now -- or a function, whose body is read as an `eval` string is while the call's own words go on to be
     dispatched for what they name.  An alias shadows a function of the same name, as the shell resolves them.
+
+    A function the line itself defines under that name reads the call's standard input, `stdin` (`fed`: whether anything
+    stands there): its body is read with it where the line defines it, the line being walked again (walk.read_call and
+    walk_line, SPD-212).
 
     The call's words reach a function's body as its positional parameters, so the body is read with them set where it
     reads those (shell/positional, SPD-203): `gitfn push`, whose body is `command git "$@"`, is `git push`.  It is read
@@ -592,6 +600,7 @@ def read_shell_name(words, a, depth):
         finally:
             del a.expanding[len(a.expanding) - len(expanded):]
         return True
+    walk.read_call(a, cmd, stdin, fed)
     body = expansions.shell_function(cmd, a)
     if body is not None:
         text, sound = positional.substituted(body, words[1:])
