@@ -41,19 +41,20 @@ A module of its own, off the analyse cycle (it reads prepare and syntax alone), 
 import re
 
 from . import prepare, syntax
+from ..core import lazy
 
 
 # A reference to the positional parameters: `$1`..`$9`, `$@`, `$*`, `$#`, every braced form of them (`${1}`, `${10}`,
 # `${@:2}`, `${1+"$@"}`, `${#}`, `${#1}`, `${(q)@}`, `${=1}`), and zsh's `argv`, which is them by name.  `$0` is not one:
 # zsh sets it to the function's own name.  `${#name}` is a length, and not `${#}` followed by a name.
-REFERENCE_RE = re.compile(r"\$(?:[1-9@*#]|\{(?:[=~^]|\([^)]*\))*[#!]?(?:[1-9][0-9]*|[@*#])(?![A-Za-z0-9_]))|\bargv\b")
+REFERENCE_RE = lazy.LazyPattern(r"\$(?:[1-9@*#]|\{(?:[=~^]|\([^)]*\))*[#!]?(?:[1-9][0-9]*|[@*#])(?![A-Za-z0-9_]))|\bargv\b")
 # What reads the parameters with no reference to them: a loop that walks them with no list of its own (`for f; do`),
 # `getopts` and zsh's `zparseopts`, which parse them, and zsh's `argv`, which is them by name.
-READS_RE = re.compile(r"\b(?:for|select|foreach)\s+(?!in\b)[A-Za-z_]\w*+(?:\s+(?!in\b)[A-Za-z_]\w*+)*\s*(?:;|\{|\bdo\b)"
+READS_RE = lazy.LazyPattern(r"\b(?:for|select|foreach)\s+(?!in\b)[A-Za-z_]\w*+(?:\s+(?!in\b)[A-Za-z_]\w*+)*\s*(?:;|\{|\bdo\b)"
                       r"|(?:^|[\s;&|({!])(?:getopts|zparseopts)(?=[\s;&|)}]|\Z)|\bargv\b")
 # What moves them before a reference reads them, or holds a reference the substitution does not follow: `shift` and
 # `set`, a function defined inside the body (whose own call's they are there), and a here-document.
-MOVES_RE = re.compile(r"(?:^|[\s;&|({!])(?:shift|set)(?=[\s;&|)}]|\Z)"
+MOVES_RE = lazy.LazyPattern(r"(?:^|[\s;&|({!])(?:shift|set)(?=[\s;&|)}]|\Z)"
                       r"|\bfunction\s|(?:^|[\s;&|({])[^\s;&|(){}<>'\"=$`]*\(\s*\)|<<(?!<)")
 # The most bodies of one function name a line reads with the words set, one per call's words (analyse.read_shell_name):
 # a body that calls functions with words of its own reads each of those once per words, so a profile could multiply the
@@ -62,13 +63,13 @@ MOVES_RE = re.compile(r"(?:^|[\s;&|({!])(?:shift|set)(?=[\s;&|)}]|\Z)"
 # (SPD-212, walk.walk_line): past it such a line's bodies are read once more on input the line does not spell.
 READINGS_PER_NAME = 8
 _SEPARATORS = " \t\n;&|()<>"  # what ends a word unquoted, and before a `#` opens a comment (prepare._COMMENT_AFTER)
-_NUMBER_RE = re.compile(r"[1-9][0-9]*\Z")
-_TEST_RE = re.compile(r"([1-9][0-9]*)(:?[-+])(.*)\Z", re.S)  # `${1-w}`, `${1:-w}`, `${1+w}`, `${1:+w}`
-_ALL_OR_RE = re.compile(r"([@*]):-(.*)\Z", re.S)  # `${@:-.}`: the words, or the alternative for none
-_SLICE_RE = re.compile(r"([@*]):([1-9][0-9]*|\$#)(?::([0-9]+|\$#))?\Z")  # `${@:2}`, `${@:$#}`, `${*:2:1}`
-_COUNT_RE = re.compile(r"\$\{#\}|\$#(?![A-Za-z0-9_{\[@*#?!$-])")
-_AFTER_COUNT = re.compile(r"[A-Za-z0-9_{\[@*#?!$-]")  # after `$#`: zsh's `$#name`, a length, and not the count
-_MODIFIER_RE = re.compile(r"\[|:[A-Za-z&]")  # after a bare `$1`, `$@` or `$*`: zsh's subscript or modifier
+_NUMBER_RE = lazy.LazyPattern(r"[1-9][0-9]*\Z")
+_TEST_RE = lazy.LazyPattern(r"([1-9][0-9]*)(:?[-+])(.*)\Z", re.S)  # `${1-w}`, `${1:-w}`, `${1+w}`, `${1:+w}`
+_ALL_OR_RE = lazy.LazyPattern(r"([@*]):-(.*)\Z", re.S)  # `${@:-.}`: the words, or the alternative for none
+_SLICE_RE = lazy.LazyPattern(r"([@*]):([1-9][0-9]*|\$#)(?::([0-9]+|\$#))?\Z")  # `${@:2}`, `${@:$#}`, `${*:2:1}`
+_COUNT_RE = lazy.LazyPattern(r"\$\{#\}|\$#(?![A-Za-z0-9_{\[@*#?!$-])")
+_AFTER_COUNT = lazy.LazyPattern(r"[A-Za-z0-9_{\[@*#?!$-]")  # after `$#`: zsh's `$#name`, a length, and not the count
+_MODIFIER_RE = lazy.LazyPattern(r"\[|:[A-Za-z&]")  # after a bare `$1`, `$@` or `$*`: zsh's subscript or modifier
 # In a word bash splits or globs where it stands unquoted, as zsh does not: a blank, a `"$NAME"` the line quoted (its
 # value), or a glob character the line quoted.
 _SPLIT_CHARS = frozenset(" \t\n" + syntax._QUOTED_NAME + "".join(syntax._GLOB_SENTINELS[c] for c in "*?["))

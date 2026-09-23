@@ -3,25 +3,20 @@
 One pass per step analyse_command takes before shlex, each reading the quotes the one before it wrote and the same
 substitution spans, and shell/heredocs prepares the text it asks about with the same steps: kept whole past the ~250-line
 mark (the spudlib-modules size rule), where a module of its own for the ANSI-C pass (SPD-202) would put one more file on
-every hook run's import path for three functions that read the others' spans."""
+every hook run's import path for two functions that read the others' spans.  The decoder of a `$'...'` string's value is
+hooks/snapshots.ansi_c_value, beside the alias reading that needs it too, so a command loading snapshots loads no shell/
+module (SPD-216)."""
 
 import re
 
 from . import syntax
-from ..hooks import hookio
+from ..hooks import hookio, snapshots
 
 
 # What a quoted or escaped character becomes: a glob metacharacter's sentinel, or a shell operator character's, so a
 # quoted `;` or `(` stays in its word instead of reaching the walk as the operator.
 _QUOTED_SENTINELS = dict(syntax._GLOB_SENTINELS, **syntax._PUNCT_SENTINELS)
 
-# The escapes zsh 5.9 and bash 3.2 both decode inside `$'...'`, each to the one character it names, beside a code of one to
-# three octal digits or of `x` and one or two hex digits (ansi_c_value).  Probed through tests/probes/shell_probe.py
-# (AnsiCQuotingTest has what each printed): they part on every other escape -- `\u` and `\U`, which bash 3.2 keeps as
-# text, `\c`, an unknown letter, whose backslash zsh drops and bash keeps, a bare `\x`, a backslash-newline -- and on NUL.
-_ANSI_C_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
-                   "\\": "\\", "'": "'", '"': '"', "?": "?"}
-_ANSI_C_CODE_RE = re.compile(r"([0-7]{1,3})|x([0-9A-Fa-f]{1,2})")
 _ANSI_C_PAIR_RE = re.compile(r"\\(.)", re.S)
 _COMMENT_AFTER = " \t\n;&|()<>"  # before a `#` that opens a comment, as newlines_as_separators reads one
 
@@ -58,34 +53,6 @@ def ansi_c_end(text, i):
     return n
 
 
-def ansi_c_value(body):
-    """The text `$'body'` stands for, where zsh and bash decode every escape in it alike (_ANSI_C_ESCAPES), or None where
-    they part, or where a code is NUL or past 0x7f, one byte of a character a command line held as text cannot spell."""
-    if "\\" not in body:
-        return body
-    out, i, n = [], 0, len(body)
-    while i < n:
-        c = body[i]
-        if c != "\\":
-            out.append(c)
-            i += 1
-            continue
-        escape = body[i + 1 : i + 2]
-        if escape and escape in _ANSI_C_ESCAPES:
-            out.append(_ANSI_C_ESCAPES[escape])
-            i += 2
-            continue
-        m = _ANSI_C_CODE_RE.match(body, i + 1)
-        if m is None:
-            return None
-        code = int(m.group(1), 8) if m.group(1) else int(m.group(2), 16)
-        if not 0 < code < 0x80:
-            return None
-        out.append(chr(code))
-        i = m.end()
-    return "".join(out)
-
-
 def _hex_apostrophe(m):
     return "\\x27" if m.group(1) == "'" else m.group()
 
@@ -96,7 +63,7 @@ def ansi_c_quotes(text):
     unquoted `${ }` too; a backslash escapes the next character there, so `\\'` does not end it, and shlex, which reads it as
     plain single quotes, ended it there: `echo $'\\'' ; git push ; echo \\'` read as one echo while both shells pushed.  So:
 
-    - a string both shells decode alike (ansi_c_value) becomes its value in single quotes, a literal, which every reading
+    - a string both shells decode alike (hooks/snapshots.ansi_c_value) becomes its value in single quotes, a literal, which every reading
       after this one reads as the word the shells pass (a command word, a git verb, a write target, eval's text);
     - one whose escapes they decode apart keeps its `$'`, the text the hook does not decode that neutralize_quoted_globs
       marks, with each escaped apostrophe spelled `\\x27`, the same character, so that it holds no `'` but its closer;
@@ -130,7 +97,7 @@ def ansi_c_quotes(text):
         elif text.startswith("$'", i) and not in_double:
             end = ansi_c_end(text, i + 2)
             body = text[i + 2 : end]
-            value = ansi_c_value(body) if end < n else None
+            value = snapshots.ansi_c_value(body) if end < n else None
             if value is not None:
                 out.append("'" + value.replace("'", "'\\''") + "'")
             else:

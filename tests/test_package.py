@@ -302,6 +302,16 @@ class HookPathTest(SpudTestCase):
             seen |= ours
         self.assertEqual(seen, HOOK_PATH)  # the list stays exact: a module no hook imports any more leaves it
 
+    def test_a_command_imports_no_module_of_the_shell_package(self):
+        # Every command loads commands/doctor, and so hooks/snapshots: its ANSI-C decoder sat in shell/prepare, and every
+        # `spud` run -- each `member log` a spudagent makes -- paid for shell/prepare and shell/syntax (SPD-202, SPD-216).
+        proc = subprocess.run([sys.executable, "-I", "-S", "-c", MODULES_AT_EXIT, str(SPUD), "board"],
+                              capture_output=True, text=True, env=self.home.env)
+        self.assertEqual(proc.returncode, 0, proc)
+        imported = proc.stderr.rsplit("\nMODULES ", 1)[-1].split()
+        self.assertIn("spudlib.hooks.snapshots", imported)
+        self.assertEqual([m for m in imported if m.startswith("spudlib.shell")], [])
+
 
 if __name__ == "__main__":
     unittest.main()
