@@ -218,3 +218,27 @@ def deglob(text):
     if not text:
         return text
     return syntax._GLOB_SENTINEL_RE.sub(lambda m: syntax._SENTINEL_TEXT[m.group()], text)
+
+
+# What requoted escapes: each character that ends a word or changes the reading around it wherever it stands unquoted and
+# that a word can hold with no sentinel of its own -- shlex's blanks, both quotes and the backslash, a backtick (which
+# split_substitutions would lift as a body) and `#` (which opens a comment at a word's start in newlines_as_separators).  A
+# newline is single-quoted instead, since newlines_as_separators joins a backslash-newline's lines.
+_REQUOTE = str.maketrans({**{c: "\\" + c for c in " \t\r'\"\\`#"}, "\n": "'\n'"})
+
+
+def requoted(word):
+    """Shell text the reading turns back into exactly this masked word, for text the hook reads again with words it has
+    already tokenized set into it: the body of an alias followed by the words the line spelled after the alias's name,
+    whether the Bash tool's shell holds the alias (expansions.shell_aliased) or the line defined it for eval
+    (analyse.dispatch_words) -- SPD-201.  The shell expands an alias textually, before it parses the words after it, so
+    they keep their quotes: `gc -m "don't"` runs `git commit --verbose -m "don't"`, and a quoted word holding blanks, `;`,
+    `>`, a newline, `$( )` or backticks stays one word (probed through tests/probes/shell_probe.py, AliasWordsTest).
+    Joined raw, with their quotes gone, the words read as a line the hook could not tokenize, or as more words and more
+    commands than the shell runs.  A reading that hands tokenized words to text a program joins them into itself (eval's
+    words, `npm explore`'s) joins them raw, as that program does.
+
+    The sentinels stay as they are, so a quoted glob or operator character stays quoted and a literal dollar literal, and
+    what the line left active -- an unquoted glob, a `$NAME`, a lifted substitution -- stays active; only the characters
+    that carry no sentinel are escaped.  An empty word is `''`, which shlex keeps as a word."""
+    return word.translate(_REQUOTE) if word else "''"

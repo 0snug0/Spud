@@ -150,12 +150,13 @@ def shell_aliased(words, a):
 
     A shell expands an alias where it parses the command word, textually and before any rule reads it, so the body and
     the words after it are analysed as the text the shell would have parsed -- `gc -m x` is `git commit --verbose -m x`
-    and earns Law 7's own refusal.  When the body ends in a blank the next word is expanded too (zsh's chaining rule,
-    `_='sudo '`), and a name is not expanded again while its own expansion is in flight, which is what stops
-    `alias ls='ls -G'`.  A word the line quoted or escaped (`\\gp`, `'gp'`) reaches this with its quotes already taken
-    and is expanded all the same: that is fail-closed -- the name it spells is no program -- and telling the two apart
-    would need a mark inside the command word that every reading by name would then have to strip (the expansion check makes
-    the same choice for `'$X' push`)."""
+    and earns Law 7's own refusal -- each of those words quoted again as the line spelled it (prepare.requoted, SPD-201):
+    `gc -m "don't"` is one message, not a quote that never closes.  When the body ends in a blank the next word is
+    expanded too (zsh's chaining rule, `_='sudo '`), and a name is not expanded again while its own expansion is in
+    flight, which is what stops `alias ls='ls -G'`.  A word the line quoted or escaped (`\\gp`, `'gp'`) reaches this
+    with its quotes already taken and is expanded all the same: that is fail-closed -- the name it spells is no program --
+    and telling the two apart would need a mark inside the command word that every reading by name would then have to
+    strip (the expansion check makes the same choice for `'$X' push`)."""
     found = snapshots.shell_table(a.home)
     if not found.aliases:  # a machine with no snapshot, and every scratch home the suite builds: nothing to read
         return None, [], [], None
@@ -174,8 +175,8 @@ def shell_aliased(words, a):
         i += 1
     if not expanded:
         return None, [], [], None
-    own_words = [prepare.deglob(w) for w in words[i:]]
-    return " ".join(out + own_words), own_words, expanded, None
+    text = " ".join(out + [prepare.requoted(w) for w in words[i:]])
+    return text, [prepare.deglob(w) for w in words[i:]], expanded, None
 
 
 def shell_function(name, a):

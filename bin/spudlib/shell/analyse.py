@@ -294,11 +294,12 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         a.findings.append(("env-function", prepare.deglob(cmd.partition("=")[0])))
     if a.alias_scope and command_position:
         # Inside `eval`, a command word the line aliased runs the alias's body, not a command of its own.  The body
-        # is read as the shell text it is, with its own quotes and the words after it, as eval's rejoined words are.
+        # is read as the shell text it is, with its own quotes, as eval's rejoined words are, and the words after it as
+        # eval's text spells them, quotes and all: the shell parses them after the body (SPD-201, prepare.requoted).
         body, doubtful = expansions.alias_substitution(cmd, a)
         if body is not None or doubtful:
             if body is not None:
-                rest = " ".join(prepare.deglob(w) for w in words[1:])
+                rest = " ".join(prepare.requoted(w) for w in words[1:])
                 analyse_command(body + (" " + rest if rest else ""), a, depth + 1)
             else:
                 a.kinds.append("other")

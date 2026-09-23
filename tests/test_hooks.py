@@ -14734,13 +14734,20 @@ class UnreadableLineTest(ShellSnapshotCase):
         reason = self.assertRefused("echo 'a $(b) c", UNREADABLE).reason
         self.assertIn("`'a $(b) c`", reason)
 
-    def test_an_alias_expansion_the_hook_cannot_read_is_refused_to_a_member(self):
-        """The words after an alias of the shell's are read again after its body without their quotes, so `gc -m "don't"`
-        (the snapshot's `git commit --verbose`) read as unparseable and a member's commit passed.  The line is refused now,
-        and the reason says the text is the alias's."""
+    def test_an_alias_expansion_reads_the_words_after_it_with_their_quotes(self):
+        """The words after an alias of the shell's were read again after its body without their quotes, so `gc -m
+        "don't"` (the snapshot's `git commit --verbose`) read as unparseable: a member's commit passed before this ticket,
+        and was refused to every caller, Spud included, as a line the hook cannot read.  SPD-201 reads each word as the shell
+        passes it (AliasWordsTest): the commit is Law 7's for a member and nothing for Spud.  Text the shell itself holds
+        that the hook cannot tokenize -- here a function whose `$'it\\'s'` shlex reads as an open quote -- still earns the
+        reason, which says the text is the shell's."""
         line = "gc -m \"don't\""
-        r = self.refused_for_members(line, UNREADABLE)
+        self.assertIn("git commit", self.refused_for_members(line, "Law 7").reason)
+        self.assertSilent(line, agent_id=None)
+        self.write_snapshot("snapshot-zsh-1700000000003-dddddd.sh", "ansi () {\n\techo $'it\\'s'\n}\n")
+        r = self.refused_for_members("ansi", UNREADABLE)
         self.assertIn("in the text an alias or function of your shell runs", r.reason)
+        self.assertRefused("ansi", UNREADABLE, agent_id=None)
 
     # -- what stays as it was -----------------------------------------------------------------------------------------
     def test_a_line_the_hook_reads_is_answered_as_before(self):
@@ -14760,6 +14767,115 @@ class UnreadableLineTest(ShellSnapshotCase):
         self.assertAllowed("%s --as spud board" % self.spud_cli, agent_id=None)
         self.assertRefused("%s --as %s member log \"it's done" % (self.spud_cli, AGENT_A), UNREADABLE)
         self.assertRefused("%s --as spud board 'x" % self.spud_cli, UNREADABLE, agent_id=None)
+
+
+def single_quoted(text):
+    """The text as one single-quoted shell word, an apostrophe in it spelled '\\''."""
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+class AliasWordsTest(ShellSnapshotCase):
+    """SPD-201, filed by SPD-191's engineer: read_shell_name read an alias of the Bash tool's shell as its body followed by
+    the words the line spelled after it, joined again after their quotes were taken off, so a quoted word read as other
+    words.  `gc -m "don't"` (the snapshot's `git commit --verbose`) read as a line the hook cannot tokenize: a member's
+    commit passed before SPD-191, and the line was refused to every caller after it, Spud included.  A quoted word holding
+    blanks, an operator, a newline, a `$( )` or backticks read as more words or more commands than the shell runs: `ll "x;
+    git push"` was Law 7's, `ll "x; echo hi > tests/kept.txt"` refused Spud under Law 1 for a write no shell makes, and `md
+    "tests/a b"` wrote `b`.  The line aliases eval expands (SPD-059, SPD-105) joined their words the same way.
+
+    The rule now: each word after the name reaches the body's reading as the shell passes it (prepare.requoted), its
+    quoted characters still quoted and what the line left active -- a glob, a `$NAME`, a substitution -- still active, so
+    the reading behind an alias is the reading of the same words spelled after its body.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, and in GNU bash 3.2.57 with `shopt -s expand_aliases`, which printed the same: with `alias show='printf
+    "<%s>\\n"'` defined on a line before, `show "a b" 'c;d' "don't" '$(touch r1)' 'x`touch r2`' '#h' '' "e<newline>f" 'g >
+    r3' "h\\\\i" x\\ y` printed each word whole on a row of its own (`<a b>`, `<c;d>`, `<don't>`, `<$(touch r1)>`,
+    `<x`touch r2`>`, `<#h>`, `<>`, `<e<newline>f>`, `<g > r3>`, `<h\\i>`, `<x y>`) and wrote none of r1, r2 and r3; `alias
+    chain='show '; chain show 'j;touch r4'` passed `j;touch r4` as one word; and `alias show2='printf "[%s]\\n"'; eval
+    'show2 "a b" "c;touch r5" "don'\\''t" "" "#k" '\\''$(touch r6)'\\'''` printed `[a b]`, `[c;touch r5]`, `[don't]`, `[]`,
+    `[#k]` and `[$(touch r6)]` and wrote nothing.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    # Words a line may spell after an alias, each read as the same words spelled after the alias's body
+    WORDS = ("\"don't\"", "'a b'", "'a;b'", "\"a > b\"", "'a\nb'", "'$(x)'", "'`x`'", "'#h' 'a b'", "''", "\"h\\\\i\"",
+             "x\\ y", "'*'", "'$HOME/x'", "\"$HOME/x\"", "$HOME/x", "$'a b'", "\"a'b\\\"c\"", "'{a,b}'", "\\#x 'a b'",
+             "'a\tb'", "'a\rb'", "$(echo x)", "\"$(echo 'x y')\"", "\\; git\\ push", "a*b", "tests/{a,b}", "(a|b)/x",
+             "x(a|b)", "<1-3>/x", "$((1+2))", "<(echo x) y", "\"${(e)X}\"")
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "tests" / "kept.txt").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def reading(self, command):
+        """What the analysis of this line reads that a refusal rests on: whether it could tokenize it, the findings that are
+        more than "the hook cannot read a word" (which the text an alias runs does not keep), and the files it writes."""
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            a = self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+        return (a.unparseable, [f for f in a.findings if f[0] not in self.m.SHELL_TEXT_TOLERATED],
+                [(e[0], e[1]) for e in a.arg_writes], [r[0] for r in a.redirects], [(g[0], g[1]) for g in a.git_writes])
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_a_commit(self):
+        for line in ("gc -m \"don't\"", "gc -m 'it'\\''s'", "gc -m it\\'s", "gp origin \"don't\"", "_ gc -m \"don't\""):
+            with self.subTest(line=line):
+                self.assertIsNone(self.reading(line)[0])
+                self.assertIn("git ", self.refused_for_members(line, "Law 7").reason)
+                self.assertSilent(line, agent_id=None)
+        self.assertEqual(self.reading("gc -m \"don't\"")[1], [("git", ("commit", "commit"))])
+
+    def test_a_quoted_word_with_an_operator_stays_one_word(self):
+        """`;`, `&&`, `|`, `>`, a newline, `$( )` and backticks inside quotes, and an escaped `;`, are characters of the
+        word, which `ls` is handed; before, each ran a command or opened a file of its own."""
+        for line in ("ll \"x; git push\"", "ll 'x && git push'", "ll 'x | git push'", "ll \"x\ngit push\"", "ll '$(git push)'",
+                     "ll 'x`git push`'", "ll \\; git\\ push", "ll \"x; echo hi > note.txt\"", "ll 'x > note.txt'",
+                     "ll \"x; echo hi > tests/kept.txt\"", "gp origin 'x; echo hi > tests/kept.txt'"):
+            with self.subTest(line=line):
+                if line.startswith("gp"):
+                    self.refused_for_members(line, "Law 7")
+                    self.assertSilent(line, agent_id=None)
+                else:
+                    self.silent_for_everyone(line)
+        self.assertEqual((self.home.path / "tests" / "kept.txt").read_text(encoding="utf-8"), "orig\n")
+
+    def test_a_quoted_word_with_blanks_stays_one_word(self):
+        for line in ("md \"tests/a b\"", "md 'tests/a b'", "md tests/a\\ b", "md 'tests/a\tb'", "_ md \"tests/a b\""):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A)
+                self.assertSilent(line, AGENT_B)
+                self.assertRefused(line, "Law 1", agent_id=None)  # a member's deliverable
+        self.assertEqual(self.reading("md \"tests/a b\"")[2], [("mkdir", "tests/a b")])
+        self.refused_for_members("md \"tests/a b\" b", "deliverables")  # a word of its own is still one
+
+    # -- every word reads as it does after the body spelled out ---------------------------------------------------------
+    def test_the_words_read_as_they_do_after_the_body_spelled_out(self):
+        for alias, body in (("md", "mkdir -p"), ("gc -m", "git commit --verbose -m"), ("_ md", "sudo mkdir -p")):
+            for words in self.WORDS:
+                with self.subTest(alias=alias, words=words):
+                    self.assertEqual(self.reading("%s %s" % (alias, words)), self.reading("%s %s" % (body, words)))
+
+    def test_a_line_alias_eval_expands_reads_its_words_the_same_way(self):
+        """SPD-059's alias table, read where eval parses its words again: the words after the name are the eval text's
+        own, which the shell parses after the body with their quotes, as the probe's `show2` shows."""
+        for words in self.WORDS:
+            with self.subTest(words=words):
+                aliased = "alias mk='mkdir -p'; eval %s" % single_quoted("mk " + words)
+                spelled = "alias mk='mkdir -p'; eval %s" % single_quoted("mkdir -p " + words)
+                self.assertEqual(self.reading(aliased), self.reading(spelled))
+        line = "alias gp='git push'; eval %s" % single_quoted("gp origin \"don't\"")
+        self.assertIsNone(self.reading(line)[0])
+        self.refused_for_members(line, "Law 7")
+        self.assertSilent(line, agent_id=None)
+        for words in ("\"x; git push\"", "'x > note.txt'", "\"x\ngit push\""):
+            with self.subTest(words=words):
+                self.silent_for_everyone("alias e=echo; eval %s" % single_quoted("e " + words))
+        line = "alias mk='mkdir -p'; eval %s" % single_quoted("mk \"tests/a b\"")
+        self.assertSilent(line, AGENT_A)
+        self.assertRefused(line, "Law 1", agent_id=None)
 
 
 # =============================================================================
