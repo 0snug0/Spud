@@ -4,22 +4,25 @@ import os
 import sqlite3
 import sys
 
-from . import ghread, homesync, prcmds, publish, settings_sync, vaultlock
+from . import ghread, homesync, logread, prcmds, publish, settings_sync, vaultlock
 from ..core import homeconf, kernel, launchagents, shipped
 from ..hooks import gitrepos, hookio, snapshots, worktrees
 from ..projects import agentdef, install, sessions
 from ..render import prices
 from ..state import actors, backup, ledgerdb, lookup, schema
 
-WATCHER_DOWN = ("the render watcher %s is installed but not running: the vault is stale until `spud --as spud schedule install` reloads it"
-                % launchagents.RENDER_LABEL)
+# Both watcher problems name the log (SPD-118): the hooks refuse a shell command naming .spud/, so `spud logs render` is how a
+# session reads how the last run ended -- render.log.1 once the next run has started -- or what a stuck one keeps logging.
+WATCHER_LOG = "`spud logs render` shows its log"
+WATCHER_DOWN = ("the render watcher %s is installed but not running: the vault is stale until `spud --as spud schedule install` reloads it;"
+                " %s, the last run's end included" % (launchagents.RENDER_LABEL, WATCHER_LOG))
 # The vault behind the ledger by more than a render takes, which a watcher running and stuck leaves behind exactly
 # as a watcher that is down does.  The state of the vault, not of a process, so it is a problem either way.
 VAULT_BEHIND = "the vault is behind the ledger"
 RENDER_BEHIND = VAULT_BEHIND + " by %s, the oldest %s (a render lands within seconds of an event): `spud render` brings it up to date"
 # A watcher holding its lock and rendering nothing is stale for the same reason a down one is, and reloads the same way;
 # one command settles the vault now, the other the watcher that should have settled it.
-RENDER_BEHIND_STUCK = RENDER_BEHIND + ", and `spud --as spud schedule install` reloads the watcher that is running and not rendering"
+RENDER_BEHIND_STUCK = RENDER_BEHIND + ", and `spud --as spud schedule install` reloads the watcher that is running and not rendering; " + WATCHER_LOG
 # doctor's render line for each of the four states core/launchagents reports; the lag phrase follows it.
 WATCHER_TEXT = {"absent": "not installed", "down": "installed, not running", "current": "running", "behind": "running"}
 # A home with an empty registry is a working home -- the schema allows it and `spud init --no-project` makes one
@@ -466,7 +469,8 @@ def doctor_render(ctx, problems, notes):
     far behind the ledger the vault is, then every rendered file whose on-disk text is neither the last render's nor the
     current one, each with the two commands that settle it.  A watcher installed and not running is a problem and one never
     installed is a note, as before; a vault behind past launchagents.RENDER_LAG_SECONDS is a problem of its own, raised
-    whether or not a watcher holds the lock, because what is stale then is the vault and one `spud render` settles it."""
+    whether or not a watcher holds the lock, because what is stale then is the vault and one `spud render` settles it.
+    A watcher down, or running and stuck, names `spud logs render` (SPD-118), and `log` carries render.log and render.log.1."""
     con = ledgerdb.connect(ctx)
     try:
         watcher = launchagents.watcher_report(ctx, con)
@@ -483,4 +487,5 @@ def doctor_render(ctx, problems, notes):
         problems.append(shape % (launchagents.behind_text(lag), kernel.ago_text(lag["seconds"])))
     for rel in conflicts:
         problems.append("hand-edited %s: accept it with `spud --as spud import --file %s`, or overwrite it with `spud --as spud render --discard %s`" % (rel, rel, rel))
-    return {"watcher": WATCHER_TEXT[watcher["state"]], "state": watcher["state"], "lag": lag, "conflicts": conflicts}
+    return {"watcher": WATCHER_TEXT[watcher["state"]], "state": watcher["state"], "lag": lag, "conflicts": conflicts,
+            "log": [str(p) for p in logread.render_files(ctx)]}

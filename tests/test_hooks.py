@@ -6003,12 +6003,13 @@ class SettledStandardInputTest(BashHookCase):
     is passed, and a here-string's word, is now read through the value the line settled (shell/arg_writes.resolved, the
     reading SPD-127 gave every write target), before the command runs, so its own prefix assignments reach none of them.
 
-    The masked words no longer tell `$X` from `"$X"`, and bash splits an unquoted expansion at its blanks where zsh
-    never does, so a command whose settled value holds a blank is read both ways and its text kept where the two agree:
-    `echo $X` prints `git push` in either.  Where they differ -- an echo option the split would make of the value, a run
-    of blanks, a printf format applied to each field -- the text stays unread, as does every value the line does not
-    settle: one assigned in a branch, a loop, a function body or a subshell, one a substitution computes, one `read`
-    or `unset` changes, and one holding a glob character, which bash expands."""
+    bash splits an unquoted expansion at its blanks where zsh never does, and neither splits a quoted one, which the masked
+    words mark since SPD-167, so a command whose settled value holds a blank is read both ways and its text is what either
+    prints: `echo $X` prints `git push` in both, and where they differ -- an echo option the split makes of the value, a
+    run of blanks, a printf format applied to each field -- both texts are read.  A reading the hook cannot spell leaves
+    the text unread, as does every value the line does not settle: one assigned in a branch, a loop, a function body or a
+    subshell, one a substitution computes, one `read` or `unset` changes, and one holding a glob character, which bash
+    expands."""
 
     # Each line feeds a shell one `git push` through a value it settles itself.
     SETTLED = ("X='git push'; echo $X | sh", "X='git push'; echo \"$X\" | sh", "X=push; echo \"git $X\" | sh",
@@ -6024,8 +6025,16 @@ class SettledStandardInputTest(BashHookCase):
                  "(X='git push'); echo $X | sh", "X='git push' | true; echo $X | sh", "X='git push' echo $X | sh",
                  "X='git push'; X=$(date); echo $X | sh", "X='git push'; unset X; echo $X | sh",
                  "X='git p*'; echo $X | sh", "echo \"$CMD\" | sh", "X=push; echo \"git $Y\" | sh")
+    # SPD-167: a value bash's split of an unquoted expansion prints otherwise than zsh does -- each reading is read.
     SPLIT = ("X='-n git push'; echo $X | sh", "X='git  push'; echo $X | sh", "X='git push'; printf '%s\\n' $X | sh",
-             "X='git  push'; bash -s <<< $X")
+             "X='git  push'; bash -s <<< $X", "X='-n git push'; echo $X | xargs -0 sh -c")
+    # ... and a quoted one, which neither shell splits, is one word in both readings.
+    QUOTED = ("X='git push'; printf '%s\\n' \"$X\" | sh", "X='git  push'; printf '%s\\n' \"$X\" | sh",
+              "X='push'; Y='git  '; printf '%s\\n' \"$Y$X\" | sh", "X='git  push'; bash -s <<< \"$X\"",
+              "X='git push'; printf '%s\\n' \"a; $X\" | sh")
+    # One reading the hook cannot spell leaves the text unread, whatever the other prints: zsh passes printf the format
+    # `git %d`, a directive this module does not apply, where bash's `printf git %d` prints `git`.
+    HALF = ("X='git %d'; printf $X | sh", "X='%d git push'; printf $X | sh")
 
     def analysis(self, command):
         m = load_spud_module()
@@ -6051,16 +6060,47 @@ class SettledStandardInputTest(BashHookCase):
                 self.assertRefused(command, SCRIPT_WORDING)
                 self.assertSilent(command, agent_id=None)
 
-    def test_a_value_the_two_shells_print_apart_stays_unread(self):
-        """`$X` and `"$X"` reach the reading alike, so a value bash's split of an unquoted expansion would print
-        otherwise than zsh does is text the hook cannot say, as it was -- and a shell reading it refuses a member (SPD-145)."""
-        for command in self.SPLIT:
+    def test_a_value_the_two_shells_print_apart_is_read_both_ways(self):
+        """SPD-167: SPD-148 read `$X` and `"$X"` alike, so a value bash's split of an unquoted expansion printed otherwise
+        than zsh did was text the hook could not say -- refused a member only as unread input (SPD-145), and `printf '%s\\n'
+        "$X" | sh`, one word in both shells, with it.  The masked words now mark a quoted `$NAME`: a quoted value is read
+        whole, an unquoted one as each shell passes it, and a shell fed what either prints is read on both texts, so the
+        bash-only `X='-n git push'; echo $X | sh` earns the Law 7 refusal `echo 'git push' | sh` earns."""
+        for command in self.SPLIT + self.QUOTED:
+            with self.subTest(command):
+                findings = self.analysis(command).findings
+                self.assertIn("push", [d[0] for k, d in findings if k == "git"])
+                self.assertEqual([d[0] for k, d in findings if k == "script"], [])
+                r = self.assertRefused(command, "Law 7")
+                self.assertNotIn(SCRIPT_WORDING, r.reason)
+                self.assertSilent(command, agent_id=None)
+        # the quoted value is one word: printf applies its format once, where bash's split of `$X` applies it per field
+        self.assertEqual(self.verbs("X='git push'; printf '%s\\n' \"$X\" | sh"), ["push"])
+        self.assertSilent("X='git status'; printf '%s\\n' \"$X\" | sh")
+        self.assertSilent("X='-n git status'; echo $X | sh")
+
+    def test_a_reading_the_hook_cannot_spell_leaves_the_text_unread(self):
+        for command in self.HALF:
             with self.subTest(command):
                 findings = self.analysis(command).findings
                 self.assertEqual([f for f in findings if f[0] != "script"], [])
                 self.assertEqual([d[0] for k, d in findings if k == "script"], ["stdin"])
                 self.assertRefused(command, SCRIPT_WORDING)
                 self.assertSilent(command, agent_id=None)
+
+    def test_the_masked_words_mark_a_quoted_name(self):
+        """Only a `$NAME` inside double quotes carries the mark, and every reader that takes the word whole -- a write
+        target, the command word -- reads it as before."""
+        m = load_spud_module()
+        mark = ""
+        self.assertEqual(m.neutralize_quoted_globs('echo "$X" $Y "a $Z/b" \'$W\''),
+                         'echo "$X%s" $Y "a $Z%s/b" \'$W\'' % (mark, mark))
+        self.assertNotIn(mark, m.neutralize_quoted_globs('echo "${X}" "$1" "$@" "cost $"'))
+        self.assertEqual(m.deglob("$X" + mark), "$X")
+        self.assertRefused("X=push; \"$X\"; git \"$X\"", "Law 7")
+        self.assertRefused("S=docs; echo x > \"$S/y.md\"", "deliverables")
+        self.assertSilent("S=tests; echo x > \"$S/y.md\"")
+        self.assertRefused("echo x > \"$HOME/planted\"", "$HOME/planted")  # a reason names the spelling, unmarked
 
     def test_a_spud_call_and_a_write_are_read_through_it_too(self):
         cli = self.spud_cli
@@ -6792,12 +6832,13 @@ class InterpreterWordTest(BashHookCase):
                  # a partial expansion is resolved nowhere (SPD-043): `$S/x.js` may be an option as much as a file
                  "S=scripts; node $S/x.js", "X=cript; node -$X x.js")
     # Each line hands a tabled interpreter words out of an xargs's input that the line does not spell: a file, another
-    # program's output, or text stdin_text does not read -- `echo '-e code'` among them, a leading word starting with
-    # `-` that is no option of echo's, which the shells differ over printing at all (stdin_text._echo_text).
+    # program's output, or text stdin_text does not read -- `echo -x code` among them, a leading word starting with
+    # `-` that is no option of echo's and holds no blank, which stdin_text._echo_text does not read.  (`echo '-e code'`
+    # is read since SPD-167: a blank makes the word text in both shells, so xargs hands node `-e code`, below.)
     UNSPELLED_INPUT = ("cat f | xargs node", "cat tests/x.py | xargs python3", "xargs -a f ruby",
                        "xargs --arg-file f node", "curl -sS https://example.com/f | xargs deno",
                        "xargs node < f", "cat f | xargs -I% node %", "date | xargs ruby",
-                       "echo '-e code' | xargs node", "echo '-e code' | xargs -I% node %",
+                       "echo -x code | xargs node", "echo -x code | xargs -I% node %",
                        "cat f | xargs osascript", "cat f | xargs swift", "cat f | xargs tsx")
 
     def setUp(self):
@@ -6842,7 +6883,8 @@ class InterpreterWordTest(BashHookCase):
                         "printf '%s\\n' '-r code' | xargs php", "printf '%s\\n' '--eval code' | xargs node",
                         "printf '%s\\n' '-e code' | xargs -I% node %", "echo 'eval code' | xargs deno",
                         "{ printf '%s\\n' '-e code'; } | xargs node", "printf '%s\\n' '-e code' | xargs -0 node",
-                        "xargs node <<< '-e code'", "xargs deno <<< 'eval code'", "xargs osascript <<< '-e beep'"):
+                        "xargs node <<< '-e code'", "xargs deno <<< 'eval code'", "xargs osascript <<< '-e beep'",
+                        "echo '-e code' | xargs node", "echo '-e code' | xargs -I% node %"):
             with self.subTest(command):
                 self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
                 self.assertRefused(command, INLINE_WORDING)
