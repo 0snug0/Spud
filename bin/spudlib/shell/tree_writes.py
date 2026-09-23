@@ -1,7 +1,7 @@
 """shell/tree_writes: the commands whose files land under a directory the line names but whose names it does not spell
-(SPD-126) -- an archive extracted, a patch applied, a tree synced or copied -- and the files the same commands name.
+-- an archive extracted, a patch applied, a tree synced or copied -- and the files the same commands name.
 
-Until SPD-126 none of them was read: `tar -xf a.tar -C out`, `unzip a.zip -d out`, `patch -p1 < x.patch`, `rsync -a src/
+None of them used to be read: `tar -xf a.tar -C out`, `unzip a.zip -d out`, `patch -p1 < x.patch`, `rsync -a src/
 dest/` and `ditto src dst` recorded no write at all, and `cp -R src dest` checked dest and dest/src and nothing under them,
 so a source tree holding a `.git` planted one wherever it landed.  Each command here is read on this Mac's grammar (its man
 page: bsdtar, Info-ZIP unzip, BSD patch, openrsync, ditto), and records a write anywhere under the directory its files land
@@ -9,15 +9,14 @@ in (arg_writes' kind "tree"), which the path rule lets a member make only where 
 (hooks/pathrule.glob_covers_directory).  What the line cannot place at all -- bsdtar's -P, which keeps absolute paths and
 `..`; unzip's `-:`, which keeps `../`; a list tar reads with -T; rsync's daemon; an option a substitution may hide -- is
 syntax.ANY_PATH, refused to a member as a target the hook cannot resolve.  The files these commands name on the line are
-read here too, since their grammar is: tar's archive under -c, -r and -u, and patch's file operand, -o, -r and backups (the
-second SPD-126 engineer's), rsync's --log-file and batch files, ditto -c's archive.  A download (curl, wget) is
-shell/downloads' reading.
+read here too, since their grammar is: tar's archive under -c, -r and -u, and patch's file operand, -o, -r and backups,
+rsync's --log-file and batch files, ditto -c's archive.  A download (curl, wget) is shell/downloads' reading.
 
 What rsync and ditto copy is walked for a git directory by shell/tree_walk, as cp -R's and mv's are, through the destination
 entry each records with arg_writes.RECURSIVE.  An archive's, a patch's or a download's names are not on disk to read, and
 are not walked: such a command may land a `.git` under the directory it writes into, which the tree reading cannot see.
 
-Past 250 lines (SPD-065's look-again point) it stays whole: it is a list of five grammars, each one short reader with its
+Past 250 lines (the package's look-again point) it stays whole: it is a list of five grammars, each one short reader with its
 table, and its one caller, the analysis, dispatches to all of them through read_tree_writes; the walk, which another caller
 wants alone, is the seam taken (shell/tree_walk), and so are the downloads, whose two grammars read files and trees alike
 (shell/downloads)."""
@@ -40,7 +39,7 @@ TAR_VALUE_LONGS = frozenset({
 TAR_MODES = {"-x": "x", "--extract": "x", "--get": "x", "-c": "c", "--create": "c", "-t": "t", "--list": "t", "-r": "r",
              "--append": "r", "-u": "u", "--update": "u"}
 TAR_CHDIR = ("-C", "--cd", "--directory")
-TAR_ARCHIVE_MODES = ("c", "r", "u")  # SPD-126: the modes that write the archive -f names
+TAR_ARCHIVE_MODES = ("c", "r", "u")  # the modes that write the archive -f names
 TAR_STDOUT = ("-O", "--to-stdout")  # x mode writes each entry to standard output, no file
 TAR_ANYWHERE = ("-P", "--absolute-paths", "-T", "-I", "--files-from")  # -P keeps `/` and `..`; -T's list may hold -C lines
 # unzip (Info-ZIP): the modes that write no file (-c, -p to standard output; -l, -v list; -t test; -z the comment), the
@@ -90,7 +89,7 @@ def read_tree_writes(cmd, base, words, a, depth):
     docstring); `cmd` is its command word as spelled, `base` what it dispatches on."""
     reader = {"tar": read_tar, "bsdtar": read_tar, "unzip": read_unzip, "patch": read_patch, "rsync": read_rsync,
               "ditto": read_ditto}[base]
-    # SPD-127's one reading of a variable: a `$NAME` the line settled is read as the option or the file it holds
+    # every write target's one reading of a variable: a `$NAME` the line settled is read as the option or file it holds
     reader(cmd, [arg_writes.resolved(w, a) for w in words[1:]], a, depth)
 
 
@@ -170,7 +169,7 @@ def names_of(options):
 def read_tar(cmd, args, a, depth):
     """bsdtar: x mode extracts every entry under the directory -C changes to (each -C relative to the one before it, as
     chdir(2) goes) or the line's own; -O writes none; -P, and a -T list, may put one anywhere.  --use-compress-program names
-    a program tar runs, read as a command.  SPD-126's second engineer: c, r and u modes write the archive -f names (or TAPE,
+    a program tar runs, read as a command.  c, r and u modes write the archive -f names (or TAPE,
     set on the line, when -f is not given; `-` is standard output), relative to the line's own directory: tar opens it
     before it adds a file, and -C "changes the directory before adding the following files" (tar(1)), so a -C before -f
     moves only what goes into the archive."""
@@ -253,7 +252,7 @@ def read_patch(cmd, args, a, depth):
     or not the line names one, since a patch file may hold several patches and only the first takes the file operand and
     -o (patch.c's reinitialize_almost_everything clears both, and each later patch names its own file); -C writes nothing;
     each -d changes directory from the one before it, as patch does when it reads the option; a -B backup prefix holding a
-    directory puts the backups under it.  SPD-126's second engineer: the file operand, or -o's file in its place, is
+    directory puts the backups under it.  The file operand, or -o's file in its place, is
     written as named, with its backup (patch_backups) and its reject file, -r's or <file>.rej (patch(1))."""
     options, operands, hidden = scan_options(args, PATCH_VALUE_LETTERS, PATCH_VALUE_LONGS, a, permute=True)
     names = names_of(options)

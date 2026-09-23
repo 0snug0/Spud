@@ -1,4 +1,4 @@
-"""commands/resumcmd: member resum.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""commands/resumcmd: member resum."""
 
 from pathlib import Path
 
@@ -6,8 +6,8 @@ from ..core import kernel
 from ..state import actors, ledgerdb, lookup, transcripts
 
 
-# member resum (SPD-023): a transcript sum stored before SPD-023 added every transcript entry; it is re-summed
-# once per API request from the member's transcript, merged through run_totals, its old figures kept in a
+# member resum: a transcript sum stored before sums counted each API request once added every transcript entry; it is
+# re-summed once per API request from the member's transcript, merged through run_totals, its old figures kept in a
 # member.edited event.  The events table's kinds are fixed by its CHECK constraint, so the re-sum is recorded
 # as the member edit it is rather than as a kind that would take a migration of the append-only table.
 RESUM_FIGURES = ("total_tokens", "tool_uses", "duration_ms")
@@ -17,8 +17,8 @@ RESUM_LEFT = ("not found", "ambiguous", "unreadable", "no usage")  # a sum witho
 
 def stored_counting(usage_json):
     """How a member's stored transcript sum was counted: "breakdown" (once per API request, with the per-model
-    breakdown, since SPD-013), "request" (once per request without it, from SPD-023 to SPD-013), "entry"
-    (before SPD-023, every transcript entry added) or "imported" (read back from a rendered note by the
+    breakdown that prices it), "request" (once per request without it, as sums were stored before the breakdown),
+    "entry" (the oldest sums, every transcript entry added) or "imported" (read back from a rendered note by the
     importer, with no transcript behind it); None when usage_json holds no transcript sum.  member resum
     re-sums "entry" and "request"."""
     stored, _ = transcripts.usage_parts(usage_json)

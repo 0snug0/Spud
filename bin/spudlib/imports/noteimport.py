@@ -1,4 +1,4 @@
-"""imports/noteimport: markdown-v0 ticket and member notes into rows.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""imports/noteimport: markdown-v0 ticket and member notes into rows."""
 
 import json
 import re
@@ -38,7 +38,7 @@ def store_prose_if_needed(con, entity, entity_id, section, text, rendered_from_r
     return True
 
 
-# The one table a note cannot rebuild: pull_requests (SPD-116).  A rendered ticket carries its landing pull request's
+# The one table a note cannot rebuild: pull_requests.  A rendered ticket carries its landing pull request's
 # number, its state and its URL, but not the head branch, the worktree, who recorded it or when it was last read -- and
 # a merged row whose ticket is already done renders no owed line at all, so the columns that make a row actionable are
 # exactly the ones the note drops.  A rebuilt row would claim a `pr record` and a `gh pr view` that never happened, and
@@ -49,7 +49,7 @@ def store_prose_if_needed(con, entity, entity_id, section, text, rendered_from_r
 
 def ticket_layout(fm_keys, section_names, parked=False):
     """The file's own key and section order, stored only where it differs from the template's.  The two parked
-    properties are in the template's order only while the ticket is parked (SPD-096), as `## Blocked` is on a member
+    properties are in the template's order only while the ticket is parked, as `## Blocked` is on a member
     note: a note that is not parked has neither, and still needs no layout of its own.  The two pull-request keys and
     ## Landing are never in either order, whatever the file had (the comment above); the caller drops them."""
     default = [k for k in kernel.TICKET_FM_KEYS
@@ -73,7 +73,7 @@ def require_keys(fm, keys, path):
             raise kernel.SpudError(kernel.EXIT_ERROR, "%s: frontmatter lacks %s" % (path, key))
 
 
-# SPD-160: migration 0006_owner_origin renamed the origin of a ticket the owner filed from 'eric' to 'owner'; a note
+# Migration 0006_owner_origin renamed the origin of a ticket the owner filed from 'eric' to 'owner'; a note
 # rendered before it still says 'eric', and imports as 'owner'.
 ORIGIN_READ = {"eric": "owner"}
 
@@ -119,7 +119,7 @@ def import_ticket_file(ctx, con, at, path, rel):
         brief=sections.get("Brief", ""), sizing=sections.get("Size, persona and model decision", ""),
         outcome=sections.get("Outcome", ""), tags=tags, heading=heading, created_at=fm["created"],
         number=int(m.group(2)), layout=ticket_layout(fm_keys, names, fm["status"] == "parked"),
-        # SPD-096: an export from before the parked status has neither key, so require_keys does not grow; the CHECKs
+        # An export from before the parked status has neither key, so require_keys does not grow; the CHECKs
         # of migration 0003_parked refuse one that says parked with no reason, which is the right refusal
         parked_until=fm.get("parked_until") or None, parked_reason=fm.get("parked_reason") or None,
     )
@@ -132,7 +132,7 @@ SQLITE_INTEGER_MAX = 2**63 - 1
 
 
 def usage_columns(fm, rel):
-    """The usage keys a rendered member note carries when known (SPD-010), read back: duration_ms and
+    """The usage keys a rendered member note carries when known, read back: duration_ms and
     tool_uses into their columns; the three token keys, when all are present, as total_tokens and a
     transcript-shaped usage_json that renders the same keys and Tokens cell again (in stands for
     input plus cache creation, so cache creation is 0).  A present key that is not a non-negative
@@ -154,7 +154,7 @@ def usage_columns(fm, rel):
         columns["usage_json"] = json.dumps({"source": "transcript", "imported": True, "usage": {
             "input_tokens": values["tokens_in"], "output_tokens": values["tokens_out"],
             "cache_creation_input_tokens": 0, "cache_read_input_tokens": values["tokens_cached"]}})
-    if "cost_usd" in fm:  # SPD-013: the list-price cost the note showed, kept with the imported sum it was computed from
+    if "cost_usd" in fm:  # the list-price cost the note showed, kept with the imported sum it was computed from
         value = fm["cost_usd"]
         if not isinstance(value, str) or not prices.COST_USD.fullmatch(value):
             raise kernel.SpudError(kernel.EXIT_ERROR, "%s: cost_usd must be an amount of US dollars with at most two decimals, not %r" % (rel, value))

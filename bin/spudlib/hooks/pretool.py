@@ -1,4 +1,4 @@
-"""hooks/pretool: The PreToolUse handlers.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/pretool: The PreToolUse handlers."""
 
 import json
 from pathlib import Path
@@ -52,7 +52,7 @@ def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_
             "SELECT tool_use_id, at FROM spawn_requests WHERE member_id = ? AND decision = 'allow' AND agent_id IS NULL AND tool_use_id != ? ORDER BY at, rowid LIMIT 1",
             (member["id"], tool_use_id),
         ).fetchone()
-        if mode == "plain" and caller_member is None:  # SPD-014: the full check refuses a spudagent-shaped spawn in a session that is not Spud
+        if mode == "plain" and caller_member is None:  # the full check refuses a spudagent-shaped spawn in a session that is not Spud
             reason = ("this session is not Spud: a spudagent is spawned by the Spud session that planned it, and %s was not planned here"
                       " (type /spud to claim this session first)" % ref)
         elif member["status"] != "planned":
@@ -60,7 +60,7 @@ def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_
         elif pending is not None:
             # The first allow reserves the row (Rooster's HIGH-1): until that spawn binds, a second
             # Agent call for the same member would run a copy the ledger cannot see or count.  The
-            # way out names the caller's own actor (SPD-028): a spudagent cannot run `--as spud`
+            # way out names the caller's own actor: a spudagent cannot run `--as spud`
             # (Law 6 refuses it inside a subagent), so only Spud's own root row offers --next.
             fail = ("`spud --as %s member finish %s --status failed --outcome '<why>'`" % (caller_agent_id, ref)) if caller_agent_id else (
                     "`spud --as spud member finish %s --status failed --outcome '<why>' [--next '<what happens next>']`" % ref)
@@ -133,7 +133,7 @@ def hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member,
     reason, analysis = bash_rule.bash_reason(ctx, con, caller_agent_id, caller_member, command, payload.get("cwd") or None, mode)
     gap = snapshots.shell_table(str(ctx.home)).gap
     if gap is not None:
-        # SPD-133: the snapshot directory is there but the hook could not read it, so a command word the shell already
+        # The snapshot directory is there but the hook could not read it, so a command word the shell already
         # defines ran unread and a line that would otherwise be silent kept the reading it had.  Fail open on the line --
         # a member must never be refused every command because a table is cold -- and spool the gap, which `spud doctor`
         # reports and the next command drains into a hook.error event.  A machine with no snapshots at all is no gap.
@@ -141,7 +141,7 @@ def hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member,
                                  "error": "the shell alias table is missing: %s" % gap})
     if reason:
         return deny_and_record(con, at, payload, reason, caller_agent_id, caller_member, extra={"command": command[:2000]})
-    # The allow skips the harness's prompt, so it needs more than recognition (SPD-032): every spud call runs the ledger root's
+    # The allow skips the harness's prompt, so it needs more than recognition: every spud call runs the ledger root's
     # launcher through an interpreter, options and environment the hook vouches for (vouched_spud_call), and the line writes
     # no file by redirection, which the prompt would otherwise ask about.  Anything else recognized stays silent.
     if analysis is not None and analysis.all_spud \
@@ -221,7 +221,7 @@ def hook_pre_tool_use(ctx, payload):
         return hookio.SILENT
     if not ctx.db_path.is_file():
         if ctx.hook_project and not payload.get("agent_id"):
-            return hookio.SILENT  # a project's hook with no ledger to read fails open for a caller with no agent_id (design section 6.4)
+            return hookio.SILENT  # a project's hook with no ledger to read fails open for a caller with no agent_id
         return hookio.pre_decision("deny", "no ledger database at %s; run `spud init` (the enforcing hooks refuse until the ledger exists)" % ctx.db_path)
     con = ledgerdb.connect(ctx)
     try:
@@ -237,7 +237,7 @@ def hook_pre_tool_use(ctx, payload):
             mode = sessions.session_mode(ctx, con, payload)[0]
             if tool == "Agent":
                 if mode == "plain" and caller_member is None and not sessions.spudagent_shaped(tool_input):
-                    return hookio.SILENT  # Eric's own subagent in a session that is not Spud: no check, no spawn_requests row (SPD-014)
+                    return hookio.SILENT  # Eric's own subagent in a session that is not Spud: no check, no spawn_requests row
                 return hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_member, mode)
             if tool == "Bash":
                 return hook_bash(ctx, con, at, payload, tool_input, caller_agent_id, caller_member, mode)

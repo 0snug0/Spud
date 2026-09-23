@@ -1,6 +1,6 @@
-"""commands/renderwatch: render --watch, the loop LaunchAgent local.spud.render runs (SPD-097).  Whether a watcher is alive
-is core/launchagents' since SPD-048, and since SPD-117 so is the comparison this loop makes: the same watermark and the same
-highest non-render event id answer doctor, the board and the SessionStart context."""
+"""commands/renderwatch: render --watch, the loop LaunchAgent local.spud.render runs.  Whether a watcher is alive is
+core/launchagents' question, and so is the comparison this loop makes: the same watermark and the same highest
+non-render event id answer doctor, the board and the SessionStart context."""
 
 import contextlib
 import fcntl

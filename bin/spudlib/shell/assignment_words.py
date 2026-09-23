@@ -1,5 +1,5 @@
 """shell/assignment_words: The words a shell reads as an assignment, subscripted ones included, and what zsh's special
-associations and bash's environment bind through them (SPD-085, SPD-105, SPD-106).
+associations and bash's environment bind through them.
 
 A module of its own because three readers share it and one of them cannot reach the rest of the shell reading: zsh.py
 (which imports syntax alone) asks whether a word before `(` is an array assignment's head and whether a word keeps zsh's
@@ -13,7 +13,7 @@ from . import prepare, syntax
 from ..hooks import hookio
 
 
-# SPD-085: `name[subscript]=value` and `name[subscript]+=value` are assignments, not command words, in zsh and bash (probed
+# `name[subscript]=value` and `name[subscript]+=value` are assignments, not command words, in zsh and bash (probed
 # in zsh 5.9 -f, zsh -f -o nobareglobqual, bash 3.2 and sh with a fake program first on a scratch PATH): zsh's
 # `path[1]=<dir>; foo`, `path[1,0]=(<dir>); foo`, `path[1]+=/../fakebin; foo` and `PATH[1]=<dir>:/; foo` (a character
 # slice of the scalar) each ran the scratch copy, as a prefix too (`path[1]=<dir> foo`), and in bash `PATH[0]=<dir>`
@@ -27,7 +27,7 @@ _BRACKETS_PLAIN = str.maketrans({syntax._GLOB_SENTINELS["["]: "[", syntax._GLOB_
 # the elements with plain blanks, so the elements can be told apart again (special_bindings); variable_readings restores
 # it before splitting, and deglob restores it everywhere else.
 _ELEMENT_BLANKS = str.maketrans({" ": syntax._ZSH_SENTINELS[" "], "\t": syntax._ZSH_SENTINELS["\t"]})
-# SPD-105: zsh's special associations whose elements the shell runs by name (the zsh/parameter module, loaded under -f):
+# zsh's special associations whose elements the shell runs by name (the zsh/parameter module, loaded under -f):
 # each key of `functions` is a shell function, of `commands` a hashed command, of `aliases`, `galiases` and `saliases` an
 # alias, a global alias and a suffix alias (as `alias`, `alias -g` and `alias -s` define them).  Probed in zsh 5.9 -f and
 # -o nobareglobqual: `functions[foo]='echo SH'; foo`, `functions+=(foo 'echo SH'); foo`, `functions=(foo 'echo SH'); foo`
@@ -37,7 +37,7 @@ _ELEMENT_BLANKS = str.maketrans({" ": syntax._ZSH_SENTINELS[" "], "\t": syntax._
 # (`aliases+=( ... )` defined nothing in 5.9 -- recorded all the same, refusing on doubt); `dis_functions` and
 # `dis_aliases` bind disabled entries, which ran nothing.  bash and sh have none of these: there they are plain arrays.
 SPECIAL_TABLES = {"functions": "function", "commands": "hashed", "aliases": "alias", "galiases": "alias", "saliases": "alias"}
-# SPD-106: the variables bash and sh (bash in POSIX mode) import a shell function from: `BASH_FUNC_<name>%%=() { body; }`
+# The variables bash and sh (bash in POSIX mode) import a shell function from: `BASH_FUNC_<name>%%=() { body; }`
 # on macOS's bash 3.2, the spelling `export -f` writes (probed; `BASH_FUNC_<name>()=` and `<name>=() {` imported nothing).
 ENV_FUNCTION_PREFIX = "BASH_FUNC_"
 
@@ -86,7 +86,7 @@ def declaration_word(word):
 
 
 def array_head(word):
-    """True for the word before an array's `(`: `name=`, `name+=`, `name[subscript]=` or `name[subscript]+=` (SPD-085:
+    """True for the word before an array's `(`: `name=`, `name+=`, `name[subscript]=` or `name[subscript]+=` (probed:
     `path[1,0]=(<dir>)` and `typeset path[1]=(<dir>)` ran in zsh)."""
     if not word.endswith("="):
         return False

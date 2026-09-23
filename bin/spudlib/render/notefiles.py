@@ -1,4 +1,4 @@
-"""render/notefiles: Whole notes: ticket, member, Projects.md, report; the render targets.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""render/notefiles: Whole notes: ticket, member, Projects.md, report; the render targets."""
 
 import json
 import re
@@ -11,7 +11,7 @@ from ..state import ledgerdb, lookup
 def place_names(names, group, after, present):
     """`group`'s names in order, each kept where the note already has it and otherwise inserted right after the first
     name of `after` the note carries (at the end when it carries none) -- or all of them gone when `present` is False.
-    The shape a conditional part of a ticket note has: SPD-096's parked pair of keys, and SPD-116's pull-request pair
+    The shape a conditional part of a ticket note has: the parked pair of keys, and the pull-request pair
     and its ## Landing section, each rendered only while the ledger has something to put in it."""
     if not present:
         return [n for n in names if n not in group]
@@ -26,9 +26,9 @@ def place_names(names, group, after, present):
 def render_ticket(con, t, pricing=None):
     layout = json.loads(t["layout"]) if t["layout"] else {}
     keys = list(layout.get("fm_keys") or kernel.TICKET_FM_KEYS)
-    if "project" not in keys:  # an imported ticket's stored order, from before SPD-014: the key goes right after origin
+    if "project" not in keys:  # an imported ticket's stored order, from before projects: the key goes right after origin
         keys.insert(keys.index("origin") + 1 if "origin" in keys else len(keys), "project")
-    # SPD-096: the two keys that qualify the status, right after it and only while parked.  SPD-116: the two that name
+    # The two keys that qualify the status, right after it and only while parked.  Then the two that name
     # the landing pull request, after those, and only while one is recorded.
     landing = lookup.ticket_landing(con, t["id"])
     keys = place_names(keys, kernel.PARKED_FM_KEYS, ("status",), t["status"] == "parked")
@@ -54,7 +54,7 @@ def render_ticket(con, t, pricing=None):
     }
     pairs = [(k, values[k]) for k in keys if k in values]
     heading = "%s — %s" % (t["key"], t["heading"] or t["title"])
-    # ## Landing goes where the template has it, after the sections that precede it there (SPD-116), so a note whose
+    # ## Landing goes where the template has it, after the sections that precede it there, so a note whose
     # stored layout predates the section -- every imported one -- gains it in the right place the moment one is recorded
     before = kernel.TICKET_SECTIONS[: kernel.TICKET_SECTIONS.index(kernel.LANDING_SECTION)]
     names = place_names(list(layout.get("sections") or kernel.TICKET_SECTIONS), (kernel.LANDING_SECTION,),
@@ -90,7 +90,7 @@ def render_member(con, m, pricing=None):
     return markdown.emit_frontmatter(pairs) + sectiontext.body_with_sections(heading, sections)
 
 
-# ledger/Projects.md (SPD-014): the projects table, generated, and the disaster-recovery import source for it.
+# ledger/Projects.md: the projects table, generated, and the disaster-recovery import source for it.
 PROJECTS_NOTE = "ledger/Projects.md"
 PROJECTS_COLUMNS = ("Key", "Name", "Ticket prefix", "Team prefix", "Root", "Default branch", "Landing", "Sessions", "Remote", "Archived")
 
@@ -171,7 +171,7 @@ def render_report(day, entries):
 
 
 def render_targets(con, pricing=None):
-    """[(relative path, content)] for every generated file; costs at the given price table's list prices (SPD-013)."""
+    """[(relative path, content)] for every generated file; costs at the given price table's list prices."""
     targets = []
     for t in con.execute("SELECT * FROM tickets ORDER BY id").fetchall():
         targets.append(("ledger/tickets/%s.md" % t["key"], render_ticket(con, t, pricing)))

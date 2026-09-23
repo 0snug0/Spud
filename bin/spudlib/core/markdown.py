@@ -1,12 +1,12 @@
-"""core/markdown: markdown-v0: the YAML subset, documents, log, handoff and report entries.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""core/markdown: markdown-v0: the YAML subset, documents, log, handoff and report entries."""
 
 import re
 
 from . import kernel
 
 
-# The headings an import opens a member note's sections at, its layout not known yet (SPD-076): the layout keys, and
-# ## Sources, the one section a markdown-v0 member note carried beyond them (SPD-006/Dakota), where its layout puts it.
+# The headings an import opens a member note's sections at, its layout not known yet: the layout keys, and
+# ## Sources, the one section a markdown-v0 member note carried beyond them, where its layout puts it.
 IMPORT_MEMBER_SECTIONS = ["Brief", "Log", "Sub-agents", "Ticket proposals", "Result", "Blocked", "Sources", "Outcome"]
 
 
@@ -173,7 +173,7 @@ def restyled_render(raw, renders):
 
 def owned_headings(lines, found, owned):
     """{line index: name}: which of the `## ` lines `found` [(line index, name)] open the sections of a note whose
-    layout owns the names `owned`, in that order (SPD-076).  Prose may hold an owned name too, so the first owned line
+    layout owns the names `owned`, in that order.  Prose may hold an owned name too, so the first owned line
     opens a section and the rest are the longest run of owned lines in layout order after it; of equally long runs,
     each next heading is one that follows a blank line, as the render writes every heading, then the later one.  Text
     the CLI writes cannot hold an owned heading line (check_prose_headings refuses it).  Hand-written or legacy text
@@ -196,7 +196,7 @@ def owned_headings(lines, found, owned):
 def split_document(text, owned=None):
     """A ledger note: frontmatter, the H1 tail, and (name, body) sections in order.  Given `owned`, the section names
     the note's layout owns in order, only those headings open a section (owned_headings), so prose may hold any other
-    `## ` line (SPD-076).  Fences hide no owned heading: the CLI refuses stored prose holding one, and hand-written or
+    `## ` line.  Fences hide no owned heading: the CLI refuses stored prose holding one, and hand-written or
     legacy text that does may move between sections.  Without it, markdown-v0 as written by hand: every `## ` line
     outside fenced code opens one."""
     fm_lines, body = frontmatter_block(text)

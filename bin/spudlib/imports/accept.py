@@ -1,4 +1,4 @@
-"""imports/accept: import --file: accepting a hand edit of a rendered file.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""imports/accept: import --file: accepting a hand edit of a rendered file."""
 
 import json
 import re
@@ -70,11 +70,11 @@ TICKET_SECTION_COMMANDS = {
 }
 MEMBER_OWN_SECTIONS = {"Log": "spud member log", "Result": "spud member result", "Blocked": "spud member block"}
 MEMBER_SECTION_COMMANDS = {"Sub-agents": "spud member new", "Ticket proposals": "spud proposal file"}
-# SPD-096: the status and the two properties that qualify it move together, and only through the command that carries
+# The status and the two properties that qualify it move together, and only through the command that carries
 # the reason; a hand edit has nowhere to put one, and the database's CHECKs would refuse half the change anyway.
 PARKED_BY_COMMAND = ("parked is set and cleared by `spud ticket move --status parked --reason …` and"
                      " `ticket move --status queued|active|declined`; a hand edit cannot carry the reason")
-# SPD-116: the two keys are the landing pull request's number and state, read from `pull_requests`.  The number comes
+# The two keys are the landing pull request's number and state, read from `pull_requests`.  The number comes
 # from the URL `spud pr record` was given and the state from what `gh pr view` last said; neither is a judgment a hand
 # edit could carry, and a note that named another pull request would name one the ledger has no row for.
 PR_BY_COMMAND = ("pr and pr_state are the landing pull request the ledger recorded; they change through"
@@ -256,7 +256,7 @@ def accept_file(ctx, con, actor, path):
         baseline = record["content"] if record and record["content"] else None
         if kind[0] == "ticket":
             t = lookup.get_ticket(con, kind[1])
-            owned = (json.loads(t["layout"]) if t["layout"] else {}).get("sections") or kernel.TICKET_SECTIONS  # SPD-076
+            owned = (json.loads(t["layout"]) if t["layout"] else {}).get("sections") or kernel.TICKET_SECTIONS
             base = markdown.split_document(baseline or notefiles.render_ticket(con, t, ctx.pricing), owned)
             doc = markdown.split_document(text, owned)
             if doc["frontmatter"].get("id") != t["key"]:
@@ -265,7 +265,7 @@ def accept_file(ctx, con, actor, path):
         elif kind[0] == "member":
             m = lookup.get_member(con, "%s/%s" % (kind[1], kind[2]))
             ticket = lookup.get_ticket_by_id(con, m["ticket_id"])
-            # every member section, Blocked included, since the last render may predate a block or its clearing (SPD-076)
+            # every member section, Blocked included, since the last render may predate a block or its clearing
             owned = (json.loads(m["layout"]) if m["layout"] else {}).get("sections") or kernel.MEMBER_SECTIONS
             base = markdown.split_document(baseline or notefiles.render_member(con, m, ctx.pricing), owned)
             doc = markdown.split_document(text, owned)

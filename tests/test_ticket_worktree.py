@@ -22,6 +22,7 @@ from helpers import EXIT_OK, EXIT_TRANSITION, REPO, RepoMixin, SpudTestCase, git
 from test_hooks import AGENT_A, AGENT_B, AGENT_C, SESSION, HookCase
 
 BRIEF = "Build it."
+BOUND_WORDING = "a member of a bound ticket writes its project's paths there alone"  # the refusal outside the bound worktree
 
 
 class BoundCase(RepoMixin, HookCase):
@@ -232,7 +233,7 @@ class EnforcementTest(BoundCase):
     def assertOutsideTheWorktree(self, r, what=None):
         self.assertEqual((r.code, r.decision), (0, "deny"), (what, r))
         self.assertIn("bound to %s" % self.bound, r.reason, what)
-        self.assertIn("SPD-098", r.reason, what)
+        self.assertIn(BOUND_WORDING, r.reason, what)
 
     def unbind(self):
         """The ticket as a member planned before SPD-098 left it: unbound."""
@@ -262,7 +263,7 @@ class EnforcementTest(BoundCase):
                 r = self.write(path, agent_id=None)
                 self.assertEqual(r.decision, "deny")
                 self.assertIn("Law 1", r.reason)
-                self.assertNotIn("SPD-098", r.reason)
+                self.assertNotIn(BOUND_WORDING, r.reason)
         self.assertAllowed(self.write(self.home.path / "CLAUDE.md", agent_id=None))
 
     def test_the_bash_hook_holds_redirections_and_git_write_targets_to_the_bound_worktree(self):
@@ -383,8 +384,9 @@ class TextTest(BoundCase):
         card = self.cli("session", "claim", actor="spud", cwd=self.wt, session=SESSION).stdout
         self.assertIn(needle, card)
         self.assertIn("board (spud):", card)  # the added line leaves the board its room
-        self.assertIn("SPD-098", self.home.run("member", "new", "--help").stdout)
-        self.assertIn("ticket worktrees (SPD-098)", self.home.run("--help").stdout)
+        self.assertIn("refuses from the main checkout, outside the project or another worktree",
+                      " ".join(self.home.run("member", "new", "--help").stdout.split()))  # argparse wraps it
+        self.assertIn("ticket worktrees: a bare glob", self.home.run("--help").stdout)
         agent = (REPO / "share" / "agents" / "spudagent.md").read_text(encoding="utf-8")  # SPW-004
         self.assertIn("A bare glob is relative to the linked worktree your ticket is bound to", agent)
         self.assertNotIn("the root or a worktree of it", agent)

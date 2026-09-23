@@ -1,4 +1,4 @@
-"""render/teamcard: The Team table and its cells.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""render/teamcard: The Team table and its cells."""
 
 from . import prices
 from ..core import lazy
@@ -22,12 +22,12 @@ def join_prose(prose, rows_text):
     return "\n".join(parts)
 
 
-# The Team card (SPD-010; docs/design/2026-09-12-team-card.md, sections 1 to 4 and 6.3).  A ticket
+# The Team card.  A ticket
 # note's ## Team is generated from `members` alone: a table of who ran as what, on which model and
 # how it went; the member tree, each line carrying what that member worked on and built; and the
 # embedded Fleet.base Team view.  The spec's reference implementation is the contract.
 
-# Cost (list) since SPD-013: a run at the API list price in USD, never Eric's subscription bill; a Total row ends the table.
+# Cost (list): a run at the API list price in USD, never Eric's subscription bill; a Total row ends the table.
 TEAM_TABLE_HEAD = ("| Member | ID | Persona | Model | Status | Run | Tokens | Cost (list) | Tools |", "|---|---|---|---|---|---|---|---|---|")
 TEAM_TOTAL_LABEL = "**Total**"
 TEAM_VIEW_EMBED = "![[Fleet.base#Team]]"
@@ -67,7 +67,7 @@ def run_duration(ms):
 
 def known_stamp(stamp):
     """The stamp, or None when it is NULL, empty, has no time, or is an imported minute-only stamp at
-    00:00 (SPD-001's placeholder for a spawn that never ran; the hooks write seconds and an offset)."""
+    00:00 (the markdown-v0 placeholder for a spawn that never ran; the hooks write seconds and an offset)."""
     if not stamp or len(stamp) < 16 or (len(stamp) == 16 and stamp.endswith("T00:00")):
         return None
     return stamp
@@ -125,7 +125,7 @@ def team_order(rows, lead_id):
 
 
 def usage_pairs(m, pricing=None):
-    """A member note's usage keys, each only when known: after finished, before tags.  cost_usd (SPD-013) is the run at
+    """A member note's usage keys, each only when known: after finished, before tags.  cost_usd is the run at
     the API list price, from the price table the render is given; a run without a cost has no cost_usd."""
     pairs = []
     if m["duration_ms"] is not None:

@@ -1,4 +1,4 @@
-"""commands/vaultcapture: `spud vault capture --into <worktree>` (SPD-156, the portable-home design section 3).
+"""commands/vaultcapture: `spud vault capture --into <worktree>`.
 
 Obsidian writes the vault's settings and the `.base` views; this is the command that takes them back into the tool, so
 that a change Eric makes in his own vault reaches everyone else's home through an ordinary ticket.  It is a member's
@@ -40,7 +40,7 @@ NOT_THIS_REPOSITORY = ("--into %s is a checkout of another repository (%s); the 
                        " writes only into a linked worktree of %s")
 IS_MAIN_CHECKOUT = ("--into %s is the main checkout of %s, where code is never built (the tool's CLAUDE.md): enter a linked"
                     " worktree of it and capture into that")
-NOT_THE_BOUND_WORKTREE = ("Law 5: %s is bound to the worktree %s (SPD-098) and --into names %s; a member writes in its"
+NOT_THE_BOUND_WORKTREE = ("Law 5: %s is bound to the worktree %s and --into names %s; a member writes in its"
                           " ticket's own worktree, and capturing the vault into another one puts the work where nobody"
                           " will commit it. Capture into %s, or ask your parent for a ticket bound there")
 SPUD_CAPTURES_NOTHING = ("capturing the vault produces files in a worktree, and Spud never produces a deliverable (Law 1):"
@@ -327,7 +327,7 @@ def cmd_vault_capture(ctx, args):
         worktree = Path(into_worktree(ctx, args.into))
         ticket_row = lookup.get_ticket_by_id(con, actor.member["ticket_id"])
         bound = ticket_row["worktree"]
-        # SPD-098: a member writes in the worktree its ticket is bound to, and the edit hook holds it to that.  A
+        # A member writes in the worktree its ticket is bound to, and the edit hook holds it to that.  A
         # capture is a CLI write, which no edit hook sees, so the same rule is made here -- otherwise a member of a
         # ticket bound in another project could write share/ in this one, where its globs mean something else.
         if bound and worktrees.file_identity(bound) != worktrees.file_identity(str(worktree)):

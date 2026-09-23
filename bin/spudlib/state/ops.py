@@ -1,4 +1,4 @@
-"""state/ops: Domain operations: ticket numbers, transitions, names, deliverables, planning, member status changes, and the prose checks and proposal brief the commands share.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""state/ops: Domain operations: ticket numbers, transitions, names, deliverables, planning, member status changes, and the prose checks and proposal brief the commands share."""
 
 import json
 import re
@@ -8,7 +8,7 @@ from ..core import kernel
 
 
 def check_prose_headings(value, names, what, before=None):
-    """Refuse stored prose holding a line an import reads as its note's own section heading (SPD-076): `## <name>`, read
+    """Refuse stored prose holding a line an import reads as its note's own section heading: `## <name>`, read
     as split_document reads a heading, for a name in `names` (TICKET_SECTIONS for ticket prose, IMPORT_MEMBER_SECTIONS
     for member prose), fenced or not, since owned_headings sees no fences.  Given `before`, only the lines added to it."""
     lines = [line for line in (value or "").split("\n") if line.startswith("## ") and line[3:].strip() in names]
@@ -18,7 +18,7 @@ def check_prose_headings(value, names, what, before=None):
     if lines:
         name = lines[0][3:].strip()
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s holds the line `%s`, which an import reads as the note's own ## %s heading and so moves"
-                        " text into another section (SPD-076); write `### %s` or reword it" % (what, lines[0].rstrip(), name, name))
+                        " text into another section; write `### %s` or reword it" % (what, lines[0].rstrip(), name, name))
 
 
 def proposal_brief(why, evidence):
@@ -49,7 +49,7 @@ def insert_ticket(con, at, actor_label, project, title, priority, status, origin
     team_key = ticket_key(project["team_prefix"], number)
     stamp = created_at or at
     tags = tags if tags is not None else ["ticket"]
-    # parked_until and parked_reason are the importer's (SPD-096): `ticket new` has no --status parked, so a ticket born
+    # parked_until and parked_reason are the importer's: `ticket new` has no --status parked, so a ticket born
     # parked is `ticket new` then `ticket move`, and the CHECKs of 0003_parked refuse anything else here.
     cur = con.execute(
         "INSERT INTO tickets (project_id, number, key, team_key, title, heading, priority, status, origin, proposal_id,"
@@ -95,13 +95,13 @@ QUALIFIED_GLOB = re.compile(r"([a-z][a-z0-9-]*):(.*)\Z", re.S)
 
 
 def glob_scope(glob):
-    """(project key or None, the glob): `<key>:<glob>` names another project's checkout (SPD-014), a bare glob the ticket's."""
+    """(project key or None, the glob): `<key>:<glob>` names another project's checkout, a bare glob the ticket's."""
     m = QUALIFIED_GLOB.match(glob)
     return (m.group(1), m.group(2)) if m else (None, glob)
 
 
 def check_deliverable_projects(con, globs):
-    """A qualified deliverable must name an active project, or the home by its reserved key (SPD-097)."""
+    """A qualified deliverable must name an active project, or the home by its reserved key."""
     keys = {r["key"] for r in con.execute("SELECT key FROM projects WHERE archived_at IS NULL").fetchall()} | {kernel.HOME_KEY}
     for g in globs:
         key = glob_scope(g)[0]
@@ -112,11 +112,11 @@ def check_deliverable_projects(con, globs):
 def normalize_deliverable(glob):
     """A deliverable is a repository-relative path glob: no leading slash, no `..`,
     `**` allowed; a trailing slash means everything under that directory.  An optional
-    `<key>:` in front names the project whose checkout it is relative to (SPD-014), or
-    `home:` Spud's home (SPD-097).
+    `<key>:` in front names the project whose checkout it is relative to, or
+    `home:` Spud's home.
     `*` and `?` stay inside one path segment, `**` crosses segments, and every other
     character is literal, brackets included: a Next.js `[email]` segment is written
-    plainly, and nothing in a glob has to be escaped (SPD-086, pathrule.glob_to_regex)."""
+    plainly, and nothing in a glob has to be escaped (pathrule.glob_to_regex)."""
     key, rest = glob_scope((glob or "").strip())
     g = normalize_bare_deliverable(glob, rest)
     return "%s:%s" % (key, g) if key else g
@@ -146,10 +146,10 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
                 binder=None):
     """member new: the four limit checks, the lineage and the name draw, all inside
     one BEGIN IMMEDIATE, reading the ticket and the parent inside it too.  session_id is
-    the Claude Code session planning it (SPD-018), None outside one.  `binder` is the
+    the Claude Code session planning it, None outside one.  `binder` is the
     command's commands/worktreebind.Binder, prepared before this call: its decision runs
     last, inside the transaction, so a plan refused for its worktree writes nothing and a
-    binding is written only with the member it binds for (SPD-098)."""
+    binding is written only with the member it binds for."""
     limits = ctx.limits
     deliverables = normalize_deliverables(deliverables)
     if persona not in ctx.personas():

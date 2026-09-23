@@ -205,10 +205,11 @@ class PackageShapeTest(unittest.TestCase):
 class ShippedPathsTest(unittest.TestCase):
     """SPW-002: no file this repository ships names a machine's home directory -- the installed spudagent definition is
     rendered from Ctx at install (projects/agentdef), the way the /spud skill's text is, and every command in the prose
-    finds the launcher from git instead of spelling one machine's path.  The two files below hold recorded test data, a
-    spudagent's return text and a Bash hook payload, and keep the paths they recorded."""
+    finds the launcher from git instead of spelling one machine's path.  Recorded test data (a spudagent's return text in
+    tests/fixtures/team_card.json, a Bash hook payload in tests/test_hooks.py) spells a neutral /Users/Someone, so no file
+    is exempt (SPD-158)."""
 
-    RECORDED = {"tests/fixtures/team_card.json", "tests/test_hooks.py"}
+    RECORDED = set()
     SKIP = (".git", ".claude/worktrees")  # git's own store, and a linked worktree checked out inside the main one
 
     def shipped(self):

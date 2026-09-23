@@ -1,9 +1,8 @@
-"""commands/homeinit: `spud init`, one command from a fresh clone to a working Spud (SPW-001,
-docs/design/2026-09-21-spud-init.md sections 2 and 6).
+"""commands/homeinit: `spud init`, one command from a fresh clone to a working Spud.
 
-All ten of the design's steps.  Steps 1 to 5 build the home: the directory and the config, the database, the first
+All ten of init's steps.  Steps 1 to 5 build the home: the directory and the config, the database, the first
 project with one report entry, the vault -- its scaffolding, and then, unless `--no-vault`, the Obsidian settings and
-every plugin and theme the lock pins (SPD-156, step 4b) -- and the home pointer.  Steps 6 to 10 are the install tail --
+every plugin and theme the lock pins (step 4b) -- and the home pointer.  Steps 6 to 10 are the install tail --
 `finish_install` (`settings sync` into the home's own `.claude/settings.json`, `project install` for the first project,
 the two LaunchAgents) and `verify` (the first render under the render lock, then doctor) -- and when they end green one
 command has taken a fresh clone to `spud doctor` reporting `problems none`, which is the ticket's definition of done.
@@ -18,12 +17,11 @@ prose from the config step 1 wrote and the project row step 3 inserted, and must
 the four before it made the directory a home; step 7 installs the project row step 3 inserted; step 9 renders what steps
 3 to 8 wrote and refuses anything else; step 10 asks doctor about all of it.  Cutting that sequence at any point would
 give two modules that may only ever be called in one order, with the order itself written nowhere.  The one seam that is
-real is the install tail, which is `finish_install` and `verify` -- the two functions the design named, and the two the
-suite calls on their own.
+real is the install tail, which is `finish_install` and `verify` -- the two functions the suite calls on their own.
 
 Three properties an edit here must keep:
 
-- **Init resolves no actor** (design 2.3).  `state/actors.resolve_actor(con, None)` refuses outright and `require_spud`
+- **Init resolves no actor.**  `state/actors.resolve_actor(con, None)` refuses outright and `require_spud`
   refuses an unclaimed session in a `claim` project -- which is exactly the session init creates when it registers
   someone's repository as project 1.  So `--as` is checked lexically, every event and the report entry are written under
   the literal actor label `spud` the way `homemove.move_resync` writes them, and `reportentry.check_next` (which goes
@@ -48,23 +46,22 @@ from ..projects import install, registry
 from ..render import notefiles
 from ..state import ledgerdb, schema
 
-# The default home the prompt offers when neither --home, nor SPUD_HOME, nor the pointer names one: Eric's call
-# (design section 10), made 2026-09-21.  Shortest of the four candidates, outside iCloud Drive -- a SQLite database
+# The default home the prompt offers when neither --home, nor SPUD_HOME, nor the pointer names one.  Shortest of the four candidates, outside iCloud Drive -- a SQLite database
 # with a WAL in a synced directory is a silent corruption risk -- and a plain directory a person can open in Obsidian.
 DEFAULT_HOME = "~/SpudHome"
 DEFAULT_NAME = "Spud"
 DEFAULT_PRONOUNS = "he/him/his"
-# The owner's pronouns have a default and the owner's name does not (SPD-157).  Pronouns nobody gave are the ones that
+# The owner's pronouns have a default and the owner's name does not.  Pronouns nobody gave are the ones that
 # are right for anyone; a name nobody gave cannot be guessed at all, and it is in the generated CLAUDE.md, in every
 # brief template and in the note that says whose ledger this is -- so it joins the two prefixes as a value `--yes`
-# must be given rather than assume (design section 3.3's rule, one more value under it).
+# must be given rather than assume (the prompts' rule, one more value under it).
 DEFAULT_OWNER_PRONOUNS = "they/them/their"
 CONFIG_NAME = "spud.config.json"
-# Step 4's five directories.  The files it writes are `commands/homesync.tool_owned` -- the seven of the design's
-# section 2.2 and every shipped skill beside them (SPD-157) -- which moved there when `home sync` became the second
+# Step 4's five directories.  The files it writes are `commands/homesync.tool_owned` -- the seven a new home starts
+# from and every shipped skill beside them -- which moved there when `home sync` became the second
 # command that writes them, and which is where the rendering, the project-line rule and the unrendered-mark refusal
 # live now.  Not every shipped file is in that list: share/agents/spudagent.md is rendered to user scope by step 7's
-# `project install`, never into a home (SPW-004), and share/obsidian/ is step 4b's.
+# `project install`, never into a home, and share/obsidian/ is step 4b's.
 DIRECTORIES = ("ledger/tickets", "ledger/teams", "reports", "docs/spikes", "docs/design")
 
 NOT_SPUD = ("init resolves no actor and `--as %s` names one: the first run has no database and no members table for"
@@ -76,11 +73,11 @@ POINTER_ELSEWHERE = ("%s names %s, not %s; a machine has one pointer and repoint
                      "  Rerun with `--home %s` to work on that home, or with `--repoint` to point this machine here instead.")
 SPUD_HOME_ELSEWHERE = ("SPUD_HOME is %s, not %s; after init the shell's SPUD_HOME beats the pointer in resolve_home, so"
                        " you would be working on a different home than the one init just built.  Unset it, or rerun with `--home %s`.")
-IN_WORK_TREE = "%s is inside a git work tree (%s); the home is a plain directory (SPD-097), and a home inside a repository puts the vault into somebody's history"
+IN_WORK_TREE = "%s is inside a git work tree (%s); the home is a plain directory, and a home inside a repository puts the vault into somebody's history"
 TOOL_IS_WORKTREE = ("the running bin/spud is in a linked worktree (%s); run the main checkout's.  Init writes that path into"
                     " this home's CLAUDE.md, and a worktree is deleted when its ticket lands.")
 NOT_A_HOME = "%s is not an empty directory and is no Spud home (no %s and no .spud/): it holds %s"
-PREFIX_DIFFERS = ("%s %s differs from the %s already in %s, which carries %s; init leaves a config it finds alone (design section 6)"
+PREFIX_DIFFERS = ("%s %s differs from the %s already in %s, which carries %s; init leaves a config it finds alone"
                   " and doctor compares project 1's prefixes with the config's.  Rerun with `%s %s`, or edit the config first.")
 NO_PREFIXES = ("%s has no %s yet, and a config carries the two prefixes: give `--ticket-prefix XXX --team-prefix XXXS`."
                "  They have no default on purpose -- a prefix is in every rendered file name and every wikilink forever,"
@@ -89,10 +86,10 @@ NO_OWNER = ("%s has no %s yet, and a config carries the name of the person the h
             "  It has no default on purpose -- it is in the CLAUDE.md the tool generates for this home, in the brief"
             " template every spudagent is spawned with, and in the note that says whose ledger this is.  The pronouns"
             " are `--owner-pronouns subject/object/possessive` and default to %s.")
-CONFIG_IS_THEIRS = "%s is already there and init leaves it alone (design section 6), so %s has nothing to write; edit the file instead"
+CONFIG_IS_THEIRS = "%s is already there and init leaves it alone, so %s has nothing to write; edit the file instead"
 LEFT_BEHIND =("nothing init wrote is removed: %s is as the steps above left it, and a rerun continues from there,"
                " because every step is idempotent by content")
-# Step 9's refusal.  The design's 2.1 reads `move_check_vault`'s precondition -- the copied vault must already be what
+# Step 9's refusal.  Init reads `move_check_vault`'s precondition -- the copied vault must already be what
 # the copied database renders -- as init's postcondition: a fresh vault has nothing rendered yet, so the scaffolding is
 # written first (step 4) and the first render must write nothing but what a fresh ledger generates.
 RENDER_UNEXPECTED = ("the render into %s wrote %s and found %d conflict(s); a fresh home renders %s and nothing else."
@@ -110,7 +107,7 @@ NO_PROJECT_TO_INSTALL = ("7. no project to install (--no-project): the home's ow
 SCHEDULE_SKIPPED = ("8. %s: %s and %s not installed, so nothing renders or backs up on its own until"
                     " `%s --as spud schedule install` -- which doctor reports as a note, never a problem")
 NOT_DARWIN = "%s is not darwin, and launchctl is macOS's"
-# Step 4b's two skips, both notes and never a failure (design section 3): a home whose plugins did not download is a home
+# Step 4b's two skips, both notes and never a failure: a home whose plugins did not download is a home
 # that opens and works, with the views the tool ships and no plugin behind them, and one command later it is complete.
 VAULT_SKIPPED = "4b. no Obsidian vault installed (--no-vault): `%s --as spud vault install` sets one up later"
 VAULT_REFUSED = ("4b. %d download(s) refused, so those plugins and themes are not installed and the vault opens without"
@@ -126,7 +123,7 @@ INIT_BY_HAND = """by hand, now:
 
 
 def ask(args, question, default=None):
-    """One prompt of design section 3.3, or `default`: the interface is flags and the prompt is a convenience, so a value
+    """One of init's prompts, or `default`: the interface is flags and the prompt is a convenience, so a value
     not given takes its default whenever stdin is not a tty or `--yes` was given.  `input` is a builtin, which costs the
     `python3.14 -I -S` launcher nothing."""
     if args.yes or not sys.stdin.isatty():
@@ -137,7 +134,7 @@ def ask(args, question, default=None):
 
 def ask_offered(args, question, default):
     """A prompt whose default is *offered* rather than taken: the home is the one value with a default that a run off a
-    tty must not silently use (design section 10 -- `~/SpudHome` is a convention, and a person told which directory they
+    tty must not silently use (`~/SpudHome` is a convention, and a person told which directory they
     are about to fill is a person who can say no), so away from a prompt the refusal names `--home` instead."""
     return ask(args, question, default) if not args.yes and sys.stdin.isatty() else None
 
@@ -149,9 +146,9 @@ def home_path(value):
 
 def init_ctx(env, args):
     """The home `spud init` will build, and how it was found: `--home`, then SPUD_HOME, then the existing pointer, then
-    DEFAULT_HOME offered as a prompt when stdin is a tty, then the usage refusal naming `--home` (design section 10).
+    DEFAULT_HOME offered as a prompt when stdin is a tty, then the usage refusal naming `--home`.
 
-    `bin/spud_ledger.main` calls this instead of `homeconf.resolve_home` for `init` alone (design 2.3): resolve_home
+    `bin/spud_ledger.main` calls this instead of `homeconf.resolve_home` for `init` alone: resolve_home
     raises on a machine with no SPUD_HOME and no pointer, which is every fresh machine, and `init` is the command that
     has to run there.  Returns (path, how), which main hands to `homeconf.Ctx`.
     """
@@ -171,14 +168,14 @@ def init_ctx(env, args):
 
 
 def check_actor(args):
-    """`--as`, read lexically: absent or `spud` proceeds, anything else is refused (design 2.3, and the reason the whole
+    """`--as`, read lexically: absent or `spud` proceeds, anything else is refused (init resolves no actor, the reason the whole
     module writes the literal actor label `spud` rather than resolving one)."""
     if args.actor is not None and args.actor != "spud":
         raise kernel.SpudError(kernel.EXIT_OWNERSHIP, NOT_SPUD % args.actor)
 
 
 def check_next_line(args):
-    """`--next`, validated here rather than by `reportentry.check_next`, which goes through `require_spud` (design 2.3)."""
+    """`--next`, validated here rather than by `reportentry.check_next`, which goes through `require_spud`."""
     if args.next is not None and not args.next.strip():
         raise kernel.SpudError(kernel.EXIT_USAGE, "--next is empty: give the Next line, or leave --next out")
 
@@ -189,7 +186,7 @@ def check_next_line(args):
 
 
 def project_key_for(root):
-    """The `--project-key` default of design section 3.3: the root's directory name, lower-cased and sanitized towards
+    """The `--project-key` default: the root's directory name, lower-cased and sanitized towards
     `registry.PROJECT_KEY_RE`.  A name that cannot become a key is not guessed at -- the refusal names `--project-key`."""
     return re.sub(r"[^a-z0-9-]+", "-", os.path.basename(str(root)).lower()).strip("-")
 
@@ -198,7 +195,7 @@ def pronouns_of(args, flag, given, question, default):
     """`subject/object/possessive` as one flag spells it, or the prompt's answer, or `default`: the three values the
     config carries for one person and the shipped prose renders separately.
 
-    One function for both `--pronouns` (the identity's) and `--owner-pronouns` (SPD-157), because a second copy of the
+    One function for both `--pronouns` (the identity's) and `--owner-pronouns`, because a second copy of the
     three-word check is a second place for the two to drift.  `given` is passed already read rather than the flag's
     name looked up, so a flag that was given skips its prompt, as every other value here does."""
     value = given or ask(args, question, default) or default
@@ -211,11 +208,10 @@ def pronouns_of(args, flag, given, question, default):
 def init_plan(ctx, args):
     """Every value init needs, resolved once: the identity, the two prefixes, and the first project's root, key and name.
 
-    The prompts of design section 3.3 run here and nowhere else, which is why `cmd_init` builds this once and hands it to
+    The prompts run here and nowhere else, which is why `cmd_init` builds this once and hands it to
     `init_preconditions` and `init_steps` rather than letting each resolve its own -- a person must be asked once.
 
-    Two rules the design's section 3 implies and this makes explicit, both about a config already on disk, which init
-    leaves alone entirely (section 6): the identity flags have nothing to write and are refused; and the config's
+    Two rules about a config already on disk, which init leaves alone entirely: the identity flags have nothing to write and are refused; and the config's
     prefixes are authoritative, so a prefix flag that differs is refused and one that is absent is taken from the file.
     Doctor compares project 1's prefixes with the config's, so the two must agree the moment init writes them both.
     """
@@ -261,8 +257,8 @@ def init_plan(ctx, args):
         raise kernel.SpudError(kernel.EXIT_USAGE, "--no-project registers no project, so %s has nothing to describe" % " and ".join(project_flags))
     root = args.project_root
     if root is None and not args.no_project:
-        # Neither flag, and not a tty: no project.  The design gives the home and the prefixes as the two values with no
-        # default (section 3.3), and the first project is not one of them -- `--no-project` is a supported home (1.3).
+        # Neither flag, and not a tty: no project.  The home and the prefixes are the values with no default, and the
+        # first project is not one of them -- a home with no project (`--no-project`) is a supported one.
         root = ask(args, "The first project's repository (empty for none)")
     plan["project_root"] = str(root) if root else None
     plan["project_key"] = (args.project_key or project_key_for(root)) if root else None
@@ -282,7 +278,7 @@ def is_spud_home(target):
 
 
 def project_problems(ctx, plan):
-    """Refusal 7 (design section 6): the shape of the first project's root, its key, and the two prefixes -- everything a
+    """Refusal 7: the shape of the first project's root, its key, and the two prefixes -- everything a
     candidate answers on its own, before anything is written.
 
     The uniqueness halves of the key and prefix checks need a connection and run inside step 3's transaction, where
@@ -311,7 +307,7 @@ def project_problems(ctx, plan):
 
 
 def init_preconditions(ctx, args, plan):
-    """Every reason init is refused (design section 6), each naming what is in the way.  Five are
+    """Every reason init is refused, each naming what is in the way.  Five are
     `homemove.move_preconditions`', copied rather than re-derived; the interpreter's version is the cheapest check there
     is and doctor makes it a problem, so init cannot end green without it."""
     problems = []
@@ -402,7 +398,7 @@ def init_steps(ctx, args, plan):
 def write_config(ctx, plan):
     """Step 1: the home directory, and the config rendered from `<tool>/share/spud.config.json` when the home has none.
 
-    A config already there is left alone entirely (design section 6): a person's config is theirs after the first run and
+    A config already there is left alone entirely: a person's config is theirs after the first run and
     a template that has moved on must not take an edit back.  Either way `config_problems` runs against what is now on
     disk and a refusal stops the command here, because nothing downstream may read a config that has not cleared that bar.
     """
@@ -428,7 +424,7 @@ def write_config(ctx, plan):
 
 def create_database(ctx):
     """Step 2: `<home>/.spud/ledger.db`, created in WAL and migrated, or migrated if behind -- `admincmds.cmd_init`'s
-    body, moved here whole (design section 7), and the reason `spud init` is still what every message about a database
+    body, moved here whole, and the reason `spud init` is still what every message about a database
     behind or missing names.  Init never creates a second database over an existing one: `apply_migrations` takes its own
     backup when the file was not just created, and refuses a database a newer spud wrote."""
     created = not ctx.db_path.exists()
@@ -457,7 +453,7 @@ def database_line(database):
 
 def add_first_project(ctx, con, args, plan, created):
     """Step 3: the first project and one report entry, in one transaction -- `registry.cmd_project_add`'s own `INSERT`
-    and `project.added` event, under the literal actor label `spud` (design 2.3).  With no project, the entry alone.
+    and `project.added` event, under the literal actor label `spud`.  With no project, the entry alone.
 
     Idempotent by content, like every step: a project already registered at that root or under that key is reported and
     kept, and the entry is written only by a run that created the database or registered the project -- a second run
@@ -513,7 +509,7 @@ def add_first_project(ctx, con, args, plan, created):
 
 def write_scaffolding(ctx, project):
     """Step 4: every file the tool owns in a home and the five directories, from `<tool>/share/` through
-    `commands/homesync` (design section 2.2, and SPD-157 for the shipped skills beside the seven).
+    `commands/homesync` (the seven files a new home starts from, and the shipped skills beside them).
 
     Each file is written **only when absent** and a present one is kept: `CLAUDE.md`, `ledger/Home.md`, `ledger/Spud.md`,
     the two `.base` files and `ledger/_templates/**` are all in `hooks/hookio.SPUD_PATHS`, Spud's hand-written set, so
@@ -538,9 +534,9 @@ def write_scaffolding(ctx, project):
 
 
 def install_home_vault(ctx, args, done):
-    """Step 4b: the Obsidian vault, `vault install` over the home step 4a just scaffolded (SPD-156).
+    """Step 4b: the Obsidian vault, `vault install` over the home step 4a just scaffolded.
 
-    Part of step 4 and not a step of its own, because it is the same sentence of the design -- the files a new home
+    Part of step 4 and not a step of its own, because it is the same job -- the files a new home
     needs before anybody opens it -- and because the ten steps' numbers are what every other message here names.  It
     calls `install_vault` rather than `cmd_vault_install`: init resolves no actor and opens no database for this.
 
@@ -576,7 +572,7 @@ def write_pointer(ctx):
 
 def install_first_project(ctx, project, done):
     """Step 7: `project install` for the first project, skipped with `--no-project` -- `homemove.move_resync`'s 5d over
-    one project, with the `projects.installed` record and the `project.installed` event written beside it (design 2.1).
+    one project, with the `projects.installed` record and the `project.installed` event written beside it.
 
     Idempotent by content: `install.install_project` writes each file only when its text changes, so a second run
     reports `unchanged`, and the record and the event follow only a run that wrote something or found the project not
@@ -627,17 +623,17 @@ def finish_install(ctx, args, project, done):
     project, and the two LaunchAgents -- `homemove.move_resync`'s 5b and 5d and its step 6, over a home just built.
 
     Each line goes into `done` as its step completes rather than being returned at the end, so the failure report of
-    `cmd_init` can name a step 6 that completed when step 7 is the one that failed (design 2.4).  Step 6 is first
+    `cmd_init` can name a step 6 that completed when step 7 is the one that failed.  Step 6 is first
     because it is the step that makes a session in the home Spud's, and it is the one step no flag skips: a home whose
-    own `.claude/settings.json` carries no ledger hook loses every hook in every home session, and doctor does not check
-    it (SPW-006), so nothing downstream would notice.
+    own `.claude/settings.json` carries no ledger hook loses every hook in every home session, and nothing downstream
+    of this step but doctor's settings line would notice.
     """
     synced = settings_sync.cmd_settings_sync(ctx, lazy.argparse.Namespace(path=None, dry_run=False))
     done.append("6. %s %s (%d ledger hook lines)"
                 % (synced.data["path"], "written" if synced.data["written"] else "unchanged", synced.data["hooks"]))
     data = {"settings": {k: synced.data[k] for k in ("path", "written", "hooks")}}
     data["install"] = install_first_project(ctx, project, done)  # three statements, not one dict literal: the order is
-    data["schedule"] = install_schedule(ctx, args, done)  # the design's, and it should not rest on how a literal evaluates
+    data["schedule"] = install_schedule(ctx, args, done)  # init's own, and it should not rest on how a literal evaluates
     return data
 
 
@@ -659,7 +655,7 @@ def verify(ctx, done):
     which must write nothing but `ledger/Projects.md` and each report entry's day file and find no conflict, then
     `doctor`, where every problem but the just-bootstrapped watcher's fails the command with the report attached.
 
-    Design 2.1: homemove requires a zero-write render *before* it writes the home it copied (`move_check_vault`),
+    `home move` requires a zero-write render *before* it writes the home it copied (`move_check_vault`),
     because its vault arrives already rendered.  A fresh vault has nothing rendered yet, so the same rule is init's
     **postcondition** instead -- the scaffolding is written first, at step 4, and the first render must write only what a
     fresh ledger generates.  A shipped file that collided with a render target would surface here.
@@ -701,8 +697,8 @@ def verify(ctx, done):
 
 
 def cmd_init(ctx, args):
-    """`spud init`: design section 2, in its order, each step reported; a step that fails stops the command, names every
-    step that completed, and removes nothing (section 2.4), so a rerun continues from where it stopped."""
+    """`spud init`: the ten steps in their order, each step reported; a step that fails stops the command, names every
+    step that completed, and removes nothing, so a rerun continues from where it stopped."""
     check_actor(args)
     check_next_line(args)
     plan = init_plan(ctx, args)

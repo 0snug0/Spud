@@ -1,13 +1,13 @@
-"""shell/find_xargs: the operands a line does not spell (SPD-126): what find deletes, the files its -fprint and kin name,
+"""shell/find_xargs: the operands a line does not spell: what find deletes, the files its -fprint and kin name,
 the command its -exec, -execdir, -ok and -okdir run with `{}` a path under its starting points; and where xargs puts what
 it reads from its input.
 
-Until SPD-126 neither was read.  `find . -exec git push \\;` was silent for a member, past Law 7, because find's utility
+Neither used to be read.  `find . -exec git push \\;` was silent for a member, past Law 7, because find's utility
 was never a command the analysis read; `find tests/tmp -name '*.pyc' -delete` and `find . -exec rm {} \\;` recorded no
 write at all; and `xargs rm < list` read as an `rm` with no operand.
 
 find.  In the Bash tool `find` is Claude Code's shadow function, which runs the claude binary as bfs (the shell snapshot
-~/.claude/shell-snapshots/ defines it, SPD-133), and this Mac's BSD find where that binary is missing.  bfs takes BSD's and
+~/.claude/shell-snapshots/ defines it), and this Mac's BSD find where that binary is missing.  bfs takes BSD's and
 GNU's primaries and lets "Flags (-H/-L/-P etc.), paths, and expressions ... be freely mixed in any order" (its --help), so
 every word that is neither a flag, a primary, an operator nor a primary's argument is a starting point, and none means `.`;
 a primary this reading does not know may have taken the next word, so `.` is then a starting point too.
@@ -20,12 +20,13 @@ a primary this reading does not know may have taken the next word, so `.` is the
   current file").  Every write that command records whose file holds FIND_PATH becomes a write anywhere under each
   starting point ("find-tree", or "rm-tree" for a removal), and each starting point is walked for a git directory
   (arg_writes.written_paths), since what find hands its command is already on disk there.  A write the line spells stays
-  SPD-121's.  -execdir and -okdir run in the found file's directory, which the hook cannot know, so their command is read
-  with its directories unknown, as after an unresolved cd.  `{}` in the utility's own name is a program find found.
-- -fls, -fprint, -fprint0 and -fprintf name a file find writes: SPD-121's write of that file.
+  an ordinary write by argument.  -execdir and -okdir run in the found file's directory, which the hook cannot know, so
+  their command is read with its directories unknown, as after an unresolved cd.  `{}` in the utility's own name is a
+  program find found.
+- -fls, -fprint, -fprint0 and -fprintf name a file find writes: a write by argument of that file.
 A word where a primary may stand that holds a value the member controls (tree_writes.hidden_word: a substitution, a
 positional, a variable the line assigns but cannot settle, an operand xargs or an outer find hands it) may be -delete or
-several words, and is refused as SPD-043 refuses a word the dispatch reads by name.
+several words, and is refused as any word the dispatch reads by name that the shell expands first.
 
 xargs.  xargs runs its utility with what it reads from its input appended after the words the line spells, or put where
 -J's replstr stands as an argument of its own, or into every argument (not the utility) holding -I's replstr (xargs(1);
@@ -106,7 +107,7 @@ def read_find(cmd, words, a, depth):
         elif t in KNOWN or FLAGS_RE.match(t):
             pass
         elif tree_writes.hidden_word(w, a) or (globbing.active_glob_word(w) and globbing.may_start_with_dash(w)):
-            # may be -delete, or in bash several words: refused as a word read by name is (SPD-043, SPD-041), and read as
+            # may be -delete, or in bash several words: refused as a word read by name is, and read as
             # the starting point it may also be
             a.findings.append(("glob" if globbing.active_glob_word(w) else "var-word", syntax.shown_operands(t)))
             starts.append(w)

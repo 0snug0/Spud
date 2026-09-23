@@ -1,4 +1,4 @@
-"""commands/views: events, board, fleet, card, member list.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""commands/views: events, board, fleet, card, member list."""
 
 from . import prcmds, worktreebind
 from ..core import kernel, launchagents
@@ -21,7 +21,7 @@ def cmd_events(ctx, args):
         if args.kind:
             clauses.append("kind = ?")
             params.append(args.kind)
-        if args.project:  # SPD-014: its tickets' events, and the project and session events that name it
+        if args.project:  # its tickets' events, and the project and session events that name it
             lookup.get_project(con, args.project)
             clauses.append("(ticket_id IN (SELECT t.id FROM tickets t JOIN projects p ON p.id = t.project_id WHERE p.key = ?)"
                            " OR json_extract(data, '$.project') = ?)")
@@ -44,9 +44,9 @@ def cmd_board(ctx, args):
         if args.project:
             lookup.get_project(con, args.project)
             rows = [r for r in rows if r["project"] == args.project]
-        if args.parked:  # SPD-096: the bucket on its own, with the two columns the default table does not carry
+        if args.parked:  # the bucket on its own, with the two columns the default table does not carry
             rows = [r for r in rows if r["status"] == "parked"]
-        # SPD-077: the full board is where the one `gh pr view` per unsettled pull request happens -- never in `--brief`,
+        # The full board is where the one `gh pr view` per unsettled pull request happens -- never in `--brief`,
         # which SessionStart injects, and never on any hook path.  A stored check younger than STALE is left alone, the
         # whole run is capped, `--no-reconcile` skips it, and SPUD_GH=off turns it off (the suite's default).
         prs, pr_block = [], []
@@ -55,13 +55,13 @@ def cmd_board(ctx, args):
             if args.reconcile:
                 prcmds.reconcile(ctx, con, open_ids, stale=prcmds.STALE)
             prs, pr_block = prcmds.board_block(con, open_ids)
-        for r in rows:  # SPD-098: the bound worktree and its branch, read from git now, never stored
+        for r in rows:  # the bound worktree and its branch, read from git now, never stored
             r["worktree"] = worktreebind.worktree_state(r["worktree"])
         if args.brief:
             text = sessions.board_brief_text(con, rows, parked=args.parked)
-            # SPD-097, SPD-117: the render watcher's lines -- down, the vault behind, or both.  The SessionStart context
-            # carries the same ones (SPD-048), so a session reads the state of the vault it is about to trust.
-            # SPD-123: and one line naming each checkout that holds what a member may have planted for git to run, which the
+            # The render watcher's lines -- down, the vault behind, or both.  The SessionStart context carries the
+            # same ones, so a session reads the state of the vault it is about to trust.
+            # And one line naming each checkout that holds what a member may have planted for git to run, which the
             # harness's own git and Eric's terminal would run with no hook to see it.
             for line in launchagents.watcher_lines(ctx, con) + gitrepos.planted_lines(ctx, con):
                 text += "\n" + line
@@ -72,13 +72,13 @@ def cmd_board(ctx, args):
                 columns = [("ticket", "key"), ("P", "priority"), ("title", "title"), ("until", "parked_until"), ("reason", "parked_reason"), ("lead", "lead"), ("created", "created")]
             else:
                 columns = [("ticket", "key"), ("status", "status"), ("P", "priority"), ("title", "title"), ("lead", "lead"), ("origin", "origin"), ("proposed by", "proposed_by"), ("created", "created")]
-            if con.execute("SELECT count(*) FROM projects").fetchone()[0] > 1:  # SPD-014: the project column once there is more than one
+            if con.execute("SELECT count(*) FROM projects").fetchone()[0] > 1:  # the project column once there is more than one
                 columns.insert(1, ("project", "project"))
             text = kernel.table(rows, columns)
             bound = [r for r in rows if r["worktree"] is not None and r["status"] not in ("done", "declined")]
             if bound:  # an open ticket's worktree, in the board's order; a closed one keeps its path as history only
                 text += "\n\nworktrees:\n" + "\n".join("  %s  %s" % (r["key"], worktreebind.worktree_line(r["worktree"])) for r in bound)
-            if pr_block:  # SPD-077: an open ticket's recorded pull requests, merged ones with what the landing still owes
+            if pr_block:  # an open ticket's recorded pull requests, merged ones with what the landing still owes
                 text += "\n" + "\n".join(pr_block)
     finally:
         con.close()
@@ -106,7 +106,7 @@ def team_tree(con, ticket, pricing=None):
     roots = []
     for m in rows:
         node = lookup.member_dict(con, m)
-        cost, reasons = prices.run_cost(m["usage_json"], pricing)  # SPD-013: the run's tokens and its cost at the API list price
+        cost, reasons = prices.run_cost(m["usage_json"], pricing)  # the run's tokens and its cost at the API list price
         node.update(tokens=prices.token_counts(m["usage_json"]), cost_usd=prices.usd_text(cost) if cost is not None else None, not_priced=reasons)
         node["children"] = []
         nodes[m["id"]] = node
@@ -142,7 +142,7 @@ def format_tree(nodes, depth=0):
 
 
 def card_total_line(totals, not_priced, pricing):
-    """The card's last line (SPD-013): the ticket's tokens and its cost at the API list price, with the table's date,
+    """The card's last line:the ticket's tokens and its cost at the API list price, with the table's date,
     partial when a member's transcript sum has no cost, naming each such member and why."""
     if totals["tokens"] is None:
         return "total: no tokens recorded"
@@ -168,17 +168,17 @@ def cmd_card(ctx, args):
         tree = team_tree(con, t, pricing)
         totals = teamcard.team_totals(con.execute("SELECT * FROM members WHERE ticket_id = ? ORDER BY lineage", (t["id"],)).fetchall(), pricing)
         not_priced = [{"ref": lookup.member_ref(con, m["id"]), "reasons": reasons} for m, reasons in totals["not_priced"]]
-        prs = [lookup.pr_dict(con, p) for p in lookup.pull_requests(con, [t["id"]])]  # SPD-077: stored state; `card` reads no gh
+        prs = [lookup.pr_dict(con, p) for p in lookup.pull_requests(con, [t["id"]])]  # stored state; `card` reads no gh
     finally:
         con.close()
     total = {"tokens": totals["tokens"], "cost_usd": prices.usd_text(totals["cost"]) if totals["cost"] is not None else None,
              "partial": totals["cost"] is not None and bool(not_priced), "not_priced": not_priced, "tool_uses": totals["tools"],
              "pricing": {k: pricing[k] for k in ("as_of", "source", "currency")} if pricing else None}
-    worktree = worktreebind.worktree_state(d["worktree"])  # SPD-098: read from git now, never stored
+    worktree = worktreebind.worktree_state(d["worktree"])  # read from git now, never stored
     lines = ["%s — %s  [%s, %s]  lead: %s" % (d["key"], d["title"], d["status"], d["priority"], d["lead"] or "-")]
     if worktree is not None:
         lines.append("worktree: " + worktreebind.worktree_line(worktree))
-    for p in prs:  # SPD-077: every recorded pull request, and what a merge nobody has acted on still owes
+    for p in prs:  # every recorded pull request, and what a merge nobody has acted on still owes
         lines.append("pull request %s %s  %s" % (lookup.pr_name(p), prcmds.pr_read_text(p), p["url"]))
         owed = lookup.pr_owed(p)
         if owed:
@@ -196,7 +196,7 @@ def cmd_member_list(ctx, args):
     try:
         if args.ticket:
             t = lookup.get_ticket(con, args.ticket)
-            members = flatten_team(team_tree(con, t, ctx.pricing))  # SPD-013: match card's team, cost included
+            members = flatten_team(team_tree(con, t, ctx.pricing))  # match card's team, cost included
         else:
             rows = con.execute("SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id ORDER BY t.id DESC, m.lineage").fetchall()
             members = [lookup.member_dict(con, m) for m in rows]

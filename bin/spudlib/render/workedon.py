@@ -1,4 +1,4 @@
-"""render/workedon: The worked-on sentence: markdown blocks to one line.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""render/workedon: The worked-on sentence: markdown blocks to one line."""
 
 import re
 

@@ -1,8 +1,8 @@
-"""shell/script_text: the files a sed script or an awk program writes and the commands it runs (SPD-139), read for
+"""shell/script_text: the files a sed script or an awk program writes and the commands it runs, read for
 bash_reason to hold each to the path rule as a redirection target and to Law 7 as an `sh -c` string.
 
-The Bash hook reads a command's words, and a script is one quoted word, so until this ticket what the script itself named
-was never read.  On main (08c344e), with cwd /Users/x/repo, each of these recorded findings=[] and no write:
+The Bash hook reads a command's words, and a script is one quoted word, so before this module what the script itself named
+was never read.  On main (08c344e), with cwd /Users/X/repo, each of these recorded findings=[] and no write:
 `awk 'BEGIN{system("git push")}'` and `awk 'BEGIN{print "x" | "git push"}'`, a VCS write past Law 7;
 `awk '{print > "ledger/tickets/SPD-001.md"}' f` and `sed -n 'w ledger/tickets/SPD-001.md' f`, a write to a rendered note
 past Law 5.  A file the script names is now recorded where spelled_writes records dd's `of=`, held to the path rule as a
@@ -11,7 +11,7 @@ hidden part of the name, and the target is unresolvable -- and a command it hand
 analyse.analyse_new_shell reads a `-c` string.
 
 Probed on this Mac, whose sed is BSD's (/usr/bin/sed) and whose awk is the one true awk, version 20200816; neither gsed
-nor gawk is installed, and SPD-140 owns the g-names.
+nor gawk is installed; reading the GNU tools under their g-prefixed names is left for later.
 
 - sed(1): the `w file` command and the `w file` flag of `s///` take the rest of the line as the name -- `w out.txt;p` made
   a file called `out.txt;p`, and `w out.txt   ` one with the blanks (sed warns and keeps them) -- with the blanks after
@@ -37,10 +37,10 @@ read.
 
 What stays unread, for every caller, is a script the line does not spell: `sed -n "$S" f`, `awk "$P" f`, a -f file that is
 missing, too large or not text, and a word the line cannot settle where an option may stand, after which the hook cannot
-say which operand is the program.  That is the class of `sh script.sh` (SPD-145's question for Eric), and it keeps
-SPD-121's reading of a member's `sed -n "${n},$((n+3))p" f`, which writes nothing, silent.
+say which operand is the program.  That is the class of `sh script.sh` (a question left open for Eric), and it keeps
+the write-by-argument reading of a member's `sed -n "${n},$((n+3))p" f`, which writes nothing, silent.
 
-One module for both, past 250 lines (SPD-065's look-again point) and past 500: the two grammars are scanned apart, in
+One module for both, past 250 lines (the package's look-again point) and past 500: the two grammars are scanned apart, in
 two runs of short functions the `sed_` and `awk_` prefixes keep apart, but everything around them is one reading with one
 caller -- the option scan that finds a script's fragments, the -f file, the masked slice a span names, and the three ways
 a span is recorded (a write, a command, a target the hook cannot name).  Splitting it would make three modules, two of
@@ -73,8 +73,8 @@ AWK_STATEMENT_END = (";", "\n", "}", ")")
 
 def read_script(cmd, base, words, a, depth):
     """Record what the sed or awk command `words` writes and runs by its script (module docstring); `cmd` is its command
-    word as spelled.  The line's own values are put in its words first (arg_writes.resolved), as SPD-127 reads every write
-    target."""
+    word as spelled.  The line's own values are put in its words first (arg_writes.resolved), as every write target is
+    read."""
     args = [arg_writes.resolved(w, a) for w in words[1:]]
     for group in sed_fragments(args, a) if base == "sed" else awk_fragments(args, a):
         text, offsets = script_lines(group)

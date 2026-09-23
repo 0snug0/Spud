@@ -1,4 +1,4 @@
-"""state/schema: The SQL schema and its migrations, as data.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""state/schema: The SQL schema and its migrations, as data."""
 
 # ----------------------------------------------------------------------------
 # Database: schema, migrations, connections
@@ -65,7 +65,7 @@ CREATE TABLE members (                            -- one row per spudagent or co
   spawned_at    TEXT,
   stopped_at    TEXT,
   finished_at   TEXT,
-  agent_id      TEXT    UNIQUE,                   -- native Claude Code id, bound by hooks (SPD-008)
+  agent_id      TEXT    UNIQUE,                   -- native Claude Code id, bound by hooks
   session_id    TEXT,
   tool_use_id   TEXT,
   resolved_model TEXT,
@@ -82,7 +82,7 @@ CREATE TABLE members (                            -- one row per spudagent or co
 CREATE INDEX members_tree ON members(ticket_id, parent_id);
 CREATE INDEX members_live ON members(status) WHERE status IN ('planned','active');
 
-CREATE TABLE spawn_requests (                     -- one row per PreToolUse(Agent); written by hooks (SPD-008)
+CREATE TABLE spawn_requests (                     -- one row per PreToolUse(Agent); written by hooks
   tool_use_id       TEXT PRIMARY KEY,
   session_id        TEXT NOT NULL,
   at                TEXT NOT NULL,
@@ -204,7 +204,7 @@ SELECT t.key AS ticket, (SELECT pr.key FROM projects pr WHERE pr.id = t.project_
 CREATE VIEW v_live AS SELECT count(*) AS live FROM members WHERE status IN ('planned','active');
 
 -- Append-only, with one exception: an event a subagent recorded before its agent_id was
--- bound to a member (SPD-008) may have member_id and ticket_id attached, once, by the
+-- bound to a member may have member_id and ticket_id attached, once, by the
 -- hook that lands the binding.  Every other column stays as written.
 CREATE TRIGGER events_no_update BEFORE UPDATE ON events
   WHEN NOT (OLD.member_id IS NULL AND NEW.member_id IS NOT NULL
@@ -216,10 +216,10 @@ BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;
 CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT, 'events is append-only'); END;
 """
 
-# Cross-repository projects (SPD-014, docs/design/2026-09-14-cross-repository-projects.md section 8): five columns on
+# Cross-repository projects: five columns on
 # projects, the sessions a /spud claim makes Spud's, and seven event kinds.  SQLite cannot alter a CHECK, so events is
 # rebuilt with the kind list widened; its triggers are dropped first and VIEWS_AND_TRIGGERS re-creates them after.
-# The two views are dropped first as well (SPD-096): apply_migrations runs the newest VIEWS_AND_TRIGGERS after every
+# The two views are dropped first as well: apply_migrations runs the newest VIEWS_AND_TRIGGERS after every
 # migration, so on a fresh init v_board already names the parked columns 0003 has not added yet, and the rename below
 # re-parses every view -- a rename fails on a view whose SELECT no longer resolves, whatever table is renamed.
 DDL_0002 = """
@@ -269,7 +269,7 @@ CREATE INDEX events_agent  ON events(agent_id, id);
 CREATE INDEX events_kind   ON events(kind, id);
 """
 
-# Parked tickets (SPD-096, docs/design/2026-09-16-parked-tickets.md section 4.1): a fifth status and the two columns
+# Parked tickets: a fifth status and the two columns
 # that qualify it.  SQLite cannot alter a CHECK, so tickets is rebuilt; the two views that name it are dropped first
 # (the rename re-parses every view, and one naming a missing table fails it), and VIEWS_AND_TRIGGERS re-creates them.
 # apply_migrations turns foreign keys off around the transaction: with them on, DROP TABLE tickets is refused because
@@ -312,7 +312,7 @@ ALTER TABLE tickets_new RENAME TO tickets;
 CREATE INDEX tickets_board ON tickets(status, priority);
 """
 
-# Ticket-bound worktrees (SPD-098, the home and tool split design's section 6): the one column, the absolute path of the
+# Ticket-bound worktrees: the one column, the absolute path of the
 # linked worktree a code ticket is built in, NULL while unbound (every ticket planned before this migration, which keeps
 # the path rule it had), and the event kind that records a binding.  SQLite cannot alter a CHECK, so events is rebuilt
 # as 0002_projects rebuilt it; the views are dropped first, since the rename re-parses every view and v_board names the
@@ -352,7 +352,7 @@ CREATE INDEX events_agent  ON events(agent_id, id);
 CREATE INDEX events_kind   ON events(kind, id);
 """
 
-# Landing pull requests (SPD-077): the row a `pr record` writes and the reconciler updates, so a pull request that merges
+# Landing pull requests: the row a `pr record` writes and the reconciler updates, so a pull request that merges
 # after its session stopped still reaches the ledger.  One row per recorded pull request, because a ticket carries several
 # over its life (one closed unmerged, a second opened).  `state` is what the last successful `gh pr view` said, `settled_at`
 # when it first said anything but open, `checked_at` and `check_error` the last read whether it worked or not; a settled row
@@ -415,7 +415,7 @@ CREATE INDEX events_agent  ON events(agent_id, id);
 CREATE INDEX events_kind   ON events(kind, id);
 """
 
-# The owner's origin (SPD-160): a ticket the home's owner filed directly carried origin 'eric', one person's name in the
+# The owner's origin: a ticket the home's owner filed directly carried origin 'eric', one person's name in the
 # schema of a tool any home runs, and it becomes 'owner'.  SQLite cannot alter a CHECK, so tickets is rebuilt as
 # 0003_parked rebuilt it, with the worktree column 0004_ticket_worktree added kept last, every row copied with its id and
 # 'eric' written as 'owner' on the way; the views are dropped first, since the rename re-parses every one of them, and

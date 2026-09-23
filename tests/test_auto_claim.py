@@ -66,12 +66,12 @@ class PromptMatchTest(unittest.TestCase):
 
     def test_the_skill_and_the_hooks_steps_have_one_source(self):
         # SPD-097: the steps read the home's CLAUDE.md and run the tool's launcher, two directories now
-        ctx = spud.Ctx(Path("/Users/eric/SpudHome"), "SPUD_HOME", False, tool=Path("/Users/eric/Spud"))
+        ctx = spud.Ctx(Path("/Users/Someone/SpudHome"), "SPUD_HOME", False, tool=Path("/Users/Someone/Spud"))
         home, launcher = ctx.home, ctx.launcher
         skill = spud.skill_markdown(ctx)
         self.assertTrue(skill.startswith("---\nname: spud\n"), skill)
-        self.assertIn("You are becoming Spud in this session.\n\n1. Read /Users/eric/SpudHome/CLAUDE.md in full", skill)
-        self.assertIn("/Users/eric/Spud/bin/spud --as spud session claim", skill)
+        self.assertIn("You are becoming Spud in this session.\n\n1. Read /Users/Someone/SpudHome/CLAUDE.md in full", skill)
+        self.assertIn("/Users/Someone/Spud/bin/spud --as spud session claim", skill)
         hook = numbered(spud.skill_steps(home, spud.HOOK_CLAIM.format(launcher=launcher), "BAD-006 - <what this session does>"))
         steps = numbered(skill)
         self.assertEqual((len(steps), len(hook)), (4, 4))

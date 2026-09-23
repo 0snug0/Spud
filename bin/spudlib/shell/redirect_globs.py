@@ -1,4 +1,4 @@
-"""shell/redirect_globs: The files a redirection glob opens.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""shell/redirect_globs: The files a redirection glob opens."""
 
 import os
 import re
@@ -63,7 +63,7 @@ def _expand_one_brace(pattern):
 
 def brace_expand(pattern):
     """Every pattern a masked pattern's bare brace expansions produce, and whether the count reached the match budget
-    (SPD-034: zsh writes each; bash calls a multi-word target an ambiguous redirect, so expanding is the safe reading)."""
+    (zsh writes each; bash calls a multi-word target an ambiguous redirect, so expanding is the safe reading)."""
     done, queue, capped = [], [pattern], False
     while queue:
         p = queue.pop(0)
@@ -101,7 +101,7 @@ def _digit_span(a, b):
 
 
 def numeric_range_regex(lo, hi):
-    """A regex for the digit strings zsh's `<lo-hi>` matches (SPD-039, probed: `SPD-<1-1>.md` opened SPD-001.md, `<->` every
+    """A regex for the digit strings zsh's `<lo-hi>` matches (probed: `note-<1-1>.md` opened note-001.md, `<->` every
     number): a run of digits whose value lies in the range, leading zeros included, an empty bound open.  A reversed range,
     which zsh matches to nothing, is read as the ordered one, and bounds too long to split as any digits: more files checked."""
     if len(lo) > 18 or len(hi) > 18:
@@ -126,7 +126,7 @@ _GROUP_REGEX = {syntax.ZSH_OPEN: "(?:", syntax.ZSH_BAR: "|", syntax.ZSH_CLOSE: "
 
 def _segment_regex(seg):
     """A regex matching one filename against a masked glob segment: bare `*` `?` `[...]` glob, a zsh group is an alternation
-    and a zsh range a number in range (SPD-039), a quoted sentinel or any other character is literal.  An unbalanced `[` is
+    and a zsh range a number in range, a quoted sentinel or any other character is literal.  An unbalanced `[` is
     a literal bracket, as the shells read it (probed).  A segment the regex engine rejects matches any name: more checked."""
     out, i, n = [], 0, len(seg)
     while i < n:
@@ -180,8 +180,8 @@ def _segment_regex(seg):
 def bounded_glob(pattern):
     """The existing files a masked absolute glob pattern names, and whether the scan budget was reached.  `**` matches
     directories recursively; the scan is bounded by GLOB_SCAN_CAP entries and GLOB_MATCH_CAP matches so a recursive glob
-    never walks a large tree without limit (SPD-034), and stops reporting the bound was hit instead.  A zsh group holding a
-    `/`, or one left open, is a bad pattern zsh opens nothing for (SPD-039, probed)."""
+    never walks a large tree without limit, and stops reporting the bound was hit instead.  A zsh group holding a
+    `/`, or one left open, is a bad pattern zsh opens nothing for (probed)."""
     depth = 0
     for c in pattern:
         if c == syntax.ZSH_OPEN:
@@ -274,6 +274,6 @@ def expand_redirect_target(target, cwds):
 def qualifier_readings(pattern):
     """The patterns a marked pattern stands for: with a trailing group that has no `|`, zsh's default bareglobqual reads glob
     qualifiers, which only narrow the files the rest matches (`(N)` also drops a word matching nothing), and nobareglobqual
-    (this Mac's Bash tool) reads a group (SPD-039, probed: `SPD-001.md(.)` opened the file only with bareglobqual); both count."""
+    (this Mac's Bash tool) reads a group (probed: `note.md(.)` opened the file only with bareglobqual); both count."""
     span = globbing.trailing_group(pattern)
     return [pattern] if span is None else [pattern[: span[0]], pattern]

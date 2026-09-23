@@ -1,4 +1,4 @@
-"""hooks/recording: Binding, and the recording handlers PostToolUse and SubagentStart.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""hooks/recording: Binding, and the recording handlers PostToolUse and SubagentStart."""
 
 import json
 
@@ -34,7 +34,7 @@ def bind_member(con, at, actor_label, member, agent_id, session_id=None, tool_us
     return member
 
 
-# A member's run totals (SPD-021).  A foreground spawn fires SubagentStop and then PostToolUse(Agent,
+# A member's run totals.  A foreground spawn fires SubagentStop and then PostToolUse(Agent,
 # completed) (spike, Enforcement plan, fact 8); a background spawn's PostToolUse comes at launch with no
 # usage fields, so only its SubagentStop records the run.
 # total_tokens and the usage key token_counts reads come only from a transcript sum: the completion's
@@ -76,7 +76,7 @@ def hook_post_tool_use(ctx, payload):
             req = con.execute("SELECT * FROM spawn_requests WHERE tool_use_id = ?", (tool_use_id,)).fetchone() if isinstance(tool_use_id, str) else None
             gap = None
             if req is None and sessions.session_mode(ctx, con, payload)[0] == "plain":
-                return hookio.SILENT  # Eric's own subagent in a session that is not Spud: PreToolUse wrote no row, and that is no gap (SPD-014)
+                return hookio.SILENT  # Eric's own subagent in a session that is not Spud: PreToolUse wrote no row, and that is no gap
             if req is None:
                 gap = "PostToolUse(Agent) for tool_use_id %s (agentId %s) has no spawn_requests row: the spawn was not seen by PreToolUse" % (tool_use_id, agent_id)
             elif req["decision"] != "allow":
@@ -102,9 +102,9 @@ def hook_post_tool_use(ctx, payload):
     return hookio.SILENT
 
 
-# A resume (SPD-050).  Eric resumes a spudagent that has already returned by sending it a message, and the harness
+# A resume.  Eric resumes a spudagent that has already returned by sending it a message, and the harness
 # gives the hooks one signal for it and only one: SubagentStart fires again for the same agent_id.  Probed live on
-# 2026-09-15 with the scout SPUD-050/Sarpo (agent_id aca970f6a277bd623): events 3685 (started), 3688 (stopped), then
+# 2026-09-15 with a scout (agent_id aca970f6a277bd623): events 3685 (started), 3688 (stopped), then
 # SendMessage, then 3689, a second member.started carrying the same three fields, agent_type, session_id and cwd, and
 # nothing else; no PreToolUse or PostToolUse names SendMessage.  So the resume is read from the row, not the payload.
 # Before this the return stood through the whole second round: Spud's Stop held with Law 9 and named a member that was
@@ -142,7 +142,7 @@ def hook_subagent_start(ctx, payload):
         with ledgerdb.write_txn(con):
             member = con.execute("SELECT * FROM members WHERE agent_id = ?", (agent_id,)).fetchone()
             if member is None and not sessions.pending_spawn(con, payload.get("session_id")) and sessions.session_mode(ctx, con, payload)[0] == "plain":
-                return hookio.SILENT  # Eric's own subagent in a session that is not Spud (SPD-014)
+                return hookio.SILENT  # Eric's own subagent in a session that is not Spud
             member, was_stopped, cleared = resume_member(con, member)
             body = "subagent %s started (%s)" % (agent_id, payload.get("agent_type"))
             data = {"agent_type": payload.get("agent_type"), "session_id": payload.get("session_id"), "cwd": payload.get("cwd")}
@@ -172,7 +172,7 @@ def hook_subagent_start(ctx, payload):
                 context += " You are %s/%s (%s, %s) on %s; your deliverables: %s." % (
                     ticket["team_key"], member["name"], member["lineage"], member["persona"], ticket["key"], ", ".join(json.loads(member["deliverables"])) or "none")
                 project = con.execute("SELECT * FROM projects WHERE id = ?", (ticket["project_id"],)).fetchone()
-                if ticket["worktree"]:  # SPD-098: a bound ticket's paths are its worktree's alone
+                if ticket["worktree"]:  # a bound ticket's paths are its worktree's alone
                     context += (" Your ticket's project is `%s`, and your ticket is bound to its worktree `%s`: bare deliverables are relative"
                                 " to that worktree alone, the same paths in the main checkout `%s` or in any other worktree are refused, and"
                                 " `home:<glob>` names Spud's home (%s); that repository's CLAUDE.md and skills govern how you build and verify."

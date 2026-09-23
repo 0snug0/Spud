@@ -1,4 +1,4 @@
-"""shell/spud_calls: Recognizing and vouching for a spud call.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""shell/spud_calls: Recognizing and vouching for a spud call."""
 
 import os
 import re
@@ -60,7 +60,7 @@ def python_interpreter_args(args):
 
 
 def spud_launcher(script, cwd):
-    """True when running `script` runs a spud launcher however its path is spelled (SPD-029): Law 6's refusals and
+    """True when running `script` runs a spud launcher however its path is spelled: Law 6's refusals and
     Law 5's `--as` check depend on seeing the call.  Its name case-folded is spud (bin/SPUD and bin/ſpud are bin/spud
     on macOS), or the name its symlinks resolve to is (the launcher finds its program from its own real path, so a
     link by any name runs it).  A relative path resolves against the directory the shell would be in."""
@@ -81,10 +81,10 @@ def any_spud_launcher(script, cwds):
     return any(spud_launcher(script, c) for c in (sorted(cwds) if cwds else [None]))
 
 
-# What the Bash hook's allow needs beyond recognizing a spud call (SPD-032).  Recognition by name stays wide, since Laws 5 and 6
+# What the Bash hook's allow needs beyond recognizing a spud call.  Recognition by name stays wide, since Laws 5 and 6
 # refuse every spelling; the allow skips the harness's prompt, so it is given only to a call whose every moving part the hook
 # can vouch for, each pinned by a probe in the scratchpad (python3.14 3.14.7, framework build):
-#   the launcher: the running tool's bin/spud by file identity (SPD-097), run from its own directory, since it loads spud_ledger.py beside
+#   the launcher: the running tool's bin/spud by file identity, run from its own directory, since it loads spud_ledger.py beside
 #     its real path (a hard link elsewhere is the same file running another program; __file__ keeps the path as given, and its
 #     realpath is the kernel's reading, symlinks before `..` included).  Not a worktree's: bin/** there is a member's deliverable.
 #   the interpreter: the file the hook itself runs on, in the same directory (a symlink elsewhere is a file anyone who can write
@@ -140,7 +140,7 @@ def interpreter_vouched(word, cwds):
 
 
 def launcher_vouched(script, cwds, launcher):
-    """The script is the running tool's own bin/spud (SPD-097: the tool repository's, which the hook itself runs; never the
+    """The script is the running tool's own bin/spud (the tool repository's, which the hook itself runs; never the
     home's, which has none), the same file in the same directory, from every directory the shell may be in."""
     if unresolvable_word(script) or (script.startswith("~") and not script.startswith("~/")):
         return False
@@ -167,7 +167,7 @@ def spud_home_vouched(value, home):
 
 
 def vouched_spud_call(a, interpreter, options, script, prefixed):
-    """True when the hook may allow this python spud call without the harness's prompt (SPD-032)."""
+    """True when the hook may allow this python spud call without the harness's prompt."""
     if prefixed or a.home is None or a.launcher is None or not python_options_vouched(options):
         return False
     for name, value in a.vars.items():
@@ -178,15 +178,13 @@ def vouched_spud_call(a, interpreter, options, script, prefixed):
 
 QUIET_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
 # The order bash_reason reads a line's findings in: a refusal the words as spelled already earn first, then the ones that are
-# the hook's last resort -- a verb it cannot place among git's own commands and a repository it cannot read (SPD-047), a
-# program name the shell would not find where the hook looked (SPD-062: a PATH the line assigns, a hashed name; SPD-084: a
-# name the line bound to a shell function; SPD-106: a function the line hands a program's environment; SPD-049 gave them
-# their entry, which wave 2 could not) -- then a word it cannot
-# resolve at all (SPD-043).  So `touch push; git p?sh` still names `git push`, `git -C /tmp commit` the verb, and
-# `PATH=<dir> git status; git push` the push.  All of them refuse; the entry decides only which reason a line of several
-# commands answers with.
+# the hook's last resort -- a verb it cannot place among git's own commands and a repository it cannot read, a program
+# name the shell would not find where the hook looked (a PATH the line assigns, a hashed name, a name the line bound to a
+# shell function, a function the line hands a program's environment) -- then a word it cannot resolve at all.  So
+# `touch push; git p?sh` still names `git push`, `git -C /tmp commit` the verb, and `PATH=<dir> git status; git push` the
+# push.  All of them refuse; the entry decides only which reason a line of several commands answers with.
 FINDING_LAST = {"git-verb": 1, "git-repo": 1, "path": 1, "hashed": 1, "function": 1, "env-function": 1, "var-word": 2, "var-doubt": 2,
-                "shell-alias": 2}  # SPD-133: an alias of the shell's whose body the hook cannot read, after the words as spelled
+                "shell-alias": 2}  # an alias of the shell's whose body the hook cannot read, after the words as spelled
 
 
 def actor_is_self(con, actor, caller_member, caller_agent_id):
@@ -197,7 +195,7 @@ def actor_is_self(con, actor, caller_member, caller_agent_id):
 
 
 def spud_call_writes(call):
-    """Whether a recognized spud call writes the ledger: everything but the read commands and --help (SPD-014)."""
+    """Whether a recognized spud call writes the ledger: everything but the read commands and --help."""
     if call["help"] or call["command"] is None:
         return False
     return call["command"] not in hookio.READ_ONLY_COMMANDS and (call["command"], call["subcommand"]) not in hookio.READ_ONLY_SUBCOMMANDS

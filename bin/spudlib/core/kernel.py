@@ -1,4 +1,4 @@
-"""core/kernel: Shared types and constants: exit codes, statuses and state machines, event kinds, note layout, SpudError, the clock, Result and table, two file helpers.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""core/kernel: Shared types and constants: exit codes, statuses and state machines, event kinds, note layout, SpudError, the clock, Result and table, two file helpers."""
 
 import contextlib
 import os
@@ -25,17 +25,17 @@ MODELS = ("fable", "opus", "sonnet", "haiku")
 PERSONAS = ("researcher", "architect", "reviewer", "engineer", "designer", "writer", "scout", "contractor")
 ALIVE = ("planned", "active")
 
-# SPD-097: the reserved key of Spud's home in a deliverable glob (home:<glob>) and in the path rule.  The home is not a
+# The reserved key of Spud's home in a deliverable glob (home:<glob>) and in the path rule.  The home is not a
 # project and never a projects row; project 1, `spud`, is the tool repository.
 HOME_KEY = "home"
 
-# The two state machines, decided on SPD-007.
+# The two state machines, decided when the ledger CLI was first built.
 TICKET_TRANSITIONS = {
     ("queued", "active"),
     ("active", "done"),
     ("queued", "declined"),
     ("active", "queued"),
-    # parked (SPD-096): important but deliberately not-now.  Reached from the queue and from work in hand, left for
+    # parked: important but deliberately not-now.  Reached from the queue and from work in hand, left for
     # either or declined, and renewed in place with a new reason or date; never `done`, since nothing was done while
     # parked — a wait that ends goes through `active`.
     ("queued", "parked"),
@@ -60,26 +60,26 @@ EVENT_KINDS = (
     "member.log", "member.result", "member.blocked", "member.outcome", "member.status", "member.edited",
     "handoff", "proposal.filed", "proposal.decided", "hook.denied", "hook.error", "render",
     "report.entry", "commit", "import", "config.synced",
-    # cross-repository projects (SPD-014, migration 0002_projects)
+    # cross-repository projects (migration 0002_projects)
     "project.added", "project.edited", "project.installed", "project.uninstalled", "project.removed",
     "session.claimed", "session.released",
-    # ticket-bound worktrees (SPD-098, migration 0004_ticket_worktree)
+    # ticket-bound worktrees (migration 0004_ticket_worktree)
     "ticket.worktree",
-    # landing pull requests (SPD-077, migration 0005_pull_requests): recorded by Spud, settled by the reconciler
+    # landing pull requests (migration 0005_pull_requests): recorded by Spud, settled by the reconciler
     "pr.recorded", "pr.state",
 )
 
-# The actor a reconciled pull-request state is written under (SPD-077).  A `gh pr view` read is nobody's judgment, so it
+# The actor a reconciled pull-request state is written under.  A `gh pr view` read is nobody's judgment, so it
 # names no person: `spud pr reconcile` takes no --as, which is what lets `spud board` run it.
 RECONCILE_ACTOR = "reconcile"
 
-# The markdown-v0 templates (ledger/_templates/) as the renderer's default layout.  `project` since SPD-014: every
+# The markdown-v0 templates (ledger/_templates/) as the renderer's default layout.  `project`: every
 # note names its project, the home's included, so the Obsidian views group and filter without an empty bucket.
 TICKET_FM_KEYS = ["id", "title", "priority", "status", "parked_until", "parked_reason", "pr", "pr_state", "origin", "project",
                   "proposed_by", "lead", "created", "tags"]
-# The two a ticket note carries only while it is parked (SPD-096); every other note drops them.
+# The two a ticket note carries only while it is parked; every other note drops them.
 PARKED_FM_KEYS = ("parked_until", "parked_reason")
-# The two a ticket note carries only while a landing pull request is recorded against it (SPD-116), after the status and
+# The two a ticket note carries only while a landing pull request is recorded against it, after the status and
 # the parked pair: the number of the row `pr record` last wrote (empty when its URL carried none) and that row's state.
 # The clickable URL is in ## Landing, never here: Ledger v1 forbids a property value shaped like `word:text`, which is
 # what Obsidian reads `https://github.com/...` as.
@@ -90,7 +90,7 @@ MEMBER_SECTIONS = ["Brief", "Log", "Sub-agents", "Ticket proposals", "Result", "
 TICKET_COLUMN_SECTIONS = {"Brief": "brief", "Size, persona and model decision": "sizing", "Outcome": "outcome"}
 MEMBER_COLUMN_SECTIONS = {"Brief": "brief", "Result": "result", "Blocked": "blocked", "Outcome": "outcome"}
 # The ticket sections generated from a table alone, whose prose is never stored and which a hand edit cannot change:
-# ## Team from members (SPD-010) and ## Landing from pull_requests (SPD-116).
+# ## Team from members and ## Landing from pull_requests.
 TICKET_GENERATED_SECTIONS = ("Team", LANDING_SECTION)
 # Derived sections render from rows; imported prose (when the rows cannot regenerate
 # it) renders first, followed by the rows added after the prose was stored.  The
@@ -136,7 +136,7 @@ def fm_minute(stamp):
 
 def seconds_since(stamp, now=None):
     """Seconds between an ISO stamp the ledger wrote and now; None when the stamp cannot be read or compared.  Moved down
-    from commands/prcmds on SPD-117: a pull request's last read and the vault's lag ask the same question, and the lag is
+    from commands/prcmds: a pull request's last read and the vault's lag ask the same question, and the lag is
     asked on the hook path, which no command module may serve."""
     try:
         return ((datetime.now().astimezone() if now is None else now) - datetime.fromisoformat(stamp)).total_seconds()
@@ -179,7 +179,7 @@ def write_whole(path, content):
 
 def write_bytes(path, data):
     """`write_whole` for bytes: a temporary file in the same directory, renamed into place, so a reader -- and Obsidian
-    is a reader -- never sees half a plugin.  Moved here from `commands/vaultlock` on SPD-157, when `state/backup` came
+    is a reader -- never sees half a plugin.  Moved here from `commands/vaultlock` when `state/backup` came
     to need it for the copy every command keeps before it overwrites a tool-owned file."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.parent / (".spud-" + path.name + ".tmp")

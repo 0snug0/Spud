@@ -1,4 +1,4 @@
-"""core/homeconf: Where the ledger is: home resolution, Ctx and config, git subprocess helpers, user-scope directories.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""core/homeconf: Where the ledger is: home resolution, Ctx and config, git subprocess helpers, user-scope directories."""
 
 import json
 import os
@@ -15,8 +15,8 @@ from ..render import prices
 
 
 def resolve_home(env):
-    """SPUD_HOME, else the ~/.config/spud/home pointer (SPD-097: the home is a plain directory, so nothing about the running
-    script says where it is; the git fallback of SPD-007 is gone).  Returns (path, how)."""
+    """SPUD_HOME, else the ~/.config/spud/home pointer (the home is a plain directory, so nothing about the running
+    script says where it is, and no git repository is asked).  Returns (path, how)."""
     if env.get("SPUD_HOME"):
         return Path(env["SPUD_HOME"]).expanduser().resolve(), "SPUD_HOME"
     pointer = spud_config_dir(env) / "home"
@@ -29,7 +29,7 @@ def resolve_home(env):
 
 def tool_root(env=None):
     """The checkout whose bin/spud is running: the parent of the bin/ directory this package sits in, symlinks resolved;
-    SPUD_TOOL_DIR overrides it, for tests (SPD-097).  What the hook lines, the allow rules, the LaunchAgents and the /spud
+    SPUD_TOOL_DIR overrides it, for tests.  What the hook lines, the allow rules, the LaunchAgents and the /spud
     skill name, where the spudagent source is read, and project spud's root at `spud init`."""
     env = os.environ if env is None else env
     if env.get("SPUD_TOOL_DIR"):
@@ -40,7 +40,7 @@ def tool_root(env=None):
 def tool_checkout_kind(tool):
     """`main` when the tool is the main checkout of a git repository, `worktree` for a linked worktree, `none` when git names
     no repository there.  A command that writes the tool's path somewhere durable warns on `worktree`: a worktree is deleted
-    when its ticket lands, and a hook line naming it would die with it (SPD-097)."""
+    when its ticket lands, and a hook line naming it would die with it."""
     if not os.path.lexists(os.path.join(str(tool), ".git")):
         return "none"
     try:
@@ -61,13 +61,13 @@ class Ctx:
         self.resolved_by = resolved_by
         self.json = json_mode
         self.db_path = home / ".spud" / "ledger.db"
-        self.tool = tool_root() if tool is None else Path(tool)  # SPD-097: the tool repository; the home is not one
+        self.tool = tool_root() if tool is None else Path(tool)  # the tool repository; the home is not one
         self._config = None
-        self.hook_project = None  # `spud hook <event> --project <key>`: the failure policy of a project's hook line (SPD-014)
+        self.hook_project = None  # `spud hook <event> --project <key>`: the failure policy of a project's hook line
 
     @property
     def launcher(self):
-        """The running tool's bin/spud: what every durable reference to the program names (SPD-097)."""
+        """The running tool's bin/spud: what every durable reference to the program names."""
         return self.tool / "bin" / "spud"
 
     @property
@@ -112,7 +112,7 @@ class Ctx:
 
     @property
     def pricing(self):
-        """The price table spud.config.json gives (`pricing`, SPD-013), or None: what cost renders from."""
+        """The price table spud.config.json gives (`pricing`), or None: what cost renders from."""
         return prices.price_table(self.config)[0]
 
 
@@ -181,6 +181,6 @@ def spud_config_dir(env=None):
     return Path(os.path.abspath(os.path.expanduser(env.get("SPUD_CONFIG_DIR") or "~/.config/spud")))
 
 
-# -- worktrees: every checkout of the home repository, wherever `git worktree add` put it (SPD-016) -----------------
+# -- worktrees: every checkout of the home repository, wherever `git worktree add` put it ---------------------------
 
 GIT_REDIRECTS = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR", "GIT_INDEX_FILE")  # what could point a git call away from the home

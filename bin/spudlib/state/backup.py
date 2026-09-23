@@ -1,4 +1,4 @@
-"""state/backup: The backup copy, its listing, quick check and daily prune.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""state/backup: The backup copy, its listing, quick check and daily prune."""
 
 import os
 import re
@@ -26,7 +26,7 @@ def do_backup(ctx, con, label=None, stamp=None):
     return target
 
 
-# backup --daily (SPD-012): one checked copy a local calendar day, and the newest DAILY_KEEP daily copies kept.
+# backup --daily: one checked copy a local calendar day, and the newest DAILY_KEEP daily copies kept.
 DAILY_LABEL = "daily"
 DAILY_KEEP = 14
 # A daily copy's whole name.  The stamp is fixed-width, so the names sort chronologically; ASCII digits and
@@ -41,7 +41,7 @@ def backups_dir(ctx):
 
 def copy_stamp(ctx, folder):
     """The `<when>` directory a run keeps its copies under, inside `.spud/backups/<folder>/`: one no run of that command
-    has used, whatever the clock says (SPD-162).
+    has used, whatever the clock says.
 
     The clock reads to the second, and two runs of one command inside a second are ordinary -- a `home sync` right after
     the `--check` that settled it, a `vault install` run twice while a download is being fixed.  Sharing a folder, the
@@ -67,7 +67,7 @@ def keep_copy(ctx, folder, stamp, rel, data, check_only=False):
     the reassurance.  `check_only` names the path the command *would* keep and writes nothing, which is what makes
     `spud home sync --check` able to say where each copy would go while writing none of them.
 
-    One function for `vault install` (SPD-156) and `home sync` (SPD-157), which differ in `folder` and nothing else,
+    One function for `vault install` and `home sync`, which differ in `folder` and nothing else,
     and here in `state/backup` rather than in either command because this is where a backup's directory is decided.
     """
     path = backups_dir(ctx) / folder / stamp / rel

@@ -1,4 +1,4 @@
-"""render/prices: List-price cost from spud.config.json pricing, and the token counts it prices.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""render/prices: List-price cost from spud.config.json pricing, and the token counts it prices."""
 
 import json
 import re
@@ -10,10 +10,10 @@ from ..state import transcripts
 def token_counts(usage_json):
     """{out, in, cached} from a run's transcript sum: output_tokens; input_tokens plus
     cache_creation_input_tokens; cache_read_input_tokens (a missing key counts 0).  A sum counts each API
-    request once since SPD-023 ("counting": "request"); one stored before added every transcript entry,
+    request once ("counting": "request"); one stored by an older spud added every transcript entry,
     reads the same way, and runs four to five times too high until `spud member resum` re-sums it.  The
     completion kept beside the sum under "completion" is never read: its figures cover only its final
-    request (SPD-021).  None for any other source (a completion alone), a figure that is not a
+    request.  None for any other source (a completion alone), a figure that is not a
     non-negative integer, or JSON of another shape."""
     if not usage_json:
         return None
@@ -33,7 +33,7 @@ def token_counts(usage_json):
             "cached": figures["cache_read_input_tokens"]}
 
 
-# Cost at the API list price (SPD-013).  Eric decided the basis on 2026-09-13: the API list price in USD from Anthropic's
+# Cost at the API list price.  Eric decided the basis on 2026-09-13: the API list price in USD from Anthropic's
 # published per-model prices, labelled as list price so it is never read as his subscription's bill, from the dated
 # table spud.config.json gives (`pricing`), which he updates.  Cost is computed when the card and the notes render, from
 # a stored transcript sum's per-model breakdown (usage_breakdown) and that table; it is never stored, so a price change
@@ -190,9 +190,9 @@ def bucket_cost(bucket, table):
 def run_cost(usage_json, table):
     """(a member's run at the API list price in USD, an exact fraction, or None; the reasons it has none).  Only a
     transcript sum is priced, the one token_counts reads: a completion kept beside it or alone covers a final request
-    (SPD-021) and is never priced, and a row without a sum has nothing to price and no reason.  A sum the importer read
+    and is never priced, and a row without a sum has nothing to price and no reason.  A sum the importer read
     back from a rendered note carries the cost the note showed; any other sum is priced from its breakdown, which one
-    stored before SPD-013 lacks until `spud member resum` adds it."""
+    stored before costs were priced lacks until `spud member resum` adds it."""
     if token_counts(usage_json) is None:
         return None, []
     stored, _ = transcripts.usage_parts(usage_json)

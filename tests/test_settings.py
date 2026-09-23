@@ -283,7 +283,7 @@ class HookEvidenceTest(SpudTestCase):
         """SPW-003: projects/sessions generates both forms instead of importing shlex, which every hook run would pay
         0.11 ms for.  Exact for any text, this pins it: whatever shlex.quote writes is one of the two."""
         spud = load_spud_module()
-        for text in ("/Users/eric/Spud", "/Users/eric/My Home", "/tmp/it's here", "a$b`c", "", "plain", "a'b'c", "/a\nb"):
+        for text in ("/Users/Someone/Spud", "/Users/Someone/My Home", "/tmp/it's here", "a$b`c", "", "plain", "a'b'c", "/a\nb"):
             self.assertIn(shlex.quote(text), spud.shell_word_forms(text), text)
 
     def test_the_hook_table_installs_exactly_the_events_the_program_handles(self):

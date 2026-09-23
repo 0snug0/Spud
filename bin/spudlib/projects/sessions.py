@@ -1,8 +1,8 @@
 """projects/sessions: Session mode and claims, the /spud skill text, the board brief, the session commands, and what a
-session has loaded of the ledger's hooks (SPW-003).  Moved from bin/spud_ledger.py (SPD-065).
+session has loaded of the ledger's hooks.
 
-Past 250 lines deliberately (the rule of SPD-065): all of it is what one session is to the ledger, and this is the only
-module of tests/test_package.HOOK_PATH that a command may import as freely as a hook does -- which is why SPW-003's
+Past 250 lines deliberately (the size rule's look-again point, not a cap): all of it is what one session is to the ledger, and this is the only
+module of tests/test_package.HOOK_PATH that a command may import as freely as a hook does -- which is why the
 reading of the settings files a session loads its hooks from is here, and not beside
 commands/settings_sync.settings_hold_hooks, whose question it is but which no hook may import (Eric's decision 2)."""
 
@@ -17,7 +17,7 @@ from ..state import actors, ledgerdb, lookup
 def brief_state(m, today=None):
     """A live member's state on the brief board: its status, or `returned HH:MM, unrecorded` for a member that
     returned and has no verdict yet (the date too when it stopped on another day).  A session holds only for its
-    own members (SPD-018), so this is how a later or parallel session sees another session's."""
+    own members, so this is how a later or parallel session sees another session's."""
     if m["status"] == "active" and m["stopped_at"] and not (m["outcome"] or "").strip():
         same_day = m["stopped_at"][:10] == (today or kernel.now())[:10]
         return "returned %s, unrecorded" % (m["stopped_at"][11:16] if same_day else kernel.fm_minute(m["stopped_at"]))
@@ -26,7 +26,7 @@ def brief_state(m, today=None):
 
 def board_line(r, day):
     """One ticket's line: key, status, priority, title, and what qualifies it in one parenthesis — its lead, and for a
-    parked ticket (SPD-096) the date, read as `due back` from the day it names, and the reason."""
+    parked ticket the date, read as `due back` from the day it names, and the reason."""
     inside = ["lead %s" % r["lead"]] if r["lead"] else []
     if r["status"] == "parked":
         until = r["parked_until"]
@@ -36,9 +36,9 @@ def board_line(r, day):
 
 
 def settled_pr_lines(con, key):
-    """The lines a ticket's merged or closed-unmerged pull requests put on the brief board (SPD-077).  Stored state only:
+    """The lines a ticket's merged or closed-unmerged pull requests put on the brief board.  Stored state only:
     no `gh` and no git here, because this text is injected at every session start -- which is the point, since the session
-    that opened the pull request is long gone by the time it merges (BAD-058).  An open one says nothing: the full board
+    that opened the pull request is long gone by the time it merges.  An open one says nothing: the full board
     reads it and shows it there."""
     rows = con.execute("SELECT p.* FROM pull_requests p JOIN tickets t ON t.id = p.ticket_id WHERE t.key = ? AND p.state <> 'open'"
                        " ORDER BY p.id", (key,)).fetchall()
@@ -47,11 +47,11 @@ def settled_pr_lines(con, key):
 
 def board_brief_text(con, rows=None, parked=False):
     """Open tickets and their live members, one line each (also the SessionStart context): active tickets with their live
-    members and any settled landing pull request (SPD-077), then the parked tickets whose date has arrived, then queued,
-    then one count line for the parked (SPD-096).
+    members and any settled landing pull request, then the parked tickets whose date has arrived, then queued,
+    then one count line for the parked.
     A due-back line sits above the queue and the count line last because every SessionStart context keeps whole lines
     from the top (fit_bytes): the line meant to nag must survive the cut, and the count may be cut.  With no parked ticket the
-    text is what it was before SPD-096, byte for byte.  `parked`: every parked ticket instead, due or not."""
+    text is what it was before tickets could be parked, byte for byte.  `parked`: every parked ticket instead, due or not."""
     if rows is None:
         rows = [dict(r) for r in con.execute("SELECT * FROM v_board").fetchall()]
     now = kernel.now()
@@ -84,16 +84,16 @@ def board_brief_text(con, rows=None, parked=False):
 
 
 CLAIM_CARD_CAP = 1536        # bytes: what `session claim` prints
-# Bytes of UTF-8: every SessionStart context, the home's, outside's and a project's (SPD-048).  The harness keeps a hook's
+# Bytes of UTF-8: every SessionStart context, the home's, outside's and a project's.  The harness keeps a hook's
 # additionalContext inline up to 10,000 UTF-16 code units and past that gives the model a ~2 KB preview and a file path
-# (code.claude.com/docs/en/hooks, "JSON output"; the design's probe P2 saw that preview).  tests/probes/context_limit.py
+# (code.claude.com/docs/en/hooks, "JSON output").  tests/probes/context_limit.py
 # measured the edge on Claude Code 2.1.274: 10,000 units inline, 10,001 persisted, 18,886 bytes of 10,000 two-byte
 # characters inline, 6,000 four-byte characters (11,320 units) persisted.  UTF-8 never has fewer bytes than UTF-16 has
 # units, so a cap in bytes holds whatever the text, and 8,000 is 80% of the limit.
 SESSION_CONTEXT_CAP = 8000
 PLAIN_NOTICE_CAP = 300       # bytes: the one line a session that is not Spud gets
 # The /spud skill's steps, the one source of the installed SKILL.md and of the context the UserPromptSubmit hook gives a
-# session it claims (SPD-057), so the two cannot drift.  Step 2 is the claim: the skill runs it, the hook has made it.
+# session it claims, so the two cannot drift.  Step 2 is the claim: the skill runs it, the hook has made it.
 SKILL_HEAD = """---
 name: spud
 description: Make this session Spud, Eric's second brain, in a repository registered as a Spud project. Only when Eric types /spud or asks for Spud in this session.
@@ -120,7 +120,7 @@ def skill_steps(home, claim, title):
 
 
 def skill_markdown(ctx):
-    """What project install writes to ~/.claude/skills/spud/SKILL.md: the home's CLAUDE.md and config, the tool's launcher (SPD-097)."""
+    """What project install writes to ~/.claude/skills/spud/SKILL.md: the home's CLAUDE.md and config, the tool's launcher."""
     return SKILL_HEAD + "\n" + skill_steps(ctx.home, SKILL_CLAIM.format(launcher=ctx.launcher), SKILL_TITLE)
 
 
@@ -139,10 +139,10 @@ def pending_spawn(con, session_id):
 
 
 def session_mode(ctx, con, payload, env=None):
-    """(mode, launch project row or None, claim row or None), once per hook call (design section 6.1).  The launch project
-    is the project of CLAUDE_PROJECT_DIR, which stays at the launch directory after EnterWorktree (probe P5), else of the
+    """(mode, launch project row or None, claim row or None), once per hook call.  The launch project
+    is the project of CLAUDE_PROJECT_DIR, which stays at the launch directory after EnterWorktree, else of the
     payload's cwd.  `outside`: it is in no active project and not the home, and a hook behaves as `spud` there, today's
-    strict behaviour.  `spud`: launched in the home (SPD-097: the home is not a project, so the row is None), or the session
+    strict behaviour.  `spud`: launched in the home (the home is not a project, so the row is None), or the session
     holds a claim, or its project's sessions is `always`.  `plain` otherwise."""
     env = os.environ if env is None else env
     session = payload.get("session_id")
@@ -164,16 +164,16 @@ def session_mode(ctx, con, payload, env=None):
 
 
 # ----------------------------------------------------------------------------
-# Whether the session a command describes has the ledger's hooks loaded (SPW-003)
+# Whether the session a command describes has the ledger's hooks loaded
 # ----------------------------------------------------------------------------
 #
 # Claude Code reads hooks from the user's own ~/.claude/settings.json and from the .claude/settings.json and
 # .claude/settings.local.json of the session's *project directory*: the directory the session was launched in, which the
-# harness exports as CLAUDE_PROJECT_DIR and which stays there after EnterWorktree (probe P5).  `settings sync` writes the
+# harness exports as CLAUDE_PROJECT_DIR and which stays there after EnterWorktree.  `settings sync` writes the
 # home's file and `project install` each project root's local one, so a session launched anywhere else reads neither and
 # loads no ledger hook at all -- and every consequence of that is silent: a spawned member never binds (no
 # PostToolUse(Agent) runs), its child gets no agent_id (no SubagentStart), PreToolUse guards nothing and Stop holds no
-# turn.  That is SPW-003, where a recorded claim on top of it made `session show` print `mode spud` over a session in
+# turn.  A recorded claim on top of it once made `session show` print `mode spud` over a session in
 # which nothing of the ledger ran at all.
 #
 # The evidence the report may use is those files, read now, and nothing else:
@@ -181,9 +181,9 @@ def session_mode(ctx, con, payload, env=None):
 #   * The working directory is not evidence.  A command runs where it runs -- another worktree, a subagent's cwd,
 #     wherever Eric cd'd to -- while the session goes on reading the settings of the directory it was launched in.
 #     session_mode falls back to the payload's cwd because a hook has nothing better; a command must not turn that guess
-#     into a claim, and reading the cwd is exactly what hid SPW-003.
+#     into a claim, and reading the cwd is exactly what once hid a session with no hooks.
 #   * CLAUDE_PROJECT_DIR unset is its own answer, `unknown`, and never `absent`: it was unset in the very session that
-#     found SPW-003, so its absence proves nothing either way.  The one file that can still be named is the user-scope
+#     found hooks missing, so its absence proves nothing either way.  The one file that can still be named is the user-scope
 #     one, so `loaded` still holds when that carries the lines; otherwise the honest answer is that the directory cannot
 #     be named -- and the fix is named anyway, since it is the same relaunch.
 #   * With no session at all -- a terminal, a LaunchAgent, a cron run -- there is nothing to load hooks, which is
@@ -194,7 +194,7 @@ def session_mode(ctx, con, payload, env=None):
 # None of this runs inside a hook: `session show` and `doctor` call it, and the settings read stays out of session_mode,
 # which every hook run pays for.  It lives here, rather than beside commands/settings_sync.settings_hold_hooks whose
 # question it is, because cmd_session_show is in this module and every commands/* module is off the hook path for good
-# (Eric's decision 2, SPD-065); settings_hold_hooks asks that question of one file through settings_hook_events below, so
+# (Eric's decision 2 on the package split); settings_hold_hooks asks that question of one file through settings_hook_events below, so
 # the reading of a settings file is written once.
 HOOK_MARK = "bin/spud hook"  # what marks a hook entry as the ledger's, whatever home it was generated for
 HOOKS_LOADED = "this home's ledger hooks are loaded in this session, from %s"
@@ -210,7 +210,7 @@ HOOKS_NO_SESSION = "there is no Claude Code session here, so nothing loads this 
 HOOKS_RELAUNCH = "relaunch the session in %s or in a registered project's checkout (`spud project list`)"
 HOOKS_INSTALL_HERE = ", or install this home's hook lines where this session reads them: `spud --as spud settings sync --path %s`"
 HOOKS_NOT_THE_ROOT = ("%s is in `%s` but is not %s, the directory this home installs its hook lines into: relaunch the session"
-                      " there -- EnterWorktree leaves CLAUDE_PROJECT_DIR at the directory the session started in (probe P5), so"
+                      " there -- EnterWorktree leaves CLAUDE_PROJECT_DIR at the directory the session started in, so"
                       " a worktree reached from there keeps them")
 HOOKS_SYNC_HOME = "run `spud --as spud settings sync`, which writes them into %s"
 HOOKS_SYNC_PROJECT = "run `spud --as spud project install %s`, which writes them into %s"
@@ -219,7 +219,7 @@ HOOKS_SYNC_PROJECT = "run `spud --as spud project install %s`, which writes them
 def shell_word_forms(text):
     """The two spellings shlex.quote can write `text` as, and so the two an installed hook line can carry it in: the text
     itself, when it needs no quoting, and single-quoted with every quote closed and reopened.  Generating both is exact
-    and keeps `import shlex` -- 0.11 ms of every hook run, measured on SPW-003 -- off the hook path for a read only two
+    and keeps `import shlex` -- 0.11 ms of every hook run, measured -- off the hook path for a read only two
     commands make; tests/test_settings.py pins the pair against shlex.quote itself."""
     return (text, "'%s'" % text.replace("'", "'\"'\"'"))
 
@@ -261,7 +261,7 @@ def session_settings_files(ctx, launch):
 
 
 def session_hooks(ctx, con, session, env=None):
-    """What this home's ledger hooks are in the session `session`, on the evidence above (SPW-003):
+    """What this home's ledger hooks are in the session `session`, on the evidence above:
 
       state    `loaded`, `partial`, `absent`, `unknown` or `no_session`
       launch   CLAUDE_PROJECT_DIR, the directory the session reads its project settings from, or None
@@ -278,7 +278,7 @@ def session_hooks(ctx, con, session, env=None):
     launch = env.get("CLAUDE_PROJECT_DIR") or None
     files, events = [], set()
     for path in session_settings_files(ctx, launch):
-        # No key: a line's `--project <key>` sets its failure policy (SPD-014), not which ledger it writes, so any line
+        # No key: a line's `--project <key>` sets its failure policy, not which ledger it writes, so any line
         # of this home's runs here and counts, whichever project it was installed for.
         found = settings_hook_events(ctx, path)
         files.append({"path": path, "exists": os.path.isfile(path), "events": sorted(found)})
@@ -346,7 +346,7 @@ def session_hooks_lines(ctx, hooks):
 
 
 def cut_note(count):
-    """The closing line of a cut: how many of the body's lines it left out, and where the rest is (SPD-048)."""
+    """The closing line of a cut: how many of the body's lines it left out, and where the rest is."""
     return "(%d more line%s cut to fit; run `spud board --brief` for the rest)" % (count, "" if count == 1 else "s")
 
 
@@ -375,8 +375,8 @@ def fit_bytes(head, body, cap):
 
 def home_session_context(con, payload, alerts=()):
     """The SessionStart context of a session in the home, or outside every project: `alerts` (the render watcher's lines,
-    when it is down or the vault is behind the ledger), the board's header, and the board, cut to SESSION_CONTEXT_CAP (SPD-048).
-    With no alert and a board that fits, the text is what the hook injected before SPD-048, byte for byte."""
+    when it is down or the vault is behind the ledger), the board's header, and the board, cut to SESSION_CONTEXT_CAP.
+    With no alert and a board that fits, the text is what the hook injected before the cap, byte for byte."""
     head = "\n".join(list(alerts) + ["Ledger board (`spud board --brief` at %s, source %s):" % (kernel.now(), payload.get("source"))])
     return fit_bytes(head, board_brief_text(con), SESSION_CONTEXT_CAP)
 
@@ -410,7 +410,7 @@ def project_session_context(ctx, con, project, claim, payload, alerts=()):
 def record_claim(con, at, actor_label, session, project, cwd, ticket=None):
     """The one write of a claim: the session's row, unreleased, and its session.claimed event.  `how` in the event says who
     claimed: `command` (`session claim`, which /spud runs) or `hook`, the UserPromptSubmit hook, with the ticket whose key
-    in the prompt made it claim (SPD-057)."""
+    in the prompt made it claim."""
     con.execute(
         "INSERT INTO sessions (session_id, project_id, claimed_at, released_at, cwd) VALUES (?, ?, ?, NULL, ?)"
         " ON CONFLICT(session_id) DO UPDATE SET project_id = excluded.project_id, claimed_at = excluded.claimed_at, released_at = NULL, cwd = excluded.cwd",
@@ -433,7 +433,7 @@ def claim_card(ctx, con, project, session, at, cap=CLAIM_CARD_CAP):
             root, project["ticket_prefix"], project["team_prefix"], project["default_branch"], project["landing"], project["sessions"]),
         "rule: this repository's CLAUDE.md and .claude/skills govern how deliverables are built, verified, committed and landed; Spud's laws"
         " govern delegation, the ledger, and who writes what.",
-        "code: in the linked worktree the ticket is bound to (SPD-098); `member new` refuses from the main checkout, so enter a worktree first.",
+        "code: in the linked worktree the ticket is bound to; `member new` refuses from the main checkout, so enter a worktree first.",
         "board (%s):" % project["key"],
     ])
     rows = [dict(r) for r in con.execute("SELECT * FROM v_board WHERE project = ?", (project["key"],)).fetchall()]
@@ -497,8 +497,8 @@ def cmd_session_release(ctx, args):
 
 
 def cmd_session_show(ctx, args):
-    """The ritual's first step outside the home (design section 6.3): the home, the working directory's project and
-    checkout, the session and its mode -- and, since SPW-003, whether this session has the ledger's hooks loaded where it
+    """The ritual's first step outside the home: the home, the working directory's project and
+    checkout, the session and its mode -- and whether this session has the ledger's hooks loaded where it
     actually reads them, which the mode alone never says: `mode spud` was printed for a session in which no hook of the
     ledger had run.  The `hooks` line appears only when there is news (see session_hooks_lines), so a session launched in
     the home or in a registered project's checkout reads exactly as it did before."""
@@ -517,7 +517,7 @@ def cmd_session_show(ctx, args):
         hooks = session_hooks(ctx, con, session)
         hooks["lines"] = session_hooks_lines(ctx, hooks)
         project = checkout = None
-        if mapped is not None and worktrees.is_home(mapped[0]):  # SPD-097: launched in the home, which is not a project
+        if mapped is not None and worktrees.is_home(mapped[0]):  # launched in the home, which is not a project
             checkout = {"path": str(ctx.home), "kind": "home", "branch": None}
         elif mapped is not None:
             p, checkout_root, _rel = mapped
@@ -545,6 +545,6 @@ def cmd_session_show(ctx, args):
     lines.append("mode      %s" % {"spud": "spud" + (" (claimed %s)" % kernel.fm_minute(claim["claimed_at"]) if claim is not None else ""),
                                    "plain": "plain: this session is not Spud; type /spud to make it Spud",
                                    "outside": "outside every project (behaves as Spud)"}[mode])
-    if hooks["state"] not in ("loaded", "no_session"):  # SPW-003: only when there is news; the data carries the answer either way
+    if hooks["state"] not in ("loaded", "no_session"):  # only when there is news; the data carries the answer either way
         lines.extend(("hooks     " if n == 0 else "          ") + line for n, line in enumerate(hooks["lines"]))
     return kernel.Result(data, "\n".join(lines))

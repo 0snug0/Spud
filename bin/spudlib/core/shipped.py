@@ -1,12 +1,12 @@
-"""core/shipped: the files the tool ships for a home, <tool>/share/, and the marks a command fills from Ctx (SPW-001)."""
+"""core/shipped: the files the tool ships for a home, <tool>/share/, and the marks a command fills from Ctx."""
 
 from . import homeconf, kernel
 
 
-MARK = "{{%s}}"  # SPW-002's syntax, established by projects/agentdef's {{launcher}}: no {{ appears in any shipped file's prose
+MARK = "{{%s}}"  # the syntax projects/agentdef's {{launcher}} established: no {{ appears in any shipped file's prose
 NO_SHIPPED = "no shipped %s: the tool repository's share/ is the source"
-# What the four owner marks read as in a home whose config carries no `owner` block, or one whose values are empty
-# (SPD-157).  A person's name cannot be guessed, so `spud init` refuses to write a config without one -- but a config
+# What the four owner marks read as in a home whose config carries no `owner` block, or one whose values are empty.
+# A person's name cannot be guessed, so `spud init` refuses to write a config without one -- but a config
 # that predates the block, or one edited by hand, must still render every shipped file rather than put `{{owner_name}}`
 # or, worse, nothing at all into somebody's CLAUDE.md: a mark that renders empty is a file nobody can fix by hand once
 # it is generated.  So the fallback is a placeholder that reads as one, and `commands/doctor` says what to set.
@@ -30,7 +30,7 @@ MARKS = {
     "pronoun_subject": "identity.pronouns.subject",
     "pronoun_object": "identity.pronouns.object",
     "pronoun_possessive": "identity.pronouns.possessive",
-    # The person the home works for, beside the identity of the one working (SPD-157).  Four marks rather than a name
+    # The person the home works for, beside the identity of the one working.  Four marks rather than a name
     # and a pronoun triple in one, because the shipped prose spells all four separately -- "<name> is the person you
     # work for", "take <possessive> commands", "tell <object>" -- and each falls back to DEFAULT_OWNER on its own.
     "owner_name": "owner.name in the config, else DEFAULT_OWNER",

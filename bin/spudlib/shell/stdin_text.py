@@ -1,11 +1,11 @@
-"""shell/stdin_text: the commands a line feeds a shell on standard input (SPD-143).
+"""shell/stdin_text: the commands a line feeds a shell on standard input.
 
-Until this ticket the analysis read two bodies a shell runs as commands: its `-c` string, and a here-document fed to the
+Before this module the analysis read two bodies a shell runs as commands: its `-c` string, and a here-document fed to the
 shell itself (`zsh <<EOF ... EOF`).  A shell started with neither runs what it reads on standard input, and every line
 that spelled those commands somewhere else -- `echo 'git push' | sh`, `printf ... | bash -s`, `bash -s <<< '...'`,
 `cat <<'EOF' | sh`, `echo ... | xargs -0 sh -c` -- was silent for a member: Laws 1, 5, 6 and 7 all read nothing there.
 
-Spud probed the shells for this, a member in a worktree being unable to run one (SPD-094), with an executable `vcs` on
+Spud probed the shells for this, a member in a worktree being unable to run one, with an executable `vcs` on
 PATH logging its arguments and each line run by /bin/bash -c from a scratch directory:
 
 - a shell with no -c and no script operand reads its commands from standard input and ran them: `echo 'vcs a' | sh`,
@@ -16,8 +16,8 @@ PATH logging its arguments and each line run by /bin/bash -c from a scratch dire
 - what the line spells: `printf 'vcs a\\nvcs b' | sh` ran both (printf decodes the escapes in its format),
   `printf '%s\\n' 'vcs a' | sh` ran a, `echo -e 'vcs a\\nvcs b' | bash` ran both, and `echo 'vcs a\\nvcs b' | sh` ran one
   command under bash's echo, which keeps the backslash, and two under zsh's, which decodes it -- the Bash tool's shell
-  here.  The escapes are decoded in this reading, the one that finds more (SPD-039 reads a line both ways for the same
-  reason).
+  here.  The escapes are decoded in this reading, the one that finds more (the analysis reads a line as both zsh and
+  bash for the same reason).
 - here-strings: `bash -s <<< 'vcs a'`, `zsh -f <<< 'vcs a'` and `sh <<< 'vcs a'` ran a.
 - through other shapes: `cat <<'EOF' | sh` (a here-document through cat), `{ echo 'vcs a'; echo 'vcs b'; } | sh`,
   `(echo 'vcs a') | sh`, `echo 'vcs a' | tee /dev/null | sh`, `echo 'vcs a' | env sh` and `| nohup sh` each ran what the
@@ -30,10 +30,11 @@ What stays unread: standard input the line does not spell -- a file (`sh < f`), 
 not read either, and Law 7 has that hole for every caller; Spud has filed it as a question for Eric rather than have a
 member refused for it here.
 
-Kept whole past 250 lines (SPD-065's rule): it answers one question -- what text stands on a command's standard input
-and standard output -- and the two halves are the same reading from either end.  SPD-150 added `input_fed`, whether the
-line puts anything there at all, which is the same reading of the same redirections.  What the printers decode is the table
-`analyse` and `walk` reach it for; splitting the escapes off would leave a module no caller names.
+Kept whole past 250 lines (the package's look-again point): it answers one question -- what text stands on a
+command's standard input and standard output -- and the two halves are the same reading from either end.  `input_fed`
+says whether the line puts anything there at all, which is the same reading of the same redirections.  What the
+printers decode is the table `analyse` and `walk` reach it for; splitting the escapes off would leave a module no caller
+names.
 """
 
 import os
@@ -65,7 +66,7 @@ def joined(before, text):
 
 def word_text(word):
     """The text this masked word stands for, or None where the hook cannot say it: an expansion, a substitution, a glob
-    the shell expands, or an operand the line does not spell (SPD-126)."""
+    the shell expands, or an operand the line does not spell."""
     if expansions.expansion_word(word) or globbing.active_glob_word(word) or syntax.unknown_operand(word):
         return None
     return prepare.deglob(word)
@@ -96,7 +97,7 @@ def command_input(tokens, bodies, piped):
 
 
 def input_fed(tokens, bodies, piped):
-    """Whether the line puts anything on this simple command's standard input at all (SPD-150), which is not whether
+    """Whether the line puts anything on this simple command's standard input at all, which is not whether
     command_input can say what it is: that answers None both for input the line does not spell and for none at all, and
     an interpreter with no program of its own runs whatever stands there (shell/inline_programs), so the two must be
     told apart -- `cat x | node` and `python3 < f` run a program, `python3` on its own is the REPL.
@@ -192,7 +193,7 @@ def xargs_string(words, consumed, appended, text):
 
 def xargs_words(words, consumed, text):
     """The words an xargs call hands the command it runs, from the standard input `text` the line spells, or None where
-    the line does not spell it (SPD-152).
+    the line does not spell it.
 
     The whole input as one word where xargs reads whole records (-0 or -d), and its blank-separated words otherwise --
     every one of them, where xargs_string above takes the first: a shell's `-c` string is one operand, while an

@@ -1,10 +1,10 @@
-"""shell/git_config: The repository a git call reads, as the Bash rule answers for it: a member's must be a known checkout's own and set no program for itself (SPD-066, SPD-063), and nobody's may hold what a member planted (SPD-123).  Moved from bin/spud_ledger.py (SPD-065); the reading itself is hooks/gitrepos since SPD-123."""
+"""shell/git_config: The repository a git call reads, as the Bash rule answers for it: a member's must be a known checkout's own and set no program for itself, and nobody's may hold what a member planted.  The reading itself is hooks/gitrepos."""
 
 from . import bash_rule, git_verbs, prepare
 from ..hooks import gitrepos, worktrees
 
 
-# SPD-063: the config a repository sets for itself, which git reads with nothing on the line (hooks/gitrepos reads it).
+# the config a repository sets for itself, which git reads with nothing on the line (hooks/gitrepos reads it).
 GIT_SCOPE_REASON = (
     "Law 7: this git call reads a repository that sets %s at its own %s scope (the repository in %s), a config key that"
     " names or enables a program git runs -- a pager, editor, ssh or proxy command, diff or merge driver, hooks path,"
@@ -23,16 +23,17 @@ GIT_SCOPE_UNREADABLE_REASON = (
     " Law 7's table allows; the hook fails closed. Spud commits, after the outcome is recorded")
 
 
-# SPD-066: the repository itself.  SPD-047 refuses a repository a line names outside every checkout the ledger knows, and
-# SPD-063 reads the keys a repository sets for itself; neither sees a repository nested in a checkout -- a .git built below
+# the repository itself.  One check refuses a repository a line names outside every checkout the ledger knows, and
+# another reads the keys a repository sets itself; neither sees a repository nested in a checkout -- a .git built below
 # its root by an interpreter, cp or mkdir, which the path rule cannot read, or a bare layout (HEAD, objects/, refs/, hooks/)
 # written under a member's globs, which no path names -- and git runs such a repository's hooks with nothing on the line
 # (probed on 2.54.0: `git status` runs post-index-change, `git fetch` reference-transaction; pre-auto-gc was not reached,
 # fetch's auto maintenance running gc without it) and reads its config, attributes and index.  So the repository a member's
 # git call reads must be a known checkout's own: discovered, its work tree is a registered project's root or a listed
 # worktree, reached through that root's own .git; named as the git or common directory, or found as a bare layout, it is
-# the git or common directory such a root's .git names.  This is SPD-047's rule carried one level down, and it closes hooks,
-# config, attributes and the index at once, with the one walk SPD-063 already makes and no git run.
+# the git or common directory such a root's .git names.  This is the outside-repository rule carried one level down, and
+# it closes hooks, config, attributes and the index at once, with the one walk the config check already makes and no
+# git run.
 GIT_FOREIGN_REPOSITORY_REASON = (
     "Law 7: this git call reads the repository at %s (%s), which is not the own repository of a checkout the ledger knows"
     " -- a registered project's root or one of its listed worktrees, read through that root's own .git -- and %s. git runs"
@@ -43,12 +44,13 @@ GIT_FOREIGN_REPOSITORY_REASON = (
     " commits, after the outcome is recorded")
 
 
-# SPD-123: what a member can plant in a known checkout's own repository through an interpreter the hook cannot read (python -c, a
+# what a member can plant in a known checkout's own repository through an interpreter the hook cannot read (python -c, a
 # script under its globs, node) -- a hook in the common directory, a program key in its config or in a worktree's
 # config.worktree, a repository below the checkout -- which git runs with nothing on the line under anyone's git call.  A
 # member keeps every refusal it had, in the same order, and is refused a planted hook last; Spud, whose own git runs as
 # Eric's, is refused all three for a repository in a known checkout, and nothing else: a repository outside every known
-# checkout is his own business (SPD-047 is a member's rule) and a directory the hook cannot follow is his own spelling.
+# checkout is his own business (the outside-repository rule is a member's) and a directory the hook cannot follow is his
+# own spelling.
 GIT_PLANTED_HOOK_REASON = (
     "Law 7: this git call reads the repository in %s, which holds %s. git runs a hook from there with"
     " nothing on the line (post-index-change under `git status`, reference-transaction under `git fetch`), and a member can"
@@ -64,7 +66,7 @@ def git_call_directories(targets, cwds):
     """([(directory, named as a git or common directory, the spelling that named it or None)], whether the hook cannot
     resolve one) for one git call: every target git_repo_targets found, and the directories the shell may be in whenever
     neither -C nor --git-dir/GIT_DIR is on the line, since git then discovers the repository there -- --work-tree,
-    GIT_WORK_TREE and GIT_COMMON_DIR do not stop that (SPD-066; SPD-063 read only the targets when there were any)."""
+    GIT_WORK_TREE and GIT_COMMON_DIR do not stop that (the config check read only the targets when there were any)."""
     out, unresolved, kinds = [], False, set()
     for spelled, target in targets:
         kind = git_verbs.git_target_kind(spelled)
@@ -91,10 +93,10 @@ def git_foreign_repository_reason(ctx, con, directory, spelled, where):
 
 def git_repository_reason(ctx, con, targets, cwds):
     """The reason a member's git call is refused for the repository it reads, or None: a repository that is not a known
-    checkout's own (SPD-066), then the config it sets for itself (SPD-063), then a hook planted in it (SPD-123).  The
-    repository is the one `-C`, `--git-dir`, GIT_DIR and friends name (SPD-047's git_repo_targets) and, when git discovers
+    checkout's own, then the config it sets for itself, then a hook planted in it.  The
+    repository is the one `-C`, `--git-dir`, GIT_DIR and friends name (git_repo_targets) and, when git discovers
     it, the one containing each directory the shell may be in.  A target outside every checkout the ledger knows already
-    has SPD-047's own refusal, which is read first."""
+    has the outside-repository refusal, which is read first."""
     directories, unresolved = git_call_directories(targets, cwds)
     if unresolved:
         return GIT_SCOPE_UNRESOLVED_REASON
@@ -118,7 +120,7 @@ def git_repository_reason(ctx, con, targets, cwds):
 
 
 def git_spud_repository_reason(ctx, con, targets, cwds):
-    """The reason Spud's own git call is refused, or None (SPD-123): each repository it reaches that lies in a checkout the
+    """The reason Spud's own git call is refused, or None: each repository it reaches that lies in a checkout the
     ledger knows is read for what a member could have planted there -- a repository that is not the checkout's own, a
     program key at its local or worktree scope, a hook that is not a sample -- and every finding of the first such
     repository is named.  A repository outside every known checkout and a directory the hook cannot resolve stay silent:

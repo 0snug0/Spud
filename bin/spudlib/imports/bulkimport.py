@@ -1,4 +1,4 @@
-"""imports/bulkimport: The markdown-v0 tree import.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""imports/bulkimport: The markdown-v0 tree import."""
 
 import re
 from pathlib import Path
@@ -38,7 +38,7 @@ TEAM_LINE = re.compile(r"^\s*- \[\[(?P<ref>[^\]|\\]+)(?:\\?\|[^\]]*)?\]\] \([^()
 
 def import_team_summaries(con, ticket, text):
     """A tree line's ` — text` in a ticket's ## Team becomes that member's summary, when the member is
-    on this ticket and has none (SPD-010: the section is generated, so its prose is never stored).
+    on this ticket and has none (the section is generated, so its prose is never stored).
     Table rows, the embed, lines without the suffix and other teams' members are ignored.  Returns
     the columns whose value was derived."""
     derived = {}
@@ -116,7 +116,7 @@ def bulk_import(ctx, con, paths):
     with ledgerdb.write_txn(con):
         imported_tickets = []
         imported_members = []
-        for ledger, base in ledger_dirs:  # SPD-014: the projects first, since a ticket finds its project by its prefix
+        for ledger, base in ledger_dirs:  # the projects first, since a ticket finds its project by its prefix
             if (ledger / "Projects.md").is_file():
                 path = ledger / "Projects.md"
                 counts["projects"] += notefiles.import_projects_file(con, at, path, path.relative_to(base).as_posix())
@@ -155,7 +155,7 @@ def bulk_import(ctx, con, paths):
                 item["derived"].update(import_team_summaries(con, item["ticket"], sections["Team"]))
         for item in imported_tickets:
             data = {"source": item["rel"], "derived": item["derived"]}
-            if item["dropped"]:  # SPD-116: what the note said about its landing pull request and the import read past
+            if item["dropped"]:  # what the note said about its landing pull request and the import read past
                 data["dropped"] = item["dropped"]
             ledgerdb.write_event(con, at, "import", "import", "imported %s" % item["rel"], ticket_id=item["ticket"]["id"], data=data)
         for item in imported_tickets:

@@ -1,4 +1,4 @@
-"""shell/globbing: Glob words, qualifiers and their readings.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""shell/globbing: Glob words, qualifiers and their readings."""
 
 import functools
 import os
@@ -8,14 +8,14 @@ from . import analyse, directories, prepare, redirect_globs, spud_calls, syntax
 from ..hooks import hookio
 
 
-# A word the dispatch reads by name that the shell expands first (SPD-041) is read as each of these it can match: the names a
+# A word the dispatch reads by name that the shell expands first is read as each of these it can match: the names a
 # command word dispatches on, and every option, verb and argument the dispatch compares a later word with.
 GLOB_COMMAND_SAMPLES = frozenset(syntax.WRAPPERS | syntax.SHELLS | syntax.DIRECTORY_COMMANDS | syntax.SHELL_DECLARATIONS | syntax.JS_RUNTIMES
                                  | {"git", "spud", "eval", "source", ".", "trap", "sqlite3", "sqlite", "tee", "python", "python3", "python3.14",
-                                    "hash"}  # `hash` shadows a name the hook reads (SPD-062)
-                                 | set(syntax.ARG_WRITE_COMMANDS)  # SPD-121: `/bin/c? a b` runs cp
-                                 | syntax.TREE_WRITE_COMMANDS  # SPD-126: `fin? . -delete` runs find
-                                 | syntax.SPELLED_WRITE_COMMANDS | {"perl"})  # SPD-126: `/bin/d? of=x` runs dd
+                                    "hash"}  # `hash` shadows a name the hook reads
+                                 | set(syntax.ARG_WRITE_COMMANDS)  # `/bin/c? a b` runs cp
+                                 | syntax.TREE_WRITE_COMMANDS  # `fin? . -delete` runs find
+                                 | syntax.SPELLED_WRITE_COMMANDS | {"perl"})  # `/bin/d? of=x` runs dd
 GLOB_SAMPLES = frozenset(
     GLOB_COMMAND_SAMPLES | syntax.GIT_WRITE_VERBS | syntax.GIT_GLOBAL_VALUE_FLAGS | syntax.BRANCH_READ_FLAGS | syntax.BRANCH_READ_VALUE_FLAGS | syntax.TAG_READ_FLAGS
     # CONFIG_READ_SUBCOMMANDS are left out: a glob read as `get` or `list` refuses nothing, so sampling them would only
@@ -24,15 +24,15 @@ GLOB_SAMPLES = frozenset(
     | {"stash", "worktree", "remote", "reflog", "branch", "tag", "config", "list", "show", "add", "remove", "rm", "rename", "set-url",
        "set-head", "set-branches", "prune", "update", "expire", "delete"}
     | {o for options in syntax.WRAPPER_VALUE_OPTIONS.values() for o in options}
-    # SPD-051: the verbs that carry a program-naming option and the options themselves, so a glob that can expand to one is
+    # The verbs that carry a program-naming option and the options themselves, so a glob that can expand to one is
     # read as it (`git ls-remote --upload-pac? cmd .` was read only as spelled, and the prefix check never saw --upload-pack).
     | set(syntax.GIT_VERB_PROGRAM_OPTIONS)
     | {o for longs, _ in syntax.GIT_VERB_PROGRAM_OPTIONS.values() for o in longs}
     | {"-" + c for _, shorts in syntax.GIT_VERB_PROGRAM_OPTIONS.values() for c in shorts}
     | {"-c", "-lc", "-ic", "-m", "-", "-X", "-W", "-Q", "-I", "-S", "--as", "--as=spud", "--json", "--help", "-h", "--version"}
     | set(hookio.SPUD_COMMANDS) | {w for pair in hookio.SPUD_ONLY_SUBCOMMANDS + hookio.MEMBER_OWN_COMMANDS for w in pair}
-    | syntax.ARG_WRITE_OPTIONS)  # SPD-121: `sed -? '' s/a/b/ f` is `sed -i` when a file named -i is there
-GLOB_OPTION = "-%"  # a glob that may start with `-` read as an option that takes no value (SPD-041)
+    | syntax.ARG_WRITE_OPTIONS)  # `sed -? '' s/a/b/ f` is `sed -i` when a file named -i is there
+GLOB_OPTION = "-%"  # a glob that may start with `-` read as an option that takes no value
 GLOB_WORD_LIMIT = 256  # a longer glob word, or a segment with more than two stars or four groups, is not matched (backtracking)
 GLOB_READING_BUDGET = 128  # the readings of one simple command's glob words before the hook stops reading them and refuses a member
 _EQUALS_RE = re.compile(r"=([^/=\s]+)\Z")  # zsh's EQUALS: `=name` is the path of the command name
@@ -44,7 +44,7 @@ _QUALIFIER_CLOSERS = {"(": ")", "[": "]", "{": "}", "<": ">"}
 
 def trailing_group(word):
     """(start, end) of the group a marked word ends with, when it has no top-level `|`: what zsh with bareglobqual, its
-    default, reads as a glob qualifier list (SPD-039, probed: `SPD-001.md(.)` opened the file); else None."""
+    default, reads as a glob qualifier list (probed: `notes.md(.)` opened the file); else None."""
     if not word.endswith(syntax.ZSH_CLOSE):
         return None
     depth, k = 0, len(word) - 1
@@ -92,7 +92,7 @@ _QUALIFIER_NAME_RE = re.compile(r"[\w:.-]+")  # the command a `+` qualifier name
 
 
 def active_glob_word(word):
-    """True when the shell expands this masked word before running the command (SPD-041): an unquoted glob character, brace
+    """True when the shell expands this masked word before running the command: an unquoted glob character, brace
     list or zsh group or range (GLOB_RE), or zsh's `=name`.  `[` and `[[` are commands, not patterns."""
     if word in ("[", "[["):
         return False
@@ -101,14 +101,14 @@ def active_glob_word(word):
 
 def literalize(word):
     """The word as the shell passes it when it does not expand it (bash, when a glob matches nothing): its glob characters
-    quoted and a leading `=` marked, so it is never expanded again; deglob still restores its text (SPD-041)."""
+    quoted and a leading `=` marked, so it is never expanded again; deglob still restores its text."""
     word = word.translate(syntax._LITERALIZE)
     return syntax._LITERAL_EQUALS + word[1:] if word.startswith("=") else word
 
 
 def may_start_with_dash(word):
     """True when a glob word that does not start with `-` may expand to a word that does: a leading `*`, `?` or zsh group, or
-    a bracket expression that is negated or holds `-` (SPD-041, probed: `git [-]p push` ran `git -p push` with a file -p)."""
+    a bracket expression that is negated or holds `-` (probed: `git [-]p push` ran `git -p push` with a file -p)."""
     c = word[:1]
     if c in ("*", "?", syntax.ZSH_OPEN):
         return True
@@ -120,7 +120,7 @@ def may_start_with_dash(word):
 
 def glob_too_complex(text):
     """True when a masked glob is too long, or a segment holds too many stars, ranges or groups, to match without the regex
-    engine's backtracking running away (SPD-041); the hook then reads it as spelled and refuses a member."""
+    engine's backtracking running away; the hook then reads it as spelled and refuses a member."""
     if len(text) > GLOB_WORD_LIMIT:
         return True
     for seg in text.split("/"):
@@ -151,7 +151,7 @@ def command_path(name):
 
 
 def glob_readings(word, a, command=False, script=False, dash=False, shift=False):
-    """(readings, ambiguous) for a masked word the shell expands before it runs the command (SPD-041, probed in zsh 5.9 -f, zsh
+    """(readings, ambiguous) for a masked word the shell expands before it runs the command (probed in zsh 5.9 -f, zsh
     -f -o nobareglobqual as the Bash tool runs it, and bash 3.2 with a fake git on a scratch PATH).  Each reading is the list of
     words the word may become:
 
@@ -164,7 +164,7 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False)
       drop the word (`git nomatch(N) push` pushed in zsh with bareglobqual); `dash`: a glob that may start with `-` may be an
       option (GLOB_OPTION); `shift`: a word at a place the command may skip as an option's value is also read with each name
       after it, since a glob matching two files is two words; `script` and a command word with a `/`: each existing file it
-      matches that runs the spud launcher, whatever its name (SPD-029).
+      matches that runs the spud launcher, whatever its name.
 
     Ambiguous: it can match two names the hook checks (both files may exist, and the shell passes both: `* x` ran `git push x`
     with files git and push), it is too complex to match, or its files reach the scan budget."""
@@ -208,7 +208,7 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False)
 
 
 def resolve_glob(words, i, kind, bodies, a, depth, budget, effect, prefixed, fresh=0):
-    """Read words[i], a word the shell expands first, as each reading glob_readings gives (SPD-041).  One reading replaces it in
+    """Read words[i], a word the shell expands first, as each reading glob_readings gives.  One reading replaces it in
     place and the caller reads on (False).  Several are each analysed from the start of `words`, with the directories and
     variables after them those of every reading, as ShellWalk merges branches, and the caller stops (True).  An ambiguous word
     is a "glob" finding, which refuses a member; past the budget every glob word left is read as spelled, ambiguous too."""
@@ -235,8 +235,8 @@ def resolve_glob(words, i, kind, bodies, a, depth, budget, effect, prefixed, fre
 
 def analyse_readings(words, i, readings, bodies, a, depth, budget, effect, prefixed, fresh, expanded=False):
     """Analyse `words` once for each reading of words[i], from the start, with the directories, variables and doubts after them
-    those of every reading, as ShellWalk merges branches (SPD-041).  `expanded`: the readings are an expansion's words, so in the
-    command word none of the words from it on is an assignment or a reserved word (SPD-043)."""
+    those of every reading, as ShellWalk merges branches.  `expanded`: the readings are an expansion's words, so in the
+    command word none of the words from it on is an assignment or a reserved word."""
     cwds, variables, uncertain, doubt = a.cwds, dict(a.vars), a.cd_uncertain, set(a.doubt)
     outcomes = []
     for reading in readings:
@@ -247,7 +247,7 @@ def analyse_readings(words, i, readings, bodies, a, depth, budget, effect, prefi
     a.cwds, a.vars, a.cd_uncertain, a.doubt = outcomes[0]
     for other_cwds, other_vars, other_uncertain, other_doubt in outcomes[1:]:
         a.cwds = directories.union_dirs(a.cwds, other_cwds)
-        a.doubt |= other_doubt | (set(a.vars) ^ set(other_vars))  # a variable only some readings assign (SPD-043)
+        a.doubt |= other_doubt | (set(a.vars) ^ set(other_vars))  # a variable only some readings assign
         for name, value in other_vars.items():
             a.vars[name] = value if a.vars.get(name, value) == value else hookio.SUBST  # readings that disagree: a value the hook cannot know
         a.cd_uncertain = a.cd_uncertain or other_uncertain

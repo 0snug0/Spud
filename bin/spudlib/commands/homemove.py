@@ -1,5 +1,5 @@
-"""commands/homemove: spud --as spud home move, the switch-over from a home inside the tool repository to a plain directory
-(SPD-097, design section 5).  One procedure over two contexts, the old home's and the new one's, kept whole because every
+"""commands/homemove: spud --as spud home move, the switch-over from a home inside the tool repository to a plain directory.
+One procedure over two contexts, the old home's and the new one's, kept whole because every
 step reads what the ones before it did."""
 
 import json
@@ -62,7 +62,7 @@ def move_preconditions(ctx, con, target):
 
 
 def move_steps(ctx, con, target):
-    """The nine steps as --dry-run prints them, with this home's paths filled in.  SPW-001: step 5's line is true only
+    """The nine steps as --dry-run prints them, with this home's paths filled in.  Step 5's line is true only
     when a row 1 is there to claim; a project-less home has none, so it says that instead."""
     has_project = con.execute("SELECT 1 FROM projects WHERE id = 1").fetchone() is not None
     step5 = ("set project spud's sessions to claim; settings sync into %s; strip the ledger's entries from %s; project install spud and re-sync"
@@ -167,8 +167,8 @@ def strip_home_settings(ctx, settings):
 
 def move_resync(old, new, args):
     """Step 5 over the new home: project spud claims, the report entry, the new home's settings, the tool's tracked settings
-    stripped, project spud installed and every installed project re-synced (the user-scope agent and skill with them).  SPW-001:
-    a project-less home has no row 1 to claim, so 5a records that instead and the move otherwise proceeds -- moving a legal
+    stripped, project spud installed and every installed project re-synced (the user-scope agent and skill with them).
+    A project-less home has no row 1 to claim, so 5a records that instead and the move otherwise proceeds -- moving a legal
     home is reasonable whether or not one is registered."""
     done = []
     con = ledgerdb.connect(new)
@@ -237,7 +237,7 @@ def move_verify(new):
 
 
 def cmd_home_move(ctx, args):
-    """spud --as spud home move --to <dir> [--dry-run]: design section 5, in its order, each step reported; a step that fails
+    """spud --as spud home move --to <dir> [--dry-run]: the move's steps in their order, each reported; a step that fails
     stops the move with the old home untouched (its state directory is renamed last)."""
     target = Path(os.path.abspath(os.path.expanduser(args.to)))
     con = ledgerdb.connect(ctx)

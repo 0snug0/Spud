@@ -1,4 +1,4 @@
-"""state/actors: Actors, ownership, and the session a command runs in.  Moved from bin/spud_ledger.py (SPD-065)."""
+"""state/actors: Actors, ownership, and the session a command runs in."""
 
 import os
 import re
@@ -58,15 +58,15 @@ def require_spud(con, actor, what):
 
 
 def claim_of(con, session_id):
-    """The unreleased claim of a Claude Code session (SPD-014), or None."""
+    """The unreleased claim of a Claude Code session, or None."""
     if not session_id:
         return None
     return con.execute("SELECT * FROM sessions WHERE session_id = ? AND released_at IS NULL", (session_id,)).fetchone()
 
 
 def unclaimed_session_project(ctx, con):
-    """The project a CLI command runs in when that makes its session not Spud (design section 6.1): CLAUDE_CODE_SESSION_ID
-    is set, the working directory is in a `claim` project (the home is none, SPD-097), and the session holds no claim.  None
+    """The project a CLI command runs in when that makes its session not Spud: CLAUDE_CODE_SESSION_ID
+    is set, the working directory is in a `claim` project (the home is none), and the session holds no claim.  None
     otherwise, and always outside a Claude Code session (tests, a terminal)."""
     session = planning_session(os.environ)
     if ctx is None or session is None:
@@ -108,6 +108,6 @@ def require_ancestor(con, actor, member, what):
 def planning_session(env):
     """The Claude Code session a command runs in: CLAUDE_CODE_SESSION_ID, which the harness sets in every Bash and
     hook subprocess to the session_id its hook payloads carry, a subagent's Bash included (hooks and env-vars
-    references; observed 2026-09-13, SPD-018).  None outside a session."""
+    references; observed 2026-09-13).  None outside a session."""
     value = env.get("CLAUDE_CODE_SESSION_ID")
     return value.strip() if isinstance(value, str) and value.strip() else None

@@ -1,8 +1,8 @@
-"""spud: the one program that writes the ledger (SPD-007, ledger CLI v1).
+"""spud: the one program that writes the ledger (ledger CLI v1).
 
 Run it as  python3.14 -I -S bin/spud [--as ACTOR] [--json] <command> ...
 
-bin/spud is the launcher and this module is the program's entry (SPD-016).  Since SPD-065 the program's code is the
+bin/spud is the launcher and this module is the program's entry.  The program's code is the
 package spudlib beside this file: PackageFinder imports its modules from that directory alone, each with a loader of
 the class that loaded this file, so the launcher caches every module's bytecode by its own rule.  main imports what the
 run needs, and a hook run never imports the parser, the commands, render or import.  spud_ledger.<name> still reads
@@ -10,9 +10,9 @@ every name the program defines, from the module that defines it.  Running this f
 
 The ledger is one SQLite file, <SPUD_HOME>/.spud/ledger.db, in WAL mode.
 Markdown under ledger/ and reports/ is what `spud render` generates from it;
-`spud import` reads the markdown-v0 files once.  Design: the ledger database
-spike (docs/spikes/2026-09-12-ledger-database.md, SPD-006) as amended by the
-decisions recorded on SPD-007.  Python 3.14 standard library only.
+`spud import` reads the markdown-v0 files once.  Design: a spike on the ledger
+database, as amended by the decisions taken when the CLI was first built.
+Python 3.14 standard library only.
 
 Exit codes: 0 ok, 1 error, 2 usage, 3 ownership refused, 4 limit refused,
 5 state transition refused, 6 render conflict (a hand-edited file).
@@ -110,7 +110,7 @@ def __getattr__(name):
 
 class HookCall:
     """What the parser gives for exactly `spud hook <event>`, the line settings sync installs: a hook run skips building
-    the parser, which any other line still goes through (SPD-016)."""
+    the parser, which any other line still goes through: a hook run is timed in milliseconds."""
 
     command = "hook"
     actor = None
@@ -135,7 +135,7 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
     if len(argv) == 2 and argv[0] == "hook" and argv[1] in hookio.HOOK_EVENTS:
         args = HookCall(argv[1])
-    elif len(argv) == 4 and argv[0] == "hook" and argv[1] in hookio.HOOK_EVENTS and argv[2] == "--project":  # a project's hook line (SPD-014)
+    elif len(argv) == 4 and argv[0] == "hook" and argv[1] in hookio.HOOK_EVENTS and argv[2] == "--project":  # a project's hook line
         args = HookCall(argv[1], argv[3])
     else:
         from spudlib.cli import cliparser
@@ -144,7 +144,7 @@ def main(argv=None):
     ctx = None
     try:
         if getattr(args, "command", None) == "init":
-            # SPW-001: resolve_home raises on a machine with no SPUD_HOME and no pointer, which is every fresh machine,
+            # resolve_home raises on a machine with no SPUD_HOME and no pointer, which is every fresh machine,
             # and `spud init` is the command that has to run there.  One branch beside the two hook branches above, and
             # the command module imported in it the way cliparser is: resolve_home, which every hook runs, is untouched.
             from spudlib.commands import homeinit

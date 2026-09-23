@@ -1,6 +1,6 @@
-"""commands/admincmds: migrate, config sync, sql, import.  Moved from bin/spud_ledger.py (SPD-065).
+"""commands/admincmds: migrate, config sync, sql, import.
 
-SPW-001: `cmd_init` left here for `commands/homeinit.create_database`, which is its body -- `spud init` stopped being a
+`cmd_init` left here for `commands/homeinit.create_database`, which is its body -- `spud init` stopped being a
 command about a database and became the command that builds a home, and the database is step 2 of five."""
 
 import re
@@ -38,8 +38,8 @@ def cmd_config_sync(ctx, args):
     finally:
         con.close()
     prefixes = (synced["ticket_prefix"], synced["team_prefix"])
-    # SPW-001: the prefixes are project 1's, whichever project that is; with no row 1 they are nobody's, and the line
-    # says so and names what registers one.  (`home project` was a leftover from before SPD-097 either way.)
+    # The prefixes are project 1's, whichever project that is; with no row 1 they are nobody's, and the line says so
+    # and names what registers one.  (`home project` was a leftover from when the home was a project either way.)
     if synced["project"] is None:
         project, text = None, NO_PROJECT_SYNCED % (synced["pool"], *prefixes, *prefixes)
     else:
