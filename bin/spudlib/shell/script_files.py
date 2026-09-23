@@ -19,8 +19,18 @@ the shell may be in):
   `/tmp/x` -- and a wrapper's own word spelled that way, whatever the dispatch reads it as (`./git status` runs
   whatever `./git` holds).  The spud launcher is read as the spud call it is, as before.
 - "stdin": a shell that runs what it reads on standard input where the line feeds it text it does not spell (a `<` file,
-  another program's output); spelled text is read as SPD-143 and SPD-148 read it.
+  another program's output, and since SPD-207 an unquoted here-document whose body holds a command substitution's
+  output, fed to the shell or printed into it: heredocs.OutputBody, and since SPD-208 one holding a variable's value
+  the line does not settle); spelled text is read as SPD-143 and SPD-148 read it.  Since SPD-209 such input beside
+  text the line spells counts as well (`sh <<'EOF' < x.sh`, `cat x.sh | sh <<'EOF'`): zsh feeds a command every input
+  its redirections name in turn, after its pipe (stdin_text.command_input).  Since SPD-210 so does such input given to
+  the command around the shell: a `-c` string, eval, a group, a subshell, a loop, a conditional (`sh -c sh < x.sh`,
+  `{ sh; } < x.sh`, `(sh) < x.sh`), and a command substitution in their commands' words.  Since SPD-212 so does the
+  input a call hands a function the line defines (`f() { sh; }; f < x.sh`, walk.walk_line).
 - "xargs": a shell's `-c` string an xargs reads from input the line does not spell (`cat f | xargs -0 sh -c`).
+- "function": a call given input of a function the line defines in text whose reading is over before the call -- an
+  `eval` string's (`eval 'f() { sh; }'; f < x.sh`) -- whose body no walk reads again on that input (SPD-212,
+  walk.read_call); a function the line defines anywhere else is read on each call's input (walk.walk_line).
 - "startup": a variable that names a file of commands a shell runs when it starts -- BASH_ENV (any non-interactive
   bash, a script's `#!/bin/bash` included), ENV and ZDOTDIR -- assigned anywhere on the line, and HOME assigned on a line
   that starts a shell, whose ~/.zshenv (and an interactive shell's rc files) then come from the line's own directory.
@@ -70,8 +80,12 @@ HOW = {
     "operand": "from the script file %s",
     "source": "from the file %s, which it reads into the shell",
     "exec": "from %s, a file run by its path rather than a program the shell finds on PATH",
-    "stdin": "it reads on standard input that the line does not spell (a `<` file, or another program's output through a pipe)",
+    "stdin": "it reads on standard input that the line does not spell (a `<` file, another program's output through a pipe,"
+             " a command substitution's output in an unquoted here-document, or a variable's value there that the line"
+             " does not settle)",
     "xargs": "from a `-c` string xargs reads from input the line does not spell",
+    "function": "from the body of a function the line defines inside an `eval` string, on the standard input the call hands"
+                " it, which the hook does not read there",
     "startup": "from a file of commands a shell runs as it starts (BASH_ENV, ENV and ZDOTDIR name one, and HOME holds"
                " a shell's own startup files)",
 }
@@ -89,10 +103,11 @@ def record_script(a, form, cmd, word=None):
     a.findings.append(("script", (form, syntax.shown_operands(prepare.deglob(cmd)), shown, target, a.cwds)))
 
 
-def read_shell(words, a, dash_c, string, xargs_input, stdin, fed, bodies):
+def read_shell(words, a, dash_c, string, xargs_input, stdin, fed):
     """A shell command's words as analyse's dispatch read them: the script file it runs, the files bash runs first, the
     standard input the line feeds it without spelling it, the `-c` string an xargs reads from such input, and a HOME the
-    line set for it.  `string` is the -c string as the dispatch settled it (None where there is none to read)."""
+    line set for it.  `string` is the -c string as the dispatch settled it (None where there is none to read); `stdin`
+    the text on its standard input (stdin_text.command_input) and `fed` whether anything stands there at all."""
     cmd = words[0]
     operand = stdin_text.script_operand(words)
     if operand is not None:
@@ -104,7 +119,10 @@ def read_shell(words, a, dash_c, string, xargs_input, stdin, fed, bodies):
     elif not dash_c and operand is None and xargs_input is not None and xargs_input[1]:
         # the words xargs appends are the shell's operands, the first of them its script (`echo x.sh | xargs sh`)
         record_script(a, "operand", cmd, syntax.INPUT_OPERAND)
-    if not bodies and not dash_c and operand is None and stdin is None and fed and stdin_text.reads_commands(words):
+    if not dash_c and operand is None and stdin_text.reads_commands(words) and fed and stdin_text.unspelled(stdin):
+        # standard input the line does not spell, in zsh's reading or bash's: a file, another program's output, or a
+        # here-document body holding a command substitution's output, which the shell runs as its commands (SPD-207) --
+        # beside a body or a pipe the line spells too, since zsh reads every input in turn (SPD-209)
         record_script(a, "stdin", cmd)
     if "HOME" in a.vars:
         record_script(a, "startup", "HOME=...")

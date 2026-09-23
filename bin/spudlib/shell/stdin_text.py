@@ -31,14 +31,28 @@ masked words tell `"$X"` from `$X` (syntax._QUOTED_NAME, SPD-167): a quoted valu
 one is passed whole by zsh and split at its blanks by bash, so the printer is read both ways and the text a shell reading
 it runs is what either prints (printed_text, _string_text, _either).
 
+A command's input redirections are read as each shell feeds them (SPD-209, command_input): zsh reads every one of them
+in turn, after the pipe into the command, and bash the last alone, so where the two differ the text is a MultiosText
+holding both, and a shell fed it reads each.
+
+That input reaches the commands a command runs inside itself wherever nothing of theirs replaces it (SPD-210): a `-c`
+string's commands and eval's start from their command's (analyse.analyse_command's `stdin`), the commands in a compound
+command from its own input redirections, read as a simple command's are (walk.walk_line), and a command substitution
+from the input of the list it stands in (walk.ShellWalk.substitution_input).  So `sh -c sh < f`, `{ sh; } < f` and
+`(sh) <<'EOF'` read as `sh < f` and `sh <<'EOF'` do.  A function the line defines runs its body on each call's input
+(SPD-212, walk.walk_line): `f() { sh; }; f < x` reads as `sh < x` does.
+
 What stays unread: standard input the line does not spell -- a file (`sh < f`), another program's output (`cat f | sh`,
-`curl ... | sh`), a value the line does not settle, or text this module cannot decode in either reading.  That is the same class as `sh script.sh`, a script the hook does
+`curl ... | sh`), a value the line does not settle, a command substitution's output or such a value in an unquoted
+here-document's body (heredocs.OutputBody, SPD-207 and SPD-208), or text this module cannot decode in either reading.  That is the same class as `sh script.sh`, a script the hook does
 not read either.  Eric's call on SPD-145 (fail closed): a member is refused both, a shell reading standard input the
-line does not spell and a shell given a script file (script_operand below), by shell/script_files; Spud is not.
+line does not spell -- in either shell's reading of it -- and a shell given a script file (script_operand below), by
+shell/script_files; Spud is not.
 
 Kept whole past 250 lines (the package's look-again point): it answers one question -- what text stands on a
 command's standard input and standard output -- and the two halves are the same reading from either end.  `input_fed`
-says whether the line puts anything there at all, which is the same reading of the same redirections.  What the
+says whether the line puts anything there at all, which is the same reading of the same redirections, and
+MultiosText with its helpers is the text both halves carry where zsh and bash read it apart.  What the
 printers decode is the table `analyse` and `walk` reach it for; splitting the escapes off would leave a module no caller
 names.
 """
@@ -46,7 +60,7 @@ names.
 import os
 import re
 
-from . import arg_writes, directories, expansions, globbing, prepare, syntax
+from . import arg_writes, directories, expansions, globbing, heredocs, prepare, syntax
 
 # The operands that name the standard input the line gave the shell rather than a script file of its own (probed:
 # `bash /dev/stdin <<< 'vcs a'` and `bash - <<< 'vcs a'` both ran it).
@@ -68,9 +82,69 @@ _FIELD = "\0"
 _PRINTERS = frozenset({"echo", "print", "printf", "cat", "tee"})
 
 
+class MultiosText(str):
+    """The text on a command's standard input where zsh and bash read it apart (SPD-209, command_input): the str is
+    bash's reading -- the last input redirection's text, which sh and bash feed the command alone -- and `zsh` zsh's,
+    every input in turn under its MULTIOS option, None where one of them is text the line does not spell.  bash's is
+    never None where zsh's is text, zsh's holding bash's with the rest, so where either shell reads text the line spells
+    the str is text.  A reader that takes it as a str reads bash's; joined keeps both, and each_reading gives a shell
+    each."""
+
+    def __new__(cls, text, zsh):
+        self = super().__new__(cls, text)
+        self.zsh = zsh
+        return self
+
+
+def _zsh(text):
+    """zsh's reading of a text: a MultiosText's own, and any other text as it stands."""
+    return text.zsh if isinstance(text, MultiosText) else text
+
+
+def _paired(bash, zsh):
+    """One text for bash's reading and zsh's: None where bash's is None, the text where they agree, a MultiosText where
+    they differ."""
+    if bash is None or zsh == bash:
+        return bash
+    return MultiosText(bash, zsh)
+
+
+def each_reading(text):
+    """The texts a shell fed `text` may read, each a plain str: none for None, and a MultiosText's zsh's, where it is
+    text, then bash's."""
+    if text is None:
+        return []
+    if isinstance(text, MultiosText) and text.zsh is not None:
+        return [text.zsh, str(text)]
+    return [str(text)]
+
+
+def unspelled(text):
+    """Whether either shell's reading of this standard input is text the line does not spell."""
+    return text is None or isinstance(text, MultiosText) and text.zsh is None
+
+
+def reading_key(text, fed):
+    """The standard input a body is analysed with, as a key (analyse.analyse_isolated, SPD-210): each shell's reading of
+    the text, whether either is text the line does not spell, and whether anything stands there at all."""
+    return tuple(each_reading(text)), unspelled(text), fed
+
+
+def single(text):
+    """The one text both shells read, or None where they read apart or the line does not spell it: for a reader that
+    takes its input whole, as xargs builds its command string from it."""
+    return None if isinstance(text, MultiosText) else text
+
+
 def joined(before, text):
-    """The text two commands print one after the other; None, text the hook cannot spell, absorbs."""
-    return None if before is None or text is None else before + text
+    """The text two commands print one after the other; None, text the hook cannot spell, absorbs.  Each shell's reading
+    joins its own (MultiosText)."""
+    if before is None or text is None:
+        return None
+    if not (isinstance(before, MultiosText) or isinstance(text, MultiosText)):
+        return before + text
+    zsh_before, zsh_text = _zsh(before), _zsh(text)
+    return _paired(before + text, None if zsh_before is None or zsh_text is None else zsh_before + zsh_text)
 
 
 def word_text(word, a=None):
@@ -117,30 +191,50 @@ def _either(zsh_text, bash_text):
     return zsh_text + ("" if zsh_text.endswith("\n") else "\n") + bash_text
 
 
-def command_input(tokens, bodies, piped, a=None):
+def command_input(tokens, bodies, piped, pipe_feeds, a=None):
     """The text the simple command `tokens` reads on standard input, or None where the line does not spell it.
 
-    The last thing the line puts there wins: a here-document body, which ShellWalk.consume has already taken out of the
-    words (`bodies`); a here-string whose word the hook can resolve; or the text the pipeline element before this one
-    printed (`piped`).  A file (`sh < f`), a descriptor (`sh <&3`) and a word holding an expansion, a substitution or a
-    glob leave it unknown, and so does a here-string whose settled value the two shells do not read alike
-    (_string_text).  A here-document and a `<` on one command are read in the order the redirections stand, which
-    the body no longer stands in; the body wins, since the hook reads it anyway.  `a`: the line's analysis, whose settled
-    values a here-string's word is read with (SPD-148)."""
-    text = bodies[-1] + "\n" if bodies else piped
+    `tokens`: the command's words with its redirections still in them, each here-document's operator and delimiter
+    among them, whose bodies ShellWalk.consume took out (`bodies`, in the order the operators stand; an unquoted one
+    as its expansion leaves it, heredocs.received_body, SPD-206).  `piped`: what stands on standard input before the
+    command's own redirections -- the text the pipeline element before it printed, or the input the compound command
+    around it was given -- and `pipe_feeds`, whether a pipe feeds this command itself rather than a compound command
+    around it.  `a`: the line's analysis, whose settled values a here-string's word is read with (SPD-148).
+
+    Each redirection on descriptor 0 is one input: a here-document's body, a here-string whose word the hook can
+    resolve, and a file (`<`, and `<>`, which opens it for reading and writing) or a descriptor (`<&`), which the line
+    does not spell -- nor a word holding an expansion, a substitution or a glob, a here-string whose settled value the
+    two shells do not read alike (_string_text), or a body holding a command substitution's output
+    (heredocs.OutputBody, SPD-207).  zsh reads every one of them, one after another in the order they stand, after the
+    pipe that feeds the command itself (its MULTIOS option, on by default: zshmisc(1) calls a pipe an implicit
+    redirection), and bash reads the last alone; with none, both read `piped`.  Where the two differ the text is a
+    MultiosText, bash's holding zsh's (SPD-209, probed through tests/probes/shell_probe.py in zsh 5.9 -f and -f -o
+    nobareglobqual and bash 3.2.57: tests/test_hooks.py MultiosInputTest).  A pipe into a compound command is no input
+    of a command inside it that has one of its own (probed: `printf 'touch p1\\n' | { sh <<'EOF' ...; }` ran the body
+    alone)."""
+    inputs, pending = [], iter(bodies)
     i = 0
     while i < len(tokens):
         t, fd = tokens[i], None
         if _FD_RE.fullmatch(t) and i + 1 < len(tokens) and tokens[i + 1] in (syntax.OUT_REDIRECTS | syntax.IN_REDIRECTS):
             fd, i, t = t, i + 1, tokens[i + 1]
-        if t in syntax.IN_REDIRECTS:
-            if fd in (None, "0") and t not in ("<<", "<<-"):  # a here-document's body is in `bodies`
+        if t in ("<<", "<<-"):
+            body = next(pending, None)  # consume takes a body for each operator while any is left
+            if fd in (None, "0") and body is not None:
+                inputs.append(None if isinstance(body, heredocs.OutputBody) else body + "\n")
+            i += 2
+            continue
+        if t in syntax.IN_REDIRECTS or t == "<>":
+            if fd in (None, "0"):
                 spelled = _string_text(tokens[i + 1], a) if t == "<<<" and i + 1 < len(tokens) else None
-                text = None if spelled is None else spelled + "\n"
+                inputs.append(None if spelled is None else spelled + "\n")
             i += 2
             continue
         i += 2 if t in syntax.OUT_REDIRECTS else 1
-    return text
+    if not inputs:
+        return piped
+    zsh = ([_zsh(piped)] if pipe_feeds else []) + inputs
+    return _paired(inputs[-1], None if None in zsh else "".join(zsh))
 
 
 def _string_text(word, a):
@@ -237,12 +331,13 @@ def _shell_options(words):
     return i, forced, False, files
 
 
-def printed_text(tokens, bodies, piped, a=None):
+def printed_text(tokens, stdin, a=None):
     """The text the simple command `tokens` prints on standard output, or None where the hook cannot spell it.
 
     Only the commands that print what the line spells are read: echo, zsh's print, printf, a cat of its own input, and
     tee, which passes its input on whatever files it also writes.  A command whose standard output a redirection takes
-    prints nothing into the pipe, and every other command prints text this module does not know.
+    prints nothing into the pipe, and every other command prints text this module does not know.  `stdin`: the text the
+    command reads on standard input (command_input), which cat and tee print as it stands.
 
     `a`, the line's analysis before this command runs: a `$NAME` the line settled is read as its value (SPD-148), the
     value the shells expand it to, since the command's own prefix assignments reach none of its words.  bash splits an
@@ -256,22 +351,22 @@ def printed_text(tokens, bodies, piped, a=None):
         name = word_text(words[0]) if words else None
         if not _printer(name):
             return None
-        return _printed([name] + [word_text(w) for w in words[1:]], tokens, bodies, piped, a)
+        return _printed([name] + [word_text(w) for w in words[1:]], stdin)
     if not _printer(word_text(words[0], a)):
         return None  # zsh's reading prints nothing this module reads, so bash's cannot agree with a text
     whole, fields = _readings(words, a)
     if not (fields and _printer(fields[0])):
         return None
-    return _either(_printed(whole, tokens, bodies, piped, a), _printed(fields, tokens, bodies, piped, a))
+    return _either(_printed(whole, stdin), _printed(fields, stdin))
 
 
 def _printer(name):
     return bool(name) and os.path.basename(name).casefold() in _PRINTERS
 
 
-def _printed(texts, tokens, bodies, piped, a):
+def _printed(texts, stdin):
     """printed_text's reading of one list of words as a shell passes them, `texts`, None for one the hook cannot say;
-    the first is a printer's name."""
+    the first is a printer's name.  `stdin`: the text the command reads, a MultiosText kept whole."""
     base, args = os.path.basename(texts[0]).casefold(), texts[1:]
     if base == "echo":
         return _echo_text(args)
@@ -279,7 +374,6 @@ def _printed(texts, tokens, bodies, piped, a):
         return _print_text(args)
     if base == "printf":
         return _printf_text(args)
-    stdin = command_input(tokens, bodies, piped, a)
     # tee(1) writes its input to each file and to standard output unchanged, whatever its options; cat prints its
     # input only when every operand it reads is that input (`cat`, `cat -`), never a file the hook does not read
     return stdin if base == "tee" or all(t == "-" for t in args) else None

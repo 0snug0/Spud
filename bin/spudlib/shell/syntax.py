@@ -11,6 +11,15 @@ OUT_REDIRECTS = {">", ">>", ">|", "&>", "&>>", ">&", "<>"}
 IN_REDIRECTS = {"<", "<<", "<<<", "<<-", "<&"}
 RESERVED_WORDS = {"if", "then", "else", "elif", "fi", "while", "until", "do", "done", "for", "select", "case", "esac",
                   "in", "function", "!", "{", "}", "coproc"}
+# zsh's own reserved words, as `enable -r` listed them in zsh 5.9 -f (tests/probes/shell_probe.py, SPD-180).  Its lexer
+# reads each as a token of its own wherever it is in command position, as it is after each of a for's or a foreach's names,
+# so one there ends the names and opens the loop's body: `set -- p; foreach f if true; then echo x; fi; end`, `foreach f
+# [[ -n x ]] && echo x; end`, `foreach f typeset -f > tf; end` and `foreach f export X=1; end` each ran as that body, and
+# so did `for f if true; then echo x; fi` and `for f typeset -f > o4` (SPD-182).  `in` is not one: zsh's parser compares
+# the word itself there.
+ZSH_RESERVED_WORDS = {"!", "[[", "case", "coproc", "declare", "do", "done", "elif", "else", "end", "esac", "export", "fi",
+                      "float", "for", "foreach", "function", "if", "integer", "local", "nocorrect", "readonly", "repeat",
+                      "select", "then", "time", "typeset", "until", "while", "{", "}"}
 # Matched case-folded: macOS PATH lookup is case-insensitive, so ENV runs /usr/bin/env.  noglob and nocorrect are
 # zsh's precommand modifiers.
 WRAPPERS = {"env", "command", "exec", "builtin", "nohup", "nice", "time", "timeout", "caffeinate", "sudo", "doas",
@@ -64,10 +73,12 @@ WRAPPER_VALUE_OPTIONS = {
 WRAPPER_CHDIR_OPTIONS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
 DURATION_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?|\.\d+[smhd]?")
 # The shell's operators, longest first: shlex (punctuation_chars) returns a run of them such as `)>` or `;;&` as one token.
-SHELL_OPERATORS = (";;&", "&>>", "<<<", "<<-", ";;", ";&", "&&", "||", "|&", "&>", ">>", ">|", ">&", "<&", "<>", "<<", "<(", ">(",
-                   ";", "&", "|", "(", ")", "<", ">")
+# `;|` is zsh's: it ends a case arm and goes on testing the patterns after it, and anywhere else it is a parse error in zsh
+# (probed in zsh 5.9 -f: `echo a;| cat` failed near `;|`) and in bash, which reads `;` then `|` (SPD-181).
+SHELL_OPERATORS = (";;&", "&>>", "<<<", "<<-", ";;", ";&", ";|", "&&", "||", "|&", "&>", ">>", ">|", ">&", "<&", "<>", "<<", "<(",
+                   ">(", ";", "&", "|", "(", ")", "<", ">")
 SHELL_PUNCTUATION = frozenset("();<>|&")
-LIST_TERMINATORS = {";", ";;", ";&", ";;&"}
+LIST_TERMINATORS = {";", ";;", ";&", ";|", ";;&"}
 # What may stand between a complete header or condition and the body that follows it with no `do` or `then`: a terminator
 # separates the two, and a list operator says the condition is not complete after all, so the `]]` that looked
 # like its end was not (probed: `if [[ -n x ]] && [[ -n y ]] echo both` and `if true && [[ -n x ]] echo both` ran
@@ -82,6 +93,7 @@ LOOP_PREFIX_WORDS = {"coproc", "time", "!"}
 # simple command named NAME, and zsh, whose coproc takes a command only, is a parse error for every named form).
 COPROC_COMPOUND_WORDS = {"{", "(", "[[", "if", "while", "until", "for", "select", "case"}
 IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+LOOP_NAME_RE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)\Z")  # a loop's name to zsh: an identifier or a run of digits
 DIRECTORY_COMMANDS = {"cd", "chdir", "pushd", "popd"}  # the builtins, spelled exactly: CD and /usr/bin/cd are programs
 SHELL_DECLARATIONS = {"export", "typeset", "declare", "local", "readonly"}
 # A redirection or tee target the shell expands is checked as every file it opens, not as its literal spelling.
@@ -94,21 +106,28 @@ _GLOB_UNSENTINEL = {v: k for k, v in _GLOB_SENTINELS.items()}
 # zsh's own glob operators: parenthesised alternation `(a|b)` and the numeric range `<n-m>`, which shlex reads as a
 # subshell and as an input redirection.  mark_zsh_patterns replaces each character zsh reads as part of such a pattern (the
 # parentheses, bars and blanks of a group, the angle brackets of a range) with one of these sentinels, so the pattern stays
-# in one word; they are active glob syntax, unlike the quoted sentinels above, and deglob restores both kinds.
-_ZSH_PATTERN_CHARS = "(|)<> \t"
+# in one word; they are active glob syntax, unlike the quoted sentinels above, and deglob restores both kinds.  A group
+# holds a newline as one more character of its pattern (SPD-183), so the newline has one too.
+_ZSH_PATTERN_CHARS = "(|)<> \t\n"
 _ZSH_SENTINELS = {c: chr(0xE010 + i) for i, c in enumerate(_ZSH_PATTERN_CHARS)}
 ZSH_OPEN, ZSH_BAR, ZSH_CLOSE, ZSH_RANGE_OPEN, ZSH_RANGE_CLOSE = (_ZSH_SENTINELS[c] for c in "(|)<>")
 _ZSH_UNSENTINEL = {v: k for k, v in _ZSH_SENTINELS.items()}
 _LITERAL_EQUALS = chr(0xE020)  # a word's leading `=` that zsh's EQUALS is not to expand again (literalize)
 # Marks neutralize_quoted_globs leaves beside a `$`, so an expansion is told from a literal dollar once shlex has taken
-# the quotes away.  `$` then _LITERAL_DOLLAR: single-quoted or escaped, no expansion.  `$` then _QUOTED_DOLLAR: `$'...'` (ANSI-C
-# quoting, both shells) or `$"..."` (bash's locale string), whose text the hook does not decode.  _NAME_END: a quote or an escape
+# the quotes away.  `$` then _LITERAL_DOLLAR: single-quoted or escaped, no expansion.  `$` then _QUOTED_DOLLAR: a `$'...'`
+# (ANSI-C quoting) whose escapes zsh and bash decode apart -- prepare.ansi_c_quotes has written every other one as the literal
+# it is (SPD-202) -- or `$"..."` (bash's locale string), whose text the hook does not decode.  _NAME_END: a quote or an escape
 # right after `$name` ends the name (`$X"t"` is $X then t, which shlex joins as $Xt).  _ARRAY_VALUE opens the value ShellWalk
 # joins for `name=(a b)`: bash reads `$name` as its first element, zsh as all of them.  _QUOTED_NAME follows the name of a
 # `$name` that stands in double quotes (`"$X"`, `"git $X"`), whose value neither shell splits, where bash splits the value
 # of an unquoted one at its blanks (SPD-167); it ends the name as _NAME_END does.  deglob removes all five.
 _LITERAL_DOLLAR, _QUOTED_DOLLAR, _ARRAY_VALUE, _NAME_END = chr(0xE021), chr(0xE022), chr(0xE023), chr(0xE024)
 _QUOTED_NAME = chr(0xE025)
+# What newlines_as_separators writes, between two blanks, for an unquoted newline, where it once wrote `;` (SPD-183): the
+# `;` the walk reads everywhere but inside a zsh glob group, where zsh reads the newline as one more character of the
+# pattern and a spelled `;` ends the word.  mark_zsh_patterns replaces every one, with `;` or with the group's newline, so
+# shlex and the walk never see it and deglob has nothing to restore.
+LINE_BREAK = chr(0xE026)
 # The characters of an arithmetic command `(( ... ))` and of an arithmetic expansion `$(( ... ))`.  Both shells
 # evaluate what stands between the parentheses as arithmetic -- the `>` of `(( n > 2 ))` is a comparison and opens no file,
 # `|` is a bitwise or and not a pipeline, `;` separates a `for` header's three expressions and no commands -- so
@@ -141,7 +160,15 @@ _SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **_ARITH_UNSENTINEL, 
 # stands for the files a command places where the line cannot say -- an archive extracted with -P, unzip's `-:`, a curl
 # config file, tar's -T list -- which may lie anywhere at all.
 FIND_PATH, INPUT_OPERAND, ANY_PATH = chr(0xE050), chr(0xE051), chr(0xE052)
-_OPERAND_TEXT = {FIND_PATH: "{}", INPUT_OPERAND: "{input}", ANY_PATH: "(anywhere)"}
+# PROCSUB_MARK follows hookio.SUBST in the word that stands for the file name a `<( list )` hands its command
+# (walk.PROCSUB_FILE, SPD-190): every reader of SUBST takes that word for the one it is, a word the line does not spell,
+# and ShellWalk.consume, which analyses one lifted `$( )` or backtick body for each SUBST a word holds, pairs it with none.
+# A private-use character, as the sentinels are: a suffix of plain text is one a line can spell after a `$( )` in the
+# same word (`$(...)FILE__`), whose body would then pair with none.  deglob keeps it, so text eval or a shell reads again
+# still pairs it with none, and a reason shows the word as SUBST alone (shown_operands).  0xE053 and 0xE054 are
+# hooks/pathrule's.
+PROCSUB_MARK = chr(0xE055)
+_OPERAND_TEXT = {FIND_PATH: "{}", INPUT_OPERAND: "{input}", ANY_PATH: "(anywhere)", PROCSUB_MARK: ""}
 _LITERALIZE = str.maketrans(dict(_GLOB_SENTINELS, **_ZSH_UNSENTINEL))
 _GLOB_SENTINEL_RE = re.compile("[" + "".join(_SENTINEL_TEXT) + "]")
 GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}|[" + ZSH_OPEN + ZSH_RANGE_OPEN + "]")
@@ -160,8 +187,9 @@ ALIAS_KEY = "\x00alias\x00"
 # cannot spell it differently and cannot write the file it comes from, and Claude Code's own shadows for find, grep,
 # pkill and rg each dispatch through `"$_cc_bin"`, so reading those as refusals would refuse every `grep` a member runs.
 # Everything the hook *can* read there -- a git verb, a program git runs, a database call, a spud call, a file the text
-# names and writes -- is the finding it would be on the line.
-SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias"})
+# names and writes -- is the finding it would be on the line, and so is one the member's own words there earn: a word
+# after the alias's name, or a call's words in a function's body (analyse.analyse_shell_text, SPD-203).
+SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias", "eval-flag"})
 # A positional parameter, which is how a function receives the words the member wrote (`mkdir -p $@` in a body is
 # the member's own path).  A write target holding one is never pruned from text the shell holds, whatever else is: `$@`,
 # `$*`, `$0`..`$9` and every braced form of them (`${@}`, `${@:2}`, `${@:$#}`, `${1:-x}`, `${#@}`, `${1+"$@"}`).  `$HOME`
@@ -195,7 +223,6 @@ ASSIGNING_COMMANDS = {"read", "getopts", "printf", "print", "mapfile", "readarra
 DYNAMIC_VARIABLES = {"_", "PWD", "OLDPWD", "REPLY", "OPTARG", "OPTIND", "MATCH", "MBEGIN", "MEND", "match", "mbegin", "mend", "BASH_REMATCH",
                      "RANDOM", "SRANDOM", "SECONDS", "EPOCHSECONDS", "EPOCHREALTIME", "LINENO", "BASH_COMMAND", "FUNCNAME", "DIRSTACK",
                      "dirstack", "PIPESTATUS", "pipestatus", "status", "argv", "BASHPID", "COLUMNS", "LINES", "HISTCMD", "psvar", "reply"}
-HEREDOC_RE = re.compile(r"<<-?\s*(?:'([^']*)'|\"([^\"]*)\"|(\\?[A-Za-z_][\w.-]*))")
 # The verbs Law 7 refuses a member by name, whatever git's own command list says: the ones a member would reach for, so
 # the refusal keeps its own reason (`git push` is still "Spud commits" when the hook cannot run git at all).
 # Every other name git answers to is refused by GIT_MEMBER_VERBS below; this table is the named half, not the whole set,
@@ -460,7 +487,8 @@ class ShellAnalysis:
         self.vars = {}
         # The text the line feeds the simple command being read on its standard input -- a here-string, a
         # here-document body, or what the pipeline element before it printed -- and None where the line does not spell
-        # it.  A shell that runs what it reads there runs that text (shell/stdin_text).  analyse_segment sets it for
+        # it; a stdin_text.MultiosText where zsh, which reads every input in turn, and bash read it apart (SPD-209).  A
+        # shell that runs what it reads there runs that text (shell/stdin_text).  analyse_segment sets it for
         # each command and puts back what it found, so a body read in its own process reads its own input, not this one.
         self.stdin = None
         # Whether the line puts anything on that standard input at all (stdin_text.input_fed), which `stdin`
@@ -468,7 +496,12 @@ class ShellAnalysis:
         # program of its own runs whatever stands there, and reads a terminal where nothing does (shell/inline_programs).
         self.stdin_fed = False
         self.cwds = frozenset([cwd]) if cwd else None
-        self.unparseable = False
+        # What stopped the hook tokenizing text it reads for this line, or None (SPD-191): (what -- the quote character
+        # that never closes, or a backslash that ends the text with nothing to escape; the text from that quote on, or up
+        # to that backslash, as untokenized gives it; where -- "line" for the line itself, "nested" for a body the line
+        # hands another reading, "shell" for text the Bash tool's shell already holds).  The first one found is kept, and
+        # bash_rule refuses every caller a line that holds one.
+        self.unparseable = None
         self.loop_depth = 0  # inside a loop or a function body, where a relative cd may repeat
         self.cd_uncertain = False  # the last directory change may not happen (a target that does not exist now)
         self.isolated_done = set()  # (command, depth, starting state) of every body analysed in its own process
@@ -490,11 +523,14 @@ class ShellAnalysis:
         # command word may already be one of that profile's aliases or functions before anything on the line runs.
         # `shell_expanded`, (the name, what the shell runs for it) per expansion on this line, in order, so a reason can
         # say what the word it names actually was; `expanding`, the alias names whose expansion is in flight, which zsh
-        # does not expand again inside their own body (`alias ls='ls -G'` terminates); `bodies_read`, the function names
-        # whose body this line has already read, once each however often the line names them; `shell_reading`, how deep
-        # inside such text the reading is, so the outermost of them prunes once, against the member's own words.
-        self.shell_expanded, self.expanding, self.bodies_read = [], [], set()
-        self.shell_reading = 0
+        # does not expand again inside their own body (`alias ls='ls -G'` terminates); `bodies_read`, each function name ->
+        # the (text, call's words) its body was read as on this line, once each however often the line names it with those
+        # words; `shell_reading`, how deep inside such text the reading is, so the outermost of them prunes once, against
+        # the member's own words; `shell_words`, those words, while the outermost reading is under way; `shell_kept`, the
+        # indices of the findings a function's body earned that the member's words reach where the hook cannot follow them
+        # (SPD-203), which that prune keeps.
+        self.shell_expanded, self.expanding, self.bodies_read = [], [], {}
+        self.shell_reading, self.shell_words, self.shell_kept = 0, [], set()
         # The command names a `hash` line put in the shell's own command table, so a later bare call of one of them
         # runs the file the line chose whatever PATH holds.  Never cleared: a `hash` in a branch, a subshell or a loop body
         # still leaves the hook unable to say which program a name finds, and the refusal is the safe answer.  zsh's
@@ -511,11 +547,31 @@ class ShellAnalysis:
         # parameter binds the same names (`functions[git]=body`, `functions+=(git body)`), and UNKNOWN_NAME stands
         # for one whose name the hook cannot read.
         self.functions = set()
+        # The bodies of those definitions, which a call reads with the standard input it is given (SPD-212,
+        # walk.walk_line): `function_bodies`, each name -> the (reading, definition) pairs a call of it may run -- the
+        # reading of the line (walk_line) the definition stands in, and its number there (ShellWalk.define) -- every
+        # definition kept and scoped as `functions` is; `function_inputs`, reading -> definition -> {the input's
+        # stdin_text.reading_key: (the text, whether anything stands there)}, what the calls hand that body, in order;
+        # `walking`, the readings under way, whose walk_line will still read a body on a call's input; `body_walks`, the
+        # walks the whole analysis has made to read bodies on calls' inputs, which positional.READINGS_PER_NAME bounds.
+        self.function_bodies, self.function_inputs, self.walking, self.body_walks = {}, {}, set(), 0
 
     @property
     def all_spud(self):
         """Every simple command is a spud call (a `cd` beside it changes nothing that matters)."""
         return "spud" in self.kinds and all(k in ("spud", "cd") for k in self.kinds) and not self.unparseable
+
+
+def loop_name(word, first=False):
+    """Whether zsh reads this word, in a for, select or foreach header, as one of the loop's names (its parser, par_for;
+    SPD-180, SPD-182): an identifier or a run of digits, which its isident takes as well (probed in zsh 5.9: `for f 1 (a b)
+    echo $f$1` printed ab, and so did foreach).  The `first` word after the reserved word is read with command position
+    off, so `in` and a reserved word are names there too (`for in (a b)`, `for do (a b)` and `select in (a)` ran their
+    bodies); after it zsh reads each word in command position, where `in` starts a word list and a reserved word is a token
+    of its own (ZSH_RESERVED_WORDS), and either ends the names, as any other word does (walk.ShellWalk.names_end)."""
+    if LOOP_NAME_RE.match(word) is None:
+        return False
+    return first or word != "in" and word not in ZSH_RESERVED_WORDS
 
 
 def unknown_operand(word):
@@ -525,7 +581,8 @@ def unknown_operand(word):
 
 
 def shown_operands(text):
-    """A word or reason with the operand markers shown as the line spells them: `{}` for find's, `{input}` for xargs's."""
+    """A word or reason with the operand markers shown as the line spells them: `{}` for find's, `{input}` for xargs's;
+    PROCSUB_MARK as nothing, so the word for a process substitution's file name reads as a substitution's."""
     for marker, shown in _OPERAND_TEXT.items():
         text = text.replace(marker, shown)
     return text
@@ -539,6 +596,36 @@ def shell_tokens(text):
         return list(lx)
     except ValueError:
         return None
+
+
+UNTOKENIZED_KEPT = 160  # the most of the text untokenized keeps, from the quote on or up to the backslash
+
+
+def untokenized(text):
+    """What stops shell_tokens splitting this text, by shlex's own posix rules: (the quote character that never closes,
+    and the text from it on), or ("\\\\", the text up to and with a backslash that ends it with nothing to escape).  A
+    backslash escapes the next character outside single quotes, and inside double quotes too, where shlex keeps it; a
+    backslash that ends the text inside an open quote is the quote's.  ("", the text) when neither is the cause, which
+    only text shlex splits reaches."""
+    i, n, quote, start = 0, len(text), None, 0
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            if c == "'":
+                quote = None
+        elif c == "\\":
+            if i + 1 == n and quote is None:
+                return "\\", text[max(0, i + 1 - UNTOKENIZED_KEPT):]
+            i += 1
+        elif quote == '"':
+            if c == '"':
+                quote = None
+        elif c in "'\"":
+            quote, start = c, i
+        i += 1
+    if quote is not None:
+        return quote, text[start:start + UNTOKENIZED_KEPT]
+    return "", text[:UNTOKENIZED_KEPT]
 
 
 def operator_parts(token):

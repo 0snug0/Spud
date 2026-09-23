@@ -143,19 +143,21 @@ def alias_substitution(name, a):
 # status.  hooks/snapshots holds the table; these two read a command word against it.  An alias the line itself defines is
 # a different thing and read by the alias table: it reaches only text the line parses again, which is `eval`.
 def shell_aliased(words, a):
-    """(the text the shell's own aliases put in place of `words`, the member's own words that follow that expansion,
-    [(the name, what it runs)] for each one expanded, the first name whose body the hook cannot read), or
-    (None, [], [], None) when the command word is none of them.  The own words are kept apart because a write a body
-    makes into one of them is the member's write, which analyse_shell_text never prunes.
+    """(the text the shell's own aliases put in place of `words`, the member's own words that follow that expansion, as
+    the line's reading tokenized them, [(the name, what it runs)] for each one expanded, the first name whose body the hook
+    cannot read), or (None, [], [], None) when the command word is none of them.  The own words are kept apart because a
+    write a body makes into one of them, and a finding that spells one the hook cannot read, is the member's, which
+    analyse_shell_text never prunes.
 
     A shell expands an alias where it parses the command word, textually and before any rule reads it, so the body and
     the words after it are analysed as the text the shell would have parsed -- `gc -m x` is `git commit --verbose -m x`
-    and earns Law 7's own refusal.  When the body ends in a blank the next word is expanded too (zsh's chaining rule,
-    `_='sudo '`), and a name is not expanded again while its own expansion is in flight, which is what stops
-    `alias ls='ls -G'`.  A word the line quoted or escaped (`\\gp`, `'gp'`) reaches this with its quotes already taken
-    and is expanded all the same: that is fail-closed -- the name it spells is no program -- and telling the two apart
-    would need a mark inside the command word that every reading by name would then have to strip (the expansion check makes
-    the same choice for `'$X' push`)."""
+    and earns Law 7's own refusal -- each of those words quoted again as the line spelled it (prepare.requoted, SPD-201):
+    `gc -m "don't"` is one message, not a quote that never closes.  When the body ends in a blank the next word is
+    expanded too (zsh's chaining rule, `_='sudo '`), and a name is not expanded again while its own expansion is in
+    flight, which is what stops `alias ls='ls -G'`.  A word the line quoted or escaped (`\\gp`, `'gp'`) reaches this
+    with its quotes already taken and is expanded all the same: that is fail-closed -- the name it spells is no program --
+    and telling the two apart would need a mark inside the command word that every reading by name would then have to
+    strip (the expansion check makes the same choice for `'$X' push`)."""
     found = snapshots.shell_table(a.home)
     if not found.aliases:  # a machine with no snapshot, and every scratch home the suite builds: nothing to read
         return None, [], [], None
@@ -174,16 +176,14 @@ def shell_aliased(words, a):
         i += 1
     if not expanded:
         return None, [], [], None
-    own_words = [prepare.deglob(w) for w in words[i:]]
-    return " ".join(out + own_words), own_words, expanded, None
+    text = " ".join(out + [prepare.requoted(w) for w in words[i:]])
+    return text, list(words[i:]), expanded, None
 
 
 def shell_function(name, a):
-    """The shell text a function the shell already defines runs for this command word, or None.  Read once per name per
-    line, so a line that names it twice -- or a body that calls itself -- reads it no further; an alias of the same name
-    is expanded first, as the shell does it (shell_aliased runs before this)."""
-    if name in a.bodies_read:
-        return None
+    """The shell text a function the shell already defines runs for this command word, or None; an alias of the same name
+    is expanded first, as the shell does it (shell_aliased runs before this).  analyse.read_shell_name reads it once per
+    call's words, so a body that calls itself with them reads it no further."""
     found = snapshots.shell_table(a.home)
     return found.body(name) if name in found.functions else None
 
@@ -220,7 +220,8 @@ def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fres
     line assigned is read as the words the shells give it (variable_readings): one reading replaces it in place (_AGAIN), several
     are each analysed from the start (_STOP), and a doubtful value adds a "var-doubt" finding.  Anything else is not resolved: an
     operator form (`${X:-git}`), zsh's flags and modifiers (`${(L)X}`, `$~X`, `$X:t`), a subscript, a concatenation (`$X$Y`,
-    `g$X`), arithmetic, `$'...'`, a substitution, a variable the line did not assign, or an empty value outside the command word.
+    `g$X`), arithmetic, a `$'...'` whose escapes the shells decode apart (prepare.ansi_c_quotes), a substitution, a variable the
+    line did not assign, or an empty value outside the command word.
     The command word is then a "var" finding, which ends the analysis for a bare variable or a substitution (_STOP) and leaves a
     partial expansion to be dispatched as spelled (_FLAGGED); another word is a "var-word" finding left as spelled (_FLAGGED); a
     wrapper's command word is left for the loop to read once the wrapper is stripped (_FLAGGED, no finding).  Each finding refuses

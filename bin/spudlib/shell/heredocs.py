@@ -1,0 +1,528 @@
+"""shell/heredocs: where each here-document's body starts and ends, and the line without the bodies.
+
+A body starts after the newline that ends its operator's command, not after the line the operator stands on (SPD-188): zsh
+and bash read here-documents at the next newline their lexer reads as one, and a quoted word, a backslash-newline, a `$( )`,
+backticks, a `${ }`, a `<( )`, an arithmetic expression or zsh's glob group spanning lines keeps the command going.  The
+scan below reads the line as that lexer does, one frame per nested text: a command list (the line itself, a `$( )`, a `<(
+)`), double quotes, a `${ }`, an arithmetic expansion.  A body read at the line's own level, or in a `<( )` on it, is taken
+out of the text, in the order its operator stands, since the walk reads the words of both and takes one body per `<<` it
+meets (ShellWalk.consume); a body inside a `$( )` or backticks stays in the text, which split_substitutions hands to that
+substitution's own analysis.  A `$( )` ends where zsh ends it, past its bodies and quotes; bash 3.2 ends it at a body
+line's `)` (probed), and so does split_substitutions, which counts parentheses (proposal 299), so the text between is read
+as the outer line's commands, bash's reading.  tests/test_hooks.py HereDocumentBodyTest has the probes.  For each body it
+takes out the scan also says whether any character of its delimiter is quoted: a body whose delimiter has none is expanded
+before its command reads it, and ShellWalk.consume reads its substitutions (SPD-192, HereDocumentExpansionTest), then
+hands the command the text that expansion leaves, received_body (SPD-206, HereDocumentInputTest), with each value the
+line settles in place of its parameter (SPD-208, HereDocumentValueTest), an OutputBody where that text holds a
+substitution's output (SPD-207, HereDocumentOutputTest) or a value the line does not settle; a body whose delimiter is
+quoted reaches its command as it is spelled.
+
+What the scan cannot tell from characters alone is what an open `(` is: a subshell or an array assignment, whose newline
+ends a command, or zsh's glob group or an arithmetic command, whose newline does not (and whose `<<` is a shift there).
+A `(` standing alone after a separator or an opening -- the line's start, a newline, `;`, `&`, `|`, `(` or `{` -- with no
+case command on the line is a subshell (zsh.mark_zsh_patterns reads it so), and while only such are open the scan needs
+nothing more.  Otherwise it asks the analysis's own reading: mark_zsh_patterns on the text read so far, the `(`s closed
+after the newline or the `<<`, with and without it.  A line that asks more than _READINGS times reads on as command text,
+which the walk reads fail closed.
+
+One scanner whose frames share the characters they stop at, kept whole past the ~250-line mark for that reason (the
+spudlib-modules size rule)."""
+
+import re
+
+from . import prepare, syntax, zsh
+
+_READINGS = 32  # how often one line asks mark_zsh_patterns what an open `(` is: the pathological line reads on
+# What mark_zsh_patterns writes for a newline zsh reads inside a word: a glob group's (_zsh_group), and an arithmetic
+# command's or a case pattern's group's (_ARITH_MARKS, _PATTERN_MARKS).
+_WORD_NEWLINES = (syntax._ZSH_SENTINELS["\n"], syntax._ARITH_SENTINELS["\n"])
+_COMMAND_RE = re.compile(r"[\\'\"`$<>=()#\n]")  # the characters a command list's scan stops at
+_QUOTED_RE = re.compile(r"[\\\"`$]")  # in double quotes
+_BRACED_RE = re.compile(r"[\\'\"`${}]")  # in a `${ }`
+_ARITH_RE = re.compile(r"[\\$()\[\]]")  # in an arithmetic expansion
+_BACKTICK_RE = re.compile(r"[\\`]")
+_ANSI_RE = re.compile(r"[\\']")  # in `$'...'`
+_RECEIVED_RE = re.compile(r"[\\`$]")  # in an unquoted body (received_body)
+# An unbraced parameter expansion (received_body): a name, zsh's `$#NAME`, `$+NAME`, `$=NAME`, `$~NAME` and `$^NAME`,
+# or a special parameter
+_PARAMETER_RE = re.compile(r"\$(?:[#+=~^]?[A-Za-z_][A-Za-z0-9_]*|[0-9@*?$!#-])")
+_WORD_START = " \t\n;&|()<>"  # before a `#` that opens a comment (newlines_as_separators reads the same)
+_DELIMITER_END = " \t\n;&|<>()"
+_CASE_RE = re.compile(r"(?<![\w-])case(?![\w-])")
+_COMMAND, _QUOTED, _BRACED, _ARITH = range(4)
+
+
+class _Frame:
+    """One nested text the scan is in.  A command list's: `strip` (its bodies leave the text), `closer` (`)` for a `$( )` or a
+    `<( )`, None for the line), the here-documents whose bodies its next newline reads, whether each bare `(` open in it
+    opens a subshell (`opens`, _Scan.subshell), and how many do not (`others`).  A `${ }`'s or an arithmetic expansion's:
+    `closer` (`}`, `)` or `]`), and `depth` counts its own brackets."""
+
+    __slots__ = ("kind", "strip", "closer", "pending", "opens", "others", "depth")
+
+    def __init__(self, kind, strip=False, closer=None, depth=0):
+        self.kind, self.strip, self.closer, self.pending, self.opens, self.others, self.depth = kind, strip, closer, [], [], 0, depth
+
+
+def _ansi_c_quoting(stack):
+    """Whether a `$'` in the innermost frame opens ANSI-C quoting: in a command list, and in a `${ }` standing in one, where
+    both shells read it too (SPD-202, probed: `echo ${u:-$'\\''} '<<EOF'`, a line `echo RAN > l/hb` and `EOF` wrote l/hb in
+    zsh and bash); never in double quotes, a `${ }` in them included, where zsh reads it as text."""
+    for frame in reversed(stack):
+        if frame.kind != _BRACED:
+            return frame.kind == _COMMAND
+    return False
+
+
+def strip_heredocs(command):
+    """Remove the here-document bodies read at the line's own level from the command text; return (text, bodies,
+    expanded), the bodies in the order their operators stand and, for each, whether the shell expands it before its
+    command reads it: a body whose delimiter has no character quoted (SPD-192, ShellWalk.consume)."""
+    if "<<" not in command:
+        return command, [], []
+    return _Scan(command).run()
+
+
+def received_body(body, values=None):
+    """The text a command fed an unquoted here-document reads, as ShellWalk.consume hands it on (SPD-206): the body with
+    the backslash taken off before a `$`, a backtick or a backslash, a backslash-newline taken out whole, which joins the
+    two lines, and every other backslash kept, as zsh and bash expand it -- a default word's text included (probed
+    through tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: `cat` fed `[\\$] [\\\\]
+    [\\x] [a\\<newline>b]` printed `[$] [\\] [\\x] [ab]`, and sh fed `\\$(echo RAN > l/h1)` ran it; tests/test_hooks.py
+    HereDocumentInputTest).  Each `$( )` and backtick substitution keeps its text as spelled, since that text is the
+    substitution's own and what the command reads is its output: the substitution is read where it runs
+    (reevaluation.read_expanded_body), and read again, fail closed, by a shell fed the body.
+
+    `values` (SPD-208, HereDocumentValueTest): the line's reading of each parameter expansion the body holds outside a
+    substitution and an arithmetic expansion -- `$NAME`, `${...}`, a special parameter, zsh's `$#NAME` and its kin --
+    called with the expansion's text and answering (the text the shells put in its place, or None to keep it as
+    spelled, whether the line settles every text it may leave), reevaluation.body_values.  A value is text a shell fed
+    the body parses again, its separators, redirections, newlines and substitutions commands there, so it is handed on
+    in place; a kept `${ }`'s own text is still read for its escapes.  Where any expansion is unsettled the text is an
+    OutputBody."""
+    if "\\" not in body and (values is None or "$" not in body):
+        return body
+    out, mark, i, quiet, unsettled = [], 0, 0, 0, False  # quiet: where the `$`s of an expansion read whole end
+    while (m := _RECEIVED_RE.search(body, i)) is not None:
+        i, c = m.start(), m.group()
+        if c == "\\":
+            escaped = body[i + 1 : i + 2]
+            if escaped and escaped in "$`\\\n":
+                out.append(body[mark:i])
+                mark = i + (2 if escaped == "\n" else 1)
+            i += 2
+        elif c == "`":
+            i = prepare.backtick_end(body, i) + 1
+        elif body.startswith("$(", i) and not body.startswith("$((", i):
+            i = prepare.substitution_end(body, i) + 1
+        elif values is None or i < quiet:
+            i += 1
+        elif body.startswith(("$((", "$["), i):  # arithmetic, which leaves a number
+            quiet = prepare.substitution_end(body, i) if body[i + 1] == "(" else _bracket_end(body, i + 1)
+            i += 1
+        elif (end := _parameter_end(body, i)) is None:
+            i += 1  # a `$` that opens no expansion is text
+        else:
+            text, settled = values(body[i:end])
+            unsettled = unsettled or not settled
+            if text is None:
+                quiet, i = end, i + 1
+            else:
+                out += [body[mark:i], text]
+                mark = i = end
+    out.append(body[mark:])
+    received = "".join(out)
+    return OutputBody(received) if unsettled else received
+
+
+def _parameter_end(body, i):
+    """The index after the parameter expansion whose `$` is body[i], or None where that `$` opens none.  A `${ }` ends
+    at the `}` that closes it, a substitution's and an escaped character's braces aside, or with the body."""
+    if body.startswith("${", i):
+        depth, j, n = 0, i + 1, len(body)
+        while j < n:
+            c = body[j]
+            if c == "\\":
+                j += 1
+            elif c == "`":
+                j = prepare.backtick_end(body, j)
+            elif body.startswith("$(", j):
+                j = prepare.substitution_end(body, j)
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if not depth:
+                    return j + 1
+            j += 1
+        return n
+    m = _PARAMETER_RE.match(body, i)
+    return None if m is None else m.end()
+
+
+def _bracket_end(body, j):
+    """The index of the `]` that closes the `[` at body[j], its brackets counted, or len(body) when none does."""
+    depth, n = 0, len(body)
+    while j < n:
+        depth += (body[j] == "[") - (body[j] == "]")
+        if not depth:
+            return j
+        j += 1
+    return n
+
+
+class OutputBody(str):
+    """The text a command reads from an unquoted here-document whose expansion runs a command substitution (SPD-207):
+    received_body's text, each substitution as spelled, where the command reads that substitution's output, which the
+    line does not spell -- and a shell fed it runs that output as commands, a newline in it starting another (probed
+    through tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: tests/test_hooks.py
+    HereDocumentOutputTest).  So the command's standard input is unknown (stdin_text.command_input), and a shell that
+    runs its standard input is refused a member as SPD-145 refuses one fed a pipe the line does not spell
+    (script_files.read_shell); the text is still read as that shell's commands for what it does spell.  A parameter
+    whose value the line does not settle leaves such text too, kept as spelled (SPD-208, reevaluation.body_values:
+    `Y=$(printf ...)` then a body `echo a $Y`)."""
+
+    __slots__ = ()
+
+
+class _Scan:
+    """One pass over a command line, as zsh's lexer reads it, splitting off the bodies (strip_heredocs)."""
+
+    def __init__(self, text):
+        self.text, self.n = text, len(text)
+        self.out, self.mark, self.bodies, self.expanded = [], 0, [], []
+        self.readings = _READINGS
+        case = _CASE_RE.search(text)
+        self.case_at = case.start() if case else self.n  # where the line's first case command may stand
+
+    def run(self):
+        text, n = self.text, self.n
+        stack = [_Frame(_COMMAND, strip=True)]
+        i = 0
+        while i < n:
+            frame = stack[-1]
+            if frame.kind == _COMMAND:
+                i = self.command(stack, frame, i)
+            elif frame.kind == _QUOTED:
+                i = self.quoted(stack, i)
+            elif frame.kind == _BRACED:
+                i = self.braced(stack, frame, i)
+            else:
+                i = self.arithmetic(stack, frame, i)
+        self.out.append(text[self.mark :])
+        return "".join(self.out), self.bodies, self.expanded
+
+    # -- the frames ---------------------------------------------------------------------------------------------------
+    def command(self, stack, frame, i):
+        """A command list's next stop from text[i]: the index to go on from."""
+        text, n = self.text, self.n
+        m = _COMMAND_RE.search(text, i)
+        if m is None:
+            return n
+        i, c = m.start(), m.group()
+        if c == "\\":
+            return i + 2  # a backslash-newline joins the lines: no newline the lexer reads
+        if c == "'":
+            end = text.find("'", i + 1)
+            return n if end < 0 else end + 1
+        if c == '"':
+            stack.append(_Frame(_QUOTED))
+            return i + 1
+        if c == "`":
+            return self.backticks(i)
+        if c == "$":
+            return self.dollar(stack, i)
+        if c == "#":
+            if i == 0 or text[i - 1] in _WORD_START:  # a comment: the rest of the line
+                end = text.find("\n", i)
+                return n if end < 0 else end
+            return i + 1
+        if c == "\n":
+            if frame.pending and not self.in_word(stack, i):
+                return self.read_bodies(frame, i + 1)
+            return i + 1
+        if c == "(":
+            subshell = self.subshell(i)
+            frame.opens.append(subshell)
+            frame.others += not subshell
+            return i + 1
+        if c == ")":
+            if frame.opens:
+                frame.others -= not frame.opens.pop()
+            elif frame.closer:
+                # a here-document the list opened and no newline of it read gets no body (probed: after `s=$(cat
+                # <<EOF)` the next line ran as a command)
+                stack.pop()
+            return i + 1
+        # `<`, `>` or `=`
+        if text.startswith("<<", i):
+            if text.startswith("<<<", i):
+                return i + 3  # a here-string
+            return self.operator(stack, frame, i)
+        if text.startswith("(", i + 1) and (c == "<" or c == ">" and text[i - 1 : i] != "&"
+                                            or c == "=" and (i == 0 or text[i - 1] in " \t\n;&|(")):
+            # a process substitution: its own list, whose bodies the walk reads with the line's (`&>(` opens a zsh pattern,
+            # zsh.mark_zsh_patterns)
+            stack.append(_Frame(_COMMAND, strip=frame.strip, closer=")"))
+            return i + 2
+        return i + 1
+
+    def quoted(self, stack, i):
+        text, n = self.text, self.n
+        m = _QUOTED_RE.search(text, i)
+        if m is None:
+            return n
+        i, c = m.start(), m.group()
+        if c == "\\":
+            return i + 2
+        if c == '"':
+            stack.pop()
+            return i + 1
+        if c == "`":
+            return self.backticks(i)
+        return self.dollar(stack, i)
+
+    def braced(self, stack, frame, i):
+        text, n = self.text, self.n
+        m = _BRACED_RE.search(text, i)
+        if m is None:
+            return n
+        i, c = m.start(), m.group()
+        if c == "\\":
+            return i + 2
+        if c == "'":
+            end = text.find("'", i + 1)
+            return n if end < 0 else end + 1
+        if c == '"':
+            stack.append(_Frame(_QUOTED))
+            return i + 1
+        if c == "`":
+            return self.backticks(i)
+        if c == "$":
+            return self.dollar(stack, i)
+        frame.depth += 1 if c == "{" else -1
+        if not frame.depth:
+            stack.pop()
+        return i + 1
+
+    def arithmetic(self, stack, frame, i):
+        text, n = self.text, self.n
+        m = _ARITH_RE.search(text, i)
+        if m is None:
+            return n
+        i, c = m.start(), m.group()
+        if c == "\\":
+            return i + 2
+        if c == "$":
+            return self.dollar(stack, i)
+        if c in "([":
+            frame.depth += c == ("(" if frame.closer == ")" else "[")
+            return i + 1
+        if c == frame.closer:
+            frame.depth -= 1
+            if not frame.depth:
+                stack.pop()
+        return i + 1
+
+    def dollar(self, stack, i):
+        """A `$` in a command list, double quotes, a `${ }` or an arithmetic expansion: what it opens."""
+        text = self.text
+        nxt = text[i + 1 : i + 2]
+        if text.startswith("$((", i):
+            stack.append(_Frame(_ARITH, closer=")", depth=2))
+            return i + 3
+        if nxt == "(":
+            stack.append(_Frame(_COMMAND, closer=")"))  # a command substitution: its bodies stay in its own text
+            return i + 2
+        if nxt == "{":
+            stack.append(_Frame(_BRACED, depth=1))
+            return i + 2
+        if nxt == "[":
+            stack.append(_Frame(_ARITH, closer="]", depth=1))
+            return i + 2
+        if nxt == "'" and _ansi_c_quoting(stack):  # `$'...'`, whose backslash escapes a quote
+            j = i + 2
+            while True:
+                m = _ANSI_RE.search(text, j)
+                if m is None:
+                    return self.n
+                if m.group() == "'":
+                    return m.end()
+                j = m.end() + 1
+        return i + 1
+
+    def backticks(self, i):
+        """The index after the backtick that closes the one at text[i]: its text, bodies and all, is the substitution's."""
+        text, j = self.text, i + 1
+        while True:
+            m = _BACKTICK_RE.search(text, j)
+            if m is None:
+                return self.n
+            if m.group() == "`":
+                return m.end()
+            j = m.end() + 1
+
+    # -- here-documents -----------------------------------------------------------------------------------------------
+    def operator(self, stack, frame, i):
+        """A `<<` or `<<-` at text[i]: the here-document its delimiter word opens, read at the list's next newline."""
+        text, n = self.text, self.n
+        k = i + 2
+        dash = text.startswith("-", k)
+        k += dash
+        while k < n and text[k] in " \t":
+            k += 1
+        word, quoted, end = self.delimiter(k)
+        if not (word or quoted) or self.shifts(stack, i):
+            return i + 2  # no word, which no shell accepts, or zsh's arithmetic shift
+        slot = None
+        if frame.strip:
+            slot = len(self.bodies)
+            self.bodies.append("")
+            self.expanded.append(not quoted)
+        frame.pending.append((word, dash, quoted, slot))
+        return end
+
+    def delimiter(self, k):
+        """(the delimiter the word at text[k] spells, whether any of it is quoted, the index after it): quote removal and
+        nothing else, as both shells read it (probed: `E"O"F`, `'EOF'` and `\\EOF` are EOF, `<<$Z` ends at a line `$Z`).
+        An ANSI-C string is its value (SPD-202, probed: `<<$'EOF'`, `<<$'E\\x4fF'`, `<<x$'y'"z"` and `<<$'E\\'F'` ended
+        at EOF, EOF, xyz and E'F in both shells).  The delimiter is None where the hook cannot know it: a string whose
+        escapes the shells decode apart (prepare.ansi_c_value), bash's `$"..."`, which zsh reads as `$` then double quotes
+        (`<<$"EOF"` ended at EOF in bash and at $EOF in zsh), and `$$'...'` (`<<$$'E'`: $$E in bash, $E in zsh)."""
+        text, n = self.text, self.n
+        word, quoted, known = [], False, True
+        while k < n and text[k] not in _DELIMITER_END:
+            c = text[k]
+            if c == "$" and text.startswith("$'", k):
+                end = prepare.ansi_c_end(text, k + 2)
+                value = prepare.ansi_c_value(text[k + 2 : end]) if end < n else None
+                known = known and value is not None
+                word.append(value or "")
+                quoted, k = True, end + 1
+            elif c == "$" and text.startswith(('$"', "$$'"), k):
+                known = False
+                word.append(c)
+                k += 1
+            elif c == "'":
+                end = text.find("'", k + 1)
+                end = n if end < 0 else end
+                word.append(text[k + 1 : end])
+                quoted, k = True, end + 1
+            elif c == '"':
+                k += 1
+                while k < n and text[k] != '"':
+                    if text[k] == "\\" and text[k + 1 : k + 2] in ('"', "\\", "$", "`"):
+                        k += 1
+                    word.append(text[k])
+                    k += 1
+                quoted, k = True, k + 1
+            elif c == "\\":
+                word.append(text[k + 1 : k + 2])
+                quoted, k = True, k + 2
+            else:
+                word.append(c)
+                k += 1
+        return ("".join(word) if known else None), quoted, min(k, n)
+
+    def read_bodies(self, frame, i):
+        """The bodies of the list's pending here-documents, one after another from text[i], the line after the newline
+        that ends their command: each runs to the line that is its delimiter, whole (leading tabs stripped after `<<-`), or
+        to the end of the text.  Where the delimiter is unquoted a line ending in an odd run of backslashes joins the next
+        before it is compared (probed: `a\\` then EOF read aEOF, and the body went on).  The index after the last one."""
+        text, n = self.text, self.n
+        if frame.strip:
+            self.out.append(text[self.mark : i])
+        for word, dash, quoted, slot in frame.pending:
+            start, end = i, None
+            if word is None:
+                # a delimiter the hook cannot know (delimiter): no body, so every line after the operator's is read as the
+                # commands it may be, which is more than any shell runs, and never less
+                if slot is not None:
+                    self.bodies[slot] = ""
+                continue
+            while i < n:
+                line_end = text.find("\n", i)
+                line_end = n if line_end < 0 else line_end
+                line = text[i:line_end]
+                while not quoted and line_end < n and (len(line) - len(line.rstrip("\\"))) % 2:
+                    nxt = text.find("\n", line_end + 1)
+                    nxt = n if nxt < 0 else nxt
+                    line, line_end = line[:-1] + text[line_end + 1 : nxt], nxt
+                if (line.lstrip("\t") if dash else line) == word:
+                    end = i
+                    i = min(line_end + 1, n)
+                    break
+                i = line_end + 1
+            i = min(i, n)
+            if slot is not None:
+                self.bodies[slot] = text[start:n] if end is None else text[start : max(start, end - 1)]
+        frame.pending = []
+        if frame.strip:
+            self.mark = i
+        return i
+
+    # -- what an open `(` is -------------------------------------------------------------------------------------------
+    def in_word(self, stack, i):
+        """zsh reads the newline at text[i] inside a word (a glob group's pattern, an arithmetic command's expression), so
+        it ends no command and reads no body.  Asked only at the line's own level and in its `<( )`s."""
+        tail = self.open_parens(stack, i)
+        if not tail:
+            return False
+        if self.readings <= 0:
+            return True
+        self.readings -= 1
+        prefix = "".join(self.out) + self.text[self.mark : i]
+        return _word_newlines(prefix + "\n" + tail) > _word_newlines(prefix + " " + tail)
+
+    def shifts(self, stack, i):
+        """zsh reads the `<<` at text[i] inside an arithmetic command (`(( x = 1 <<y ))`, probed), as a shift."""
+        tail = self.open_parens(stack, i)
+        if not tail:
+            return False
+        if self.readings <= 0:
+            return True
+        self.readings -= 1
+        prefix = "".join(self.out) + self.text[self.mark : i]
+        return _marked(prefix + "<<" + tail).count("<<") == _marked(prefix + tail).count("<<")
+
+    def open_parens(self, stack, i):
+        """The `)`s that close what is open at the line's level before text[i], where a bare `(` that may be a group or
+        arithmetic is: '' where none is, where every one open is a subshell (subshell), or where the scan is in a `$( )`,
+        whose text its own analysis reads."""
+        if not stack[-1].strip or not any(f.opens for f in stack):
+            return ""
+        # a case command's patterns hold groups after the same characters (`;;`, `|`, a newline)
+        if self.case_at < i or any(f.others for f in stack):
+            return ")" * (sum(len(f.opens) for f in stack) + len(stack) - 1)
+        return ""
+
+    def subshell(self, p):
+        """The `(` at text[p] opens a subshell as zsh reads it: alone (no `((`), after the line's start, a newline that no
+        backslash continues, `;`, `&`, `|` (not `>&` or `>|`), `(`, or a `{` that stands alone itself."""
+        text = self.text
+        if text[p + 1 : p + 2] == "(" or text[p - 1 : p] == "(":
+            return False
+        j = p - 1
+        while j >= 0 and text[j] in " \t":
+            j -= 1
+        if j < 0:
+            return True
+        c = text[j]
+        if c not in "\n;&|({" or c in "&|" and text[j - 1 : j] in ("<", ">") \
+                or c == "{" and j and text[j - 1] not in " \t\n;&|(":
+            return False
+        k = j
+        while k > 0 and text[k - 1] == "\\":
+            k -= 1
+        return (j - k) % 2 == 0
+
+
+def _marked(text):
+    """zsh's reading of a line's text (mark_zsh_patterns), prepared as analyse_command prepares it."""
+    outer, _inner = prepare.split_substitutions(prepare.newlines_as_separators(prepare.ansi_c_quotes(text)[0]))
+    return zsh.mark_zsh_patterns(prepare.neutralize_quoted_globs(outer))[0]
+
+
+def _word_newlines(text):
+    marked = _marked(text)
+    return sum(marked.count(mark) for mark in _WORD_NEWLINES)

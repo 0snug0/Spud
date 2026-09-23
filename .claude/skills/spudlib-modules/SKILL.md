@@ -19,7 +19,7 @@ bin/
     commands/  reportentry · admincmds · vaultlock · vaultinstall · homesync · ghread · prcmds · doctor · schedule · settings_sync · publish · homeinit · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind · vaultcapture
     projects/  sessions · registry · install · agentdef
     hooks/     hookio · worktrees · pathrule · gitrepos · snapshots · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
-    shell/     syntax · prepare · assignment_words · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · runtime_shells · walk · analyse · redirect_globs · inline_programs · interpreter_words · bash_rule · arg_writes · tree_walk · tree_writes · find_xargs · spelled_writes · downloads · script_text · stdin_text · script_files · runner_files · script_runners
+    shell/     syntax · prepare · heredocs · assignment_words · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · reevaluation · positional · runtime_shells · walk · analyse · redirect_globs · inline_programs · interpreter_words · bash_rule · arg_writes · tree_walk · tree_writes · find_xargs · spelled_writes · downloads · script_text · stdin_text · script_files · runner_files · script_runners
     cli/       helptexts · cliparser
 ```
 
@@ -106,7 +106,7 @@ One more property worth not breaking: a handler module that fails to import is s
 
 ## 5. The one import cycle
 
-These `shell/` modules are one strongly connected component: `analyse`, `arg_writes`, `bash_rule`, `directories`, `downloads`, `expansions`, `find_xargs`, `git_config`, `git_programs`, `git_verbs`, `globbing`, `inline_programs`, `interpreter_words`, `redirect_globs`, `runner_files`, `runtime_shells`, `script_files`, `script_runners`, `script_text`, `spelled_writes`, `stdin_text`, `tree_walk`, `tree_writes`, `walk`. That is real recursion — `analyse_words` builds a `ShellWalk` whose segments call `analyse_words` again — not tangled layering, and breaking it would take either one large module or function-local imports that hide the edges.
+These `shell/` modules are one strongly connected component: `analyse`, `arg_writes`, `bash_rule`, `directories`, `downloads`, `expansions`, `find_xargs`, `git_config`, `git_programs`, `git_verbs`, `globbing`, `inline_programs`, `interpreter_words`, `redirect_globs`, `reevaluation`, `runner_files`, `runtime_shells`, `script_files`, `script_runners`, `script_text`, `spelled_writes`, `stdin_text`, `tree_walk`, `tree_writes`, `walk`. That is real recursion — `analyse_words` builds a `ShellWalk` whose segments call `analyse_words` again — not tangled layering, and breaking it would take either one large module or function-local imports that hide the edges.
 
 It is safe under one condition the guard test enforces: **no module reads another module's name while that module is being imported, unless the module read cannot reach the reader.** In practice, a cross-module read belongs **inside a function body**. These run at import time and can fail depending on which module a run imports first:
 
