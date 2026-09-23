@@ -443,7 +443,7 @@ class ShellAnalysis:
         # rmdir, truncate, chmod and its kin, sed in place), as shell/arg_writes reads it: (the command as spelled, the
         # operand word, the directories the shell may be in, the source words a destination directory takes, how the
         # word is written, a backup suffix or None, and the directory kind -- "make" for mkdir's operands and
-        # install -d's, "remove" for rmdir's and rm -d's, None for every write of a file).  bash_reason turns each into
+        # install -d's without -m, -o or -g, "remove" for rmdir's and rm -d's, None for every write of a file).  bash_reason turns each into
         # the files it names and holds them to the path rule like a redirection target, for every caller.  The
         # kind is also "tree" (anything under the directory), "rm-tree" (rm -r, find -delete), "file-tree" (chmod -R, mv's
         # source) or "find-tree" (under find's starting point), which bash_rule.path_directories reads per path; how is

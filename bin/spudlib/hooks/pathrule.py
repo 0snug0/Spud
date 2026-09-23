@@ -76,8 +76,9 @@ def path_matches_glob(rel, glob, fold=False):
 # of exactly this shape.  Spud's decision is two readings, one per direction, and they are not symmetrical:
 # making a directory writes no content, so an ancestor of the directory is as harmless as the directory itself, while
 # removing one takes everything under it with it.  The kind of write comes from the command (shell/arg_writes): only
-# mkdir's operands, install -d's, rmdir's and rm's under -r, -R or -d carry one (the "tree" reading, below, takes rm -r
-# and the commands whose files the line does not spell), and every other write of the same path --
+# mkdir's operands, install -d's (with no -m, -o or -g, which chmod or chown one that exists), rmdir's and rm's under
+# -r, -R or -d carry one (the "tree" reading, below, takes rm -r and the commands whose files the line does not spell),
+# and every other write of the same path --
 # touch, cp, mv, ln, tee, sed -i, a redirection, a Write or an Edit -- is a file and keeps the reading it had.
 def glob_directory(glob):
     """A glob's literal directory prefix: its leading segments that hold no wildcard, dropping the segment the first

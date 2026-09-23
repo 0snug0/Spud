@@ -14,7 +14,7 @@ showed is how a member writes in its scratchpad; it is the one reading of every 
 checks -- a redirection's, a tee operand's and a git call's own write option's alike, resolved where each is recorded.
 
 Each recorded write also carries a directory kind, which the command decides and only the path rule reads: mkdir's
-operands and `install -d`'s only make a directory, rmdir's and rm -d's only remove one, and a member's own deliverable glob
+operands and `install -d`'s without -m, -o or -g only make a directory, rmdir's and rm -d's only remove one, and a member's own deliverable glob
 covers the directory it names without matching it; rm -r's, chmod -R's and mv's reach the whole subtree
 under a directory operand (bash_rule.path_directories).  Every other write of the same path, a destination directory's
 contents and a backup included, is a file and keeps the reading a redirection target has.
@@ -56,6 +56,13 @@ RM_TREE_OPTIONS = ("-r", "-R", "--recursive")  # the hierarchy rooted in each op
 # --recursive and --archive too), and the recursive option of chmod, chown, chgrp and chflags, which change every file
 # under a directory operand rather than the directory alone.
 CP_TREE_OPTIONS = ("-R", "-r", "-a", "--recursive", "--archive")
+# install's options that set a mode, an owner or a group (SPD-137): this Mac's BSD install -d applies them to a directory
+# that already exists (probed: `install -d -m 700 d` on a 755 d leaves it 700, where `mkdir -m 700 d` says File exists), so
+# with any of them among its options install -d is a metadata write of each operand, a file's reading, and never a make.
+# GNU's long forms count too, and each abbreviation getopt_long would take for one (`--mo=700`, `--own`); -f's flags are
+# ignored under -d (probed).
+INSTALL_METADATA_OPTIONS = ("-m", "-o", "-g")
+INSTALL_METADATA_LONGS = ("--mode", "--owner", "--group")
 MODE_TREE_OPTIONS = ("-R", "--recursive")
 # the kind a destination entry carries when what lands there may be a whole tree: (RECURSIVE, the rsync exclude
 # patterns a walk honours or None, whether a source spelled with a trailing `/` lands as its contents).
@@ -189,8 +196,9 @@ def directory_kind(base, names):
     removes the whole hierarchy rooted in the operand, "rm-tree", which bash_rule reads as a whole-subtree removal ("tree")
     unless the operand exists now as something other than a directory -- a file, or a symlink, which rm removes as itself
     -- when it is "remove" as before: `rm -rf bin/sub` with `bin/*` removes bin/sub/<anything>, which `bin/*`
-    does not cover."""
-    if base == "mkdir" or (base == "install" and "-d" in names):
+    does not cover.  install -d with a mode, an owner or a group among its options also changes each operand that already
+    exists (install_metadata), so it writes a file."""
+    if base == "mkdir" or (base == "install" and "-d" in names and not install_metadata(names)):
         return "make"
     if base == "rm" and any(n in names for n in RM_TREE_OPTIONS):
         return "rm-tree"
@@ -199,10 +207,17 @@ def directory_kind(base, names):
     return None
 
 
+def install_metadata(names):
+    """True when install's options set a mode, an owner or a group: -m, -o or -g in any spelling scan reads (separate,
+    glued, in a cluster), or GNU's --mode, --owner, --group or an abbreviation of one."""
+    return any(n in INSTALL_METADATA_OPTIONS
+               or (n.startswith("--") and len(n) > 2 and any(l.startswith(n) for l in INSTALL_METADATA_LONGS)) for n in names)
+
+
 def options_unknown(operands):
     """True when the first operand this Mac's getopt would read is an operand the line does not spell (find's `{}`,
     xargs's input): what it holds may be options, so the command is read as if every option that widens what it writes
-    were given (rm -r, cp -R, chmod -R)."""
+    were given (rm -r, cp -R, chmod -R, install -m)."""
     return bool(operands) and operands[0][:1] in (syntax.FIND_PATH, syntax.INPUT_OPERAND, syntax.ANY_PATH)
 
 
@@ -212,7 +227,7 @@ def operand_writes(base, shape, args, hidden=False):
     options, operands = scan(args, shape_values, longs)
     names = {n for n, _, _ in options}
     if options_unknown(operands):
-        names |= set(RM_TREE_OPTIONS) | set(CP_TREE_OPTIONS)
+        names |= set(RM_TREE_OPTIONS) | set(CP_TREE_OPTIONS) | set(INSTALL_METADATA_OPTIONS)
     entries, suffix = [], None
     if base == "install":
         entries += [(v, (), "path", None, None) for n, v, _ in options if n == "-M" and v]  # the metalog it writes, a file
@@ -220,8 +235,9 @@ def operand_writes(base, shape, args, hidden=False):
             suffix = next((v for n, v, _ in reversed(options) if n in ("-B", "--suffix") and v), ".old")
         if "-d" in names:
             shape = "each"
-    if hidden:  # `install "$X" a b` may be `install -d`, which makes every operand a directory of its own
-        entries += [(w, (), "path", None, "make") for w in operands[1:]]
+    if hidden:  # `install "$X" a b` may be `install -d`, which writes every operand: a directory it makes, or one whose
+        # mode it sets when X is `-dm700` (SPD-137), so each is read as the file it may be
+        entries += [(w, (), "path", None, None) for w in operands[1:]]
     if shape == "each":
         return entries + [(w, (), "path", None, directory_kind(base, names)) for w in operands]
     target_dir = next((v for n, v, _ in reversed(options) if n in ("-t", TARGET_DIRECTORY)), None)

@@ -9227,6 +9227,7 @@ class ArgumentWriteTest(BashHookCase):
 
 AGENT_E = "b1c2d3e4f5a6b7c8d"  # SPD-129: the member holding the differential's four mkdir globs
 AGENT_F = "c9d8e7f6a5b4c3d2e"  # SPD-129: the member holding dist/**, the differential's `rm -rf dist`
+AGENT_FIXTURES = "a7b8c9d0e1f2a3b4c"  # SPD-137: the member holding tests/fixtures/**, the ticket's `install -d -m 000 tests`
 
 
 class DirectoryWriteTest(BashHookCase):
@@ -9305,6 +9306,48 @@ class DirectoryWriteTest(BashHookCase):
                 self.assertIn(path, r.reason)
         r = self.assertRefused("mkdir -p bin/other", "deliverables", agent_id=AGENT_A)  # `home:bin/spud` gives bin, and nothing under it
         self.assertIn("bin/other", r.reason)
+
+    def test_install_d_setting_a_mode_owner_or_group_is_a_file_write(self):
+        """SPD-137: this Mac's BSD install -d applies -m, -o and -g to a directory that already exists (probed: a 755
+        directory left 700 by `install -d -m 700`, where `mkdir -m 700` says File exists), so with any of them among its
+        options install -d is a metadata write of each operand, read as a file, and never a make at a glob's prefix."""
+        for command in ("install -d test", "install -dv test/fixtures", "install -d -v -p admin/src", "install -d -- test",
+                        "install -dpv test/fixtures/movecheck"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_E)
+        for command, path in (("install -d -m 000 test", "test"), ("install -d -m000 test", "test"),
+                              ("install -dm 000 test", "test"), ("install -dm000 test", "test"),
+                              ("install -dvm 000 test", "test"), ("install -m 000 -d test", "test"),
+                              ("install -m 000 -dv test/fixtures", "test/fixtures"),
+                              ("install -d -o nobody test", "test"), ("install -d -onobody test", "test"),
+                              ("install -do nobody test/fixtures", "test/fixtures"),
+                              ("install -d -g staff admin", "admin"), ("install -dg staff admin/src", "admin/src"),
+                              ("install -d -gstaff admin/src/lib", "admin/src/lib"),
+                              ("install -d --mode=000 test", "test"), ("install -d --mode 000 test", "test"),
+                              ("install -d --owner=nobody test", "test"), ("install -d --owner nobody test", "test"),
+                              ("install -d --group=staff test", "test"), ("install -d --group staff test", "test"),
+                              ("install -d --mo=000 test", "test"), ("install -d --own=nobody test", "test"),
+                              ("install -d --gr=staff test", "test"),
+                              ("install -d -m 700 test/helpers test", "test"),
+                              # the glob's own directory too: its mode is no file `test/fixtures/movecheck/**` matches
+                              ("install -d -m 700 test/fixtures/movecheck", "test/fixtures/movecheck")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_E)
+                self.assertIn(path, r.reason)
+        # A first operand the line cannot settle may be `-dm000` as much as `-d`, so what follows it is read as a file.
+        r = self.assertRefused("install $(printf -- -dm000) test", "deliverables", agent_id=AGENT_E)
+        self.assertIn("test", r.reason)
+        # The ticket's own line: a member holding tests/fixtures/** may make tests, and may not chmod it.  The dist member
+        # is done here, which frees the lead's second slot for it.
+        self.home.json("member", "finish", self.dist["ref"], "--status", "done", "--outcome", "Accepted.", actor=AGENT_A)
+        fixtures = self.spawn(self.plan(actor=self.lead["ref"], persona="engineer", model="opus",
+                                        deliverable=["home:tests/fixtures/**"]), AGENT_FIXTURES, caller=AGENT_A)
+        self.assertTrue(fixtures)
+        self.assertSilent("install -d tests", agent_id=AGENT_FIXTURES)
+        for command in ("install -d -m 000 tests", "install -d -o nobody tests", "install -d -g staff tests"):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_FIXTURES)
+                self.assertIn("tests", r.reason)
 
     # -- removing a directory ----------------------------------------------------------
     def test_a_wholly_covered_directory_may_be_removed_in_every_spelling(self):
