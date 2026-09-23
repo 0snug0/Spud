@@ -5342,6 +5342,324 @@ class BraceCloseCommandPositionTest(BashHookCase):
                 self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
+# SPD-173: the lines in which an arithmetic command's `))` leaves zsh in command position, so that a `( list )` read after
+# it runs as a subshell; each form's `%s` is that subshell's list.  Probed 2026-09-22 (ArithmeticCommandPositionTest):
+# with `echo <label>` in the slot zsh 5.9 printed the label for every form, and so it did with `{echo <label>}` (a group
+# glued to its words, SPD-132); with `echo x | tee l/t` there it wrote l/t, and with `cd o` the line ended where it began.
+ARITH_CLOSE_SUBSHELLS = (
+    # an if, while or until whose condition ends in an arithmetic command, the subshell its body (zsh's short forms), the
+    # ticket's evidence first
+    "if (( 1 )) ( %s )",
+    "if (( 1 )) (%s)",
+    "if (( 1 ))(%s)",
+    "if ((1)) ( %s )",
+    "if (( 1 )) ( %s ); true",
+    "n=0; while (( n++ < 1 )) ( %s )",
+    "n=1; until (( n-- < 1 )) ( %s )",
+    # ... that condition a list ending in one
+    "if (( 1 )) && (( 1 )) ( %s )",
+    "if true && (( 1 )) ( %s )",
+    "if (( 0 )) || (( 1 )) ( %s )",
+    "if ! (( 0 )) ( %s )",
+    # an elif whose condition is one, after a short conditional's `{ }` body (SPD-142) or after a long form's then
+    "if [[ -z x ]] { true } elif (( 1 )) ( %s )",
+    "if (( 0 )) { true } elif (( 1 )) ( %s )",
+    "if false; then true; elif (( 1 )) ( %s )",
+    # then or do right after the `))`, their body holding the subshell
+    "if (( 1 )) then ( %s ) fi",
+    "if (( 1 )) then ( %s ); fi",
+    "n=0; while (( n++ < 1 )) do ( %s ) done",
+    "if [[ -z x ]] { true } elif (( 1 )) then ( %s ) fi",
+    "if false; then true; elif (( 1 )) then ( %s ) fi",
+    # a `{ }` body holding the subshell, apart from its brace or glued to it
+    "if (( 1 )) { ( %s ) }; true",
+    "if (( 1 )) { ( %s ) } fi",
+    "if (( 1 )) {( %s )}; true",
+    "if (( 0 )) { true } elif (( 1 )) { ( %s ) }; true",
+    "n=0; while (( n++ < 1 )) { ( %s ) }",
+    "n=0; while (( n++ < 1 )) {( %s )}",
+    "n=1; until (( n-- < 1 )) { ( %s ) }",
+    # a compound command or a prefix word as the body, the subshell after it
+    "if (( 1 )) if [[ -n x ]] ( %s )",
+    "if (( 1 )) repeat 1 ( %s )",
+    "if (( 1 )) for f (a) ( %s )",
+    "n=0; if (( 1 )) while (( n++ < 1 )) ( %s )",
+    "if (( 1 )) case x in x) ( %s );; esac",
+    "if (( 1 )) time ( %s )",
+    "if (( 1 )) ! ( %s )",
+    # the arithmetic command's own redirection before the body
+    "if (( 1 )) > /dev/null ( %s )",
+)
+# ... and an arithmetic command right after the `))`, `%s` the command after it: zsh printed the label and made no file 2.
+ARITH_CLOSE_ARITHMETIC = (
+    "if (( 1 )) (( 3 > 2 )) && %s",
+    "if (( 1 )) (( 3 > 2 )) && %s; true",
+    "n=0; while (( n++ < 1 )) (( 3 > 2 )) && %s",
+    "if [[ -z x ]] { true } elif (( 1 )) (( 3 > 2 )) && %s",
+    "if (( 1 )) then (( 3 > 2 )) && %s; fi",
+    "n=0; while (( n++ < 1 )) do (( 3 > 2 )) && %s; done",
+)
+# A `( list )` after an arithmetic command that is no condition -- at the start of a line, after `time` or `!`, glued to
+# a `{` -- and a short conditional's `{ }` body with nothing after its `}`: zsh rejects every one of these lines, so
+# nothing on them runs.
+ARITH_CLOSE_PARSE_ERRORS = (
+    "(( 1 )) ( %s )",
+    "(( 1 )) {( %s )}",
+    "time (( 1 )) ( %s )",
+    "! (( 0 )) ( %s )",
+    "if (( 1 )) { ( %s ) }",
+)
+# A group after the body's command word stands outside command position, and zsh read it as the pattern it is: each
+# printed `b c` with files b and c present (`x b c` for the second).
+ARITH_KEPT_PATTERNS = ("if (( 1 )) echo (b|c)", "if (( 1 )) echo x (b|c)", "n=0; while (( n++ < 1 )) echo (b|c)")
+
+
+class ArithmeticCommandPositionTest(BashHookCase):
+    """SPD-173, filed by SPD-142's engineer: mark_zsh_patterns takes a `(` that opens a word for a subshell in zsh's command
+    position and for one of zsh's glob patterns outside it, and it ended an arithmetic command `(( ... ))` outside command
+    position, as a command word would, where zsh stays in it.  A `( list )` right after the `))` of an arithmetic condition
+    was then one pattern word, where zsh runs a subshell: SPD-142's shape after `))` instead of a closing brace.
+
+    Probed 2026-09-22 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, which printed the same for every line, and in GNU bash 3.2.57, which rejects every line
+    of the tables above (it has no short forms, and wants a terminator before a `then` or a `do`); an `echo` stood in for
+    each command:
+
+    - ARITH_CLOSE_SUBSHELLS ran their subshell.  zsh reads `((` as arithmetic only in command position or a for loop's
+      header (`echo (( 1 )) (b|c)` failed with "no matches found: (( 1 ))", a pattern), and its `))` leaves zsh in command
+      position: after an if's, elif's, while's or until's condition ending in one it read the `( list )` as the short
+      form's body, and `then`, `do`, `{`, `if`, `repeat`, `for`, `while`, `case`, `time` and `!` there as the reserved
+      words they are, and a second `((` as arithmetic again (ARITH_CLOSE_ARITHMETIC, which made no file 2);
+    - the hole: the other reading restores a `(` that opens a word, so a plain `( git push )` in these forms was refused
+      all the same, but that reading is bash's, which keeps a brace glued to a word, and a subshell glued to its `{` stayed
+      a pattern in both readings.  So `( {list} )` in any of these forms, and `{( list )}` as a `{ }` body, ran their list
+      in zsh while zsh's reading held one glob command word: the ticket's `if (( 1 )) ( {git push} )`, `while (( n++ < 1
+      )) ( {git push} )` and `if [[ -z x ]] { true } elif (( 1 )) ( {git push} )` were silent for a member (Law 7), and a
+      write there whose words hold no `/` went past the path rule (Law 5 for a member, Law 1 for Spud);
+    - the friction: one whose words hold a `/` could name a file called sqlite, so the ticket's `if (( 1 )) ( cd /tmp/o )`
+      was refused to members and Spud as direct access to the ledger database, and an arithmetic command after the `))`,
+      read as a subshell holding `> 2`, was a write to a file named 2;
+    - a `(` after an arithmetic command that is no condition -- at the start of a line (a parse error near `(`, while
+      `(( 1 )) (( 1 ))` failed near its second ` 1 `, a second arithmetic command), after `time` or `!`, glued to a `{`
+      -- is a parse error, and so is a short conditional's `{ }` body with nothing after its `}` (ARITH_CLOSE_PARSE_ERRORS;
+      `if (( 1 )) { echo g }` failed near `}`, as `if [[ -n x ]] { git push }` does, SPD-061).  The hook reads a subshell
+      in all of them, fail closed, since nothing on such a line runs;
+    - a group after the body's command word stands outside command position, and zsh reads it as the pattern it is
+      (ARITH_KEPT_PATTERNS).
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        (self.out / "o").mkdir()
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    def every_payload(self, form):
+        for command, needle in self.member_payloads():
+            line = form % command
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertRefused(line, needle, agent_id)
+        for command, needle in self.spud_payloads():
+            line = form % command
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertRefused(line, needle, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_the_subshell_zsh_runs(self):
+        """zsh ran each push in a subshell (`{echo <label>}` printed its label), and `cd o` there ended where it began; the
+        hook read a glob command word in each, silent for the three pushes and refused to everyone for the cd."""
+        for line in ("if (( 1 )) ( {git push} )", "while (( n++ < 1 )) ( {git push} )",
+                     "if [[ -z x ]] { true } elif (( 1 )) ( {git push} )"):
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(line)
+                self.assertEqual(marked, other)  # the subshell's `(` is punctuation in zsh's reading too
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+        home = str(self.home.path)
+        line = "if (( 1 )) ( cd %s/o )" % self.out
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+        a = self.analysis(line)
+        self.assertEqual((a.findings, a.cwds), ([], frozenset([home])))
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_zsh_reads_every_form_as_the_subshell_it_runs(self):
+        for form in ARITH_CLOSE_SUBSHELLS:
+            for body in ("{git push}", "git push"):
+                line = form % body
+                with self.subTest(line=line):
+                    marked, other = self.m.mark_zsh_patterns(line)
+                    self.assertEqual(marked, other)  # no `(` on the line is a pattern in zsh's reading
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+
+    def test_a_group_in_the_subshell_is_refused(self):
+        """The hole: `( {git push} )` runs the push in every form, and neither reading found it while zsh's reading took
+        that `(` for a pattern."""
+        for form in ARITH_CLOSE_SUBSHELLS:
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+
+    def test_every_payload_in_a_subshell_glued_to_its_brace(self):
+        """`{( list )}` stayed one pattern word in both readings, so every check on the list was lost, not Law 7's alone."""
+        for form in ("if (( 1 )) {( %s )}; true", "n=0; while (( n++ < 1 )) {( %s )}",
+                     "if (( 0 )) { true } elif (( 1 )) {( %s )}; true", "if (( 1 )) then {( %s )}; fi"):
+            self.every_payload(form)
+
+    def test_every_payload_in_a_group_inside_the_subshell(self):
+        for form in ("if (( 1 )) ( {%s} )", "n=0; while (( n++ < 1 )) ( {%s} )", "n=1; until (( n-- < 1 )) ( {%s} )",
+                     "if [[ -z x ]] { true } elif (( 1 )) ( {%s} )", "if (( 1 )) then ( {%s} ) fi"):
+            self.every_payload(form)
+
+    def test_the_path_rule_inside_the_subshell(self):
+        """A write whose words hold no `/` was silent to everyone -- the path rule unchecked -- save a tee inside `( {list}
+        )`, whose target bash's reading spells `note.txt}` and checked; and one whose words hold a `/` was refused as direct
+        access to the database, a member's write into its own deliverables among them."""
+        for form in ("if (( 1 )) {( %s )}; true", "n=0; while (( n++ < 1 )) {( %s )}",
+                     "if (( 1 )) ( {%s} )", "if [[ -z x ]] { true } elif (( 1 )) ( {%s} )"):
+            for write in ("echo x | tee note.txt", "touch note.txt", "rm -rf docs"):
+                line = form % write
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")  # AGENT_A plans tests/** and bin/spud
+                    self.assertSilent(line, AGENT_C)
+                    self.assertRefused(line, "Law 1", agent_id=None)
+            line = form % "echo x | tee tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    # -- the friction ---------------------------------------------------------------------------------------------------
+    def test_a_harmless_subshell_is_silent_and_moves_nothing(self):
+        home = str(self.home.path)
+        for form in ARITH_CLOSE_SUBSHELLS:
+            line = form % ("cd %s/o" % self.out)
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+                self.assertEqual(self.analysis(line).cwds, frozenset([home]))  # the subshell's cd does not carry out
+
+    def test_an_arithmetic_command_after_the_close_writes_nothing(self):
+        for form in ARITH_CLOSE_ARITHMETIC:
+            line = form % "true"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, agent_id=None)
+                self.assertEqual(self.analysis(line).redirects, [])
+            line = form % "git push"
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertSilent(line, agent_id=None)
+
+    # -- lines zsh rejects ----------------------------------------------------------------------------------------------
+    def test_a_subshell_zsh_rejects_is_read_fail_closed(self):
+        """Nothing on these lines runs; the hook reads the subshell all the same."""
+        for form in ARITH_CLOSE_PARSE_ERRORS:
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertRefused(line, "Law 7")
+
+    # -- the other direction ----------------------------------------------------------------------------------------------
+    def test_a_pattern_after_the_bodys_command_word_stays_a_pattern(self):
+        for line in ARITH_KEPT_PATTERNS:
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(self.m.neutralize_quoted_globs(line))  # as analyse_command marks it
+                self.assertEqual(marked.count("("), 1)  # the arithmetic command's own; the group is one pattern word
+                self.assertEqual(self.m.deglob(marked), line)
+        # with l/t standing in for the ledger file, each of these wrote l/t in the probe
+        for line in ("if (( 1 )) tee (ledger|x)/tickets/SPD-001.md", "if (( 1 )) echo x > (ledger|x)/tickets/SPD-001.md",
+                     "n=0; while (( n++ < 1 )) tee -a (ledger|x)/tickets/SPD-001.md"):
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "generated", AGENT_C)  # the pattern still expands to the ledger file
+                self.assertIn("into (ledger|x)/tickets/SPD-001.md", r.reason)
+
+    # -- the directory model --------------------------------------------------------------------------------------------
+    def test_where_each_directory_goes(self):
+        """The subshell's cd never carries out (probed: `if (( 1 )) ( cd o ); echo x > k.txt` made k.txt where the line
+        began, and `if (( 1 )) ( cd l ); echo x > t` and its while spelling made t there, not l/t)."""
+        home, out = str(self.home.path), str(self.out)
+        self.assertIn(("k.txt", frozenset([home])), self.analysis("if (( 1 )) ( cd %s ); echo x > k.txt" % out).redirects)
+        self.assertSilent("if (( 1 )) ( cd %s/ledger ); echo x > tickets/SPD-001.md" % home, AGENT_C)
+        self.assertSilent("n=0; while (( n++ < 1 )) ( cd %s/ledger ); echo x > tickets/SPD-001.md" % home, AGENT_C)
+
+    # -- where the form may stand -------------------------------------------------------------------------------------------
+    def test_every_enclosing_text_reads_the_subshell(self):
+        """The scanner reads every text the hook analyses, so the subshell is read wherever the form stands (probed: zsh ran
+        `{echo <label>}` in each of these, and in `zsh -f -c` for the zsh -c line)."""
+        for line in ("echo $(if (( 1 )) ( {git push} ))", "echo `if (( 1 )) ( {git push} )`",
+                     "eval 'if (( 1 )) ( {git push} )'", "zsh -c 'if (( 1 )) ( {git push} )'",
+                     "{ if (( 1 )) ( {git push} ) }", "( while (( n++ < 1 )) ( {git push} ) )",
+                     "f() { if (( 1 )) ( {git push} ) }; f", "case x in x) if (( 1 )) ( {git push} );; esac",
+                     "if true; then if (( 1 )) ( {git push} ); fi", "for f in a; do while (( n++ < 1 )) ( {git push} ); done",
+                     "time if (( 1 )) ( {git push} )"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    # -- controls ---------------------------------------------------------------------------------------------------------
+    def test_a_terminator_an_operator_or_a_for_header_before_the_subshell_was_always_read(self):
+        """A `;`, a newline, `&&`, `||` and `|` put the scanner in command position before this ticket too, and so did a for
+        loop's arithmetic header (probed: each ran the subshell after it)."""
+        for form in ("(( 1 )); ( %s )", "(( 1 ))\n( %s )", "(( 1 )) && ( %s )", "(( 0 )) || ( %s )", "(( 1 )) | ( %s )",
+                     "if (( 1 )); then ( %s ); fi", "n=0; while (( n++ < 1 )); do ( %s ); done",
+                     "for (( i=0; i<1; i++ )) ( %s )", "for (( i=0; i<1; i++ )) do ( %s ) done"):
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("if (( 1 )) " * 2000 + "( {git push} )",
+                     "(( 1 )) " * 5000 + "( {git push} )",
+                     "n=0; " + "while (( n++ < 1 )) " * 1000 + "( {git push} )",
+                     "if (( 1 )) { " * 1000 + "( {git push} )" + " }" * 1000,
+                     "if " + "(( 1 )) && " * 2000 + "(( 1 )) ( {git push} )",
+                     "if " + "((" * 2000 + " 1 " + "))" * 2000 + " ( {git push} )"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
 class AliasEvalTest(BashHookCase):
     """SPD-059 (Burbank's SPD-054 proposal): `alias NAME=body` stores shell text the hook never read, and `eval NAME` on the
     same line ran it, so a member's VCS write behind an alias reached the hook with no finding (Law 7).  Probed in bash 3.2,

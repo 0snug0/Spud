@@ -182,6 +182,12 @@ def mark_zsh_patterns(text):
       subshell.  A `(` right after the brace is a parse error.  After a short loop's `{ }` body zsh leaves command position
       for good, takes that `(` for a pattern word and rejects the line, as it rejects a `fi` or an `else` there (`if true;
       then repeat 1 { echo r } fi`), so the subshell read in its place reads a line that runs nothing;
+    - an arithmetic command's `))` leaves command position as its `((` found it (SPD-173): zsh reads `((` as arithmetic
+      only in command position and in a for loop's header, and after the `))` it reads `then`, `do`, `{`, a second `((`
+      and a `(` as it does at the start of a command, so the body of a short if, elif, while or until whose condition ends
+      in one -- `if (( c )) ( list )`, `while (( c )) ( list )`, `if [[ c ]] { a } elif (( d )) ( list )`, `if (( c ))
+      then ( list ) fi`, `if (( c )) {( list )}; b` -- is a subshell.  With no compound command around it `(( c )) (
+      list )` is a parse error, so the subshell read in its place reads a line that runs nothing;
     - glued inside a word, `(` is a pattern in zsh and a syntax error in bash, whole in both readings, except `()` (a function's
       header), `$((`, `name=(` and a reserved word in command position (bash runs `!(`, `{(`, `if(`, `time(`, `then(`, `do(`
       and `else(` as a subshell, zsh `{(` and `else(`);
@@ -226,8 +232,11 @@ def mark_zsh_patterns(text):
                 arith = text[i] + text[i + 1 : end - 1].translate(_ARITH_COMMAND) + text[end - 1]
                 out.append(arith)
                 other.append(arith)
-                # a `for (( ... ))` header is followed by its body, in command position; a `(( ... ))` command is not
-                i, command, arith_next = end, arith_next and not command, False
+                # zsh is in command position after the `))`, a `for (( ... ))` header's and an arithmetic command's alike
+                # (SPD-173): probed in zsh 5.9 -f and -f -o nobareglobqual, `if (( 1 )) ( echo a )`, `while (( n++ < 1 ))
+                # ( echo a )` and `if (( 1 )) then ( echo a ) fi` ran the subshell, `if (( 1 )) (( 3 > 2 )) && echo a`
+                # made no file 2, and `(( 1 )) (( 1 ))` failed near the second ` 1 `, its `((` read as arithmetic
+                i, command, arith_next = end, True, False
                 continue
             if for_list == 2 and i in parens:  # `for f ( a b )`: the loop's word list
                 for_close = parens[i]
