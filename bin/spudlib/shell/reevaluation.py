@@ -79,6 +79,58 @@ class _Reading:
         return list(found)
 
 
+# The other places a shell evaluates a value as code (SPD-197), each refused by name, none modelled: a subscript a
+# `${(P)name}` or bash arithmetic evaluates, a prompt/PROMPT/PS4 string, a `${(%..)x}` or `print -P` prompt expansion,
+# and a `${~x}` GLOB_SUBST glob.  The value in each is one the line assigns that holds a substitution, a backtick, or --
+# for the glob -- an execute glob qualifier.
+_PROMPT_VARIABLES = frozenset({"PS1", "PS2", "PS3", "PS4", "PROMPT", "PROMPT2", "PROMPT3", "PROMPT4", "RPROMPT", "RPS1", "PROMPT_COMMAND", "prompt"})
+_SUBSCRIPT_CODE_RE = re.compile(r"\[[^\]]*(?:\$\(|`)")  # a `[subscript]` holding a substitution
+_EVAL_KIN_RE = re.compile(r"\$\{(?:\(([^)]*)\))?([~=#^+]*)([A-Za-z_][A-Za-z0-9_]*|[@*])")  # ${(flags)mods name}, ${~name}
+_QUALIFIER_CODE_RE = re.compile(r"\((?:#q)?[^)]*e[:{\[]")  # a glob qualifier that runs code, `(e:...:)` or `(#qe:...:)`
+
+
+def _value_holds_code(a, name, glob=False):
+    """Whether the value the line assigned `name` holds code a shell would run when it evaluates the value as code
+    (SPD-197): a substitution or backtick, and, for a glob, an execute glob qualifier.  A name the line did not assign
+    holds the environment's value, not the member's, so it is not the member's code."""
+    if name not in a.vars:
+        return False
+    value = prepare.deglob(a.vars[name])
+    return "$(" in value or "`" in value or (glob and _QUALIFIER_CODE_RE.search(value) is not None)
+
+
+def read_evaluated_kin(words, a):
+    """Refuse a member the forms besides zsh's (e) that evaluate a value as code (SPD-197), each by name, none modelled:
+    an assignment whose value holds a subscript a `${(P)name}` or bash arithmetic would evaluate, a PS1/PROMPT/PS4
+    assignment holding a substitution, a `${(%..)x}` or `print -P` prompt expansion of a value holding one, and a `${~x}`
+    GLOB_SUBST glob of a value holding a substitution or an execute glob qualifier.  Recorded and read on; Spud reads on."""
+    print_p = prepare.deglob(words[0]) == "print" and any(w.startswith("-") and "P" in w[1:] and not w.startswith("--")
+                                                          for w in (prepare.deglob(x) for x in words[1:])) if words else False
+    for w in words:
+        found = assignment_words.assignment_word(w) if "=" in w else None
+        if found is not None:
+            name, _subscript, _append, value = found
+            v = prepare.deglob(value)
+            if _SUBSCRIPT_CODE_RE.search(v):
+                _kin(a, "a subscript zsh's `${(P)name}` or bash arithmetic evaluates")
+            elif name in _PROMPT_VARIABLES and ("$(" in v or "`" in v):
+                _kin(a, "a %s prompt or PS4 trace string" % name)
+        text = prepare.deglob(w) if "$" in w else ""
+        for flags, mods, oname in _EVAL_KIN_RE.findall(text):
+            if "%" in flags and _value_holds_code(a, oname):
+                _kin(a, "a `${(%%)x}` prompt expansion")
+            if "~" in mods and _value_holds_code(a, oname, glob=True):
+                _kin(a, "a `${~x}` glob under GLOB_SUBST")
+        if print_p:
+            m = syntax.VARREF_RE.match(prepare.deglob(w))
+            if m and _value_holds_code(a, m.group(1) or m.group(2)):
+                _kin(a, "a `print -P` prompt expansion")
+
+
+def _kin(a, form):
+    a.findings.append(("unread", ("evaluated", form)))
+
+
 def read_eval_words(words, a, depth):
     """Read every (e) expansion in a simple command's masked words, at the analysis depth `depth` of the text they stand
     in.  An assignment word gives a later word of the same command its value -- zsh assigns an assignment-only command's
@@ -96,6 +148,9 @@ def read_eval_words(words, a, depth):
         if found is not None:
             name, subscript, append, value = found
             assigned[name] = None if (subscript is not None or append) else value
+    # SPD-197: the other forms that evaluate a value as code, refused by name -- after the (e) reading, so a word that
+    # holds both (`${(e)~x}`, `${(%e)x}`) keeps the (e) flag's reason, which read it first.
+    read_evaluated_kin(words, a)
 
 
 def read_eval_text(text, reading, depth, assigned=None):
@@ -184,6 +239,39 @@ def read_expanded_body(body, a, depth):
     reading = _Reading(a)
     read_evaluated_text(body, reading, depth)
     return reading.ran
+
+
+def read_body_with_prefix(body, a, depth, words):
+    """Read an unquoted here-document's substitutions a second time, as bash 3.2 expands them, with the command's own
+    prefix assignments in place (SPD-211): bash expands the body with the prefix's values where zsh, which read_expanded_body
+    reads, holds the value the line had before the command, so `$(git $x)` fed to `x=push cat <<EOF` reads git push while
+    the hook read git status.  A prefix value the hook cannot resolve leaves its variable unresolved, so the substitution
+    refuses a member (the fail-closed answer).  Returns whether it ran a substitution (heredocs.OutputBody), as
+    read_expanded_body does; no prefix, or a body with no substitution, changes nothing."""
+    if "$" not in body and "`" not in body:
+        return False
+    prefix = {}
+    for w in words:
+        found = assignment_words.assignment_word(w) if "=" in w else None
+        if found is None:
+            break  # the command's prefix assignments end at its first other word
+        name, subscript, append, value = found
+        if subscript is None and not append:
+            prefix[name] = value  # the masked value, as assign_variable stores one, resolved by the substitution's own reading
+    if not prefix or all(a.vars.get(n) == v for n, v in prefix.items()):
+        return False  # no prefix, or the body would read the same value the line already holds
+    before, redirects = a.vars, len(a.redirects)
+    a.vars = dict(before, **prefix)
+    try:
+        reading = _Reading(a)
+        read_evaluated_text(body, reading, depth)
+        # bash expands a redirection target inside a body substitution with the outer value, not the prefix (SPD-192,
+        # probed): read_expanded_body already recorded those, so the prefixed reading's redirects are dropped -- only its
+        # command words and write-by-argument operands, which bash does take from the prefix, are kept.
+        del a.redirects[redirects:]
+        return reading.ran
+    finally:
+        a.vars = before
 
 
 def body_values(a, words):

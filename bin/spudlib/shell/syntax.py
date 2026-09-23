@@ -539,6 +539,10 @@ class ShellAnalysis:
         # The variables of a `for` or `select` loop whose every listed word starts with something other than `-`,
         # so a word such a variable fills may be read as the operand it is where a command reads options (tree_writes).
         self.dashless_loops = set()
+        # The variables the call's positional parameters fill inside a shell function's body: a `for`/`select` loop over
+        # a list holding `$@`/`$1`.., and a variable a value holding a positional assigns.  A finding naming one of them
+        # is the member's own, so analyse_shell_text's prune keeps it rather than drop it as the body's (SPD-205).
+        self.member_vars = set()
         # The names a `name () { ... }`/`function name` definition earlier on the line bound to a shell function, so
         # a later bare call of one of them (in command position) runs that function, not the program the hook read.  Kept as a
         # set like `hashed`, but scoped: a definition in a branch, a loop or another function's body may exist at the call, so

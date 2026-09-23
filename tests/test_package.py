@@ -37,7 +37,8 @@ DISPATCH = "hooks.dispatch"
 # project allow-list of repository scripts (SPD-145), shell.script_runners and shell.runner_files for a script runner and the project allow-list
 # of runner names (SPD-168), shell.heredocs for where a here-document's body starts, taken out of shell.prepare (SPD-188),
 # shell.reevaluation for the text zsh's (e) flag evaluates in a word (SPD-189), shell.positional for the words a call hands a
-# function of the shell's, set where its body reads them (SPD-203).
+# function of the shell's, set where its body reads them (SPD-203), shell.unread for the one fail-closed finding, text the
+# reader did not read (SPD-217).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
@@ -48,7 +49,7 @@ HOOK_PATH = {
     "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.globbing", "shell.heredocs", "shell.inline_programs",
     "shell.interpreter_words", "shell.positional", "shell.prepare", "shell.redirect_globs", "shell.reevaluation", "shell.runner_files", "shell.runtime_shells", "shell.spud_calls",
     "shell.script_files", "shell.script_runners", "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
-    "shell.walk", "shell.zsh",
+    "shell.unread", "shell.walk", "shell.zsh",
 }
 
 

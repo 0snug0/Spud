@@ -102,6 +102,64 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
                     " assigns it, an array), or one another flag, a modifier or a subscript changes first; spell the commands out")
 
 
+# SPD-217, the one fail-closed rule: text the reader did not read is refused a member rather than modelled or let pass,
+# with the form named and a readable respelling.  A member alone is refused (the findings loop skips these for Spud, whom
+# the laws bind where the hook cannot see, as with every Law 7 fence); each form, an "unread" finding whose detail is
+# (form, shown), names why the hook could not read the text and how to spell the line so that it can.  The forms:
+# "depth"    a command substitution, `eval` or here-document nested past the hook's reading bound (SPD-195), whose
+#            innermost text is dropped unread.
+# "braces"   a `${ }` parameter expansion nested past the bound (SPD-103), read no further.
+# "subst-end" a `$( )` whose closing `)` the hook cannot place (a quoted `)`, a case pattern's, or one in a
+#             here-document body inside it), so the text past its guessed end is misread (SPD-194).
+# "placeholder" a word holds the hook's own substitution placeholder or an operand marker that the line did not
+#             produce (SPD-199), which pairs with a lifted body that is not its own.
+# "escaped-subst" a `-c` string or `eval` text holds a backslash-escaped `$( )` or backtick the shell unescapes and runs
+#             but the reader read as literal (SPD-196).
+# "evaluated" a value a shell evaluates as code in a form the reader does not model: a `${(P)name}` subscript, a
+#             glob qualifier under GLOB_SUBST, a prompt/PROMPT/PS4 expansion, or bash arithmetic holding a substitution (SPD-197).
+# "procsub-list" a process substitution in a `for`/`foreach` list or an array value, whose command the walk joins into
+#             one word without reading (SPD-198).
+UNREAD_REASON = (
+    "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
+    " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
+    " in text it did not read; %s. Spud is not refused: the laws bind him where the hook cannot see")
+UNREAD_MESSAGES = {
+    "depth": ("a command substitution, `eval` or here-document nested past the %d levels the hook reads (`%s`), so the"
+              " command at the bottom is text it never read",
+              "run the innermost command on its own line, or store its output in a variable first (`x=$(...); ... $x`)"),
+    "braces": ("a `${ }` parameter expansion nested deeper than the %d the hook reads (`%s`), read no further",
+               "expand one level at a time through a variable of your own (`x=${...}; ... ${x...}`)"),
+    "subst-end": ("a `$( )` whose closing `)` the hook cannot place -- a `)` in quotes, a `case` pattern or a"
+                  " here-document body inside it makes its extent ambiguous (`%s`) -- so the text after it is misread",
+                  "put the substitution's command in a variable on its own line (`x=$(...); ... $x`), or keep no quoted"
+                  " `)`, `case` or here-document inside the `$( )`"),
+    "placeholder": ("the word `%s` holds a marker the hook uses for a lifted substitution or an operand it cannot spell,"
+                    " which the line did not produce, so it pairs with a substitution body that is not its own",
+                    "spell the word without the marker text"),
+    "escaped-subst": ("a `%s` the shell unescapes and runs, in a `-c` string or `eval` text where the hook read its"
+                      " backslash as escaping it, so the substitution the shell runs is text the hook did not read",
+                      "spell the command out, on the line where the hook reads it (`sh -c '...'`) or in a here-document"
+                      " fed to the shell (`sh <<'EOF'` ... `EOF`)"),
+    "evaluated": ("a value the shell evaluates as code in a form the hook does not read (%s): a `${(P)name}` whose"
+                  " subscript runs, a glob qualifier under GLOB_SUBST, a prompt, PROMPT or PS4 expansion, or bash"
+                  " arithmetic holding a substitution",
+                  "spell the commands out on the line, and set none of these from a value the hook cannot read"),
+    "procsub-list": ("a process substitution -- `<( )`, `>( )` or zsh's `=( )` -- in a `for` or `foreach` list or a"
+                     " `name=( )` array value (`%s`), whose command the hook does not read where it joins the list into"
+                     " one word",
+                     "list the words without a process substitution, or read the list with `for name in <( ... )`, which"
+                     " the hook reads"),
+}
+
+
+def unread_reason(detail):
+    """The reason an "unread" finding earns a member (SPD-217): detail is (form, shown), shown a (bound, text) pair for
+    "depth" and "braces" and the readable text of the form elsewhere, filled into the form's own message."""
+    form, shown = detail
+    what, respell = UNREAD_MESSAGES[form]
+    return UNREAD_REASON % (what % shown, respell)
+
+
 # The reason a line earns when the hook cannot tokenize text it reads for it (ShellAnalysis.unparseable, SPD-191): what
 # stopped the reading and where it stands, then how to spell the line so that the hook can read it.
 UNREADABLE_REASON = ("the hook cannot read this line: %s%s, so it cannot tell which of its words are commands, operators or"
@@ -381,6 +439,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
             return VAR_WORD_REASON % detail, analysis
         elif kind == "eval-flag":
             return EVAL_FLAG_REASON % detail, analysis
+        elif kind == "unread":
+            return unread_reason(detail), analysis
         elif kind == "var-doubt":
             return ("the variable %s may not hold the value this line assigned it (the assignment may not run or does not persist: a"
                     " condition, a compound command, a loop or function body, a pipeline, a background job, a subshell or substitution,"
