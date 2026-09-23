@@ -5,6 +5,11 @@ from ..hooks import hookio
 
 # The loops whose header names a variable, one header grammar to zsh (its parser's par_for; ShellWalk.names_end)
 _NAMED_LOOPS = ("for", "select", "foreach")
+# The word ShellWalk.pop puts among a command's words for the file name a `<( list )` hands it (SPD-145): hookio.SUBST,
+# which every reader of it takes for a word the line does not spell, marked (syntax.PROCSUB_MARK) so that
+# ShellWalk.consume pairs it with no lifted body.  As SUBST alone it took the first `$( )` after it on the line, analysed
+# with the process substitution's command before any cd between them, and the `$( )` it belonged to found none (SPD-190).
+PROCSUB_FILE = hookio.SUBST + syntax.PROCSUB_MARK
 
 
 def _value_may_start_with_dash(word):
@@ -65,8 +70,8 @@ class ShellFrame:
         # `stdin` carries two flags beside those two texts: whether anything at all stands on that input.
         self.printed, self.earlier, self.stdin, self.prints = "", "", (None, None, False, False), kind != "func"
         # an input process substitution, `<( list )`: the command around it is handed a file name it stands for
-        # (/dev/fd/N), a word the line does not spell, which ShellWalk.pop puts among that command's words (SPD-145:
-        # `bash <(curl ...)` runs that file's text as a script).
+        # (/dev/fd/N), a word the line does not spell, which ShellWalk.pop puts among that command's words as PROCSUB_FILE
+        # (SPD-145: `bash <(curl ...)` runs that file's text as a script; SPD-190).
         self.procsub = False
 
 
@@ -192,10 +197,11 @@ class ShellWalk:
         (self.list_start, self.list_seen, self.pipeline_start, self.uncertain, self.conditional, self.piped, self.words,
          self.skip, self.header, self.expect_body) = frame.outer
         if frame.procsub and not self.in_pattern():
-            # the file name `<( list )` hands the command, as `$( ... )` stands in a word.  Not in a case's word or pattern
-            # (SPD-184), which no command reads: there it stood among words discarded at the pattern's `)`, took the first
-            # `$( ... )` of the body with it, read before the body's cd, and after a `|` named a command
-            self.words.append(hookio.SUBST)
+            # the file name `<( list )` hands the command: a word the line does not spell, which every reader of
+            # hookio.SUBST takes for one and consume pairs with no lifted body (SPD-190).  Not in a case's word or pattern
+            # (SPD-184), which no command reads: the walk reads a pattern's words before a `|` as a command, which this
+            # word would name
+            self.words.append(PROCSUB_FILE)
         self.a.cwds = after
         if after != frame.saved and self.conditional:
             self.uncertain = True
@@ -401,7 +407,7 @@ class ShellWalk:
         here-document bodies their `<<` operators read; return the words without the operators and their delimiters."""
         reevaluation.read_eval_words(words, self.a, self.depth)
         for w in words:
-            for _ in range(w.count(hookio.SUBST)):
+            for _ in range(w.count(hookio.SUBST) - w.count(PROCSUB_FILE)):  # a `<( )`'s file name lifted no body
                 if self.inner:
                     analyse.analyse_isolated(self.a, self.inner.pop(0), self.depth + 1)
             if syntax.ZSH_CLOSE in w:

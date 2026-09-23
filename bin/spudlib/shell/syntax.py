@@ -159,7 +159,15 @@ _SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **_ARITH_UNSENTINEL, 
 # stands for the files a command places where the line cannot say -- an archive extracted with -P, unzip's `-:`, a curl
 # config file, tar's -T list -- which may lie anywhere at all.
 FIND_PATH, INPUT_OPERAND, ANY_PATH = chr(0xE050), chr(0xE051), chr(0xE052)
-_OPERAND_TEXT = {FIND_PATH: "{}", INPUT_OPERAND: "{input}", ANY_PATH: "(anywhere)"}
+# PROCSUB_MARK follows hookio.SUBST in the word that stands for the file name a `<( list )` hands its command
+# (walk.PROCSUB_FILE, SPD-190): every reader of SUBST takes that word for the one it is, a word the line does not spell,
+# and ShellWalk.consume, which analyses one lifted `$( )` or backtick body for each SUBST a word holds, pairs it with none.
+# A private-use character, as the sentinels are: a suffix of plain text is one a line can spell after a `$( )` in the
+# same word (`$(...)FILE__`), whose body would then pair with none.  deglob keeps it, so text eval or a shell reads again
+# still pairs it with none, and a reason shows the word as SUBST alone (shown_operands).  0xE053 and 0xE054 are
+# hooks/pathrule's.
+PROCSUB_MARK = chr(0xE055)
+_OPERAND_TEXT = {FIND_PATH: "{}", INPUT_OPERAND: "{input}", ANY_PATH: "(anywhere)", PROCSUB_MARK: ""}
 _LITERALIZE = str.maketrans(dict(_GLOB_SENTINELS, **_ZSH_UNSENTINEL))
 _GLOB_SENTINEL_RE = re.compile("[" + "".join(_SENTINEL_TEXT) + "]")
 GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}|[" + ZSH_OPEN + ZSH_RANGE_OPEN + "]")
@@ -554,7 +562,8 @@ def unknown_operand(word):
 
 
 def shown_operands(text):
-    """A word or reason with the operand markers shown as the line spells them: `{}` for find's, `{input}` for xargs's."""
+    """A word or reason with the operand markers shown as the line spells them: `{}` for find's, `{input}` for xargs's;
+    PROCSUB_MARK as nothing, so the word for a process substitution's file name reads as a substitution's."""
     for marker, shown in _OPERAND_TEXT.items():
         text = text.replace(marker, shown)
     return text

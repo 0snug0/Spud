@@ -7972,6 +7972,183 @@ class EvalFlagTest(BashHookCase):
                     self.assertIn(finding, [kind for kind, _detail in a.findings], line[:40])
 
 
+# SPD-190: the file name a `<( list )` hands its command, `%s`, where each reader of hookio.SUBST reads it -- a redirection
+# target, a tee operand and a write by argument; the directory cd, pushd, `cd old new` and env -C move to; find's and
+# xargs's operands; a shell's script, a sourced file and a shell's own startup file; the command word and a wrapper's;
+# git's options, verb and arguments; a spud call's words; an interpreter's program; eval's and a builtin's words.  Each
+# reads it as it reads a `$( list )` in its place: a word the line does not spell.
+PROCSUB_OPERAND_FORMS = (
+    "echo x > %s", "echo x | tee %s", "echo x | tee -a docs/y %s", "cp docs/x %s", "mv %s docs/y", "touch %s", "rm -rf %s",
+    "chmod -R 644 %s", "sed -i s/a/b/ %s", "dd if=docs/x of=%s", "tar -xf %s", "rsync -a docs/ %s",
+    "cd %s", "cd -P %s", "pushd %s", "cd docs %s", "env -C %s touch y",
+    "find %s -delete", "find docs -newer %s -delete", "xargs rm %s", "xargs -a %s rm",
+    "sh %s", "bash %s arg", "source %s", ". %s", "bash --rcfile %s -i", "env sh %s", "xargs sh %s",
+    "%s", "%s arg", "nice %s", "env %s", "exec %s", "command %s",
+    "git %s push", "git -C %s push", "git log %s", "git diff --output %s", "git commit -F %s", "git -c %s push",
+    "bin/spud %s", "bin/spud --as %s member log hi",
+    "python3 %s", "node %s", "perl %s", "awk -f %s docs/x", "sed -f %s docs/x",
+    "eval %s", "export X %s", "x=1 %s", "typeset %s",
+)
+# ... and the lines whose `$( )`, backticks or eval text after a process substitution runs in the directory a cd between
+# them moved to (probed; see the class), each writing the generated ledger file there
+PROCSUB_BEFORE_CD = (
+    "cat <(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true >(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true =(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true <(true) >(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "diff <(true) <(true); cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "for f in <(true); do true; done; cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "select f in <(true); do break; done; cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true <(true) && cd ledger && echo `echo x > tickets/SPD-001.md`",
+    'true <(true) && cd ledger && echo "$(echo x > tickets/SPD-001.md)"',
+    "true <(true) && cd ledger && x=$(echo x > tickets/SPD-001.md)",
+    "true <(true) && cd ledger && echo ${z:-$(echo x > tickets/SPD-001.md)}",
+    "cat <(true) - <<EOF && cd ledger && echo $(echo x > tickets/SPD-001.md)\nbody\nEOF",
+    "eval cat <(true) '; cd ledger && echo $(echo x > tickets/SPD-001.md)'",
+    "echo $(cat <(true); cd ledger; echo $(echo x > tickets/SPD-001.md))",
+)
+# ... and those with a substitution of their own before the cd, which runs where the line started
+PROCSUB_AND_EARLIER = (
+    "true <(true) $(echo q > tests/zzone/q) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "cat <(echo $(echo q > tests/zzone/q)) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true <(true) `echo q > tests/zzone/q`; cd ledger && echo `echo x > tickets/SPD-001.md`",
+    "diff <(true) <(true) $(echo q > tests/zzone/q); cd ledger && echo $(echo x > tickets/SPD-001.md)",
+)
+
+
+class ProcessSubstitutionFileTest(BashHookCase):
+    """SPD-190, filed by SPD-184's engineer: ShellWalk.pop put hookio.SUBST among a command's words for the file name a
+    `<( list )` hands it (SPD-145), and ShellWalk.consume analyses one lifted `$( )` or backtick body for every SUBST a word
+    holds, so that file name took the first body after it on the line: analysed with the process substitution's command,
+    before any cd between them, while the `$( )` it belonged to found none.  The proposer's evidence, cwd /tmp: `cd /usr &&
+    echo $(echo hi > y)` recorded y in /usr, and `cat <(true) && cd /usr && echo $(echo hi > y)` in /tmp; from the home,
+    `cat <(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)` resolved the target to <home>/tickets/SPD-001.md, not
+    the generated ledger file.  SPD-184 had fixed it in a case's word and pattern alone.  A for or select list, eval's text
+    and a substitution's own body held the same hole.  The file name is now walk.PROCSUB_FILE, SUBST with a private-use
+    mark after it, which every reader of SUBST takes for one and consume pairs with no body.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line, and in GNU bash 3.2.57, each line with a directory d made first and
+    its last `$( )` writing y: `cat <(true) && cd d && echo $(echo hi > y)`, the same after `true >(true)`, `true <(true)
+    >(true)` and zsh's `true =(true)` (in an eval under `[ -n "$ZSH_VERSION" ]`, TMPPREFIX in the probe's directory: bash
+    rejects the line), `for f in <(true); do true; done; cd d && ...`, `select f in <(true); do break; done < /dev/null; cd
+    d && ...`, `eval cat <(true) '; cd d; echo $(echo hi > y)'`, `echo $(cat <(true); cd d; echo $(echo hi > y))`, backticks
+    for both substitutions, a quoted `"$( )"`, `x=$( )`, `${z:-$( )}`, and a here-document on the `<( )`'s command (`cat
+    <(echo proc) - <<EOF && cd d && ...`) each wrote y in d; `diff <(true) <(true) $(echo q > w); cd d && ...`, `cat <(echo
+    $(echo a > z)) && cd d && ...` and `true <(true) $(echo q > q) && cd d && ...` wrote y in d and w, z and q where the
+    line started.  `echo <(true)` printed /dev/fd/11 in zsh and /dev/fd/63 in bash.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans home:**."""
+
+    TAIL = "; cd ledger && echo $(echo x > tickets/SPD-001.md)"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def plain(self, value):
+        """A reading with the file name's word spelled as a substitution's."""
+        if isinstance(value, str):
+            return value.replace(self.m.PROCSUB_FILE, self.m.SUBST)
+        if isinstance(value, dict):
+            return {self.plain(k): self.plain(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return type(value)(self.plain(v) for v in value)
+        return value
+
+    def reading(self, line):
+        """What the analysis reads of a line."""
+        a = self.analysis(line)
+        return self.plain((a.findings, a.kinds, a.redirects, a.git_calls, a.git_writes, a.arg_writes, a.cwds, a.unparseable,
+                           sorted(a.doubt), sorted(a.dashless_loops), sorted(a.functions), sorted(a.hashed)))
+
+    def ledger_target(self, line):
+        """The analysis resolves the ledger file's write in the directory the cd moved to, and nowhere else."""
+        with self.subTest(line=line):
+            found = [(t, c) for t, c in self.analysis(line).redirects if t.endswith("SPD-001.md")]
+            self.assertEqual(found, [("tickets/SPD-001.md", frozenset({str(self.home.path / "ledger")}))])
+
+    def ledger_write(self, line):
+        """Refused to both members for the generated ledger file, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "generated", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_where_the_shell_runs_it(self):
+        for line in ("cd /usr && echo $(echo hi > y)", "cat <(true) && cd /usr && echo $(echo hi > y)"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).redirects, [("y", frozenset({"/usr"}))])
+        line = "cat <(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)"
+        self.ledger_target(line)
+        self.ledger_write(line)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_substitution_after_a_process_substitution(self):
+        for line in PROCSUB_BEFORE_CD:
+            self.ledger_target(line)
+        for line in PROCSUB_AND_EARLIER:
+            self.ledger_target(line)
+            with self.subTest(line=line):
+                self.assertIn(("tests/zzone/q", frozenset({str(self.home.path)})), self.analysis(line).redirects)
+
+    def test_the_hook_refuses_each_ledger_write(self):
+        for line in PROCSUB_BEFORE_CD + PROCSUB_AND_EARLIER:
+            self.ledger_write(line)
+
+    def test_a_substitution_glued_to_text_keeps_its_body(self):
+        """The file name's mark is no text a line spells after a `$( )` in the word it stands in."""
+        for glued in ("x", "FILE__", "_x_", "'__'"):
+            line = "echo $(echo q > tests/zzone/q)%s && cd ledger && echo $(echo x > tickets/SPD-001.md)" % glued
+            self.ledger_target(line)
+            with self.subTest(line=line):
+                self.assertIn(("tests/zzone/q", frozenset({str(self.home.path)})), self.analysis(line).redirects)
+
+    def test_many_file_names_and_substitutions_pair_up(self):
+        line = "true" + " <(true) $(echo q > tests/zzone/q)" * 200 + self.TAIL
+        self.ledger_target(line)
+        self.assertIn(("tests/zzone/q", frozenset({str(self.home.path)})), self.analysis(line).redirects)
+
+    # -- every reader, as it read the file name -----------------------------------------------------------------------
+    def test_each_reader_takes_the_file_name_as_a_word_the_line_does_not_spell(self):
+        """Read as its `$( )` twin in every place, and so with the ledger write after it (which the twin always read in
+        ledger/)."""
+        for form in PROCSUB_OPERAND_FORMS:
+            for tail in ("", self.TAIL):
+                line = form % "<(true)" + tail
+                with self.subTest(line=line):
+                    self.assertEqual(self.reading(line), self.reading(form % "$(true)" + tail))
+
+    def test_the_hook_decides_each_reader_as_it_did(self):
+        for form in ("sh %s", "source %s", "echo x | tee %s", "echo x > %s", "rm -rf %s", "cd %s && touch docs/x",
+                     "git %s push", "git log %s", "find %s -delete", "xargs rm %s", "bin/spud %s", "%s arg", "python3 %s",
+                     "env -C %s touch y", "diff <(ls tests) %s"):
+            for agent_id in (AGENT_A, None):
+                line = form % "<(true)"
+                with self.subTest(line=line, agent_id=agent_id):
+                    r, twin = self.bash(line, agent_id), self.bash(form % "$(true)", agent_id)
+                    self.assertEqual((r.code, r.decision, self.plain(r.reason)), (twin.code, twin.decision, twin.reason))
+
+    def test_a_case_pattern_keeps_no_file_name(self):
+        """SPD-184's reading stays: a case's word and pattern are no command's, and the walk runs the words before a `|`
+        there as one (CaseSubstitutionTest)."""
+        for line in ("case x in y) ;; <(true)|x) true;; esac", "case x in y) ;; =(true)|x) true;; esac"):
+            for agent_id in (AGENT_A, AGENT_C, None):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+        self.ledger_write("case x in <(true)) cd ledger && echo $(echo x > tickets/SPD-001.md);; esac")
+
+
 class AliasEvalTest(BashHookCase):
     """SPD-059 (Burbank's SPD-054 proposal): `alias NAME=body` stores shell text the hook never read, and `eval NAME` on the
     same line ran it, so a member's VCS write behind an alias reached the hook with no finding (Law 7).  Probed in bash 3.2,
