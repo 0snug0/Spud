@@ -42,10 +42,12 @@ What stays open, none of it this module's to close:
 - **A program from a file**, which is an open question for every caller, and with it every option that names a
   library the interpreter runs before the program: perl's `-M`, ruby's `-r`, node's `--require`, deno's `--preload`
   and `deno repl --eval-file`.  Each names a file, so each is that same question and not this one.
-- **A subcommand that runs a shell command rather than a program**: `bun exec` ("Run a shell script directly with
-  Bun", `bun --help`), `deno task <name>` and `npm run <name>`, whose command comes from deno.json or package.json.
-  That is the reading of a shell string fed to a shell, in another shape -- the hook reads no such string here -- and no
-  inline program of an interpreter's.
+- **A subcommand that runs a command a file holds**: `npm run <name>`, `deno task <name>`, `bun run <script>`,
+  `pnpm run` and `yarn <script>`, whose command comes from package.json or deno.json.  That is SPD-145's class (Eric's
+  call: a member's shell whose commands come from a file is refused, with a project allow-list), not this module's.
+  The inline half of the same shape -- a subcommand that hands a shell text the line spells, `bun exec`, `npm exec -c`,
+  `npx`, `npm explore`, `deno task --eval`, `pnpm exec`, `yarn exec` -- is read since SPD-154, where an `sh -c` string
+  is, by shell/runtime_shells; `deno task` is tabled "shell" below so its `--eval` is no program of deno's.
 - **An environment variable that carries the interpreter's own switches**, which each manual limits to switches that
   carry no program: PERL5OPT takes only `-[CDIMUdmtwW]` (perlrun), RUBYOPT only `-d -E -I -K -r -T -U -v -w -W` and
   the `--debug`/`--enable`/`--disable` kin (ruby(1)), NODE_OPTIONS no `-e`, `-p` or script at all (node(1)), and
@@ -83,7 +85,9 @@ class Interpreter:
     `subcommands`: {the subcommand: what the words after it are} for a family that runs code under a subcommand rather
     than an option -- "code" where the subcommand's first operand is the program (`deno eval <code>`), "stdin" where a
     run with no program of its own reads one there (`deno repl`, `swift repl`), "file" where it reads none at all
-    (`deno run`, whose only standard input is the `-` operand).
+    (`deno run`, whose only standard input is the `-` operand), "shell" where what it runs is shell text rather than a
+    program, which shell/runtime_shells reads and nothing here does (`deno task`, whose `--eval` is a task's text and
+    no program of deno's).
     `stdin_program`: whether this interpreter runs what it reads on standard input when the line gives it no program of
     its own, which is python's shape and not every family's (`Rscript` alone prints its usage).
     `whole_options`: whether its short options are whole words rather than getopt clusters, and so every word is read
@@ -115,7 +119,7 @@ JS = Interpreter(code="ep", code_long=("--eval", "--print"), value="r", value_lo
 # node's own letters stay on the row: `deno -e 'x'` was refused from the first and stays refused.
 DENO = Interpreter(code="ep", code_long=("--eval", "--print"), value="r", value_long=("--require",),
                    subcommands={"eval": "code", "repl": "stdin", "run": "file", "serve": "file", "watch": "file",
-                                "task": "file", "test": "file", "bench": "file", "check": "file", "compile": "file"})
+                                "task": "shell", "test": "file", "bench": "file", "check": "file", "compile": "file"})
 # perlrun: -e and -E carry the program, -I a directory, -C, -D, -F, -M, -m, -V, -x and -i the rest of their own word
 # (-d only before a `:` or `=`, read below), -0 and -l an optional number the cluster goes on after.
 PERL = Interpreter(code="eE", value="I", attached="CDFMVimx", digits="0l")
@@ -241,7 +245,8 @@ def read_words(kind, words):
             return
         if not options or not w.startswith("-"):
             mode = kind.subcommands.get(w) if sub is None else None
-            if mode is None:
+            if mode is None or mode == "shell":
+                # a file's program, or a shell's text (`deno task --eval`), which shell/runtime_shells reads
                 yield i, "program", w
                 return
             # this family runs its program under a subcommand, which says where that program comes from
