@@ -10,16 +10,20 @@ The edit hook and the Bash hook's write targets then hold a member of a bound ti
 by members planned before this landed keeps the rule it had.  `spud card` and `spud board` show the worktree and its branch.
 
 Every repository is a scratch one beside a scratch home (tests/helpers.py RepoMixin): project spud's root is moved to a
-scratch main checkout, with a linked worktree under its .claude/worktrees/ (EnterWorktree's spelling) and one elsewhere.
+scratch main checkout, with a linked worktree under its .claude/worktrees/ (EnterWorktree's spelling) and one elsewhere,
+built once per class under the home's scratch root (BoundCase.build_home, SPD-233).
 """
 
 import json
 import os
 import shutil
+import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 
-from helpers import EXIT_OK, EXIT_TRANSITION, REPO, RepoMixin, SpudTestCase, git, load_spud_module
-from hookcase import AGENT_A, AGENT_B, AGENT_C, SESSION, HookCase
+from helpers import EXIT_OK, EXIT_TRANSITION, REPO, RepoMixin, SpudTestCase, git, isolated_git_env, load_spud_module
+from hookcase import AGENT_A, AGENT_B, AGENT_C, SESSION, HookCase, run_main
 
 BRIEF = "Build it."
 BOUND_WORDING = "a member of a bound ticket writes its project's paths there alone"  # the refusal outside the bound worktree
@@ -27,14 +31,41 @@ BOUND_WORDING = "a member of a bound ticket writes its project's paths there alo
 
 class BoundCase(RepoMixin, HookCase):
     """HookCase's scratch home and its active SPD-001, with project spud's root moved to a scratch repository `tool` that has
-    two linked worktrees: `wt` under .claude/worktrees/ and `elsewhere` beside it."""
+    two linked worktrees: `wt` under .claude/worktrees/ and `elsewhere` beside it.
 
-    def setUp(self):
-        super().setUp()
+    SPD-233: in process, one home per class (HookCase.in_process): build_home makes the repository and its worktrees once,
+    under the home's scratch root so the class's snapshot holds them, and cli calls bin/spud's main in this process with the
+    environment, standard input and working directory a process would get."""
+
+    in_process = True
+
+    def build_home(self):
+        super().build_home()
         self.tool = self.make_repo("tool-")
         self.cli("project", "edit", "spud", "--root", self.tool, actor="spud")
         self.wt = self.add_worktree(self.tool, "spd-001-hooks", inside=True)
         self.elsewhere = self.add_worktree(self.tool, "spd-001-elsewhere")
+
+    def scratch_dir(self, prefix="spud-repo-"):
+        """A directory of its own under the home's scratch root (SPD-233), beside the home and the tool beside it: the class
+        home's snapshot restores what build_home put there, and the next restore removes what a test added."""
+        path = Path(tempfile.mkdtemp(prefix=prefix, dir=self.home.root))  # the root is resolved, as roots are compared
+        self.addCleanup(shutil.rmtree, path, True)
+        return path
+
+    def cli(self, *args, actor=None, cwd=None, session=None, check=True, stdin=None, env=None):
+        """RepoMixin.cli, in this process (run_main): bin/spud against the scratch home from `cwd` (default the home), in
+        `session` (None: outside every session), with git isolated from this machine's configuration."""
+        e = isolated_git_env(self.home.env)
+        e.pop("CLAUDE_CODE_SESSION_ID", None)
+        if session is not None:
+            e["CLAUDE_CODE_SESSION_ID"] = session
+        e.update(env or {})
+        argv = (["--as", actor] if actor else []) + [str(a) for a in args]
+        code, out, err = run_main(e, argv, stdin, cwd or self.home.path)
+        if check and code != 0:
+            raise AssertionError("spud %s (cwd %s) exited %d\nstdout: %s\nstderr: %s" % (" ".join(argv), cwd or self.home.path, code, out, err))
+        return subprocess.CompletedProcess(["spud"] + argv, code, out, err)
 
     def plan_in(self, cwd, deliverable=("bin/**",), actor="spud", ticket=None, persona="engineer", model="opus", check=True, **kw):
         """`member new` run from `cwd` in SESSION; the CompletedProcess."""
@@ -215,8 +246,8 @@ class MemberBindingTest(BoundCase):
 class EnforcementTest(BoundCase):
     """A member of SPD-001, bound to `wt`, with the globs `bin/**` (the ticket's project) and `home:docs/**` (the home)."""
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         self.bound = os.path.realpath(self.wt)
         self.member = self.spawn(self.planned(self.wt, deliverable=("bin/**", "home:docs/**")), AGENT_A)
         self.assertEqual((self.member["status"], self.member["agent_id"]), ("active", AGENT_A))
@@ -319,8 +350,8 @@ class DisplayTest(BoundCase):
     """The worktree and its branch are read from git when `card` or `board` runs, never stored; a worktree that is gone is
     shown as gone, never an error."""
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         self.bound = os.path.realpath(self.wt)
 
     def card(self):
@@ -375,7 +406,7 @@ class DisplayTest(BoundCase):
 
 
 class TextTest(BoundCase):
-    def test_the_skill_the_claim_card_the_help_and_the_agent_name_the_refusal(self):
+    def test_the_skill_and_the_claim_card_name_the_refusal(self):
         spud = load_spud_module()
         ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.tool)
         needle = "`member new` refuses from the main checkout"
@@ -384,19 +415,34 @@ class TextTest(BoundCase):
         card = self.cli("session", "claim", actor="spud", cwd=self.wt, session=SESSION).stdout
         self.assertIn(needle, card)
         self.assertIn("board (spud):", card)  # the added line leaves the board its room
+
+
+class HelpAndAgentTextTest(unittest.TestCase):
+    """The rest of what TextTest pinned, which reads no ledger (SPD-233): `--help` answers before any home is read, so main
+    runs in this process with the test process's own environment, whose home does not exist (helpers' guard block), and
+    the 80 columns a pipe gets; the agent definition is a file of this checkout."""
+
+    def help_text(self, *argv):
+        code, out, err = run_main(dict(os.environ, COLUMNS="80"), list(argv) + ["--help"])
+        self.assertEqual(code, EXIT_OK, err)
+        return out
+
+    def test_the_help_and_the_agent_name_the_refusal(self):
         self.assertIn("refuses from the main checkout, outside the project or another worktree",
-                      " ".join(self.home.run("member", "new", "--help").stdout.split()))  # argparse wraps it
-        self.assertIn("ticket worktrees: a bare glob", self.home.run("--help").stdout)
+                      " ".join(self.help_text("member", "new").split()))  # argparse wraps it
+        self.assertIn("ticket worktrees: a bare glob", self.help_text())
         agent = (REPO / "share" / "agents" / "spudagent.md").read_text(encoding="utf-8")  # SPW-004
         self.assertIn("A bare glob is relative to the linked worktree your ticket is bound to", agent)
         self.assertNotIn("the root or a worktree of it", agent)
 
 
 class NoRepositoryTest(RepoMixin, SpudTestCase):
-    """A project whose root is no git checkout has no linked worktree to bind: the suite's scratch homes, where project spud's
-    root is the home itself.  Its tickets bind nothing and keep the path rule they had."""
+    """A project whose root is no git checkout has no linked worktree to bind: `project add` registers only a repository,
+    so this is one whose .git went away after (SPD-233; until then the suite's own scratch homes, where project spud's root
+    was the home itself).  Its tickets bind nothing and keep the path rule they had."""
 
     def test_a_bare_glob_on_a_project_without_a_repository_binds_nothing(self):
+        shutil.rmtree(self.home.tool / ".git")
         t = self.new_ticket("Plain", status="active")
         m = self.new_member(t["key"], deliverable=["bin/**"])
         self.assertEqual(m["deliverables"], ["bin/**"])

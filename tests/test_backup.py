@@ -9,6 +9,9 @@ which runs the daily backup, and local.spud.render, the render watcher (SPD-097)
 a scratch SPUD_HOME whose SPUD_LAUNCH_AGENTS_DIR is a directory of its own, and every schedule case
 points that at its scratch and SPUD_LAUNCHCTL at a fake that records its arguments, so no test reaches
 this Mac's LaunchAgents or launchctl.
+
+SPD-233 retired GitignoreTest, which read this checkout's own .gitignore for `.spud/`: a line for the days the
+tool repository was Spud's home, which it is not since SPD-097, and no behaviour of the program's.
 """
 
 import contextlib
@@ -28,8 +31,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE, REPO, SPUD, Home, LaunchdMixin, SpudTestCase, load_spud_module
+import hookcase
+from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE, SPUD, Home, LaunchdMixin, SpudTestCase, load_spud_module
 
+# The schema this program writes (SPD-233): read from it, so the next migration needs no edit here.
+SCHEMA_VERSION = load_spud_module().SCHEMA_VERSION
 DAILY_NAME = re.compile(r"ledger-[0-9]{8}T[0-9]{6}-daily\.db")
 LABEL = "local.spud.backup"
 RENDER_LABEL = "local.spud.render"
@@ -100,7 +106,7 @@ class DailyBackupTest(BackupCase):
         self.assertRegex(path.name, r"^ledger-\d{8}T\d{6}-daily\.db$")
         self.assertEqual(out, {"ok": True, "path": str(path), "written": True, "pruned": [], "kept": 1})
         self.assertEqual(self.listing(), [path.name])  # the check leaves no -wal, -shm or -journal beside the copy
-        self.assertEqual(user_version(path), 9)  # schema v9 since SPD-222
+        self.assertEqual(user_version(path), SCHEMA_VERSION)  # the copy is of the ledger at the schema this program writes
         code, again, proc = self.backup_daily()
         text = self.home.run("backup", "--daily", actor="spud").stdout
         if datetime.now().strftime("%Y%m%d") != path.name[7:15]:
@@ -203,7 +209,7 @@ class DailyBackupTest(BackupCase):
         for path in outside + live:
             self.assertTrue(path.is_file(), path)
         self.assertEqual(con.execute("SELECT count(*) FROM projects").fetchone()[0], 1)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 9)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), SCHEMA_VERSION)
 
     def test_plain_backup_writes_a_manual_copy_and_prunes_nothing(self):
         seeds = earlier_days(20)
@@ -360,6 +366,10 @@ class DoctorBackupsTest(BackupCase):
         self.assertEqual((backups["daily"]["count"], backups["other"]), (1, 1))
         self.assertEqual((backups["daily"]["newest"], backups["daily"]["oldest"]), (self.daily()[0], self.daily()[0]))
 
+
+class DoctorWithoutDatabaseTest(unittest.TestCase):
+    """doctor in a home that was never initialised: a Home of its own, which the class fixture would only have built."""
+
     def test_doctor_without_a_database_still_reports_the_backups(self):
         home = Home()
         self.addCleanup(home.cleanup)
@@ -404,7 +414,7 @@ class ScheduleTest(LaunchdMixin, SpudTestCase):
         log = os.path.join(os.path.expanduser("~"), "Library", "Logs", "spud-backup.log")
         return {
             "Label": LABEL,
-            "ProgramArguments": [interpreter or self.interpreter, "-I", "-S", str(self.home.path / "bin" / "spud"), "--as", "spud", "backup", "--daily"],
+            "ProgramArguments": [interpreter or self.interpreter, "-I", "-S", str(self.home.launcher), "--as", "spud", "backup", "--daily"],
             "EnvironmentVariables": {"SPUD_HOME": str(self.home.path)},
             "RunAtLoad": True,
             "StartCalendarInterval": {"Hour": hour, "Minute": minute},
@@ -446,9 +456,9 @@ class ScheduleTest(LaunchdMixin, SpudTestCase):
         self.assertEqual(code, EXIT_OK, proc)
         plist = plistlib.loads(out["plist"].encode("utf-8"))
         script = Path(plist["ProgramArguments"][3])
-        self.assertEqual(script, self.home.path / "bin" / "spud")
-        script.parent.mkdir()
-        script.symlink_to(SPUD)  # the scratch home's bin/spud is this checkout's
+        self.assertEqual(script, self.home.launcher)
+        script.unlink()  # the tool's copy of the launcher, which has no program beside it
+        script.symlink_to(SPUD)  # the scratch tool's bin/spud is this checkout's
         # What launchd gives an agent: the plist's EnvironmentVariables, a minimal PATH, and / as the working directory.
         env = dict(plist["EnvironmentVariables"], PATH="/usr/bin:/bin:/usr/sbin:/sbin")
         first = subprocess.run(plist["ProgramArguments"], capture_output=True, text=True, env=env, cwd="/")
@@ -548,7 +558,7 @@ class ScheduleTest(LaunchdMixin, SpudTestCase):
         render_path = self.agents / (RENDER_LABEL + ".plist")
         self.assertEqual((out["render"]["label"], out["render"]["path"], out["render"]["replaced"]), (RENDER_LABEL, str(render_path), False))
         plist = plistlib.loads(render_path.read_bytes())
-        self.assertEqual(plist["ProgramArguments"], [self.interpreter, "-I", "-S", str(self.home.path / "bin" / "spud"), "--as", "spud", "render", "--watch"])
+        self.assertEqual(plist["ProgramArguments"], [self.interpreter, "-I", "-S", str(self.home.launcher), "--as", "spud", "render", "--watch"])
         self.assertEqual((plist["RunAtLoad"], plist["KeepAlive"], plist["EnvironmentVariables"], plist["StandardOutPath"], plist["StandardErrorPath"]),
                          (True, True, {"SPUD_HOME": str(self.home.path)}, str(self.home.path / ".spud" / "logs" / "render.log"), str(self.home.path / ".spud" / "logs" / "render.log")))
         self.assertTrue((self.home.path / ".spud" / "logs").is_dir())
@@ -581,19 +591,25 @@ class ScheduleTest(LaunchdMixin, SpudTestCase):
         self.assertFalse(self.agents.exists())
 
 
+def help_text(*args):
+    """`spud <args> --help` as the program's main answers it in this process (hookcase.run_main), before any home is read
+    (SPD-233: no home is built for it), at the 80 columns a process whose output is a pipe is wrapped to."""
+    code, out, err = hookcase.run_main(dict(os.environ, COLUMNS="80"), [*args, "--help"])
+    assert code == 0, (args, code, err)
+    return out
+
+
 class HelpTest(unittest.TestCase):
     def test_backup_and_schedule_help_render(self):
-        home = Home()
-        self.addCleanup(home.cleanup)
-        text = home.run("backup", "--help").stdout
+        text = help_text("backup")
         for needle in ("--daily", "--keep N", "quick_check", "ledger-<YYYYMMDD>T<HHMMSS>-daily.db", "exit codes"):
             self.assertIn(needle, text)
-        text = home.run("schedule", "--help").stdout
+        text = help_text("schedule")
         for needle in ("show", "install", "uninstall", "SPUD_LAUNCH_AGENTS_DIR", "SPUD_LAUNCHCTL", LABEL, "--as spud"):
             self.assertIn(needle, text)
         for verb in ("show", "install"):
-            self.assertIn("--at HH:MM", home.run("schedule", verb, "--help").stdout)
-        self.assertIn("schedule", home.run("--help").stdout)
+            self.assertIn("--at HH:MM", help_text("schedule", verb))
+        self.assertIn("schedule", help_text())
 
 
 class MachineGuardTest(LaunchdMixin, SpudTestCase):
@@ -635,7 +651,7 @@ class MachineGuardTest(LaunchdMixin, SpudTestCase):
         """What hook_timing.py's scratch home did on 2026-09-22, refused: no pointer names it, and it runs as SPUD_TOOL_DIR."""
         out = self.refused("install")
         self.assertEqual(out["refused"], "installing the LaunchAgents")
-        self.assertEqual(out["problems"], ["%s names no home" % self.pointer, "SPUD_TOOL_DIR sets the tool to %s" % self.home.path])
+        self.assertEqual(out["problems"], ["%s names no home" % self.pointer, "SPUD_TOOL_DIR sets the tool to %s" % self.home.tool])
         self.assertFalse(self.default_agents.exists())
 
     def test_a_pointer_naming_another_home_is_refused(self):
@@ -647,7 +663,7 @@ class MachineGuardTest(LaunchdMixin, SpudTestCase):
     def test_the_machines_home_run_as_another_tool_is_refused(self):
         """The pointer names this home, but SPUD_TOOL_DIR sets the tool: the plists would name a launcher the home does not run."""
         self.point(self.home.path)
-        self.assertEqual(self.refused("install")["problems"], ["SPUD_TOOL_DIR sets the tool to %s" % self.home.path])
+        self.assertEqual(self.refused("install")["problems"], ["SPUD_TOOL_DIR sets the tool to %s" % self.home.tool])
 
     def test_uninstall_is_refused_and_leaves_the_machines_plists(self):
         self.default_agents.mkdir(parents=True)
@@ -734,12 +750,6 @@ class MachineRuleTest(unittest.TestCase):
         os.environ["SPUD_CONFIG_DIR"] = str(other)
         self.ctx = self.homeconf.Ctx(self.root / "elsewhere", "test", False, tool=self.root / "tool")
         self.assertEqual(self.problems(), ["the home is %s, and %s names %s" % (self.root / "elsewhere", self.root / ".config" / "spud" / "home", self.home)])
-
-
-class GitignoreTest(unittest.TestCase):
-    def test_gitignore_lists_the_spud_directory(self):
-        lines = [line.strip() for line in (REPO / ".gitignore").read_text(encoding="utf-8").splitlines()]
-        self.assertIn(".spud/", lines)
 
 
 if __name__ == "__main__":

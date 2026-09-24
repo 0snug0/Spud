@@ -459,21 +459,8 @@ class UsageKeysTest(TeamCardCase):
         path.write_text(rendered.replace("tokens_out: 160812\n", "tokens_out: 160813\n"), encoding="utf-8")
         self.assertEqual(self.home.run("render", check=False).returncode, EXIT_CONFLICT)
 
-    def test_import_file_refuses_an_edited_usage_key(self):  # section 8.2: import --file is unchanged
-        self.home.json("render")
-        path = self.home.path / "ledger" / "teams" / "SPUD-001" / "Pompadour.md"
-        text = path.read_text(encoding="utf-8")
-        self.assertEqual(text.count("tool_uses: 105\n"), 1)
-        path.write_text(text.replace("tool_uses: 105\n", "tool_uses: 7\n"), encoding="utf-8")
-        proc = self.home.run("import", "--file", path, actor="spud", check=False)
-        self.assertEqual(proc.returncode, EXIT_ERROR)
-        self.assertIn("tool_uses", proc.stderr)
-        self.assertIn("not editable by hand", proc.stderr)
-        self.assertIn("the hooks record it", proc.stderr)
-        self.assertIn("spud member resum", proc.stderr)
-        self.assertNotIn("has no column", proc.stderr)
-        self.assertEqual(self.home.scalar("SELECT tool_uses FROM members WHERE id = ?", self.m["id"]), 105)
-
+    # section 8.2, import --file unchanged: an edited tool_uses is the second case below (SPD-233 retired its own test,
+    # whose every assertion that case makes too)
     def test_import_file_refuses_every_edited_usage_key(self):  # SPD-022: the fallthrough lied about the column
         self.home.json("render")
         path = self.home.path / "ledger" / "teams" / "SPUD-001" / "Pompadour.md"
@@ -534,6 +521,8 @@ class ForegroundUsageTest(HookCase):
     PostToolUse(Agent, completed) (SPD-021): the card and the note read its transcript sum, beside
     its completion's whole-run duration and tool count."""
 
+    in_process = True  # SPD-233: the hooks and the CLI in this process (hookcase.InProcessHome)
+
     def test_the_tokens_cell_and_the_token_keys_show_the_transcript_sum(self):
         m = self.plan(persona="engineer", model="opus")
         self.foreground(m, AGENT_B)
@@ -548,6 +537,8 @@ class ForegroundUsageTest(HookCase):
 class ResummedUsageTest(HookCase):
     """SPD-023: a member whose stored sum added every entry of its transcript (the hooks before SPD-023)
     shows those figures until Spud runs `member resum`, and the figures counted once per request after."""
+
+    in_process = True  # SPD-233
 
     def card_and_note(self, m):
         """The Tokens and Tools cells of m's row on the rendered card, and its note's usage keys."""

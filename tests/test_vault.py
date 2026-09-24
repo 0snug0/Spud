@@ -117,19 +117,19 @@ def fixture_lock():
 
 
 class VaultCase(RepoMixin, SpudTestCase):
-    """A scratch home whose tool is a scratch checkout of this repository's bin/ and share/, with the shipped vault
-    replaced by the fixture one, and a scratch directory serving its releases.  The home is not initialised: each case
-    runs `spud init` itself, because what init does to the vault is half of what is under test."""
+    """A scratch home and the tool checkout beside it, whose share/ is the tool's own (a copy of this repository's) with
+    the shipped vault replaced by the fixture one, and a scratch directory serving its releases.  The home is not
+    initialised: each case runs `spud init` itself, because what init does to the vault is half of what is under test."""
 
     def setUp(self):
-        self.tool = self.make_tool()
+        self.home = Home()
+        self.addCleanup(self.home.cleanup)
+        self.tool = self.home.tool
+        self.home.own_share()
         self.served = self.scratch_dir("vault-served-")
         self.lock = fixture_lock()
         self.write_fixture_share()
         self.serve_releases()
-        self.home = Home()
-        self.addCleanup(self.home.cleanup)
-        self.home.env["SPUD_TOOL_DIR"] = str(self.tool)
         self.home.env["SPUD_VAULT_DOWNLOADS"] = str(self.served)
 
     # -- the fixture ---------------------------------------------------------
@@ -178,12 +178,10 @@ class VaultCase(RepoMixin, SpudTestCase):
     # -- the home ------------------------------------------------------------
 
     def init(self, *extra, check=True):
-        proc = self.home.run("--json", "init", "--no-schedule", *extra, check=check)
-        if not check:
-            return proc
-        if "--dry-run" not in extra:  # a dry run builds no database for project 1 to go into
-            self.home.seed_project_one()
-        return json.loads(proc.stdout)
+        """`spud init` of the home, registering the tool as project 1 as Home.init does (SPD-233)."""
+        proc = self.home.run("--json", "init", "--no-schedule", "--project-root", self.tool, "--project-key", "spud",
+                             "--sessions", "always", *extra, check=check)
+        return json.loads(proc.stdout) if check else proc
 
     def vault(self, *parts):
         return self.home.path.joinpath(spud.OBSIDIAN, *parts)

@@ -13,14 +13,25 @@ Two corpora, two purposes:
 
 * PinnedLedgerTest archives PINNED_REF, the ledger as it stood when the importer
   was written, and pins exactly which sections the rows cannot regenerate (the
-  31 pairs below).  A regression that pushes more of the ledger into verbatim
-  prose, or parses less of it into rows, fails here on purpose.
+  31 pairs below) and the row-level facts of that corpus.  A regression that
+  pushes more of the ledger into verbatim prose, or parses less of it into
+  rows, fails here on purpose.
 * CutoverReadinessTest archives CUTOVER_REF, the ledger as it stood when it
   left the tool repository (SPD-097).  It asserts the round trip file by file
   and that every prose section is of a known kind, with no fixed count.  Until
   SPD-097 it read live HEAD, which grew with every commit on main; since the
   home moved out HEAD carries no ledger, so the last commit whose tree holds
   one is pinned instead.
+
+SPD-233: the round-trip checks RoundTripMixin holds ran on both corpora.  They
+run on the cutover corpus alone, the one that makes each of them meaningful: it
+holds every note of the pinned one in the shape the ledger kept it, and the
+notes the prose checks are about (BADS-036's briefs with a `## ` line), which
+the pinned corpus lacks, so there the last of them asserted nothing.  And each
+class holds at most tests/suite.py's CHUNK (4) tests, each running its checks
+as subtests named after them: the runner cuts a class into chunks of CHUNK and
+runs setUpClass once per chunk, so this is what builds each corpus once a run
+where it was built nine times, four of them the 414-file cutover corpus.
 """
 
 import difflib
@@ -142,7 +153,7 @@ class RoundTripMixin:
         cls.out = root / "out"
         cls.src.mkdir()
         extract_corpus(cls.REF, cls.src)
-        cls.home = Home()
+        cls.home = Home(warm=True)
         cls.home.init()
         cls.imported = cls.home.json("import", cls.src / "ledger", cls.src / "reports")
         cls.rendered = cls.home.json("render", "--out", cls.out)
@@ -152,13 +163,18 @@ class RoundTripMixin:
         cls.home.cleanup()
         cls.tmp.cleanup()
 
+    def run_checks(self, *names):
+        """Each check_<name> as a subtest of its own, so a failure names its check while the class keeps to CHUNK tests."""
+        for name in names:
+            with self.subTest(name):
+                getattr(self, "check_" + name)()
+
     def rendered_text(self, rel):
-        """The rendered file, less its `project` property when the committed note predates it: SPD-014 names the project in
-        every note, and a corpus committed before the first render with it carries no such line."""
+        """The rendered file, read back in the committed spelling where the corpus predates one.  (Every note of the
+        cutover corpus names its project, SPD-014; the pinned corpus, which did not, runs none of the checks that read
+        this since SPD-233.)"""
         got = (self.out / rel).read_text(encoding="utf-8")
         want = (self.src / rel).read_text(encoding="utf-8")
-        if rel.parts[0] == "ledger" and want.startswith("---\n") and not re.search(r"^project: ", want.split("\n---\n", 1)[0], re.M):
-            got = re.sub(r"\A(---\n(?:[^\n]*\n)*?)project: [^\n]*\n", r"\1", got, count=1)
         # SPD-160: a corpus committed before migration 0006_owner_origin says `origin: eric`, which imports and renders as
         # `origin: owner`; the rendered line is read back in the committed spelling
         if rel.parts[0] == "ledger" and re.search(r"^origin: eric$", want.split("\n---\n", 1)[0], re.M):
@@ -185,7 +201,7 @@ class RoundTripMixin:
             pairs.setdefault(r["path"], set()).add(r["section"])
         return pairs
 
-    def test_import_counts_match_the_corpus(self):
+    def check_import_counts_match_the_corpus(self):
         rels = self.sources()
         tickets = [r for r in rels if r.parts[1] == "tickets"]
         members = [r for r in rels if r.parts[1] == "teams"]
@@ -195,7 +211,7 @@ class RoundTripMixin:
         self.assertEqual(self.imported["reports"], len(reports))
         self.assertGreater(self.imported["report_entries"], 0)
 
-    def test_every_source_file_is_generated_and_nothing_else(self):
+    def check_every_source_file_is_generated_and_nothing_else(self):
         # ledger/Projects.md is generated whatever the corpus holds (SPD-014), and today's day file holds the one report
         # entry `spud init` wrote when this home was built (SPW-001) -- asserted below to be that and nothing else, so
         # "nothing else" still means it.
@@ -209,7 +225,7 @@ class RoundTripMixin:
             self.assertFalse((self.out / never).exists(), never)
         self.assertFalse((self.out / "ledger" / "_templates").exists())
 
-    def test_marker_sits_immediately_after_the_frontmatter(self):
+    def check_marker_sits_immediately_after_the_frontmatter(self):
         for rel in self.sources():
             text = (self.out / rel).read_text(encoding="utf-8")
             lines = text.split("\n")
@@ -220,7 +236,7 @@ class RoundTripMixin:
             else:  # reports have no frontmatter; the marker leads
                 self.assertEqual(lines[0], MARKER, rel)
 
-    def test_round_trip_differs_only_in_formatting(self):
+    def check_round_trip_differs_only_in_formatting(self):
         failures = []
         for rel in self.sources():
             want_text = (self.src / rel).read_text(encoding="utf-8")
@@ -245,7 +261,7 @@ class RoundTripMixin:
                 failures.append("".join(diff))
         self.assertFalse(failures, "\n".join(failures))
 
-    def test_frontmatter_keys_and_values_identical(self):
+    def check_frontmatter_keys_and_values_identical(self):
         for rel in self.sources():
             if rel.parts[0] == "reports":
                 continue
@@ -253,7 +269,7 @@ class RoundTripMixin:
             got, _ = split_frontmatter(self.rendered_text(rel))
             self.assertEqual([l.rstrip() for l in want], [l.rstrip() for l in got], rel)
 
-    def test_sections_identical_in_order(self):
+    def check_sections_identical_in_order(self):
         for rel in self.sources():
             if rel.parts[0] == "reports":
                 continue
@@ -268,7 +284,7 @@ class RoundTripMixin:
                 else:
                     self.assertEqual(normalize_markdown(wt), normalize_markdown(gt), "%s section %s" % (rel, h))
 
-    def test_wikilinks_identical(self):
+    def check_wikilinks_identical(self):
         for rel in self.sources():
             want = (self.src / rel).read_text(encoding="utf-8")
             got = (self.out / rel).read_text(encoding="utf-8")
@@ -277,7 +293,7 @@ class RoundTripMixin:
                 want, got = split_team_section(want)[0], split_team_section(got)[0]
             self.assertEqual(WIKILINK.findall(want), WIKILINK.findall(got), rel)
 
-    def test_import_events_point_at_the_source_paths(self):
+    def check_import_events_point_at_the_source_paths(self):
         rows = self.home.rows("SELECT body, data FROM events WHERE kind = 'import'")
         paths = set()
         for r in rows:
@@ -286,7 +302,7 @@ class RoundTripMixin:
         projects = {"ledger/Projects.md"} if (self.src / "ledger" / "Projects.md").is_file() else set()  # SPD-014: imported first, when committed
         self.assertEqual(paths, {str(rel) for rel in self.sources()} | projects)
 
-    def test_second_import_is_refused(self):
+    def check_second_import_is_refused(self):
         proc = self.home.run("import", self.src / "ledger", self.src / "reports", check=False)
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("already", proc.stderr.lower())
@@ -312,10 +328,10 @@ class RoundTripMixin:
             row["layout"] = json.loads(row["layout"]).get("sections") if row["layout"] else None
         return tickets, members, kept
 
-    def test_stored_prose_survives_a_second_round_trip(self):
+    def check_stored_prose_survives_a_second_round_trip(self):
         # SPD-076: no prose the corpus stores breaks the round trip.  The rendered tree imports into a fresh ledger
         # that stores the same prose in every column and kept section, and renders every file again byte for byte.
-        other = Home()
+        other = Home(warm=True)
         self.addCleanup(other.cleanup)
         other.init()
         # SPW-001: the fresh ledger holds its own init entry for today, and a bulk import refuses a day it already has,
@@ -331,7 +347,7 @@ class RoundTripMixin:
         for want, got in zip(self.stored_prose(self.home), self.stored_prose(other)):
             self.assertEqual(got, want)
 
-    def test_no_stored_prose_holds_a_line_naming_a_section_of_its_note(self):
+    def check_no_stored_prose_holds_a_line_naming_a_section_of_its_note(self):
         # SPD-076, the canary: a line `## <name>` for a section its note's kind owns may move text between columns on
         # the next import while every render stays byte for byte.  The CLI refuses one at write time; the corpus holds
         # none, whatever wrote it, in a column or in a kept section.
@@ -348,7 +364,7 @@ class RoundTripMixin:
         self.assertEqual(len(dakota), 1)
         self.assertTrue(dakota[0].strip())
 
-    def test_notes_whose_prose_holds_a_level_2_line_render_as_committed(self):
+    def check_notes_whose_prose_holds_a_level_2_line_render_as_committed(self):
         # SPD-076: a note whose stored prose has a line starting `## ` (at HEAD on 2026-09-15, the briefs of
         # BADS-036's Marfona, Roseval and Sarpo) renders exactly as committed, outside a ticket's generated ## Team
         heading = re.compile(r"^## ", re.M)
@@ -369,19 +385,32 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
 
     REF = PINNED_REF
 
-    def test_prose_sections_are_exactly_the_pinned_ones(self):
+    def test_the_prose_the_rows_cannot_regenerate(self):
+        self.run_checks("prose_sections_are_exactly_the_pinned_ones", "team_line_suffix_became_the_members_summary",
+                        "team_cards_match_the_spec_mocks")
+
+    def test_the_timestamps_are_the_files_own(self):
+        self.run_checks("imported_timestamps_keep_what_the_file_said", "import_invents_no_timestamp")
+
+    def test_the_team_tree_and_its_links(self):
+        self.run_checks("tree_imported_with_lineage_and_parents", "proposal_links_resolve_to_members", "handoffs_parsed")
+
+    def test_the_log_and_the_reports_are_events(self):
+        self.run_checks("log_lines_became_member_log_events", "report_entries_are_events")
+
+    def check_prose_sections_are_exactly_the_pinned_ones(self):
         actual = self.prose_pairs()
         self.assertEqual(self.imported["prose_sections"], sum(len(v) for v in PINNED_PROSE.values()))
         self.assertEqual(actual, PINNED_PROSE)
 
-    def test_imported_timestamps_keep_what_the_file_said(self):
+    def check_imported_timestamps_keep_what_the_file_said(self):
         self.assertEqual(self.home.scalar("SELECT created_at FROM tickets WHERE key = 'SPD-001'"), "2026-09-12")
         self.assertEqual(self.home.scalar("SELECT spawned_at FROM members WHERE name = 'Ozette'"), "2026-09-12T00:00")
         self.assertIsNone(
             self.home.scalar("SELECT finished_at FROM members WHERE name = 'Atlantic' AND ticket_id = (SELECT id FROM tickets WHERE key = 'SPD-007')")
         )
 
-    def test_import_invents_no_timestamp(self):
+    def check_import_invents_no_timestamp(self):
         # the files carry no close time: closed_at stays NULL on done tickets
         self.assertIsNone(self.home.scalar("SELECT closed_at FROM tickets WHERE key = 'SPD-001'"))
         # NOT NULL columns take the source's nearest value and the import event says which
@@ -395,7 +424,7 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
         data = json.loads(self.home.scalar("SELECT e.data FROM events e JOIN members m ON m.id = e.member_id WHERE e.kind = 'import' AND m.name = 'Ozette'"))
         self.assertEqual(data["derived"], {"planned_at": "spawned"})
 
-    def test_team_line_suffix_became_the_members_summary(self):
+    def check_team_line_suffix_became_the_members_summary(self):
         # the one fact SPD-001's markdown-v0 Team prose held beyond the rows (SPD-010)
         self.assertEqual(
             self.home.scalar("SELECT m.summary FROM members m JOIN tickets t ON t.id = m.ticket_id WHERE t.key = 'SPD-001' AND m.name = 'Ozette'"),
@@ -403,7 +432,7 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
         )
         self.assertEqual(self.home.scalar("SELECT count(*) FROM members WHERE summary IS NOT NULL"), 1)
 
-    def test_team_cards_match_the_spec_mocks(self):
+    def check_team_cards_match_the_spec_mocks(self):
         # the spec's raw mocks, byte for byte, rendered from the rows this corpus imports: SPD-001 as it
         # reads after the backfill (the corpus carries Ozette's annotation), SPD-006 as it reads before it
         fixture = json.loads((FIXTURES / "team_card.json").read_text(encoding="utf-8"))
@@ -417,7 +446,7 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
             text = (self.out / "ledger" / "tickets" / ("%s.md" % key)).read_text(encoding="utf-8")
             self.assertEqual("## Team\n" + text.split("\n## Team\n", 1)[1].split("\n\n## Handoffs\n", 1)[0], section, key)
 
-    def test_proposal_links_resolve_to_members(self):
+    def check_proposal_links_resolve_to_members(self):
         row = self.home.rows(
             "SELECT t.key, m.name, t2.key AS arose_on FROM tickets t"
             " JOIN proposals p ON p.id = t.proposal_id"
@@ -426,7 +455,7 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
         )
         self.assertEqual(row, [{"key": "SPD-002", "name": "Rosara", "arose_on": "SPD-001"}])
 
-    def test_tree_imported_with_lineage_and_parents(self):
+    def check_tree_imported_with_lineage_and_parents(self):
         rows = self.home.rows(
             "SELECT m.lineage, m.name, m.depth, p.name AS parent, m.status FROM members m"
             " JOIN tickets t ON t.id = m.ticket_id LEFT JOIN members p ON p.id = m.parent_id"
@@ -444,7 +473,7 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
         self.assertEqual(self.home.scalar("SELECT agent_type FROM members WHERE name = 'Elba'"), "claude-code-guide")
         self.assertEqual(self.home.scalar("SELECT persona FROM members WHERE name = 'Elba'"), "contractor")
 
-    def test_log_lines_became_member_log_events(self):
+    def check_log_lines_became_member_log_events(self):
         text = (self.src / "ledger/teams/SPUD-006/Vitelotte.md").read_text(encoding="utf-8")
         log = text.split("## Log\n", 1)[1].split("\n## ", 1)[0]
         expected = len([l for l in log.split("\n") if re.match(r"^- \d{4}-\d{2}-\d{2}", l)])
@@ -461,7 +490,7 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
         self.assertEqual(first["at"], "2026-09-12T13:20")
         self.assertTrue(first["body"].startswith("Started. Read spud.config.json"))
 
-    def test_handoffs_parsed(self):
+    def check_handoffs_parsed(self):
         rows = self.home.rows(
             "SELECT f.name AS f, t.name AS t, h.what FROM handoffs h"
             " JOIN tickets k ON k.id = h.ticket_id LEFT JOIN members f ON f.id = h.from_member_id"
@@ -469,7 +498,7 @@ class PinnedLedgerTest(RoundTripMixin, unittest.TestCase):
         )
         self.assertEqual([(r["f"], r["t"]) for r in rows], [("Kestrel", "Huckleberry"), ("Kestrel", "Rosara"), ("Huckleberry", "Ozette"), ("Kestrel", None)])
 
-    def test_report_entries_are_events(self):
+    def check_report_entries_are_events(self):
         rows = self.home.rows("SELECT at, body, data FROM events WHERE kind = 'report.entry' AND %s ORDER BY id" % NOT_INIT_ENTRY)
         self.assertEqual(len(rows), 22)
         self.assertEqual(rows[0]["at"], "2026-09-12T12:25")
@@ -483,7 +512,23 @@ class CutoverReadinessTest(RoundTripMixin, unittest.TestCase):
 
     REF = CUTOVER_REF
 
-    def test_prose_sections_are_of_known_kinds(self):
+    def test_the_import_accounts_for_the_corpus(self):
+        self.run_checks("import_counts_match_the_corpus", "import_events_point_at_the_source_paths",
+                        "report_entries_match_the_corpus", "prose_sections_are_of_known_kinds", "second_import_is_refused")
+
+    def test_every_file_renders_as_committed(self):
+        self.run_checks("every_source_file_is_generated_and_nothing_else", "marker_sits_immediately_after_the_frontmatter",
+                        "round_trip_differs_only_in_formatting", "frontmatter_keys_and_values_identical",
+                        "sections_identical_in_order", "wikilinks_identical")
+
+    def test_no_stored_prose_moves_on_the_next_import(self):
+        self.run_checks("no_stored_prose_holds_a_line_naming_a_section_of_its_note",
+                        "notes_whose_prose_holds_a_level_2_line_render_as_committed")
+
+    def test_stored_prose_survives_a_second_round_trip(self):
+        self.run_checks("stored_prose_survives_a_second_round_trip")
+
+    def check_prose_sections_are_of_known_kinds(self):
         unknown = [
             "%s: ## %s" % (path, section)
             for path, sections in sorted(self.prose_pairs().items())
@@ -492,7 +537,7 @@ class CutoverReadinessTest(RoundTripMixin, unittest.TestCase):
         ]
         self.assertEqual(unknown, [], "sections kept as prose of a kind the importer does not know; add the kind to KNOWN_PROSE_KINDS deliberately")
 
-    def test_report_entries_match_the_corpus(self):
+    def check_report_entries_match_the_corpus(self):
         expected = 0
         for path in self.src.glob("reports/*.md"):
             expected += len([l for l in path.read_text(encoding="utf-8").split("\n") if re.match(r"^## \d{2}:\d{2} — ", l)])

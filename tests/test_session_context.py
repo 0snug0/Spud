@@ -101,6 +101,8 @@ class FitBytesTest(unittest.TestCase):
 
 
 class ContextCase(HookCase):
+    in_process = True  # SPD-233: the hooks and the CLI in this process, one home per class (hookcase.ClassHome)
+
     def board_lines(self, *extra):
         """`spud board --brief` as the CLI prints it, one entry per line, without the render watcher's own lines."""
         lines = self.home.run("board", "--brief", *extra).stdout.rstrip("\n").split("\n")

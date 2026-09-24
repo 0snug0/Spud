@@ -91,8 +91,8 @@ class AutoClaimTest(ProjectHookCase):
         p.update({"hook_event_name": "UserPromptSubmit", "prompt": prompt})
         return p
 
-    def submit(self, s, prompt, agent_id=None):
-        return self.hook_in(s, "UserPromptSubmit", self.prompt_p(s, prompt, agent_id))
+    def submit(self, s, prompt, agent_id=None, process=False):
+        return self.hook_in(s, "UserPromptSubmit", self.prompt_p(s, prompt, agent_id), process=process)
 
     def claims(self, session, released=False):
         return self.home.rows("SELECT session_id, cwd FROM sessions WHERE session_id = ? AND released_at IS %s" % ("NOT NULL" if released else "NULL"), session)
@@ -244,9 +244,9 @@ class AutoClaimTest(ProjectHookCase):
         payload = self.prompt_p(self.PLAIN, "Work on BAD-001")
         del payload["prompt"]
         self.assertHookSilent(self.hook_in(self.PLAIN, "UserPromptSubmit", payload))
-        for raw in ("", "not json", "[1]"):
+        for raw in ("", "not json", "[1]"):  # the failure policy: the hook's process exits 0 on input it cannot read
             with self.subTest(raw=raw):
-                r = self.hook_in(self.PLAIN, "UserPromptSubmit", raw)
+                r = self.hook_in(self.PLAIN, "UserPromptSubmit", raw, process=True)
                 self.assertEqual((r.code, r.stdout), (0, ""), r)
         self.assertEqual(self.claims(SESSION_PLAIN), [])
 
@@ -254,7 +254,7 @@ class AutoClaimTest(ProjectHookCase):
         con = self.home.connect()
         con.execute("PRAGMA user_version = 99")
         con.close()
-        r = self.submit(self.PLAIN, "Work on BAD-001")
+        r = self.submit(self.PLAIN, "Work on BAD-001", process=True)  # the failure policy and the spool: the hook's own process
         self.assertEqual((r.code, r.stdout), (0, ""), r)
         self.assertTrue(self.home.spool.exists())
 

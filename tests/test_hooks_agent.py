@@ -21,6 +21,8 @@ TWO_REQUESTS_BREAKDOWN = [{"requests": 2, "input_tokens": 30, "output_tokens": 1
 
 
 class PreAgentTest(HookCase):
+    in_process = True  # SPD-233: the hooks and the CLI in this process, one home per class (hookcase.ClassHome)
+
     def test_allow_matches_the_planned_row_and_records_the_request(self):
         m = self.plan()
         r = self.home.hook("PreToolUse", self.pre_agent(self.description(m)))
@@ -308,9 +310,10 @@ class PreAgentTest(HookCase):
         self.assertFalse(self.home.spool.exists())
 
     def test_malformed_payloads_fail_closed(self):
+        """The failure policy: an enforcing hook's process exits 2 on input it cannot use, so those runs are processes."""
         m = self.plan()
         for raw in ("", "not json", "[1, 2]", '"str"'):
-            r = self.home.hook("PreToolUse", raw)
+            r = self.home.hook_process("PreToolUse", raw)
             self.assertEqual(r.code, 2, (raw, r))
             self.assertIn("spud hook PreToolUse", r.stderr)
             self.assertEqual(r.stdout, "")
@@ -321,7 +324,7 @@ class PreAgentTest(HookCase):
         self.assertIn("tool_use_id", r.reason)
         p = self.pre_agent(self.description(m))
         p["hook_event_name"] = "PostToolUse"
-        r = self.home.hook("PreToolUse", p)
+        r = self.home.hook_process("PreToolUse", p)
         self.assertEqual(r.code, 2, r)
         self.assertIn("hook_event_name", r.stderr)
         p = self.pre_agent(self.description(m))
@@ -340,6 +343,8 @@ class PreAgentTest(HookCase):
 
 
 class PostAgentTest(HookCase):
+    in_process = True  # SPD-233
+
     def test_background_launch_binds_and_activates(self):
         m = self.plan()
         pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), tool_use_id="toolu_bg"))
@@ -420,6 +425,8 @@ class PostAgentTest(HookCase):
 
 
 class SubagentStartTest(HookCase):
+    in_process = True  # SPD-233
+
     def test_context_names_the_agent_id_and_the_as_flag(self):
         r = self.home.hook("SubagentStart", self.sub_start(AGENT_A))
         self.assertEqual(r.code, 0, r)
@@ -449,6 +456,8 @@ class SubagentStartTest(HookCase):
 
 
 class SubagentStopTest(HookCase):
+    in_process = True  # SPD-233
+
     def test_hold_once_then_let_go_after_result(self):
         m = self.plan()
         self.spawn(m, AGENT_A)
@@ -595,6 +604,7 @@ class RunTotalsTest(HookCase):
     reference, Agent tool telemetry), is kept beside the sum; its totalDurationMs and
     totalToolUseCount, whole-run figures, fill duration_ms and tool_uses."""
 
+    in_process = True  # SPD-233
     USAGE_COLUMNS = ("total_tokens", "duration_ms", "tool_uses", "usage_json")
 
     def usage_of(self, m):
@@ -678,12 +688,14 @@ class RequestCountingTest(HookCase):
     groups the entries by request and counts each once, by its last entry; tool uses count distinct
     tool_use blocks; the sum is marked "counting": "request".  Before SPD-023 every entry was added."""
 
-    in_process = True  # SPD-231: no hook runs here; the class's home is built once, in this process
-
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
         cls.spud = load_spud_module()
+
+    def setUp(self):
+        """No home (SPD-233): no hook runs here and nothing reads a ledger, so the transcripts go to a scratch directory of
+        the test's own (HookCase.transcript_root)."""
 
     def sum_of(self, entries):
         return self.spud.transcript_usage(self.write_transcript(AGENT_A, entries))
@@ -767,6 +779,8 @@ class RequestCountingTest(HookCase):
 class LeadHoldTest(HookCase):
     """Law 9 below Spud: a member that returns while a child it spawned has returned
     unrecorded (a final stop, no outcome) is held once, in the same block as the Result hold."""
+
+    in_process = True  # SPD-233
 
     RESULT_ONLY = ("record your Result with `spud --as %s member result '<what you produced, where, what you verified, what is left>'`"
                    " (or Blocked with `spud --as %s member block '<the question and the options>'`) before returning; then return your summary")

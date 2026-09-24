@@ -8,6 +8,7 @@ since SPD-097). Nothing here writes into the repository.
 """
 
 import atexit
+import copy
 import fcntl
 import importlib.machinery
 import importlib.util
@@ -17,6 +18,7 @@ import py_compile
 import shlex
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -100,8 +102,22 @@ def _remove_bytecode():
 if SUITE_PYCACHE is None:  # the serial command: its first test module and this one were cached before the flag above was set
     atexit.register(_remove_bytecode)
 
-SPUD = REPO / "bin" / "spud"  # the launcher: what the hooks, the allow rules and every test run
+LAUNCHER = REPO / "bin" / "spud"  # the launcher: what the hooks, the allow rules and every test run
+SPUD = LAUNCHER  # what a test runs as the launcher: LAUNCHER itself, or, while the dependency table is measured, a shim
 PROGRAM = REPO / "bin" / "spud_ledger.py"  # the program it loads (SPD-016)
+
+# SPD-233: tests/suite_deps.py measures what each test module runs of bin/ and reads of share/ by running it in a process
+# of its own with SPUD_SUITE_TRACE naming a directory.  This process records itself (tests/suite_trace.py), and SPUD names
+# a shim that records each CLI and hook process a test starts before it runs the launcher; nothing changes otherwise.
+TRACE = os.environ.get("SPUD_SUITE_TRACE")
+if TRACE:
+    import suite_trace
+
+    suite_trace.start(REPO, TRACE)
+    _shim = tempfile.mkdtemp(prefix="spud-trace-shim-")
+    atexit.register(shutil.rmtree, _shim, True)
+    SPUD = suite_trace.write_shim(Path(_shim) / "bin" / "spud", REPO, TRACE, LAUNCHER)
+
 # The config every Home starts from: the template the tool ships for a real home, rendered with the suite's own marks
 # (SPW-001).  SPD-097 took Spud's home and its spud.config.json out of the tool repository and the suite kept a copy of
 # that config, tests/fixtures/spud.config.json; SPW-001 deleted the copy, because two files holding one config drift --
@@ -246,26 +262,61 @@ def load_spud_module():
     return module
 
 
+TOOL_DIR = "Spud"  # the tool checkout's directory name, from which `spud init` derives project 1's key (spud) and name (Spud)
+
+
+def build_tool(tool):
+    """A main checkout playing the tool repository (SPD-097), beside a home and never inside it (SPD-233): what a real home's
+    tool is, as far as the CLI reads it.  `bin/spud` is the launcher every hook line, allow rule and skill names -- a copy of
+    this checkout's, never a link, so a test that writes it writes no further; the suite runs this checkout's launcher with
+    SPUD_TOOL_DIR naming this one.  `share/` is what `spud init`, `home sync`, `vault install` and `project install` render
+    from (core/shipped): a link to this checkout's, which `Home.own_share` turns into a copy of the tool's own before a test
+    writes into it.  `.claude/settings.local.json` is ignored as the real repository ignores it, and one commit on main lets
+    a ticket of project 1 bind a linked worktree of it.  The repository is made once per process and copied into place,
+    since a main checkout's .git names no path of its own: three git processes per home otherwise."""
+    if not _TOOL_TEMPLATE:
+        template = Path(tempfile.mkdtemp(prefix="spud-test-tool-")).resolve() / TOOL_DIR
+        atexit.register(shutil.rmtree, template.parent, True)
+        (template / "bin").mkdir(parents=True)
+        shutil.copyfile(LAUNCHER, template / "bin" / "spud")
+        try:
+            os.symlink(REPO / "share", template / "share", target_is_directory=True)
+        except OSError:
+            shutil.copytree(REPO / "share", template / "share")
+        (template / ".gitignore").write_text(".claude/settings.local.json\n", encoding="utf-8")
+        git(template, "init", "-q", "-b", "main")
+        git(template, "add", "-A")
+        git(template, "commit", "-q", "-m", "tool")
+        _TOOL_TEMPLATE.append(template)
+    shutil.copytree(_TOOL_TEMPLATE[0], tool, symlinks=True)
+    return tool
+
+
+_TOOL_TEMPLATE = []  # the tool checkout build_tool copies, made on first use
+
+
 class Home:
-    """A temporary SPUD_HOME with a config file; runs the CLI against it.  `warm`: its .spud/pycache/ starts as the run's warm
-    bytecode cache (SPD-102), unless SPUD_SUITE_PYCACHE is `off`."""
+    """A temporary SPUD_HOME with a config file, and the tool checkout beside it; runs the CLI against the home.
+
+    SPD-233: the shape a real home has had since SPD-097, which is the only one the CLI accepts: a scratch directory, `root`,
+    holding the home (`path`) and, under tool/, the tool (`tool`, TOOL_DIR, build_tool), neither inside the other.  `init` makes
+    project 1 as a person's first `spud init` does, the tool registered by init's own step 3.  `warm`: its .spud/pycache/
+    starts as the run's warm bytecode cache (SPD-102), unless SPUD_SUITE_PYCACHE is `off`.  A SpudTestCase does not build one
+    per test: it restores the process's own (fixture below)."""
 
     def __init__(self, config=None, name=None, warm=False):
         self._tmp = tempfile.TemporaryDirectory(prefix="spud-test-")
-        self.path = Path(self._tmp.name).resolve()
-        if name is not None:  # a home whose own directory has this name (SPD-029: a non-ASCII home, spelled NFC)
-            self.path = self.path / name
-            self.path.mkdir()
+        self.root = Path(self._tmp.name).resolve()
+        # `name`: a home whose own directory has this name (SPD-029: a non-ASCII home, spelled NFC; SPD-226: one shlex quotes),
+        # and a tool checkout of the same name beside it, so the path the hook lines and allow rules spell with the launcher's
+        # is one of that kind too.
+        self.path = self.root / (name if name is not None else "home")
+        self.path.mkdir()
+        (self.root / "tool").mkdir()
+        self.tool = build_tool(self.root / "tool" / (name if name is not None else TOOL_DIR))
         self.config = config if config is not None else real_config()
         with open(self.path / "spud.config.json", "w", encoding="utf-8") as f:
             json.dump(self.config, f, indent=2)
-        # SPW-001: this home plays the tool (SPUD_TOOL_DIR below), and the tool ships share/ -- the config, CLAUDE.md and
-        # the vault scaffolding `spud init` writes through core/shipped.  A symlink, so every home reads the one copy in
-        # the repository and no test can write through it into the checkout (the files init writes are the home's own).
-        try:
-            os.symlink(REPO / "share", self.path / "share", target_is_directory=True)
-        except OSError:
-            shutil.copytree(REPO / "share", self.path / "share")
         if warm and SUITE_PYCACHE != "off":
             seed_pycache(self.path)
         self.env = dict(os.environ)
@@ -304,14 +355,19 @@ class Home:
         # test that wants a download points this at a directory of its own (VaultMixin, tests/test_vault.py).
         self.env["SPUD_VAULT_DOWNLOADS"] = "off"
         # SPD-097: the tool, the checkout whose bin/spud the hook lines, allow rules, LaunchAgents and the /spud skill name
-        # and where the spudagent source is read, is this scratch home unless a test names another.  So the assertions the
-        # suite made before the split keep their `<home>/bin/spud` shape; a test of the split builds a separate tool with
-        # RepoMixin.make_tool() and sets SPUD_TOOL_DIR before `spud init` (init records the tool as project spud's root).
-        self.env["SPUD_TOOL_DIR"] = str(self.path)
+        # and whose share/ every shipped file is read from, is the checkout beside this home (SPD-233), while the program
+        # that runs is this checkout's own bin/spud.
+        self.env["SPUD_TOOL_DIR"] = str(self.tool)
         self.db = self.path / ".spud" / "ledger.db"
 
+    @property
+    def launcher(self):
+        """The tool's own bin/spud: the path the hook lines, the allow rules and `Ctx.launcher` name."""
+        return self.tool / "bin" / "spud"
+
     def cleanup(self):
-        self._tmp.cleanup()
+        if self._tmp is not None:  # a home restored from a Snapshot is the snapshot's to remove, never a test's
+            self._tmp.cleanup()
 
     def run(self, *args, check=True, actor=None, stdin=None, cwd=None):
         """The CLI with this home's env; `cwd` is the directory it runs in (SPD-098: `member new` binds a code ticket to the
@@ -336,12 +392,13 @@ class Home:
             raise AssertionError("not JSON: %r (stderr %r)" % (proc.stdout, proc.stderr)) from e
 
     def init(self, project=True):
-        """`spud init`, and then project 1 unless `project` is false.
+        """`spud init`, registering the tool as project 1 unless `project` is false (`--no-project`, an empty registry).
 
-        SPW-001: init creates no project.  Project 1 is the project spud.config.json names, no longer presumed to be the
-        tool repository, and registering the first one is `spud init`'s own step (phase 3 of the design) or nobody's,
-        since a home may hold none.  Until that step exists the suite seeds the row the dropped `sync_config_rows`
-        INSERT left behind, so every home here keeps the shape it had; a test of the empty registry passes False.
+        SPD-233: project 1 is registered by init's own step 3 (`--project-root`), as a person registering the tool
+        repository registers it: key `spud`, its name the directory's (TOOL_DIR, `Spud`, unless the home is named), the
+        config's two prefixes, and then installed by step 7.  Its sessions are init's default, `claim`, as the live
+        project spud's are: a session launched in the tool is Spud's only once claimed, and a test that wants every
+        session there to be Spud's without one says so (`project edit spud --sessions always`).
 
         `--no-schedule` is not a convenience: since phase 4 `init` installs the two LaunchAgents, and `launchctl`'s
         domain and the two labels are the *machine's*, not this scratch home's -- SPUD_LAUNCH_AGENTS_DIR moves the plist
@@ -351,32 +408,8 @@ class Home:
         the tests that are about the LaunchAgents install them through the fake launchctl (LaunchdMixin,
         `fake_launchctl`).
         """
-        out = self.json("init", "--no-schedule")
-        if project:
-            self.seed_project_one()
-        return out
-
-    def seed_project_one(self):
-        """Project 1 as `spud init` inserted it before SPW-001: key `spud`, the identity's name, rooted at this home's
-        SPUD_TOOL_DIR, the config's two prefixes, `remote` from that checkout's origin when it has one, and every other
-        column the schema's default.  Idempotent, so a second `init()` is still a no-op."""
-        tool = os.path.abspath(os.path.expanduser(self.env["SPUD_TOOL_DIR"]))  # core/homeconf.tool_root reads it the same way
-        remote = None
-        if os.path.lexists(os.path.join(tool, ".git")):
-            proc = subprocess.run(["git", "-C", tool, "remote", "get-url", "origin"], capture_output=True, text=True, env=isolated_git_env())
-            remote = (proc.stdout.strip() or None) if proc.returncode == 0 else None
-        con = self.connect()
-        try:
-            with con:
-                con.execute(
-                    "INSERT INTO projects (id, key, name, root_path, remote, ticket_prefix, team_prefix, created_at)"
-                    " VALUES (1, 'spud', ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                    (self.config.get("identity", {}).get("name", "Spud"), tool, remote,
-                     self.config.get("tickets", {}).get("prefix", "SPD"), self.config.get("teams", {}).get("prefix", "SPUD"),
-                     datetime.now().astimezone().isoformat(timespec="seconds")),
-                )
-        finally:
-            con.close()
+        project = ["--project-root", self.tool, "--project-key", "spud"] if project else ["--no-project"]
+        return self.json("init", "--no-schedule", *project)
 
     def connect(self):
         con = sqlite3.connect(self.db, timeout=5)
@@ -407,21 +440,21 @@ class Home:
         return p
 
     def own_share(self):
-        """This home-as-tool's `share/`, made this home's own to write into.
+        """The tool's `share/`, made the tool's own to write into.
 
-        The share/ a Home gets is a symlink to the repository's, so that no test can write through it into the checkout
-        (__init__ above).  A test that writes a shipped file, edits one or deletes one -- which is most of the tests about
+        The share/ a tool gets is a symlink to this repository's, so that no test can write through it into the checkout
+        (build_tool).  A test that writes a shipped file, edits one or deletes one -- which is most of the tests about
         install, sync and doctor -- would be writing into the checkout's `share/`, so the symlink is replaced by a copy
         the first time this is called."""
-        share = self.path / "share"
+        share = self.tool / "share"
         if share.is_symlink():
             share.unlink()
             shutil.copytree(REPO / "share", share)
         return share
 
     def agent_source(self, text=None):
-        """This home-as-tool's `share/agents/spudagent.md`, the template `project install` renders (SPW-004), in a share/
-        this home owns (`own_share`).  `text` writes it in the same breath."""
+        """The tool's `share/agents/spudagent.md`, the template `project install` renders (SPW-004), in a share/ the tool
+        owns (`own_share`).  `text` writes it in the same breath."""
         source = self.own_share() / "agents" / "spudagent.md"
         if text is not None:
             source.parent.mkdir(parents=True, exist_ok=True)
@@ -429,18 +462,18 @@ class Home:
         return source
 
     def shipped_skill(self, name, text):
-        """This home-as-tool's `share/skills/<name>/SKILL.md` (SPD-157), the one shipped directory whose path in a home is
-        not its path under share/: `spud init` and `spud home sync` write it to `<home>/.claude/skills/<name>/SKILL.md`,
-        where Claude Code reads a skill.  In a share/ this home owns, so no test writes into the checkout."""
+        """The tool's `share/skills/<name>/SKILL.md` (SPD-157), the one shipped directory whose path in a home is not its
+        path under share/: `spud init` and `spud home sync` write it to `<home>/.claude/skills/<name>/SKILL.md`, where
+        Claude Code reads a skill.  In a share/ the tool owns, so no test writes into the checkout."""
         path = self.own_share() / "skills" / name / "SKILL.md"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")
         return path
 
     def shipped(self, rel, text=None):
-        """One shipped file of this home-as-tool's own share/, read or written: `share/<rel>`, the path
-        `core/shipped.read` reads.  Writing makes the share/ this home's own first."""
-        if text is None and (self.path / "share").is_symlink():
+        """One shipped file of the tool's own share/, read or written: `share/<rel>`, the path `core/shipped.read` reads.
+        Writing makes the share/ the tool's own first."""
+        if text is None and (self.tool / "share").is_symlink():
             return (REPO / "share" / rel).read_text(encoding="utf-8")
         path = self.own_share() / rel
         if text is not None:
@@ -626,20 +659,248 @@ class HookResult:
         return "HookResult(code=%r, stdout=%r, stderr=%r)" % (self.code, self.stdout, self.stderr)
 
 
+# -- the per-process fixture (SPD-233) ----------------------------------------------------------------------------------
+#
+# `spud init` is ten steps and a dozen processes, and every SpudTestCase test used to run it for a home of its own.  A home
+# is the same bytes every time for a given config, so a process initialises one per config at a path it keeps for its
+# whole life, takes a Snapshot of it, and each test starts from that snapshot put back at the same path: the absolute paths
+# init writes (the launcher in CLAUDE.md, the hook lines, the agent definitions, project 1's root) name the same files for
+# every test.  The snapshot is the root -- the home and the tool beside it, so a test that writes into project 1's checkout
+# changes nothing the next test reads -- less the launcher's bytecode cache, which no test writes and which stays in place.
+# hookcase.ClassHome is the same Snapshot taken one step later, after a class's build_home.
+
+
+# The program's per-process caches, which a test that calls the program in this process fills (SPD-231: hookcase.run_main;
+# and every test that calls a function of load_spud_module() directly).  A `spud hook` process starts with each empty.
+# (the module, the name) of every per-process cache on the hook path: each is empty when a `spud hook` process starts.
+HOOK_CACHES = (("spudlib.hooks.snapshots", "_TABLES"), ("spudlib.hooks.worktrees", "_WORKTREES"), ("spudlib.hooks.worktrees", "_CASE_CACHE"),
+               ("spudlib.hooks.gitrepos", "_SCOPES_READ"), ("spudlib.hooks.gitrepos", "_PROGRAM_KEYS"))
+# ... and the two that are not a container: git's own command set (None until read) and the glob sampler's lru_cache.
+HOOK_MEMOS = (("spudlib.shell.git_verbs", "_GIT_OWN_COMMANDS"), ("spudlib.shell.globbing", "glob_sample_matches"))
+# The module-level tables a run fills that hold nothing a later run could read differently: a pure function of the text
+# (loop_bindings' basename specs), tables built from constants on first use (downloads' option tables), and the Ctx main
+# sets before every command (actors.ACTIVE_CTX).  hookcase.InProcessParityTest fails on any other table a run changes.
+PURE_TABLES = (("spudlib.shell.loop_bindings", "_BASENAME_SPECS"), ("spudlib.shell.downloads", "_OPTION_TABLES"),
+               ("spudlib.state.actors", "ACTIVE_CTX"))
+
+
+def forget_process_caches():
+    """Empty the per-process caches of every module of the program this process has loaded (HOOK_CACHES, HOOK_MEMOS),
+    importing none.  SPD-233: every test's home is the fixture's, at one path for the whole process, so a cache keyed by a
+    path one test filled answers the next test about a home that is no longer there -- a worktree list, a case fold, a git
+    scope -- unless the restore empties it (Snapshot.restore)."""
+    for module, name in HOOK_CACHES:
+        if module in sys.modules:
+            getattr(sys.modules[module], name).clear()
+    if "spudlib.shell.git_verbs" in sys.modules:
+        sys.modules["spudlib.shell.git_verbs"]._GIT_OWN_COMMANDS = None
+    if "spudlib.shell.globbing" in sys.modules:
+        sys.modules["spudlib.shell.globbing"].glob_sample_matches.cache_clear()
+
+
+def _partly_kept(rel, keep):
+    """Whether the directory `rel` holds a path of `keep` below it, so that it is entered rather than removed or copied."""
+    return any(k.startswith(rel + os.sep) for k in keep)
+
+
+def remove_path(path, opened=()):
+    """Remove a file, a link or a tree, opening on the way a directory a test locked (chmod 000) and did not unlock; a path
+    that still resists once its directory is open raises."""
+    def unlocked(function, p, exc):
+        if p in opened:
+            raise exc
+        for d in (p, os.path.dirname(p)):
+            try:
+                os.chmod(d, 0o700)
+            except OSError:
+                pass
+        remove_path(p, opened + (p,))
+    if os.path.isdir(path) and not os.path.islink(path):
+        shutil.rmtree(path, onexc=unlocked)
+    else:
+        os.unlink(path)
+
+
+def copy_root(root, into, keep=(), rel=""):
+    """A copy of the tree `root` at `into`, less every path of `keep` (relative to root)."""
+    os.makedirs(into, exist_ok=True)
+    for entry in os.scandir(root):
+        name = os.path.join(rel, entry.name)
+        target = os.path.join(into, entry.name)
+        if name in keep:
+            continue
+        if entry.is_dir(follow_symlinks=False) and _partly_kept(name, keep):
+            copy_root(entry.path, target, keep, name)
+        elif entry.is_dir(follow_symlinks=False):
+            shutil.copytree(entry.path, target, symlinks=True)
+        else:
+            shutil.copy2(entry.path, target, follow_symlinks=False)
+
+
+def _kind(entry):
+    return "link" if entry.is_symlink() else "dir" if entry.is_dir(follow_symlinks=False) else "file"
+
+
+def _entries(directory):
+    """{name: its DirEntry} in `directory`, opening it first if a test locked it (chmod 000)."""
+    try:
+        return {e.name: e for e in os.scandir(directory)}
+    except PermissionError:
+        os.chmod(directory, 0o700)
+        return {e.name: e for e in os.scandir(directory)}
+
+
+def stamp_root(root, keep=(), rel=""):
+    """{path: (inode, status-change time)} of every regular file under `root` less the paths of `keep`: what restore_root
+    holds a file to before it leaves one in place."""
+    stamps = {}
+    for entry in _entries(root).values():
+        name = os.path.join(rel, entry.name)
+        if name in keep:
+            continue
+        if entry.is_dir(follow_symlinks=False):
+            stamps.update(stamp_root(entry.path, keep, name))
+        elif not entry.is_symlink():
+            st = entry.stat(follow_symlinks=False)
+            stamps[entry.path] = (st.st_ino, st.st_ctime_ns)
+    return stamps
+
+
+def restore_root(copied, root, keep=(), stamps=None, rel=""):
+    """Put the tree `root` back as copy_root copied it into `copied`: everything else removed, everything copied put back, and
+    every path of `keep` left where it is.  A file is left in place only when its size, mode and modification time are the
+    copy's and its inode and status-change time are the ones `stamps` recorded for it (stamp_root, and this function for
+    every file it copies back); every other file is copied again.  The modification time alone is not enough, since a test
+    can write a file and put its old time back (os.utime, `touch -r`), but nothing a process does to a file -- a write,
+    a chmod, a utime, a link -- leaves its status-change time as it was, and a file removed and made again is another
+    inode.  So only what a test touched is copied again (a restore is most of what a test costs that runs no CLI), and a
+    file no stamp names is copied again once.  `stamps` is updated in place; None is an empty record."""
+    stamps = {} if stamps is None else stamps
+    root, copied = os.fspath(root), os.fspath(copied)
+    here, wanted = _entries(root), _entries(copied)
+    for name, entry in here.items():
+        if os.path.join(rel, name) not in keep and (name not in wanted or _kind(entry) != _kind(wanted[name])):
+            remove_path(entry.path)
+    for name, entry in wanted.items():
+        target = os.path.join(root, name)
+        kind, present = _kind(entry), name in here and _kind(here[name]) == _kind(entry)
+        if kind == "dir":
+            if not present:
+                if _partly_kept(os.path.join(rel, name), keep):
+                    os.makedirs(target)
+                    restore_root(entry.path, target, keep, stamps, os.path.join(rel, name))
+                else:
+                    shutil.copytree(entry.path, target, symlinks=True)
+                    stamps.update(stamp_root(target))
+                continue
+            mode = entry.stat(follow_symlinks=False).st_mode
+            if os.lstat(target).st_mode != mode:
+                os.chmod(target, 0o700)  # enterable while its entries are put back: a test may have locked it
+            restore_root(entry.path, target, keep, stamps, os.path.join(rel, name))
+            if os.lstat(target).st_mode != mode:  # and its own mode last, which removing a locked entry may have changed
+                os.chmod(target, stat.S_IMODE(mode))
+        elif kind == "link":
+            if not present or os.readlink(target) != os.readlink(entry.path):
+                if os.path.lexists(target):
+                    os.unlink(target)
+                os.symlink(os.readlink(entry.path), target)
+        else:
+            if present:
+                have, want = os.lstat(target), entry.stat(follow_symlinks=False)
+                if ((have.st_size, have.st_mtime_ns, have.st_mode) == (want.st_size, want.st_mtime_ns, want.st_mode)
+                        and stamps.get(target) == (have.st_ino, have.st_ctime_ns)):
+                    continue
+                os.unlink(target)  # never written through: a test may have hard-linked it elsewhere
+            shutil.copy2(entry.path, target, follow_symlinks=False)
+            st = os.lstat(target)
+            stamps[target] = (st.st_ino, st.st_ctime_ns)
+
+
+class Snapshot:
+    """A Home's root as it stood when taken -- the home, the tool beside it, and whatever else a test put in the root --
+    with its environment and config, put back at the same path by restore().  The bytecode cache under the home's .spud/
+    is neither copied nor removed."""
+
+    def __init__(self, home):
+        self.home = home
+        self.env = dict(home.env)
+        self.config = copy.deepcopy(home.config)
+        self.keep = (os.path.relpath(home.path / ".spud" / "pycache", home.root),)
+        self._scratch = tempfile.TemporaryDirectory(prefix="spud-test-snapshot-")
+        self.copied = Path(self._scratch.name) / "root"
+        copy_root(home.root, self.copied, self.keep)
+        self.stamps = stamp_root(home.root, self.keep)  # the root's files as copied, which restore holds each to
+
+    def restore(self, cls=None):
+        """The root put back, and a Home of class `cls` (the snapshot's own by default) at its paths, with a copy of the
+        snapshot's environment and config; its cleanup() removes nothing, since the root is the snapshot owner's.  What this
+        process cached about the root is forgotten with it (forget_process_caches)."""
+        restore_root(self.copied, self.home.root, self.keep, self.stamps)
+        forget_process_caches()
+        cls = cls or type(self.home)
+        home = cls.__new__(cls)
+        home.__dict__.update(self.home.__dict__)
+        home._tmp = None
+        home.env = dict(self.env)
+        home.config = copy.deepcopy(self.config)
+        return home
+
+    def cleanup(self):
+        self._scratch.cleanup()
+
+
+_FIXTURES = {}  # (config, home name, project 1): the process's initialised home at its fixed path, as a Snapshot
+
+
+def fixture(config=None, name=None, project=True):
+    """The Snapshot of this process's initialised home for this config, home name and registry, built on first use: `spud
+    init` once per process and per key, never per test.  Removed when the process exits."""
+    config = config if config is not None else real_config()
+    key = (json.dumps(config, sort_keys=True), name, project)
+    if key not in _FIXTURES:
+        home = Home(config=config, name=name, warm=True)
+        try:
+            if TRACE:  # what this init runs is every test's, and the dependency table says so (tests/suite_trace.py)
+                home.env["SPUD_SUITE_TRACE_ROLE"] = "fixture"
+            home.init(project=project)
+            home.env.pop("SPUD_SUITE_TRACE_ROLE", None)
+            snapshot = Snapshot(home)
+        except BaseException:
+            home.cleanup()
+            raise
+        atexit.register(home.cleanup)
+        atexit.register(snapshot.cleanup)
+        _FIXTURES[key] = snapshot
+    return _FIXTURES[key]
+
+
 class SpudTestCase(unittest.TestCase):
-    """A test case with a fresh initialised Home per test, its bytecode cache warm (SPD-102) unless the class sets warm_cache
-    False, as the classes do that assert what the launcher caches or what init or a backup leaves in .spud/.  Its registry
-    holds project 1, `spud`, seeded by Home.init (SPW-001) unless the class sets seed_project False."""
+    """A test case whose every test starts from an initialised Home in today's shape (SPD-233): the process's fixture for the
+    class's config, home name and registry, restored, so no test pays for `spud init` itself.  Its registry holds project
+    1, `spud`, the tool checkout beside the home, registered by init itself, unless the class sets seed_project False.  A
+    class that sets warm_cache False -- the ones that assert what the launcher caches, or what init or a backup leaves in
+    .spud/ -- builds and initialises a home of its own per test with an empty bytecode cache, as every class once did."""
 
     config = None
     home_name = None
     warm_cache = True
-    seed_project = True  # SPW-001: project 1 seeded as init recorded it before phase 2; False for an empty registry
+    seed_project = True  # project 1 registered by init (SPD-233); False for an empty registry
 
     def setUp(self):
-        self.home = Home(config=self.config, name=self.home_name, warm=self.warm_cache)
+        self.home = self.fresh_home()
         self.addCleanup(self.home.cleanup)
-        self.home.init(project=self.seed_project)
+
+    def fresh_home(self, cls=Home):
+        """An initialised home of class `cls` for this test: the fixture restored, or with warm_cache False one of its own."""
+        if self.warm_cache:
+            return fixture(self.config, self.home_name, self.seed_project).restore(cls)
+        home = cls(config=self.config, name=self.home_name, warm=False)
+        try:
+            home.init(project=self.seed_project)
+        except BaseException:
+            home.cleanup()
+            raise
+        return home
 
     # Small builders used across files.
     def new_ticket(self, title="A ticket", **kw):

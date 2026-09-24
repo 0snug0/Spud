@@ -541,7 +541,7 @@ class GlobCommandWordTest(BashHookCase):
             p = home / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("orig\n", encoding="utf-8")
-        (home / "tests" / "tool").symlink_to(home / "bin" / "spud")  # a launcher by another name (SPD-029)
+        (home / "tests" / "tool").symlink_to(self.home.launcher)  # a launcher by another name (SPD-029)
         self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
         self.addCleanup(shutil.rmtree, self.out, True)
 
@@ -630,16 +630,16 @@ class GlobCommandWordTest(BashHookCase):
                 self.refused_for_members(cmd, "Law 7")
 
     def test_a_glob_in_a_spud_invocation(self):
-        home = self.home.path
-        for cmd in ("python3.14 -I -S %s/bin/sp?d ticket new --title x" % home, "%s/bin/sp[u]d --as spud board" % home,
-                    "python3.14 -I -S %s/bin/sp(u|x)d init" % home, "cd %s && python3.14 -I -S bin/sp?d render" % home,
+        home, tool = self.home.path, self.home.tool  # the launcher is the tool's bin/spud, and tests/tool in the home names it
+        for cmd in ("python3.14 -I -S %s/bin/sp?d ticket new --title x" % tool, "%s/bin/sp[u]d --as spud board" % tool,
+                    "python3.14 -I -S %s/bin/sp(u|x)d init" % tool, "cd %s && python3.14 -I -S bin/sp?d render" % tool,
                     "python3.14 -I -S %s/t*s/tool --as spud board" % home, "%s t?cket new --title x" % self.spud_cli,
-                    "%s --a[s] spud board" % self.spud_cli, "%s ticket {new,show} --title x" % self.spud_cli, "python3.1[4] -I -S %s/bin/spud init" % home):
+                    "%s --a[s] spud board" % self.spud_cli, "%s ticket {new,show} --title x" % self.spud_cli, "python3.1[4] -I -S %s/bin/spud init" % tool):
             with self.subTest(cmd):
                 self.refused_for_members(cmd, "Law 6")
-        self.assertRefused("python3.14 -I -S %s/bin/sp?d --as %s member log hi" % (home, AGENT_A), "Law 5", agent_id=None)
-        self.assertRefused("%s/bin/sp?d hook PreToolUse" % home, "hook", agent_id=None)
-        self.assertSilent("python3.14 -I -S %s/bin/sp?d --as %s member log hi" % (home, AGENT_A))  # recognized, never allowed
+        self.assertRefused("python3.14 -I -S %s/bin/sp?d --as %s member log hi" % (tool, AGENT_A), "Law 5", agent_id=None)
+        self.assertRefused("%s/bin/sp?d hook PreToolUse" % tool, "hook", agent_id=None)
+        self.assertSilent("python3.14 -I -S %s/bin/sp?d --as %s member log hi" % (tool, AGENT_A))  # recognized, never allowed
 
     def test_a_tee_or_cd_behind_a_glob(self):
         home, out = self.home.path, self.out

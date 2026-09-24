@@ -10,12 +10,14 @@ before SPD-011 render byte for byte as they are committed.
 """
 
 import io
+import os
 import re
 import subprocess
 import tarfile
 import unittest
 from pathlib import Path
 
+import hookcase
 from helpers import (
     EXIT_ERROR,
     EXIT_LIMIT,
@@ -409,21 +411,35 @@ class ReportDayTest(EntryCase):
         self.assertEqual([p for p in again["written"] if p.startswith("reports/")], [])
 
     def test_a_day_of_report_add_entries_alone_is_byte_identical_to_before(self):
-        for title, next_line in (("First", "a"), ("Second", "b; Eric decides SPD-002"), ("Third", "c")):
-            self.home.json("report", "add", title, "--next", next_line, actor="spud")
+        added = (("First", "a"), ("Second", "b; Eric decides SPD-002"), ("Third", "c"))
+        for title, next_line in added:
+            out = self.home.json("report", "add", title, "--next", next_line, actor="spud")
+            self.assertTrue(out["ok"])
+            self.assertEqual(out["entry"]["title"], title)
+            self.assertRegex(out["entry"]["at"], ISO_WITH_OFFSET)
         events = self.entries()
+        # init's own entry leads the day this home was built (SPW-001), then each report add's, its --next the body
+        self.assertEqual([(e["data"], e["body"]) for e in events[1:]], [({"title": t}, "- Next: " + n) for t, n in added])
         out = self.home.path / "out"
         self.home.json("render", "--out", out)
         for rel, text in rendered_days(events).items():
             self.assertEqual((out / rel).read_bytes(), text.encode("utf-8"), rel)
 
 
-class HelpTest(SpudTestCase):
+class HelpTest(unittest.TestCase):
+    """The help text, as the program's main answers it in this process before any home is read (hookcase.run_main): no
+    home is built for it (SPD-233)."""
+
+    def help(self, *args):
+        code, out, err = hookcase.run_main(dict(os.environ, COLUMNS="80"), [*args, "--help"])
+        self.assertEqual(code, 0, err)
+        return out
+
     def test_the_five_take_next_and_report_add_says_what_it_is_for(self):
         for args in (["ticket", "new"], ["ticket", "move"], ["ticket", "edit"], ["member", "finish"], ["proposal", "decide"]):
-            self.assertIn("--next", self.home.run(*args, "--help").stdout, args)
+            self.assertIn("--next", self.help(*args), args)
         for args in (["report"], ["report", "add"]):
-            text = " ".join(self.home.run(*args, "--help").stdout.split())  # the help is wrapped to the terminal's width
+            text = " ".join(self.help(*args).split())  # the help is wrapped to the terminal's width
             self.assertIn("for what no command records, such as a merge or an install", text, args)
             self.assertIn("write their own entries and take --next", text, args)
 

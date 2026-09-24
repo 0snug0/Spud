@@ -3,9 +3,11 @@ name draw, ownership, the member state machine, card and fleet."""
 
 import copy
 import json
+import os
 import re
 import unittest
 
+import hookcase
 from helpers import (
     EXIT_ERROR,
     EXIT_LIMIT,
@@ -63,8 +65,8 @@ class MemberBasicsTest(SpudTestCase):
 
     def test_deliverables_brief_and_agent_type(self):
         t = self.new_ticket("Deliverables")
-        m = self.new_member(t["key"], brief="Build it.", deliverable=["bin/spud", "tests/**"])
-        self.assertEqual(m["deliverables"], ["bin/spud", "tests/**"])
+        m = self.new_member(t["key"], brief="Build it.", deliverable=["home:bin/spud", "home:tests/**"])
+        self.assertEqual(m["deliverables"], ["home:bin/spud", "home:tests/**"])
         self.assertEqual(m["brief"], "Build it.")
         c = self.new_member(t["key"], persona="contractor", model="sonnet", agent_type="claude-code-guide")
         self.assertEqual((c["persona"], c["agent_type"]), ("contractor", "claude-code-guide"))
@@ -343,9 +345,9 @@ class OwnershipTest(SpudTestCase):
     def test_brief_and_summary_are_the_parents(self):
         proc = self.home.run("member", "edit", self.child["ref"], "--brief", "rewritten", actor=self.child["ref"], check=False)
         self.assertEqual(proc.returncode, EXIT_OWNERSHIP)
-        out = self.home.json("member", "edit", self.child["ref"], "--brief", "rewritten", "--deliverable", "x.md", actor=self.lead["ref"])["member"]
+        out = self.home.json("member", "edit", self.child["ref"], "--brief", "rewritten", "--deliverable", "home:x.md", actor=self.lead["ref"])["member"]
         self.assertEqual(out["brief"], "rewritten")
-        self.assertEqual(out["deliverables"], ["x.md"])
+        self.assertEqual(out["deliverables"], ["home:x.md"])
         proc = self.home.run("member", "edit", self.child["ref"], "--model", "fable", actor=self.lead["ref"], check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)  # tier reason required
         out = self.home.json("member", "edit", self.child["ref"], "--model", "fable", "--tier-reason", "why", actor=self.lead["ref"])["member"]
@@ -499,8 +501,16 @@ class MemberListTest(SpudTestCase):
         proc = self.home.run("member", "list", "--ticket", "SPD-999", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
 
+
+
+class MemberHelpTest(unittest.TestCase):
+    """`member --help`, as the program's main answers it in this process before any home is read (hookcase.run_main):
+    no home, where MemberListTest built one and planned three members for it (SPD-233)."""
+
     def test_member_list_is_documented_in_help(self):
-        text = " ".join(self.home.run("member", "--help").stdout.split())
+        code, out, err = hookcase.run_main(dict(os.environ, COLUMNS="80"), ["member", "--help"])
+        self.assertEqual(code, 0, err)
+        text = " ".join(out.split())
         self.assertIn("list", text)
         self.assertIn("card", text)
         self.assertIn("fleet", text)

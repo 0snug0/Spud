@@ -1,0 +1,11 @@
+usage: git bugreport [(-o | --output-directory) <path>]
+                     [(-s | --suffix) <format> | --no-suffix]
+                     [--diagnose[=<mode>]]
+
+    --[no-]diagnose[=<mode>]
+                          create an additional zip archive of detailed diagnostics (default 'stats')
+    -o, --[no-]output-directory <path>
+                          specify a destination for the bugreport file(s)
+    -s, --[no-]suffix <format>
+                          specify a strftime format suffix for the filename(s)
+

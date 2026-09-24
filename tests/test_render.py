@@ -212,9 +212,9 @@ class RenderConflictTest(SpudTestCase):
         out = self.home.json("render")
         ticket_path = self.home.path / "ledger" / "tickets" / "SPD-001.md"
         member_path = self.home.path / "ledger" / "teams" / "SPUD-001" / "Russet.md"
-        # and the day file of the report entry ticket new wrote (SPD-011), stamped with the ticket's clock read
-        # ledger/Projects.md since SPD-014
-        self.assertEqual(sorted(out["written"]), ["ledger/Projects.md", "ledger/teams/SPUD-001/Russet.md", "ledger/tickets/SPD-001.md", "reports/%s.md" % t["created_at"][:10]])
+        # and the day file of the report entry ticket new wrote (SPD-011), stamped with the ticket's clock read; never
+        # ledger/Projects.md (SPD-014), which init's own render wrote with project 1 in it (SPD-233)
+        self.assertEqual(sorted(out["written"]), ["ledger/teams/SPUD-001/Russet.md", "ledger/tickets/SPD-001.md", "reports/%s.md" % t["created_at"][:10]])
         self.assertTrue(ticket_path.exists() and member_path.exists())
         rows = {r["path"]: r for r in self.home.rows("SELECT path, sha256, through_event_id FROM renders")}
         self.assertEqual(rows["ledger/tickets/SPD-001.md"]["sha256"], hashlib.sha256(ticket_path.read_bytes()).hexdigest())
@@ -224,7 +224,7 @@ class RenderConflictTest(SpudTestCase):
         rendered = self.home.scalar("SELECT count(*) FROM events WHERE kind = 'render'")
         again = self.home.json("render")
         self.assertEqual(again["written"], [])
-        self.assertEqual(sorted(again["unchanged"]), sorted(out["written"]))
+        self.assertEqual(sorted(again["unchanged"]), sorted(out["written"] + out["unchanged"]))
         self.assertEqual(self.home.scalar("SELECT count(*) FROM events WHERE kind = 'render'"), rendered)
 
     def test_a_no_change_render_writes_nothing(self):

@@ -19,7 +19,7 @@ import os
 import unittest
 
 from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE
-from hookcase import AGENT_A, AGENT_B, AGENT_C, COMPLETION, PER_BLOCK_BREAKDOWN, PER_ENTRY_SUM, SESSION, TWO_REQUESTS_SUM, HookCase
+from hookcase import AGENT_A, AGENT_B, AGENT_C, COMPLETION, PER_BLOCK_BREAKDOWN, PER_ENTRY_SUM, SESSION, TWO_REQUESTS_SUM, HookCase, run_main
 
 MAIN = "-Users-Someone-Personal-Spud"  # the main checkout's project directory
 WORKTREE = "-Users-Someone-Personal-Spud--claude-worktrees-spd-001-tokens"  # a worktree session's, emptied when the session left it
@@ -33,6 +33,8 @@ REQUEST_SUM = dict(COUNTED_SUM, breakdown=PER_BLOCK_BREAKDOWN)
 
 
 class MemberResumTest(HookCase):
+    in_process = True  # SPD-233: the hooks and the CLI in this process, one home per class (hookcase.ClassHome)
+
     # -- builders -------------------------------------------------------------------
     def transcript(self, project, agent_id, entries=None, session=SESSION):
         """A subagent transcript's path, <home>/projects/<project>/<session>/subagents/agent-<id>.jsonl;
@@ -281,8 +283,15 @@ class MemberResumTest(HookCase):
                 proc = self.home.run("member", "resum", *args, actor="spud", check=False)
                 self.assertEqual(proc.returncode, EXIT_USAGE, proc)
 
+
+class ResumHelpTest(unittest.TestCase):
+    """`--help` answers before any home is read, so this pin builds none (SPD-233): main in this process, with the test
+    process's own environment, whose home does not exist (helpers' guard block)."""
+
     def test_help_names_the_counting_and_the_exit_codes(self):
-        text = " ".join(self.home.run("member", "resum", "--help").stdout.split())
+        code, out, err = run_main(dict(os.environ, COLUMNS="80"), ["member", "resum", "--help"])
+        self.assertEqual(code, EXIT_OK, err)
+        text = " ".join(out.split())
         for needle in ("once per API request", '"counting": "request"', "--dry-run", "exit codes: 0", "1 ", "3 "):
             self.assertIn(needle, text)
 

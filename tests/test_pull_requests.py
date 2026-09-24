@@ -15,10 +15,11 @@ and reads nothing: no test in this suite can reach the network.
 """
 
 import json
+import os
 import unittest
 
 from helpers import EXIT_CONFLICT, EXIT_ERROR, EXIT_OWNERSHIP, EXIT_TRANSITION, EXIT_USAGE, GhMixin, Home, SpudTestCase
-from hookcase import HookCase
+from hookcase import HookCase, run_main
 
 URL = "https://github.com/0snug0/BadTakes/pull/361"
 URL2 = "https://github.com/0snug0/BadTakes/pull/362"
@@ -398,6 +399,8 @@ class SessionStartTest(GhMixin, HookCase):
     """The nag reaches the model: SessionStart injects `board --brief`, so a merge is in front of the next session that
     starts anywhere, which is exactly what BAD-058 lacked."""
 
+    in_process = True  # SPD-233: the hook and the CLI in this process (hookcase.InProcessHome); gh stays the fake's process
+
     def setUp(self):
         super().setUp()
         self.setup_gh()
@@ -472,19 +475,29 @@ class DoctorTest(GhMixin, PullRequestCase):
 # =============================================================================
 
 
-class HelpTest(PullRequestCase):
+class HelpTextTest(unittest.TestCase):
+    """`--help` answers before any home is read, so these pins build none (SPD-233): main in this process, with the test
+    process's own environment, whose home does not exist (helpers' guard block), and the 80 columns a pipe gets."""
+
+    def help_text(self, *argv):
+        code, out, err = run_main(dict(os.environ, COLUMNS="80"), list(argv) + ["--help"])
+        self.assertEqual(code, 0, err)
+        return out
+
     def test_help_answers_for_the_family_and_each_subcommand(self):
-        top = self.home.run("--help").stdout
+        top = self.help_text()
         self.assertIn("pr ", top)
         self.assertIn("landing pull requests", top)
-        family = self.home.run("pr", "--help").stdout
+        family = self.help_text("pr")
         for word in ("record", "reconcile", "list", "never merges a pull request", "SPUD_GH", "## Landing"):
             self.assertIn(word, family)
         for sub in ("record", "reconcile", "list"):
             with self.subTest(sub):
-                self.assertIn("usage: spud pr " + sub, self.home.run("pr", sub, "--help").stdout)
-        self.assertIn("--no-reconcile", self.home.run("board", "--help").stdout)
+                self.assertIn("usage: spud pr " + sub, self.help_text("pr", sub))
+        self.assertIn("--no-reconcile", self.help_text("board"))
 
+
+class HelpTest(PullRequestCase):
     def test_json_answers_on_each_of_them(self):
         self.assertIn("pull_requests", self.home.json("pr", "list"))
         self.assertIn("pull_request", self.record())

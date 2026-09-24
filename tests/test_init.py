@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import hookcase
 from helpers import (
     CONFIG,
     EXIT_ERROR,
@@ -76,11 +77,12 @@ TABLES = {
     "sessions",  # SPD-014, migration 0002_projects
     "pull_requests",  # SPD-077, migration 0005_pull_requests
 }
-SCHEMA = 9  # user_version since SPD-222
+SCHEMA = load_spud_module().SCHEMA_VERSION  # the user_version this program writes: read from it (SPD-233), never pinned
 
 
 class InitTest(SpudTestCase):
-    warm_cache = False  # SPD-102: init runs as it does in a new home, before any .spud/ exists
+    """What `spud init` leaves in a home: the fixture's own init (SPD-233), restored for each test.  FreshMachineTest runs
+    init on a machine with nothing on it, the cold path."""
 
     def test_init_creates_a_wal_database_under_spud_home(self):
         self.assertTrue(self.home.db.exists())
@@ -123,9 +125,9 @@ class InitTest(SpudTestCase):
         self.assertEqual(triggers, {"events_no_update", "events_no_delete"})
 
     def test_project_1_carries_the_configs_prefixes(self):
-        # SPW-001: the row is the suite's seed (helpers.Home.init), not init's -- init registers no project since phase 2
-        # of docs/design/2026-09-21-spud-init.md, and EmptyRegistryTest below is the home it leaves.  What this asserts is
-        # the meaning of project 1 that survived: whatever project it is, its prefixes are spud.config.json's.
+        # SPD-233: the row init's own step 3 inserts for `--project-root` (helpers.Home.init names the tool beside the
+        # home); EmptyRegistryTest below is the home `--no-project` leaves.  What this asserts is the meaning of project 1:
+        # whatever project it is, its prefixes are spud.config.json's.
         row = self.home.rows("SELECT id, key, ticket_prefix, team_prefix, root_path FROM projects")
         self.assertEqual(
             row,
@@ -135,7 +137,7 @@ class InitTest(SpudTestCase):
                     "key": "spud",
                     "ticket_prefix": "SPD",
                     "team_prefix": "SPUD",
-                    "root_path": str(self.home.path),
+                    "root_path": str(self.home.tool),
                 }
             ],
         )
@@ -221,10 +223,6 @@ class InitTest(SpudTestCase):
         self.assertIn("SPD-999", out["error"])
         self.assertIn("SPD-999", proc.stderr)
 
-    def test_usage_error_exit_code(self):
-        proc = self.home.run("no-such-command", check=False)
-        self.assertEqual(proc.returncode, EXIT_USAGE)
-
     def test_no_bytecode_is_written_under_bin_or_tests(self):
         # Loading bin/spud as a module and running the CLI must add no .pyc under
         # bin/ (a stray `py_compile` by hand may have left one before; that is not
@@ -239,7 +237,7 @@ class InitTest(SpudTestCase):
         self.assertEqual(after - before, set())
 
     def test_init_leaves_the_scaffolding_the_directories_and_the_pointer(self):
-        """SPW-001 steps 4 and 5, as every scratch home now gets them (this class runs init cold, warm_cache False)."""
+        """SPW-001 steps 4 and 5, as every scratch home gets them."""
         for rel in TOOL_OWNED:
             path = self.home.path / rel
             self.assertTrue(path.is_file(), rel)
@@ -252,8 +250,22 @@ class InitTest(SpudTestCase):
         self.assertIn("name: Spud", spud_md)
         self.assertIn("model: %s" % real_config()["identity"]["model"], spud_md)
 
+
+class CommandLineTest(unittest.TestCase):
+    """What the program's main answers before it reads any home -- its help, and a command it does not know -- run in this
+    process (hookcase.run_main) with the test process's environment, whose SPUD_HOME names a home that cannot exist
+    (helpers' guard): no home is built for them (SPD-233), where InitTest built and initialised one cold for each."""
+
+    def main(self, *argv):
+        return hookcase.run_main(dict(os.environ, COLUMNS="80"), list(argv))
+
+    def test_usage_error_exit_code(self):
+        code, _out, err = self.main("no-such-command")
+        self.assertEqual(code, EXIT_USAGE, err)
+
     def test_help_says_the_hooks_bind_and_check_as(self):
-        text = self.home.run("--help").stdout
+        code, text, err = self.main("--help")
+        self.assertEqual(code, 0, err)
         self.assertIn("--as", text)
         self.assertIn("bound to its", text)
         self.assertIn("spud hook", text)
@@ -1216,9 +1228,12 @@ class WithoutDatabaseTest(unittest.TestCase):
         entries = sorted(p.name for p in (self.home.path / ".spud").iterdir())
         self.assertIn("ledger.db", entries)
         # SPW-001 phase 4: init renders the home it builds, so its own pass leaves the render lock it took and the
-        # watermark every pass writes (SPD-117).  Nothing else: no backup, no watch lock, no log directory.
+        # watermark every pass writes (SPD-117); and project 1 is a git checkout (SPD-233), so the caches the hook path
+        # keeps of a checkout's worktrees and git config scopes, which doctor's reading of it fills.  Nothing else: no
+        # backup, no watch lock, no log directory.
         for name in entries:
-            self.assertTrue(name.startswith("ledger.db") or name in ("backups", "render.lock", "rendered.json"), name)
+            self.assertTrue(name.startswith("ledger.db") or name in ("backups", "render.lock", "rendered.json", "worktrees",
+                                                                     "git-config-scopes.json"), name)
 
 
 if __name__ == "__main__":

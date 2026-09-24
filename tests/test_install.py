@@ -22,13 +22,16 @@ EVENTS = {"PreToolUse": 1, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop":
 
 
 class InstallFixture(RepoMixin):
-    """A repository shaped like BadTakes registered as project badtakes beside the scratch home, and what install writes."""
+    """A repository shaped like BadTakes registered as project badtakes beside the scratch home, and what install writes.
+    Project 1, the tool, is uninstalled first (SPD-233): init installs it, and what these tests read is the first install
+    of all -- the user-scope files it creates, the restart it asks for."""
 
     def setUp(self):
         super().setUp()
-        # SPW-004: the source is share/agents/spudagent.md under the tool, which here is the home itself; Home.agent_source
-        # gives this home its own share/ first, so writing the fixture cannot reach the repository's copy through helpers'
-        # symlink.  Every test below that edits or deletes the source uses this path.
+        self.cli("project", "uninstall", "spud", actor="spud")
+        # SPW-004: the source is share/agents/spudagent.md under the tool beside the home; Home.agent_source gives the tool
+        # its own share/ first, so writing the fixture cannot reach the repository's copy through helpers' symlink.  Every
+        # test below that edits or deletes the source uses this path.
         self.source = self.home.agent_source(AGENT)
         self.other = self.make_repo("badtakes-")
         (self.other / ".claude").mkdir()
@@ -41,10 +44,14 @@ class InstallFixture(RepoMixin):
     def install(self, key="badtakes", check=True):
         return self.cli("project", "install", key, actor="spud", check=check)
 
+    def installed_events(self, key="badtakes"):
+        """project.installed events for one project (init writes project 1's)."""
+        return [e for e in self.home.json("events", "--kind", "project.installed")["events"] if e["data"]["project"] == key]
+
     def rendered(self, text=AGENT, tool=None):
         """What install writes from that source text: SPW-002's placeholder filled with the launcher of the tool checkout
         this run names (SPUD_TOOL_DIR is the scratch home itself unless a test moves it)."""
-        return text.replace("{{launcher}}", str((tool or self.home.path) / "bin" / "spud"))
+        return text.replace("{{launcher}}", str((tool or self.home.tool) / "bin" / "spud"))
 
     def variant(self, effort, text=AGENT):
         """What install writes as `spudagent-<effort>.md` from that source text (SPD-222), spelled out rather than rendered
@@ -71,15 +78,15 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertNotIn("env", data)
         self.assertNotIn("deny", data["permissions"])
         self.assertEqual(data["permissions"]["additionalDirectories"], [str(self.home.path)])
-        home = str(self.home.path)
-        self.assertEqual(data["permissions"]["allow"], ["Bash(node -e ' *)", "Bash(python3.14 -I -S %s/bin/spud *)" % home, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, home)])
+        home, launcher = str(self.home.path), str(self.home.launcher)
+        self.assertEqual(data["permissions"]["allow"], ["Bash(node -e ' *)", "Bash(python3.14 -I -S %s *)" % launcher, "Bash(%s -I -S %s *)" % (sys.executable, launcher)])
         commands = [(event, h["command"]) for event, groups in data["hooks"].items() for g in groups for h in g["hooks"]]
         self.assertEqual(len(commands), 7)
         self.assertEqual({e: sum(1 for x, _ in commands if x == e) for e in EVENTS}, EVENTS)
         for event, command in commands:
-            self.assertEqual(command, "SPUD_HOME=%s %s -I -S %s/bin/spud hook %s --project badtakes" % (home, sys.executable, home, event))
+            self.assertEqual(command, "SPUD_HOME=%s %s -I -S %s hook %s --project badtakes" % (home, sys.executable, launcher, event))
         self.assertEqual(git(self.other, "status", "--porcelain"), "")
-        self.assertEqual(len(self.home.json("events", "--kind", "project.installed")["events"]), 1)
+        self.assertEqual(len(self.installed_events()), 1)
         second = self.make_repo("second-")
         self.add_project(second, "second", "SEC", "SECS")
         text = self.install("second").stdout
@@ -107,7 +114,7 @@ class InstallTest(InstallFixture, SpudTestCase):
         skill = (self.user / "skills" / "spud" / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(skill.startswith("---\nname: spud\n"), skill)
         self.assertIn("\ndisable-model-invocation: true\n", skill)
-        self.assertIn("python3.14 -I -S %s/bin/spud --as spud session claim" % self.home.path, skill)
+        self.assertIn("python3.14 -I -S %s --as spud session claim" % self.home.launcher, skill)
         self.assertIn("%s/CLAUDE.md" % self.home.path, skill)
         self.assertIn("set the session title to `<KEY> - <what this session does>`", skill)  # SPD-057
         self.assertEqual(self.pointer.read_text(encoding="utf-8"), "%s\n" % self.home.path)
@@ -119,7 +126,7 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertEqual(out["written"], [])
         self.assertIn("unchanged, nothing written", self.cli("project", "install", "badtakes", actor="spud").stdout)
         self.assertEqual({p: p.stat().st_mtime_ns for p in stamps}, stamps)
-        self.assertEqual(len(self.home.json("events", "--kind", "project.installed")["events"]), 1)
+        self.assertEqual(len(self.installed_events()), 1)
 
     def test_uninstall_gives_back_the_original_bytes(self):
         before_exclude = self.exclude()
@@ -171,10 +178,7 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertEqual(len(out["warnings"]), 1)
         self.assertIn("left in place", out["warnings"][0])
 
-    def test_install_refuses_the_home_an_archived_project_and_a_tracked_settings_file(self):
-        proc = self.install("spud", check=False)
-        self.assertEqual(proc.returncode, EXIT_ERROR)
-        self.assertIn("settings sync", proc.stderr)
+    def test_install_refuses_a_tracked_settings_file_and_a_missing_source(self):
         tracked = self.make_repo("tracked-")
         (tracked / ".claude").mkdir()
         (tracked / ".claude" / "settings.local.json").write_text("{}\n", encoding="utf-8")
@@ -201,10 +205,8 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.install()
         self.assertEqual(self.cli_json("doctor")["problems"], [])
         projects = self.cli_json("doctor")["projects"]
-        # SPD-097: doctor covers every project, project spud included; here its root is still the home (before `home move`).
         self.assertEqual([(p["key"], p["checks"]) for p in projects],
-                         [("spud", ["root is the home (before home move)", "not installed"]),
-                          ("badtakes", ["main checkout", "hooks", "ignored", "agent", "skill"])])
+                         [("spud", ["main checkout", "not installed"]), ("badtakes", ["main checkout", "hooks", "ignored", "agent", "skill"])])
         self.source.write_text(AGENT + "A new rule.\n", encoding="utf-8")
         proc = self.cli("--json", "doctor", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
@@ -267,7 +269,7 @@ class InstallTest(InstallFixture, SpudTestCase):
         and the source keeps its placeholder -- no machine's absolute path is shipped."""
         self.install()
         agent = (self.user / "agents" / "spudagent.md").read_text(encoding="utf-8")
-        self.assertIn("python3.14 -I -S %s/bin/spud" % self.home.path, agent)
+        self.assertIn("python3.14 -I -S %s" % self.home.launcher, agent)
         self.assertNotIn("{{launcher}}", agent)
         self.assertEqual(agent, self.rendered())
         self.assertIn("{{launcher}}", self.source.read_text(encoding="utf-8"))
@@ -310,6 +312,9 @@ class InstallTest(InstallFixture, SpudTestCase):
         own = self.other / ".claude" / "agents" / "spudagent.md"
         own.parent.mkdir(parents=True, exist_ok=True)
         own.write_text(AGENT, encoding="utf-8")
+        uninstalled = self.home.tool / ".claude" / "agents" / "spudagent.md"  # project spud's, uninstalled by InstallFixture
+        uninstalled.parent.mkdir(parents=True, exist_ok=True)
+        uninstalled.write_text(AGENT, encoding="utf-8")
         out = self.cli_json("doctor")
         self.assertEqual(out["problems"], [])
         self.assertEqual(self.cli("doctor").returncode, EXIT_OK)
@@ -319,9 +324,10 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertIn("reads it and not %s" % (self.user / "agents" / "spudagent.md"), note)
         self.assertIn("prefers a project-scope agent definition", note)
         self.assertIn("note        %s" % note, self.cli("doctor").stdout)
-        # Read for installed projects only: project spud is not installed here (its root is the home), and the home's own
-        # .claude/agents/ is Spud's hand-written set, not a project's shadow.
+        # Read for installed projects only: project spud is not installed here, so the definition in its checkout shadows
+        # no copy this home installed, and doctor names it nowhere.
         self.assertIsNone(next(p for p in out["projects"] if p["key"] == "spud")["project_scope_agent"])
+        self.assertEqual([n for n in out["notes"] if str(uninstalled) in n], [])
         own.unlink()
         self.assertEqual([n for n in self.cli_json("doctor")["notes"] if "project-scope" in n], [])
 
@@ -345,22 +351,24 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertIn("python3.14 -I -S %s/bin/spud" % moved, agent.read_text(encoding="utf-8"))
         self.assertEqual(self.cli("doctor", env=env).returncode, EXIT_OK)
 
-    def test_sync_writes_the_prompt_hook_into_an_installation_made_before_it(self):
-        """SPD-057: an installation from before the UserPromptSubmit hook lacks its line; doctor names the gap and `project sync`
-        writes the line with the project's key, keeping every other entry."""
+    def test_sync_writes_the_line_an_installation_lacks_and_doctor_names_the_gap(self):
+        """An installation one event short -- a line removed by hand, or an install from before an event joined the table,
+        as SPD-057's UserPromptSubmit once was: doctor names the gap and `project sync` writes the line with the project's
+        key and the event's matcher, keeping every other entry.  SPD-233: the prompt hook's own upgrade retired once every
+        install on this machine carried it; the gap and its repair are any event's."""
         self.install()
         data = self.settings()
-        del data["hooks"]["UserPromptSubmit"]
+        del data["hooks"]["SessionStart"]
         self.local.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
         proc = self.cli("--json", "doctor", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
-        self.assertIn("lacks this home's ledger hooks", proc.stdout)
+        self.assertIn("%s lacks this home's ledger hooks; run `spud --as spud project sync badtakes`" % self.local, proc.stdout)
         out = self.cli_json("project", "sync", "badtakes", actor="spud")
         self.assertEqual(out["projects"][0]["written"], [str(self.local)])
         data = self.settings()
-        self.assertEqual([h["command"] for g in data["hooks"]["UserPromptSubmit"] for h in g["hooks"]],
-                         ["SPUD_HOME=%s %s -I -S %s/bin/spud hook UserPromptSubmit --project badtakes" % (self.home.path, sys.executable, self.home.path)])
-        self.assertNotIn("matcher", data["hooks"]["UserPromptSubmit"][0])
+        self.assertEqual([h["command"] for g in data["hooks"]["SessionStart"] for h in g["hooks"]],
+                         ["SPUD_HOME=%s %s -I -S %s hook SessionStart --project badtakes" % (self.home.path, sys.executable, self.home.launcher)])
+        self.assertEqual(data["hooks"]["SessionStart"][0]["matcher"], "startup|resume|clear|compact")
         self.assertEqual(data["outputStyle"], "Concise")
         self.assertEqual(self.cli("doctor").returncode, EXIT_OK)
 
@@ -430,7 +438,7 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn("is not a base spudagent definition the effort variants can be rendered from: its frontmatter sets an effort",
                       proc.stderr)
-        self.assertFalse((self.user / "agents").exists())
+        self.assertEqual(list((self.user / "agents").glob("*")), [])  # nothing written (uninstalling project 1 left the directory)
         self.assertIsNone(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))
         self.source.write_text("You are a spudagent with no frontmatter.\n", encoding="utf-8")
         self.assertIn("it has no --- frontmatter block", self.install(check=False).stderr)
@@ -467,7 +475,7 @@ class QuotedPathInstallTest(InstallFixture, SpudTestCase):
 
     def assert_one_line_per_event(self):
         spud = load_spud_module()
-        ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+        ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.tool)
         commands = {}
         for event, groups in self.settings()["hooks"].items():
             for g in groups:
@@ -477,7 +485,7 @@ class QuotedPathInstallTest(InstallFixture, SpudTestCase):
 
     def test_a_second_install_or_sync_writes_nothing_and_leaves_one_line_per_event(self):
         self.install()
-        self.assertTrue(self.settings()["hooks"]["Stop"][0]["hooks"][0]["command"].endswith("'%s/bin/spud' hook Stop --project badtakes" % self.home.path))
+        self.assertTrue(self.settings()["hooks"]["Stop"][0]["hooks"][0]["command"].endswith("'%s' hook Stop --project badtakes" % self.home.launcher))
         self.assert_one_line_per_event()
         self.assertEqual(self.cli_json("project", "install", "badtakes", actor="spud")["written"], [])
         self.assertEqual(self.cli_json("project", "sync", "badtakes", actor="spud")["projects"][0]["written"], [])

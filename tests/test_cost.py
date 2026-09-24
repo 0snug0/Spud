@@ -8,8 +8,9 @@ A request billed per attempt (a server-side fallback, a compaction) is summed fr
 billed in the group of the model that ran it (SPD-220).  Cost is the API list price in USD, computed when the card
 and the notes render, from that breakdown and the dated price table spud.config.json gives (`pricing`); it is
 never stored, so a price change only re-renders.  tests/fixtures/pricing.json is that table as read from
-https://platform.claude.com/docs/en/about-claude/pricing on 2026-09-13.  Every case runs in a scratch SPUD_HOME
-over hand-built transcripts in the shape of the live ones (the usage keys a read-only survey of them found)."""
+https://platform.claude.com/docs/en/about-claude/pricing on 2026-09-13.  Every case that reads a ledger runs in a scratch
+SPUD_HOME, the rest in none, over hand-built transcripts in the shape of the live ones (the usage keys a read-only survey
+of them found)."""
 
 import copy
 import json
@@ -234,10 +235,18 @@ def flatten(nodes):
 # =============================================================================
 
 
-class BreakdownTest(HookCase):
+class TranscriptCase(HookCase):
+    """HookCase's transcript builders over no home (SPD-233): transcript_usage and run_cost read a file and a table, never a
+    ledger, so setUp builds nothing and the transcripts go to a scratch directory of the test's own."""
+
+    def setUp(self):
+        pass
+
     def sum_of(self, entries):
         return spud.transcript_usage(self.write_transcript(AGENT_A, entries))
 
+
+class BreakdownTest(TranscriptCase):
     def test_two_models_ttl_writes_and_server_tools_sum_into_the_breakdown(self):  # proof 1
         got = self.sum_of(two_models())
         self.assertEqual(got["usage_json"]["breakdown"], TWO_MODELS_BREAKDOWN)
@@ -246,18 +255,6 @@ class BreakdownTest(HookCase):
                          {"source": "transcript", "counting": "request", "messages": 3, "usage": TWO_MODELS_USAGE})
         self.assertEqual((got["total_tokens"], got["duration_ms"], got["tool_uses"]), (3_553_500, 10_000, 2))
         self.assertEqual(spud.token_counts(json.dumps(got["usage_json"])), {"out": 150_000, "in": 403_500, "cached": 3_000_000})
-
-    def test_a_stop_records_the_breakdown(self):  # proof 1, through the hooks
-        m = self.plan(persona="engineer", model="opus")
-        self.spawn(m, AGENT_A)
-        self.home.json("member", "result", "Built it.", actor=AGENT_A)
-        path = self.write_transcript(AGENT_A, two_models())
-        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, transcript=str(path)))
-        self.assertEqual((r.code, r.stdout), (0, ""), r)
-        row = self.home.rows("SELECT total_tokens, usage_json FROM members WHERE id = ?", m["id"])[0]
-        self.assertEqual(row["total_tokens"], 3_553_500)
-        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "counting": "request", "messages": 3,
-                                                          "usage": TWO_MODELS_USAGE, "breakdown": TWO_MODELS_BREAKDOWN})
 
     def test_what_makes_a_bucket(self):
         """One bucket per model, speed, service tier and inference geography as the transcript writes them, a key left
@@ -413,15 +410,28 @@ class BreakdownTest(HookCase):
         self.assertFalse(any({"iterations", "unpriced_iterations"} & set(b) for b in got["usage_json"]["breakdown"]))
 
 
+class BreakdownStopTest(HookCase):
+    in_process = True  # SPD-233: the hooks and the CLI in this process (hookcase.InProcessHome)
+
+    def test_a_stop_records_the_breakdown(self):  # proof 1, through the hooks
+        m = self.plan(persona="engineer", model="opus")
+        self.spawn(m, AGENT_A)
+        self.home.json("member", "result", "Built it.", actor=AGENT_A)
+        path = self.write_transcript(AGENT_A, two_models())
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, transcript=str(path)))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        row = self.home.rows("SELECT total_tokens, usage_json FROM members WHERE id = ?", m["id"])[0]
+        self.assertEqual(row["total_tokens"], 3_553_500)
+        self.assertEqual(json.loads(row["usage_json"]), {"source": "transcript", "counting": "request", "messages": 3,
+                                                          "usage": TWO_MODELS_USAGE, "breakdown": TWO_MODELS_BREAKDOWN})
+
+
 # =============================================================================
 # A request billed per attempt, priced (SPD-220)
 # =============================================================================
 
 
-class PerAttemptCostTest(HookCase):
-    def sum_of(self, entries):
-        return spud.transcript_usage(self.write_transcript(AGENT_A, entries))
-
+class PerAttemptCostTest(TranscriptCase):
     def test_a_fallback_is_priced_across_two_models(self):  # SPD-220
         """Tim's request: each attempt it billed at the rates of the model that ran it, the declined attempt that produced
         output included, as the fallback docs bill it; stored before SPD-220 it was kept whole and left unpriced."""
@@ -550,7 +560,9 @@ class CostTest(unittest.TestCase):
         self.assertEqual([(spud.money(f), spud.cost_number(f)) for f, _, _ in vectors], [(m, n) for _, m, n in vectors])
 
 
-class PriceTableTest(SpudTestCase):
+class PriceTableTest(unittest.TestCase):
+    """price_table and config_problems read a config, never a ledger (SPD-233: no home)."""
+
     def test_the_fixture_table_has_no_problem(self):
         found, problems = spud.price_table({"pricing": copy.deepcopy(PRICING)})
         self.assertEqual(problems, [])
@@ -591,6 +603,8 @@ class PriceTableTest(SpudTestCase):
                 else:
                     self.assertEqual(spud.run_cost(check[0], found), check[1])
 
+
+class PriceTableDoctorTest(SpudTestCase):
     def test_doctor_reports_the_table_and_flags_a_broken_one(self):
         self.home.write_config(config_with(PRICING))
         out = self.home.json("doctor")
@@ -616,6 +630,7 @@ class PricedCase(HookCase):
     """A scratch home whose config holds the fixture's price table, and members run through the hooks."""
 
     config = config_with(PRICING)
+    in_process = True  # SPD-233: the hooks and the CLI in this process, one home per class (hookcase.ClassHome)
 
     def run_member(self, agent_id, entries, name, persona="engineer", model="opus"):
         """A member spawned in the background, its Result recorded, and its SubagentStop fired over these entries."""

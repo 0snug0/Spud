@@ -8,16 +8,18 @@
     "split tests/test_hooks.py into), expanded against the tree the run covers.  With `importers`, the rule also runs",
     "the changed file's own module when it is a test module, and every test module that imports it, directly or through",
     "another, read from the tree's import statements.",
-    "Until the fixture ticket (SPD-233) lands, bin/ and share/ have two safe rules, shell and probes, from the audit of",
-    "2026-09-23; everything else under bin/ or share/ runs the full suite.  Widen this map by that ticket's dependency",
-    "table, never by guess."
+    "A rule with a `table` chooses from the dependency table instead (SPD-233): tests/suite_deps.json records, for each test",
+    "module, the files under bin/ whose functions it ran and the files under bin/ and share/ it read, measured by",
+    "tests/suite_deps.py, and what the per-process fixture's `spud init` ran or read.  A changed file the table never saw",
+    "runs the full suite; so does one whose reach -- the file and every module of bin/spudlib that reads its data, a",
+    "table, a constant or a class, directly or through another, read from the tree the run covers -- meets the fixture's;",
+    "else every test module whose entry meets the reach runs, and every test module the table does not name.  The table",
+    "records the digest of the bin/ and share/ it was measured on, and a run on a tree whose bin/ and share/ differ warns",
+    "that the selection may be short.  Widen this map by measuring again (tests/suite_deps.py), never by guess."
   ],
   "full": [
     "bin/spud",
     "bin/spud_ledger.py",
-    "bin/spudlib/core/*",
-    "bin/spudlib/state/*",
-    "bin/spudlib/cli/*",
     "tests/helpers.py",
     "tests/suite.py",
     "tests/suite_*.json",
@@ -26,10 +28,9 @@
   ],
   "rules": [
     {
-      "name": "shell",
-      "paths": ["bin/spudlib/shell/*"],
-      "modules": ["test_hooks*", "test_hookcase", "test_ticket_worktree", "test_home", "test_launcher", "test_package",
-                  "test_cost", "test_team_card", "test_resum"]
+      "name": "deps",
+      "paths": ["bin/spudlib/*", "share/*"],
+      "table": "tests/suite_deps.json"
     },
     {
       "name": "probes",
@@ -41,6 +42,11 @@
       "paths": ["tests/hookcase.py"],
       "modules": ["test_hooks*", "test_hookcase"],
       "importers": true
+    },
+    {
+      "name": "tracing",
+      "paths": ["tests/suite_trace.py", "tests/suite_deps.py"],
+      "modules": ["test_suite_deps"]
     },
     {
       "name": "tests",

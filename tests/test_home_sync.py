@@ -14,10 +14,9 @@ Three properties every case leans on.
 - **The home's own files are never touched.**  The ledger's rendered notes, the reports, docs/, the database and
   spud.config.json belong to the home; a sync that moved one of them would be a sync that ate somebody's work.
 
-`tests/helpers.Home.init` registers no project and seeds project 1 afterwards, so a fresh home here holds the prose of
-a home with no project while its registry has one: `settle()` runs the one sync that reconciles them, and every case
-that wants a settled home calls it first.  That is not a fixture convenience -- it is the shape of the first real sync
-of a home that has been hand-kept, which is what this command is for.
+`tests/helpers.Home.init` registers project 1 through init's own step 3 (SPD-233), so a fresh home here already holds
+what the tool ships for it and `settle()`, the sync every case that wants a settled home calls first, finds nothing to
+do; NoProjectTest is the first real sync that reconciles a home whose registry changed after init.
 """
 
 import json
@@ -26,7 +25,7 @@ import shutil
 import unittest
 from unittest import mock
 
-from helpers import EXIT_ERROR, EXIT_OWNERSHIP, Home, SpudTestCase, load_spud_module
+from helpers import EXIT_ERROR, EXIT_OWNERSHIP, Home, RepoMixin, SpudTestCase, load_spud_module
 
 spud = load_spud_module()
 
@@ -65,11 +64,11 @@ class HomeSyncCase(SpudTestCase):
         """{path in the home: its bytes} for every file in it, and what "nothing was written" is asserted against.
 
         `.spud/` is left out because the CLI opens the ledger before it renders anything and a read moves the WAL; the
-        copies a sync keeps live under it, and `stamps()` is what watches those.  `share/` is left out because it is
-        this home-as-tool's shipped files, which a test edits on purpose and a sync only ever reads."""
+        copies a sync keeps live under it, and `stamps()` is what watches those.  The shipped files a test edits on
+        purpose, and a sync only ever reads, are the tool's share/, beside the home."""
         out = {}
         for root, dirs, files in os.walk(self.home.path):
-            dirs[:] = [d for d in dirs if os.path.join(root, d) not in (str(self.home.path / ".spud"), str(self.home.path / "share"))]
+            dirs[:] = [d for d in dirs if os.path.join(root, d) != str(self.home.path / ".spud")]
             for name in files:
                 path = os.path.join(root, name)
                 with open(path, "rb") as f:
@@ -77,7 +76,7 @@ class HomeSyncCase(SpudTestCase):
         return out
 
     def ctx(self):
-        return spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+        return spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.tool)
 
     def owned(self):
         """Every tool-owned file's path in the home, as `commands/homesync.tool_owned` gives it."""
@@ -87,11 +86,12 @@ class HomeSyncCase(SpudTestCase):
 class SyncTest(HomeSyncCase):
     """What a sync writes, what it leaves alone, and the copy it keeps of everything it replaces."""
 
-    def test_a_first_sync_reconciles_the_home_and_a_second_changes_nothing(self):
+    def test_a_sync_of_a_home_init_just_built_changes_nothing_and_neither_does_a_second(self):
+        """Init registered project 1 before it wrote the home (SPD-233), so its lines are there already and nothing is
+        settled; NoProjectTest brings them back for a project registered after init."""
         first = self.settle()
         self.assertFalse(first["check"])
-        # The home was initialised with no project and has one now, so the lines about project 1 come back.
-        self.assertIn("CLAUDE.md", [r["path"] for r in first["replaced"]])
+        self.assertEqual((first["written"], first["replaced"]), ([], []))
         self.assertNotIn("{{project_key}}", self.read("CLAUDE.md"))
         second = self.sync()
         self.assertEqual((second["written"], second["replaced"]), ([], []))
@@ -197,10 +197,19 @@ class SyncTest(HomeSyncCase):
         self.assertEqual(self.read("docs/design/mine.md"), "a design note\n")
 
 
-class NoProjectTest(HomeSyncCase):
-    """A home with an empty registry: the lines about project 1 stay out, and the command says how many it left out."""
+class NoProjectTest(RepoMixin, HomeSyncCase):
+    """A home with an empty registry: the lines about project 1 stay out, and the command says how many it left out; once a
+    project is registered, a sync brings them back."""
 
     seed_project = False
+
+    def test_a_first_sync_after_project_1_is_registered_reconciles_the_home_and_a_second_changes_nothing(self):
+        self.add_project(self.make_repo("first-"), "first", "SPD", "SPUD", "merge")
+        first = self.settle()
+        self.assertIn("CLAUDE.md", [r["path"] for r in first["replaced"]])
+        self.assertNotIn("{{project_key}}", self.read("CLAUDE.md"))
+        second = self.sync()
+        self.assertEqual((second["written"], second["replaced"]), ([], []))
 
     def test_the_lines_about_project_1_stay_out_and_the_count_is_reported(self):
         record = self.sync()
@@ -354,15 +363,20 @@ class RefusalTest(HomeSyncCase):
             self.assertEqual(proc.returncode, EXIT_OWNERSHIP, proc.stderr)
             self.assertIn("is Spud's", proc.stderr)
 
+
+class SpudOnlyTest(unittest.TestCase):
+    """RefusalTest's Law 6 half that is a table of the program's: no home."""
+
     def test_the_command_is_one_the_bash_hook_holds_to_spud_alone(self):
         """`home sync` rewrites CLAUDE.md, the two ledger notes, the templates and the views -- every one of them a
         `SPUD_PATHS` file the edit hook already refuses a member -- so Law 6 refuses the command line too."""
         self.assertIn(("home", "sync"), spud.SPUD_ONLY_SUBCOMMANDS)
 
 
-class ShippedSkillTest(HomeSyncCase):
+class SkillPathTest(unittest.TestCase):
     """`share/skills/<name>/` is the one shipped directory whose path in a home is not its path under share/: a home
-    reads a skill from `.claude/skills/`, where Claude Code looks for one."""
+    reads a skill from `.claude/skills/`, where Claude Code looks for one.  The map is a function of the path alone, and
+    a new home's init is the test's own home: neither needs the class fixture ShippedSkillTest restores."""
 
     def test_the_share_relative_path_maps_to_the_home_s_claude_skills(self):
         self.assertEqual(spud.home_relative("skills/spud-reference/SKILL.md"),
@@ -370,6 +384,19 @@ class ShippedSkillTest(HomeSyncCase):
         self.assertEqual(spud.home_relative("skills"), ".claude/skills")
         self.assertEqual(spud.home_relative("CLAUDE.md"), "CLAUDE.md")
         self.assertEqual(spud.home_relative("ledger/Home.md"), "ledger/Home.md")
+
+    def test_a_new_home_gets_it_through_init(self):
+        second = Home(warm=True)
+        self.addCleanup(second.cleanup)
+        second.shipped_skill("spud-reference", SKILL)
+        data = second.json("init", "--no-schedule")
+        self.assertIn(".claude/skills/spud-reference/SKILL.md", data["scaffolding"]["written"])
+        written = (second.path / ".claude" / "skills" / "spud-reference" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("# In %s" % second.path, written)
+
+
+class ShippedSkillTest(HomeSyncCase):
+    """A skill shipped under the tool's share/ reaches an initialised home through a sync (SkillPathTest: the path)."""
 
     def test_a_home_built_before_the_skill_shipped_gets_it_from_a_sync(self):
         """A tool from before any skill shipped, and the home it built: neither has one, and one sync writes it."""
@@ -381,15 +408,6 @@ class ShippedSkillTest(HomeSyncCase):
         self.assertEqual(record["written"], [".claude/skills/spud-reference/SKILL.md"])
         self.assertIn("# In %s" % self.home.path, self.read(".claude/skills/spud-reference/SKILL.md"))
         self.assertIn(".claude/skills/spud-reference/SKILL.md", self.sync()["unchanged"])
-
-    def test_a_new_home_gets_it_through_init(self):
-        second = Home()
-        self.addCleanup(second.cleanup)
-        second.shipped_skill("spud-reference", SKILL)
-        data = second.json("init", "--no-schedule")
-        self.assertIn(".claude/skills/spud-reference/SKILL.md", data["scaffolding"]["written"])
-        written = (second.path / ".claude" / "skills" / "spud-reference" / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("# In %s" % second.path, written)
 
     def test_a_tool_that_ships_no_skill_owns_the_scaffolding_alone(self):
         shutil.rmtree(self.home.own_share() / spud.SKILLS, ignore_errors=True)
