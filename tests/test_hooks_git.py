@@ -1479,14 +1479,19 @@ class GitVerbProgramOptionTest(BashHookCase):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
-        # A loop whose words may be options binds no value (shell/loop_bindings reads none that may start with `-`), so
-        # its variable is unsettled where git's words are read, as on SPD-089's verbs, and refuses a member; `--` is the
-        # respelling the reason names.  A loop over spelled operands is read per value (test_269_...).
-        for cmd in ("for o in --tags --upload-pack=sh; do git fetch $o r; done", "for o in -o; do git archive $o HEAD; done",
-                    "for r in origin -o; do git fetch $r; done"):
-            with self.subTest(cmd):
-                r = self.refused_for_members(cmd, needle="spell the words out")
-                self.assertIn("end git's options with `--` before the word", r.reason)
+        # SPD-274: a loop over spelled words that may be options is read once per value where git reads options, each
+        # the option it is, so every loop gets the answer its spelled form gets (dispatch_loop; the write channels still
+        # read no option-looking value as a path).  A loop over spelled operands is read per value (test_269_...).
+        for looped, spelled in (("for o in --tags --upload-pack=sh; do git fetch $o r; done", "git fetch --upload-pack=sh r"),
+                                ("for o in -o; do git archive $o HEAD; done", "git archive -o HEAD"),
+                                ("for r in origin -o; do git fetch $r; done", "git fetch -o")):
+            for agent_id in (AGENT_C, AGENT_A, None):
+                with self.subTest(looped, agent_id=agent_id):
+                    got, want = self.bash(looped, agent_id), self.bash(spelled, agent_id)
+                    self.assertEqual((got.code, got.decision, got.reason), (want.code, want.decision, want.reason))
+                    self.assertNotIn("spell the words out", got.reason or "")
+        r = self.refused_for_members("for o in --tags --upload-pack=sh; do git fetch $o r; done")
+        self.assertIn("--upload-pack=sh", r.reason)
 
     def test_269_a_loop_over_spelled_operands_is_read_per_value(self):
         """SPD-269, handed on by SPD-171: `for r in origin upstream; do git fetch $r; done` was refused a member, the loop's
@@ -2744,6 +2749,163 @@ class GitVerbAllowlistTest(BashHookCase):
             else:
                 self.home.env["PATH"] = path
         self.assertRefused("git read-tree HEAD", "Law 7")
+
+
+CLONE_WORDING = "only into a scratch directory"  # SPD-095: git_verbs.CLONE_REASON
+
+
+class GitScratchCloneTest(BashHookCase):
+    """SPD-095 (Eric, 2026-09-24: "allow clone into scratch"): Law 7 held `git clone` for every member whole, so a member
+    briefed to reproduce a CI failure that `actions/checkout`'s shallow clone caused could not make the depth-1 clone from
+    a local path that reproduces it.  A clone into a scratch path creates a repository nobody else reads, from a source it
+    only reads, so a member's clone is now allowed when every directory it writes -- the directory operand, else the name
+    git makes of the source in the directory it runs in (git_url_basename), --separate-git-dir's, and GIT_WORK_TREE's or
+    --work-tree's -- is settled, lies under the scratchpad or a temp directory, and is outside every registered project's
+    checkouts and the home; and when it carries no option that runs or plants a program or config (-c/--config,
+    --template, -u/--upload-pack, --recurse-submodules/--recursive and the other submodule options), in any spelling
+    parse-options takes.  Everything else is refused with git_verbs.CLONE_REASON, which says what would pass.  Spud's
+    answers do not move: Law 7 does not bind him.  AGENT_A plans tests/** and bin/spud, so tests/x is inside its own
+    deliverables and still refused; AGENT_C plans home:**."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.scratch = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+        (self.home.path / "tests").mkdir(exist_ok=True)
+
+    def allowed(self, command, cwd=None):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id=agent_id, cwd=cwd)
+
+    def refused(self, command, needle=CLONE_WORDING, cwd=None):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id, cwd)
+                self.assertIn("Law 7", r.reason)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None, cwd=cwd)  # Law 7 does not bind Spud
+        return r
+
+    def finding(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_a_shallow_clone_into_scratch_is_allowed(self):
+        home = self.home.path
+        for command in ("git clone --depth 1 file:///tmp/spd-095-src /tmp/spd-095-x",
+                        "git clone --depth 1 file://%s /tmp/spd-095-x" % home,
+                        "git clone --depth=1 --single-branch -b main --no-tags -q --filter=blob:none /tmp/src /tmp/spd-095-x",
+                        "git clone --depth 1 /tmp/src %s/clone" % self.scratch,
+                        "S=%s; git clone --depth 1 /tmp/src $S/clone" % self.scratch,
+                        "git clone -- /tmp/src /tmp/spd-095-x", "git clone /tmp/src /tmp/spd-095-x --depth 1",
+                        "git clone --bare /tmp/src /tmp/spd-095-x.git", "git clone --mirror -nq /tmp/src /tmp/spd-095-x",
+                        "git clone --no-recurse-submodules --no-template /tmp/src /tmp/spd-095-x",
+                        "git clone --separate-git-dir=/tmp/spd-095-g /tmp/src /tmp/spd-095-x",
+                        "git clone --reference %s /tmp/src /tmp/spd-095-x" % home,
+                        "git clone -j2 -o up --shallow-since=2026-01-01 /tmp/src /tmp/spd-095-x"):
+            self.allowed(command)
+
+    def test_the_name_git_makes_of_the_source_is_where_it_writes(self):
+        # cwd /tmp: no project, and the names git would make there -- spd-095-src, repo, y -- lie under it
+        for command in ("git clone /private/var/spd-095-src", "git clone https://h.example/o/repo.git",
+                        "git clone https://h.example/o/repo/.git/", "git clone user@h.example:o/y.git",
+                        "git clone --bare https://h.example/o/repo"):
+            self.allowed(command, cwd="/tmp")
+        m = load_spud_module()
+        # both of git's readings, since which one it takes turns on whether the source is a bundle file
+        self.assertEqual(m.clone_humanish("https://u:p@h.example/o/repo.git/", False), ["repo", "repo.git"])
+        self.assertEqual(m.clone_humanish("h.example:o/y/.git", True), ["y.git"])
+        self.assertEqual(m.clone_humanish("/tmp/b.bundle", False), ["b.bundle", "b"])
+        self.assertEqual(m.clone_humanish("h.example:2222", False), ["h.example"])
+        self.assertEqual(m.clone_humanish("/", False), [])
+
+    def test_a_target_in_a_project_or_the_home_is_refused(self):
+        home, tool = self.home.path, self.home.tool
+        for command, where in (("git clone --depth 1 /tmp/src tests/x", "tests/x"),  # AGENT_A's own deliverables
+                               ("git clone /tmp/src %s/docs/new" % home, "docs/new"),
+                               ("git clone /tmp/src %s/sub" % tool, "sub"),
+                               ("git clone /tmp/src ./", "the directory ./"),
+                               ("git clone /tmp/src", "which git makes of /tmp/src"),
+                               ("git clone https://h.example/o/repo.git", "which git makes of")):
+            with self.subTest(command):
+                r = self.refused(command)
+                self.assertIn(where, r.reason)
+                self.assertIn("in the checkout", r.reason)
+
+    def test_a_target_through_a_symlink_is_read_where_it_lands(self):
+        # both readings, as the path rule reads a file's: a link under the temp roots that reaches into the home
+        link = self.home.root / "spd-095-link"
+        link.symlink_to(self.home.path / "tests")
+        r = self.refused("git clone /tmp/src %s/x" % link)
+        self.assertIn("in the checkout", r.reason)
+        self.allowed("git clone /tmp/src %s/x" % (self.home.root / "spd-095-plain"))
+
+    def test_a_target_outside_the_scratch_roots_or_in_a_git_directory_is_refused(self):
+        r = self.refused("git clone /tmp/src /usr/local/spd-095-x")
+        self.assertIn("outside the scratchpad and the temp directories", r.reason)
+        r = self.refused("git clone /tmp/src /tmp/r/.git/x")
+        self.assertIn("inside a git directory", r.reason)
+        r = self.refused("git clone --separate-git-dir=tests/g /tmp/src /tmp/spd-095-x")
+        self.assertIn("--separate-git-dir tests/g", r.reason)
+        self.refused("git clone --separate-git-dir tests/g /tmp/src /tmp/spd-095-x")
+        self.refused("git clone --sep=tests/g /tmp/src /tmp/spd-095-x")
+        r = self.refused("GIT_WORK_TREE=%s/tests/w git clone /tmp/src /tmp/spd-095-x" % self.home.path)
+        self.assertIn("GIT_WORK_TREE", r.reason)
+        self.refused("git --work-tree=tests/w clone /tmp/src /tmp/spd-095-x")
+
+    def test_an_unsettled_target_is_refused(self):
+        for command in ("git clone /tmp/src $D", "git clone /tmp/src /tmp/$D", "git clone $SRC",
+                        "git clone /tmp/src /tmp/x*", "git clone -b $B /tmp/src /tmp/spd-095-x",
+                        "git clone /tmp/src /tmp/spd-095-x $EXTRA", "git clone --depth=$N /tmp/src /tmp/spd-095-x",
+                        "echo /tmp/x | xargs git clone /tmp/src", "cd $X && git clone /tmp/src y",
+                        "git clone /tmp/src ~other/x"):
+            with self.subTest(command):
+                self.refused(command)
+
+    def test_each_planting_option_is_refused(self):
+        for option in ("-c core.hooksPath=/tmp/h", "-ccore.hooksPath=/tmp/h", "-qc core.x=y", "--config=core.x=y",
+                       "--config core.x=y", "--conf=core.x=y", "--template=/tmp/t", "--template /tmp/t", "--templ=/tmp/t",
+                       "-u /tmp/up", "-u/tmp/up", "-nu /tmp/up", "--upload-pack=/tmp/up", "--upload=/tmp/up",
+                       "--recurse-submodules", "--recurse-submodules=.", "--recursive", "--recurs",
+                       "--shallow-submodules", "--remote-submodules", "--also-filter-submodules"):
+            with self.subTest(option):
+                r = self.refused("git clone %s /tmp/src /tmp/spd-095-x" % option)
+                self.assertIn("runs or plants a program or config", r.reason)
+        r = self.refused("GIT_CLONE_PROTECTION_ACTIVE=0 git clone /tmp/src /tmp/spd-095-x")
+        self.assertIn("GIT_CLONE_PROTECTION_ACTIVE", r.reason)
+
+    def test_what_git_would_not_take_is_refused(self):
+        for command in ("git clone", "git clone a /tmp/b /tmp/c", "git clone --frobnicate /tmp/src /tmp/spd-095-x",
+                        "git clone --re=x /tmp/src /tmp/spd-095-x", "git clone -Z /tmp/src /tmp/spd-095-x",
+                        "git clone --bare=1 /tmp/src /tmp/spd-095-x", "git clone /tmp/src /tmp/spd-095-x --depth"):
+            with self.subTest(command):
+                self.refused(command)
+
+    def test_dash_c_is_read(self):
+        # -C inside a checkout: the directory git runs in is the one a relative target and the source's name land in
+        self.allowed("git -C tests clone /tmp/src /tmp/spd-095-x")
+        r = self.refused("git -C tests clone /tmp/src x")
+        self.assertIn("%s" % os.path.join(str(self.home.path), "tests", "x"), r.reason)
+        self.refused("git -C tests clone /tmp/src")
+        # -C outside every checkout keeps the repository refusal it had (git reads that directory's config first)
+        for agent_id in (AGENT_C, AGENT_A):
+            self.assertRefused("git -C /tmp clone /tmp/src x", "outside every checkout the ledger knows", agent_id)
+        self.assertSilent("git -C /tmp clone /tmp/src x", agent_id=None)
+
+    def test_the_line_config_and_environment_keep_their_readings(self):
+        self.refused("git -c core.hooksPath=/tmp/h clone /tmp/src /tmp/spd-095-x", "runs a program git never checks")
+        self.refused("GIT_TEMPLATE_DIR=/tmp/t git clone /tmp/src /tmp/spd-095-x", "GIT_TEMPLATE_DIR")
+        self.refused("git -c alias.x=y clone /tmp/src /tmp/spd-095-x", "alias or include")
+        self.allowed("git -c color.ui=never clone /tmp/src /tmp/spd-095-x")
+
+    def test_the_finding_and_init(self):
+        [(kind, (problem, dirs, cwds))] = self.finding("git clone --depth 1 /tmp/src /tmp/spd-095-x")
+        self.assertEqual((kind, problem, dirs), ("git-clone", None, (("the directory /tmp/spd-095-x", "/tmp/spd-095-x"),)))
+        self.assertEqual(cwds, frozenset([str(self.home.path)]))
+        # git init is not asked for: it stays Law 7's own verb
+        self.refused("git init /tmp/spd-095-x", "never run `git init`")
 
 
 if __name__ == "__main__":

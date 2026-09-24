@@ -495,6 +495,8 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 unknown = None if refused else git_verbs.git_unknown_verb(verb, a.home)
                 if unknown is not None:  # not one of git's own commands: an alias or an external git-<verb>
                     a.findings.append(("git-verb", unknown))
+                elif verb == "clone":  # a member's clone into scratch (SPD-095): what it writes, held in bash_rule
+                    a.findings.append(("git-clone", git_verbs.clone_finding(git_words, a)))
                 else:  # one of git's own: Law 7's table first, then its allowlist, which refuses every other name
                     a.findings.append(("git", (verb, refused or git_verbs.git_not_allowed(verb))))
         if git_verbs.git_unspelled_word(git_words) is not None:

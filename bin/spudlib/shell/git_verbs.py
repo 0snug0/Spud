@@ -1,12 +1,12 @@
-"""shell/git_verbs: Law 7's verbs: git's own commands, unknown and refused verbs, words xargs adds, and repository targets."""
+"""shell/git_verbs: Law 7's verbs: git's own commands, unknown and refused verbs, words xargs adds, repository targets, and a member's scratch clone."""
 
 import contextlib
 import json
 import os
 
-from . import git_programs, git_writes, globbing, prepare, spud_calls, syntax
+from . import arg_writes, bash_rule, expansions, git_programs, git_writes, globbing, prepare, spud_calls, syntax
 from ..core import homeconf, lazy
-from ..hooks import hookio
+from ..hooks import hookio, pathrule, worktrees
 
 
 def git_verb(words):
@@ -308,3 +308,249 @@ def git_refused(verb, args):
             return None
         return verb if (positionals >= 2 and not selector) else None
     return None
+
+
+# SPD-095 (Eric, 2026-09-24: "allow clone into scratch"): `git clone` stays in syntax.GIT_WRITE_VERBS, and a member's
+# clone is read apart from it (clone_finding, clone_reason): allowed only when every directory it writes lies under the
+# outside allowlist (pathrule.outside_roots: the session scratchpad and the system temp directories) and outside every
+# registered project's checkouts and the home, and it carries no option that runs or plants a program or config.  It
+# creates a repository nobody else reads from a source it only reads -- closer to `git archive` than to checkout -- and
+# reproduces what a member cannot otherwise, a CI checkout's shallow clone.  It sits beside git_refused, whose verb table
+# it narrows for a member; clone_finding and clone_reason are its whole surface, so it is a seam of its own (a
+# shell/git_clone) the day this module wants to shed it.
+#
+# Its options, from git 2.54.0 (Apple Git-157): git-clone(1) and builtin/clone.c's option table as the git binary holds its
+# strings, in order (verbosity, progress, reject-shallow, no-checkout, bare, naked, mirror, local, no-hardlinks, shared,
+# recurse-submodules, recursive, jobs, template, reference, reference-if-able, dissociate, origin, branch, revision,
+# upload-pack, depth, shallow-since, shallow-exclude, single-branch, tags, shallow-submodules, separate-git-dir,
+# ref-format, config, server-option, ipv4, ipv6, filter, also-filter-submodules, remote-submodules, sparse, bundle-uri);
+# `git clone -h` itself is a clone, which the hook refuses the member that would read it.  "value" takes the next word
+# or an `=` one, "optional" only an `=` one (--recurse-submodules[=<pathspec>]), and every other a flag.  `--naked` is a
+# hidden --bare and `--recursive` an alias of --recurse-submodules.  parse-options takes any unambiguous prefix of a long
+# option and its `--no-` form (and `--checkout`, `--hardlinks` for the two named `no-...`), and a short cluster up to a
+# letter that takes a value, which takes the rest of the cluster or the next word.
+CLONE_LONG_OPTIONS = {
+    "verbose": "flag", "quiet": "flag", "progress": "flag", "reject-shallow": "flag", "no-checkout": "flag", "bare": "flag",
+    "naked": "flag", "mirror": "flag", "local": "flag", "no-hardlinks": "flag", "shared": "flag",
+    "recurse-submodules": "optional", "recursive": "optional", "jobs": "value", "template": "value", "reference": "value",
+    "reference-if-able": "value", "dissociate": "flag", "origin": "value", "branch": "value", "revision": "value",
+    "upload-pack": "value", "depth": "value", "shallow-since": "value", "shallow-exclude": "value", "single-branch": "flag",
+    "tags": "flag", "shallow-submodules": "flag", "separate-git-dir": "value", "ref-format": "value", "config": "value",
+    "server-option": "value", "ipv4": "flag", "ipv6": "flag", "filter": "value", "also-filter-submodules": "flag",
+    "remote-submodules": "flag", "sparse": "flag", "bundle-uri": "value",
+}
+CLONE_ALIASES = {"recursive": "recurse-submodules"}
+CLONE_SHORT_FLAGS = "vqnls46"
+CLONE_SHORT_VALUES = {"j": "jobs", "o": "origin", "b": "branch", "u": "upload-pack", "c": "config"}
+# The options that run or plant a program or config, refused a member in any spelling (their `--no-` forms plant nothing):
+# -c/--config writes config into the new repository before the fetch and the checkout (core.hooksPath, a filter driver,
+# an alias ...), --template copies a directory of the line's choosing into its .git (hooks among it), -u/--upload-pack
+# names the program run for the source, and the submodule options clone further repositories from URLs the source's
+# .gitmodules names, into paths inside the new one, with their own transport and update rules.
+CLONE_PLANTING = frozenset({"config", "template", "upload-pack", "recurse-submodules", "shallow-submodules",
+                            "remote-submodules", "also-filter-submodules"})
+# The bare forms: the target is then the git directory itself (<name>.git when git names it), not <dir>/.git.
+CLONE_BARE = frozenset({"bare", "naked", "mirror"})
+# An environment variable that turns off the protection git added against a clone writing its own hooks
+# (CVE-2024-32002): a clone carrying it plants as much as --template does.
+CLONE_PLANTING_VARS = ("GIT_CLONE_PROTECTION_ACTIVE",)
+CLONE_REASON = (
+    "Law 7: a spudagent runs `git clone` only into a scratch directory, and this clone is not one: %s. A member's clone is"
+    " allowed when every directory it writes -- its directory operand, else the name git makes of the source in the"
+    " directory git runs in, and --separate-git-dir's, GIT_WORK_TREE's or --work-tree's -- is one the line spells out, lies"
+    " under this session's scratchpad (under %s/) or a system temp directory (%s), and is outside every registered"
+    " project's checkouts and Spud's home, and when it carries no option that runs or plants a program or config (-c or"
+    " --config, --template, -u or --upload-pack, --recurse-submodules or --recursive, --shallow-submodules,"
+    " --remote-submodules, --also-filter-submodules, GIT_CLONE_PROTECTION_ACTIVE). Everything else about clone is Spud's;"
+    " Spud commits, after the outcome is recorded")
+
+
+def clone_long_option(key):
+    """(the option, whether it is its `--no-` form) that `--<key>` names as git's parse-options reads it -- exact, else
+    the one option an unambiguous prefix names -- or None when it names none or more than one (git: "unknown option",
+    "ambiguous option")."""
+    spellings = []
+    for name in CLONE_LONG_OPTIONS:
+        option = CLONE_ALIASES.get(name, name)
+        spellings += [(name, option, False), ("no-" + name, option, True)]
+        if name.startswith("no-"):
+            spellings.append((name[3:], option, True))
+    exact = [(option, negated) for spelled, option, negated in spellings if spelled == key]
+    if exact:
+        return exact[0]
+    found = {(option, negated) for spelled, option, negated in spellings if key and spelled.startswith(key)}
+    return found.pop() if len(found) == 1 else None
+
+
+def clone_humanish(source, bare):
+    """The names `git clone <source>` may make for its directory with none given, as git's git_url_basename makes one
+    (dir.c, git 2.54.0): past a `scheme://` and the credentials before an `@`, trailing slashes and a `/.git` dropped, a
+    port dropped from a bare host, the last component after a `/` or a `:`, less `.git` -- or `.bundle` when the source is
+    a bundle file, which the hook does not read, so both -- and `.git` added for a bare clone.  [] when git guesses no
+    name (it dies), or when the name holds a blank or a control character, which git rewrites."""
+    start = source.find("://")
+    text = source if start < 0 else source[start + 3 :]
+    head = text.split("/", 1)[0]
+    if "@" in head:
+        text = text[text.rindex("@", 0, len(head)) + 1 :]
+    text = text.rstrip("/ \t\n")
+    if len(text) > 5 and text.endswith("/.git"):
+        text = text[:-5].rstrip("/")
+    if "/" not in text and ":" in text:
+        port = text.rstrip("0123456789")
+        if port.endswith(":"):
+            text = port[:-1]
+    name = text[max(text.rfind("/"), text.rfind(":")) + 1 :]
+    out = []
+    for suffix in (".git", ".bundle"):
+        stem = name[: -len(suffix)] if name.endswith(suffix) else name
+        if not stem or stem == "/" or any(c.isspace() or not c.isprintable() for c in stem):
+            continue
+        guessed = stem + ".git" if bare else stem
+        if guessed not in out:
+            out.append(guessed)
+    return out
+
+
+def clone_reading(words):
+    """(what refuses the clone outright, as the text a reason names it by, or None; [(the spelling a reason names a
+    directory by, the word git reads it from)]) for a `git clone` call's arguments, read as parse-options reads them: an
+    option that plants a program or config, a word the hook cannot read (an expansion the line does not settle, a glob,
+    an operand it does not spell, an option git does not have or cannot tell apart), and a count of operands git does not
+    take are each the first; else the directories it writes -- its directory operand, or the names clone_humanish makes of
+    the source, and --separate-git-dir's.
+
+    A word the line does not settle refuses the clone wherever it stands, a value's included: an unquoted expansion may
+    vanish or split in bash, and a glob expand to several words, which moves every operand after it (`-b $B /tmp/r
+    /tmp/ok` with B empty clones /tmp/ok into ./ok), and one may become a planting option.  A `$NAME` the line settled
+    reaches here resolved (clone_finding)."""
+    _verb, args = git_verb(words)
+    positionals, dirs, bare, options = [], [], False, True
+    i = 0
+    while i < len(args):
+        word = args[i]
+        i += 1
+        if clone_unsettled(word):
+            return "`%s` is a word the line does not settle (an expansion, a glob, an operand it does not spell)" % prepare.deglob(word), []
+        w = prepare.deglob(word)
+        if not options or w == "-" or not w.startswith("-"):
+            positionals.append(w)
+            continue
+        if w == "--":
+            options = False
+            continue
+        if w.startswith("--"):
+            key, sep, attached = w[2:].partition("=")
+            found = clone_long_option(key)
+            if found is None:
+                return "`%s` is an option git clone does not have, or one it cannot tell apart" % w, []
+            option, negated = found
+            if option in CLONE_PLANTING and not negated:
+                return "`%s` runs or plants a program or config" % w, []
+            kind = CLONE_LONG_OPTIONS[option]
+            if option in CLONE_BARE:
+                bare = not negated
+            if negated or kind != "value":
+                if sep and (negated or kind == "flag"):
+                    return "`%s` gives a value to an option that takes none" % w, []
+                continue
+            value = attached if sep else (prepare.deglob(args[i]) if i < len(args) else None)
+            if not sep:
+                if i < len(args) and clone_unsettled(args[i]):
+                    return "`%s %s` is a word the line does not settle" % (w, value), []
+                i += 1
+            if value is None:
+                return "`%s` takes a value the line does not give" % w, []
+            if option == "separate-git-dir":
+                dirs.append(("--separate-git-dir %s" % value, "./" + value if sep and value.startswith("~") else value))
+            continue
+        for k in range(1, len(w)):
+            letter = w[k]
+            if letter in CLONE_SHORT_FLAGS:
+                continue
+            option = CLONE_SHORT_VALUES.get(letter)
+            if option is None:
+                return "`%s` holds an option git clone does not have" % w, []
+            if option in CLONE_PLANTING:
+                return "`%s` runs or plants a program or config" % w, []
+            if not w[k + 1 :]:
+                if i >= len(args):
+                    return "`%s` takes a value the line does not give" % w, []
+                if clone_unsettled(args[i]):
+                    return "`%s %s` is a word the line does not settle" % (w, prepare.deglob(args[i])), []
+                i += 1  # jobs, origin or branch: a value that names no directory
+            break
+    if len(positionals) == 2:
+        return None, [("the directory %s" % positionals[1], positionals[1])] + dirs
+    if len(positionals) != 1:
+        return "git clone takes a repository and at most one directory, and this line gives %d" % len(positionals), []
+    source = positionals[0]
+    names = [] if source.startswith("~") and "/" not in source else clone_humanish(source, bare)
+    if not names:
+        return "the hook cannot tell which directory git would make of `%s`; name the directory" % source, []
+    return None, [("the directory %s, which git makes of %s" % (name, source), name) for name in names] + dirs
+
+
+def clone_unsettled(word):
+    """True when the shell may make of a masked word something the line does not spell: an expansion it does not
+    settle, a glob, an operand xargs or find hands the command."""
+    return spud_calls.unresolvable_word(word) or syntax.GLOB_RE.search(word) is not None
+
+
+def clone_finding(words, a):
+    """The "git-clone" finding's detail for a `git clone` call on the line: (what refuses it outright or None, ((the
+    spelling a reason names a directory by, its path from the directory the -C chain reaches), ...), the directories the
+    shell may be in).  Every word and variable is read as the shell passes it to git, a `$NAME` the line settled put in
+    its place (arg_writes.resolved), so a member clones into a scratchpad it named in a variable.  --work-tree,
+    GIT_WORK_TREE, --git-dir, GIT_DIR and GIT_COMMON_DIR are directories the clone writes too (clone takes GIT_WORK_TREE
+    as its work tree and the target as the bare git directory then; the others are read as writes, fail closed), and
+    GIT_CLONE_PROTECTION_ACTIVE refuses it outright.  bash_rule holds a member to clone_reason on it and leaves Spud's
+    clone alone, as Law 7 leaves him."""
+    words = [arg_writes.resolved(w, a) for w in words]
+    variables = {n: arg_writes.resolved(v, a) for n, v in a.vars.items()}
+    for name in CLONE_PLANTING_VARS:
+        if name in variables:
+            return ("%s=%s turns off git's protection against a clone that writes its own hooks" % (name, variables[name]), (), a.cwds)
+    problem, dirs = clone_reading(words)
+    if problem is not None:
+        return problem, (), a.cwds
+    base, _ = git_writes.git_chdir_and_config(words, ())
+    out = [(shown, chdir_join(base, path)) for shown, path in dirs]
+    out += [(spelled, target) for spelled, target in git_repo_targets(words, variables) if git_target_kind(spelled) != "chdir"]
+    return None, tuple(dict.fromkeys(out)), a.cwds
+
+
+def clone_reason(ctx, con, detail):
+    """The reason a member's `git clone` is refused (CLONE_REASON), or None, for a clone_finding detail: a problem it
+    names outright; a directory the hook cannot resolve; one any reading of which (lexical or real, pathrule's) lies in a
+    registered project's checkout or the home, holds a checkout at or under it, has a .git component, or lies outside the
+    outside allowlist (the scratchpad and the temp directories, where a member writes outside every project)."""
+    problem, dirs, cwds = detail
+    if isinstance(cwds, expansions.TrapDirs):
+        cwds = cwds.dirs()
+    if problem is None:
+        roots = pathrule.outside_roots()
+        for spelled, target in dirs:
+            candidates, unresolved = bash_rule.git_target_dirs(target, cwds)
+            if unresolved:
+                problem = "%s is a path the hook cannot resolve (relative to a directory it cannot follow, or ~name)" % spelled
+                break
+            for candidate in candidates:
+                readings = worktrees.path_readings(candidate, None)
+                placed = worktrees.project_paths(ctx, con, candidate, None)
+                if placed:
+                    problem = "%s is %s, in the checkout %s" % (spelled, os.path.normpath(candidate), placed[0][1])
+                elif any(pathrule.git_dir_path(r) for r in readings):
+                    problem = "%s is %s, inside a git directory" % (spelled, os.path.normpath(candidate))
+                elif not all(pathrule.under_outside_root(r, roots) for r in readings):
+                    problem = "%s is %s, outside the scratchpad and the temp directories" % (spelled, os.path.normpath(candidate))
+                elif pathrule.tree_checkout_reason(ctx, con, readings):
+                    problem = "%s is %s, which holds a checkout the ledger knows" % (spelled, os.path.normpath(candidate))
+                if problem:
+                    break
+            if problem:
+                break
+    if problem is None:
+        return None
+    # shown as every reason shows a word: the sentinels restored, xargs's input and find's {} as the line spells them
+    return bash_rule.shown_word(CLONE_REASON % (problem, pathrule.SCRATCHPAD_ROOT % os.getuid(), ", ".join(pathrule.FIXED_TEMP_ROOTS)))

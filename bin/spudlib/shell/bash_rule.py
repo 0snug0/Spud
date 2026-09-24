@@ -2,7 +2,7 @@
 
 import os
 
-from . import (analyse, arg_writes, expansions, git_config, prepare, redirect_globs, runner_files, script_files, spud_calls,
+from . import (analyse, arg_writes, expansions, git_config, git_verbs, prepare, redirect_globs, runner_files, script_files, spud_calls,
                syntax, tree_writes)
 from ..hooks import hookio, pathrule, worktrees
 from ..state import lookup
@@ -486,6 +486,10 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                         " and git's own spellings and plumbing for them (commit, add, stage, checkout, switch, rebase, reset, push, merge,"
                         " cherry-pick, pull, init, init-db, read-tree, update-index, write-tree, checkout-index, hash-object, repack,"
                         " pack-refs ...); Spud commits, after the outcome is recorded" % shown_word(verb)), analysis
+        elif kind == "git-clone":  # a member's clone, allowed into scratch alone (SPD-095)
+            reason = git_verbs.clone_reason(ctx, con, detail)
+            if reason:
+                return reason, analysis
         elif kind == "git-config":
             return ("Law 7: this git call takes config the hook cannot read (%s): an alias or include defined on the line, or a variable"
                     " that injects config or points git at a config file of its own (HOME and XDG_CONFIG_HOME move git's global config to"
