@@ -669,7 +669,14 @@ def read_shell_name(words, a, depth, stdin=None, fed=False):
         if read not in reads:
             a.shell_expanded.append((cmd, "a shell function"))
             reads.add(read)
-            analyse_shell_text(a, text, depth + 1, words[1:], own_process=True, substituted=sound, stdin=stdin, fed=fed)
+            kinds = expansions.inert_kinds(cmd, body, a, depth)
+            if kinds is not None:
+                # judged inert (SPD-134): its reading here would run these kinds of command and leave the directory as
+                # sure as isolated() leaves it, and record and change nothing else
+                a.kinds.extend(kinds)
+                a.cd_uncertain = False
+            else:
+                analyse_shell_text(a, text, depth + 1, words[1:], own_process=True, substituted=sound, stdin=stdin, fed=fed)
     return False
 
 

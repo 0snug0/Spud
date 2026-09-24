@@ -1,6 +1,7 @@
 """PreToolUse(Bash): Claude Code's shell snapshot (the aliases and functions the shell already defines), and the reader
 failing closed on text it cannot read."""
 
+import importlib
 import json
 import os
 import shutil
@@ -11,7 +12,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import load_spud_module, wall_clock
-from hookcase import AGENT_A, AGENT_B, AGENT_C, INLINE_WORDING, SCRIPT_WORDING, BashHookCase
+from hookcase import AGENT_A, AGENT_B, AGENT_C, INLINE_WORDING, SCRIPT_WORDING, BashHookCase, fresh_process
 
 
 # A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
@@ -399,6 +400,21 @@ class RealShellSnapshotTest(BashHookCase):
         self.assertIn("Law 7", r.reason)
         r = self.real_bash(name + " status")
         self.assertNotEqual(r.decision, "deny", r.reason)
+
+    def test_the_harness_s_own_shadows_are_read_on_every_call(self):
+        """SPD-134: Claude Code's grep, find, rg and pkill hand the call's words on, and no word stands for every word
+        (InertBodyTest.test_the_call_s_words), so none is ever judged inert and each is read on every call, as before."""
+        positional = importlib.import_module("spudlib.shell.positional")
+        cache = self.home.path / ".spud" / "shell-snapshot.json"
+        shadows = [n for n in ("grep", "find", "rg", "pkill") if n in self.table.functions]
+        if not shadows:
+            self.skipTest("this profile shadows none of grep, find, rg or pkill")
+        for name in shadows:
+            with self.subTest(name=name):
+                self.assertIsNotNone(positional.REFERENCE_RE.search(self.table.body(name)))
+                self.assertNotEqual(self.real_bash(name + " x").decision, "deny")
+                stored = json.loads(cache.read_text(encoding="utf-8"))
+                self.assertNotIn(name, (stored.get("verdicts") or {}).get("bodies") or {})
 
 
 SETTLED_SNAPSHOT = """\
@@ -1567,6 +1583,306 @@ class ReaderFailsClosedTest(ShellSnapshotCase):
         started = time.monotonic()
         m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
         self.assertLess(time.monotonic() - started, 2)
+
+
+# SPD-134: a body the hook judges once and skips after (hello, envonly, evalgx), beside bodies it must never judge inert,
+# each reading one input of a body's reading: the call's words (sortfn), a variable (runtool, outto), the standard input
+# (shonly), the directory (inwork), the reading's depth (stamp), and git (gitst).  PATH, a hash entry, a function and an
+# alias the line defines reach a body the hook skips, so each is read where the line has set one (envonly, hello, evalgx).
+# python3.14 shadows the interpreter of a spud call, whose allow reads the kinds of command a body runs.
+INERT_SNAPSHOT = """\
+# Functions
+hello () {
+\techo hello
+}
+envonly () {
+\tenv ls
+}
+evalgx () {
+\teval gx
+}
+shonly () {
+\tsh
+}
+sortfn () {
+\tcommand sort "$@"
+}
+runtool () {
+\t$TOOL push
+}
+outto () {
+\techo hi > "$OUT"
+}
+inwork () {
+\techo hi > kept.txt
+}
+gitst () {
+\tgit status
+}
+stamp () {
+\techo $(date)
+}
+python3.14 () {
+\techo shadowed
+}
+"""
+NEVER_JUDGED = "never judged"
+
+
+class InertBodyTest(ShellSnapshotCase):
+    """SPD-134: a function of the shell's whose body can earn nothing on any line the hook skips is judged once, when a
+    line first calls it, and the verdict kept in the table's cache, so the hook reads that body no more.  A body is judged
+    inert when, read at the deepest depth the hook reads whole, with nothing known of the directory the shell is in and
+    its standard input fed text the line does not spell, it records nothing (no finding of any kind, no write, no git call,
+    no text it cannot read) and changes nothing of the line's state but the kinds of command it runs.  The hook skips it
+    only where the line has set nothing its reading reads -- no variable, function, alias or hash entry, no loop or
+    function body open, no `source` or `trap` -- and within that depth; everywhere else it reads the body as before.  A
+    body that reads the call's words is never judged inert: no word stands for every word (`sort $X f` records nothing
+    where `sort -o note.txt f` writes).
+
+    Each input of a body's reading has a body below that is inert on a plain line and not on one that sets that input;
+    the answers are the ones the hook gave before, and none of those bodies is skipped where it matters.  AGENT_A and
+    AGENT_B plan home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000010-inert0.sh", INERT_SNAPSHOT)
+        self.cache = self.home.path / ".spud" / "shell-snapshot.json"
+        self.analyse = importlib.import_module("spudlib.shell.analyse")
+        self.deepest = self.analyse.READING_DEPTH
+
+    def readings(self, line, agent_id=AGENT_A, cwd=None):
+        """(the hook's answer to `line`, [(a body's text, the depth it was read at)] for every function body read: the
+        hook reads a top-level call's body at depth 1, and judges a body at the deepest depth it reads whole)."""
+        real, seen = self.analyse.analyse_shell_text, []
+
+        def spy(a, text, depth, *args, **kw):
+            seen.append((text.strip(), depth))
+            return real(a, text, depth, *args, **kw)
+
+        with mock.patch("spudlib.shell.analyse.analyse_shell_text", spy):
+            r = self.bash(line, agent_id, cwd)
+        return r, seen
+
+    def verdict(self, name):
+        """What the table's cache holds for `name`: the kinds of command its reading runs where it was judged inert,
+        None where it was judged not to be, NEVER_JUDGED where no verdict is kept."""
+        stored = json.loads(self.cache.read_text(encoding="utf-8"))
+        bodies = (stored.get("verdicts") or {}).get("bodies") or {}
+        return bodies[name][3] if name in bodies else NEVER_JUDGED
+
+    def assertNeverInert(self, name):
+        self.assertNotIsInstance(self.verdict(name), list, name)
+
+    def skipping_off(self):
+        """The hook with no body skipped: what it read before SPD-134."""
+        return mock.patch("spudlib.shell.expansions.inert_kinds", return_value=None)
+
+    # -- the flag and the skip ------------------------------------------------------------------------------------------
+    def test_an_inert_body_is_judged_once_and_skipped(self):
+        r, seen = self.readings("hello")
+        self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""), r)
+        self.assertEqual(seen, [("echo hello", self.deepest)])  # judged, and already skipped on the call that judged it
+        self.assertEqual(self.verdict("hello"), ["other"])
+        for line in ("hello", "hello there", "cd /tmp && hello", "cat /etc/hosts | hello", "hello > /dev/null", "echo $(hello)",
+                     "hello < /etc/hosts", "(hello)", "{ hello; }", "hello &", "true && hello", "hello; hello"):
+            with self.subTest(line=line):
+                r, seen = self.readings(line)
+                self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""), r)
+                self.assertEqual(seen, [], line)  # neither judged again nor read
+
+    def test_a_line_that_set_what_a_body_reads_reads_it(self):
+        """A variable, a function, an alias or a hash entry the line set, a loop or a function body open, `source` or
+        `trap` run: the call is read as before, the verdict notwithstanding."""
+        self.readings("hello")
+        for line in ("X=1; hello", "X=1 hello", "f() { :; }; hello", "alias x=y; hello", "hash ls=/bin/ls; hello",
+                     "for f in a; do hello; done", "while true; do hello; done", "g() { hello; }; g", "source /dev/null; hello",
+                     "trap : EXIT; hello", "read X; hello", "echo $(X=1; hello)"):
+            with self.subTest(line=line):
+                _, seen = self.readings(line)
+                self.assertIn(("echo hello", 1 + line.count("$(")), seen, line)
+
+    def test_a_body_past_the_depth_bound_is_read_and_refused_as_before(self):
+        self.readings("hello")
+        inside = "eval " * (self.deepest - 1) + "hello"  # the call at depth 5, its body at 6: the deepest read whole
+        r, seen = self.readings(inside)
+        self.assertEqual((r.code, r.stdout, r.stderr), (0, "", ""), r)
+        self.assertEqual(seen, [])
+        past = "eval " + inside  # its body at 7, past the bound
+        r, seen = self.readings(past)
+        self.assertEqual(r.decision, "deny", r)
+        self.assertIn(UNREAD, r.reason)
+        self.assertEqual(seen, [("echo hello", self.deepest + 1)])
+
+    def test_the_skip_leaves_every_reading_as_it_was(self):
+        """What the rule reads of a line (hook_reading) is the same with every judged body skipped as with none."""
+        for line in ("hello", "hello there", "cd /tmp && hello", "ls | hello", "hello > /dev/null", "echo $(hello)",
+                     "hello; hello", "hello && git push", "hello | sh", "hello > note.txt", "evalgx", "envonly", "shonly",
+                     "stamp", "X=1; hello", "for f in a b; do hello; done", "hello < /etc/hosts", "(cd tests; hello)",
+                     "python3.14 -I -S %s/bin/spud board" % self.home.path, "PATH=/tmp:$PATH; envonly", "eval hello"):
+            with self.subTest(line=line):
+                skipped = self.hook_reading(line)
+                with self.skipping_off():
+                    self.assertEqual(self.hook_reading(line), skipped)
+
+    def test_the_kinds_a_skipped_body_runs_still_count(self):
+        """A spud call whose interpreter is a function of the shell's is not the call the allow vouches for: the body's
+        `echo` keeps the line from being all spud calls, skipped or read.  Unshadowed, the same call is allowed."""
+        call = "python3.14 -I -S %s/bin/spud board" % self.home.path
+        self.assertSilent(call, AGENT_A)
+        self.assertEqual(self.verdict("python3.14"), ["other"])
+        self.assertSilent(call, AGENT_A)
+        (self.snapshots / "snapshot-zsh-1700000000010-inert0.sh").write_text(INERT_SNAPSHOT.replace("python3.14 ()", "py314 ()"))
+        self.assertAllowed(call, AGENT_A)
+
+    # -- never inert, through each input ------------------------------------------------------------------------------
+    def test_a_body_that_writes_runs_git_or_names_a_deliverable_is_never_judged_inert(self):
+        for line, needle in (("noteit", "note.txt"), ("gitst", None), ("opendb", "ledger database"), ("inwork", "kept.txt"),
+                             ("take tests/x", None), ("keepit", None)):
+            with self.subTest(line=line):
+                if needle is None:
+                    self.assertSilent(line, AGENT_A)
+                else:
+                    self.refused_for_members(line, needle)
+                self.assertNeverInert(line.split()[0])
+        # the base snapshot's harness-shaped grep and shadowed read the call's words, and are never judged at all
+        for line in ("grep -rn x .", "shadowed x"):
+            self.silent_for_everyone(line)
+            self.assertEqual(self.verdict(line.split()[0]), NEVER_JUDGED)
+
+    def test_the_call_s_words(self):
+        """No word stands for every word: `sort $X f` records nothing, where `sort -o note.txt f` writes."""
+        self.silent_for_everyone("sortfn f")
+        self.refused_for_members("sortfn -o note.txt f", "note.txt")
+        self.assertEqual(self.verdict("sortfn"), NEVER_JUDGED)
+
+    def test_a_variable(self):
+        self.silent_for_everyone("runtool")
+        self.refused_for_members("TOOL=git; runtool", "Law 7")
+        self.silent_for_everyone("outto")
+        self.refused_for_members("OUT=note.txt; outto", "note.txt")
+        for name in ("runtool", "outto"):
+            self.assertNeverInert(name)
+
+    def test_path(self):
+        _, seen = self.readings("envonly")
+        self.assertEqual(self.verdict("envonly"), ["other"])  # inert where the line leaves PATH alone
+        self.assertNotIn(("env ls", 1), seen)
+        r, seen = self.readings("PATH=/tmp:$PATH; envonly")
+        self.assertEqual(r.decision, "deny", r)
+        self.assertIn("assigns PATH", r.reason)
+        self.assertIn(("env ls", 1), seen)
+
+    def test_a_hash_entry(self):
+        self.readings("envonly")
+        r, seen = self.readings("hash env=/tmp/env; envonly")
+        self.assertEqual(r.decision, "deny", r)
+        self.assertIn("hashes `env`", r.reason)
+        self.assertIn(("env ls", 1), seen)
+
+    def test_a_function_the_line_defines(self):
+        """A function the line defines reads the input its caller hands it (SPD-212), a caller inside a body too."""
+        self.readings("hello")
+        (self.home.path / "x.sh").write_text("git push\n", encoding="utf-8")
+        r, seen = self.readings("echo () { sh; }; hello < x.sh")
+        self.assertEqual(r.decision, "deny", r)
+        self.assertIn(SCRIPT_WORDING, r.reason)
+        self.assertIn(("echo hello", 1), seen)
+
+    def test_an_alias_the_line_defines(self):
+        """Only `eval` expands an alias the line defines, and eval's text is read a level deeper: judged at the deepest
+        level the hook reads whole, a body that runs eval is never inert, and a line that aliases anything reads it."""
+        self.silent_for_everyone("evalgx")
+        self.assertNeverInert("evalgx")
+        r, seen = self.readings("alias gx='git push'; evalgx")
+        self.assertEqual(r.decision, "deny", r)
+        self.assertIn("Law 7", r.reason)
+        self.assertIn(("eval gx", 1), seen)
+
+    def test_the_standard_input(self):
+        (self.home.path / "x.sh").write_text("git push\n", encoding="utf-8")
+        self.silent_for_everyone("shonly")
+        self.refused_for_members("shonly < x.sh", SCRIPT_WORDING)
+        self.refused_for_members("echo 'git push' | shonly", "Law 7")
+        self.assertNeverInert("shonly")
+
+    def test_the_directory(self):
+        """A write is recorded whatever the directory, which only says where it lands."""
+        self.refused_for_members("inwork", "kept.txt")
+        self.assertSilent("inwork", AGENT_A, cwd=str(self.home.path / "tests"))
+        self.assertNeverInert("inwork")
+
+    def test_the_depth(self):
+        """A body judged at the deepest depth the hook reads whole: a substitution in it is past the bound there."""
+        self.silent_for_everyone("stamp")
+        self.assertNeverInert("stamp")
+
+    def test_a_redirection_of_the_call_is_the_call_s_own(self):
+        self.readings("hello")
+        self.refused_for_members("hello > note.txt", "note.txt")
+        self.assertSilent("hello > tests/x.txt", AGENT_A)
+
+    # -- a verdict holds for the table and the program that judged it -------------------------------------------------
+    def test_a_table_cached_before_the_flag_is_judged_again(self):
+        """A table built before SPD-134 holds no verdict: its bodies are judged, never read as inert."""
+        self.readings("hello")
+        stored = json.loads(self.cache.read_text(encoding="utf-8"))
+        self.assertEqual(set(stored), {"fingerprint", "aliases", "functions", "verdicts"})
+        del stored["verdicts"]  # the cache as the table was written before
+        self.cache.write_text(json.dumps(stored), encoding="utf-8")
+        _, seen = self.readings("hello")
+        self.assertEqual(seen, [("echo hello", self.deepest)])
+        self.assertEqual(self.verdict("hello"), ["other"])
+        self.refused_for_members("gp", "Law 7")  # the table itself read as before
+
+    def test_a_verdict_is_kept_for_its_own_body_and_program(self):
+        """A verdict another program judged, one for another body, or one the hook cannot read is no verdict: a body that
+        writes is read and refused whatever the cache says of it."""
+        self.refused_for_members("noteit", "note.txt")
+        stored = json.loads(self.cache.read_text(encoding="utf-8"))
+        where = stored["functions"]["noteit"]
+        code = stored["verdicts"]["code"]
+        forged = [{"code": code + 1, "bodies": {"noteit": where + [["other"]]}},             # another program's
+                  {"code": code, "bodies": {"noteit": [where[0], where[1] + 1, where[2], ["other"]]}},  # another body's
+                  "junk", {"code": "x", "bodies": {"noteit": where + [["other"]]}}, {"code": code, "bodies": []},
+                  {"code": code, "bodies": {"noteit": where + ["other"]}}]
+        for verdicts in forged:
+            with self.subTest(verdicts=verdicts):
+                stored["verdicts"] = verdicts
+                self.cache.write_text(json.dumps(stored), encoding="utf-8")
+                r, seen = self.readings("noteit")
+                self.assertEqual(r.decision, "deny", r)
+                self.assertIn("note.txt", r.reason)
+                self.assertIn(("echo hi > note.txt", 1), seen)
+
+    def test_another_program_judges_again(self):
+        self.readings("hello")
+        code = json.loads(self.cache.read_text(encoding="utf-8"))["verdicts"]["code"]
+        with mock.patch("spudlib.hooks.snapshots.program_key", return_value=code + 1):
+            _, seen = self.readings("hello")
+        self.assertEqual(seen, [("echo hello", self.deepest)])
+        self.assertEqual(json.loads(self.cache.read_text(encoding="utf-8"))["verdicts"]["code"], code + 1)
+
+    def test_the_judge(self):
+        """expansions.judge_body: the kinds of command a body's reading runs where it records nothing and changes nothing
+        of the line's state, read in the worst case the hook skips it in; None for anything else.  Read with the table
+        the hook reads, as the hook judges a body: an alias or a function of the shell's in a body is read too."""
+        judge = importlib.import_module("spudlib.shell.expansions").judge_body
+        home = str(self.home.path)
+        fresh_process()
+        with mock.patch.dict(os.environ, self.home.env, clear=True):
+            for body, kinds in (("echo hi", ["other"]), ("echo hi; true", ["other", "other"]),
+                                ("[[ -n x ]] && echo y", ["other", "other"]), ("cd /tmp", ["cd"]),
+                                ("builtin autoload -XUz", ["other"]), ("local x", ["other"])):
+                with self.subTest(body=body):
+                    self.assertEqual(judge(home, body), kinds)
+            for body in ("echo hi > x", "echo hi >> /tmp/x", "git status", "X=1", "local x=1", "export X=1", "sh", "cat | sh",
+                         "python3", "f() { :; }", "alias a=b", "unalias a", "hash x=/y", "source x", ". x", "trap : EXIT",
+                         "read X", "unset X", "for f in a; do :; done", "echo $(git push)", "eval 'git push'", "echo $(date)",
+                         "$X", "$X status", "rm x", "cp a b", "mkdir d", "tee x", "spud board", "./x", "gp", "gst", "ggp",
+                         "noteit", "hello", "echo 'a", "set -e", "ls *.x | xargs rm", "echo x | xargs sh -c"):
+                with self.subTest(body=body):
+                    self.assertIsNone(judge(home, body))
 
 
 if __name__ == "__main__":

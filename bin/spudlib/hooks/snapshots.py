@@ -80,17 +80,44 @@ UNALIAS_RE = re.compile(r"^unalias(?P<options>(?: +-[A-Za-z]+)*) +(?P<rest>\S.*)
 FUNCTION_RE = re.compile(r"^\s*(?:function\s+)?(?P<name>[^\s(){}=#|&;<>'\"]+)\s*(?:\(\s*\))?\s*\{$")
 
 
+UNJUDGED = object()  # Table.verdict's answer where no verdict holds (SPD-134)
+
+
 class Table:
     """What the shell the Bash tool starts already defines: `aliases`, each name's body as the shell stores it (None for a
     body the hook cannot read); `functions`, each name's body as (which snapshot, its first byte, its length); `gap`, what
     stopped the table being read, or None.  An empty table is the answer on a machine with no snapshots, and it keeps every
-    line the reading it had without one."""
+    line the reading it had without one.
 
-    def __init__(self, aliases=None, functions=None, files=(), gap=None):
+    SPD-134: `verdicts`, what the hook judged of a function's body (shell/expansions.inert_kinds), each name -> (which
+    snapshot, its first byte, its length, the kinds of command its reading runs where it was judged inert, else None);
+    `code`, the program_key of the program that judged them; `fingerprint`, the snapshots' (name, size, mtime) the table
+    was read at, which a verdict is written back to the cache beside."""
+
+    def __init__(self, aliases=None, functions=None, files=(), gap=None, fingerprint=None, verdicts=None, code=None):
         self.aliases = aliases if aliases is not None else {}
         self.functions = functions if functions is not None else {}
         self.files = list(files)
         self.gap = gap
+        self.fingerprint = fingerprint
+        self.verdicts = verdicts if verdicts is not None else {}
+        self.code = code
+        self.program = None  # program_key(), once this process has read it
+
+    def current_program(self):
+        """program_key() for this process, read once."""
+        if self.program is None:
+            self.program = program_key()
+        return self.program
+
+    def verdict(self, name):
+        """What the hook judged of this function's body: the kinds of command its reading runs where it is inert, None
+        where it is not, UNJUDGED where no verdict holds -- none kept, one kept for a body the name no longer names, or
+        one another program judged (a merge that changes the reading changes what a body earns)."""
+        kept = self.verdicts.get(name)
+        if kept is None or tuple(kept[:3]) != self.functions.get(name) or self.code != self.current_program():
+            return UNJUDGED
+        return kept[3]
 
     def body(self, name):
         """The shell text a function of this name runs, or None: read from the snapshot only when a line names it, so no
@@ -153,11 +180,58 @@ def load_table(home):
         with open(cache, encoding="utf-8") as f:
             stored = json.load(f)
         if stored["fingerprint"] == [list(e) for e in entries] and isinstance(stored["aliases"], dict):
-            return Table(stored["aliases"], {k: tuple(v) for k, v in stored["functions"].items()}, files)
+            code, verdicts = stored_verdicts(stored.get("verdicts"))
+            return Table(stored["aliases"], {k: tuple(v) for k, v in stored["functions"].items()}, files, fingerprint=entries,
+                         verdicts=verdicts, code=code)
     built = build_table(files)
     if built.gap is None:
+        built.fingerprint = entries
         write_cache(cache, entries, built)
     return built
+
+
+def stored_verdicts(section):
+    """(the program key, the verdicts) a cached table holds, or (None, {}) where it holds none the hook can read: a table
+    cached before SPD-134, or verdicts of any shape but record_verdict's.  A verdict the hook cannot read is no verdict,
+    and its body is judged again rather than skipped."""
+    if not isinstance(section, dict) or type(section.get("code")) is not int or not isinstance(section.get("bodies"), dict):
+        return None, {}
+    verdicts = {}
+    for name, kept in section["bodies"].items():
+        if not (isinstance(kept, list) and len(kept) == 4 and all(type(x) is int for x in kept[:3])):
+            return None, {}
+        kinds = kept[3]
+        if kinds is not None and not (isinstance(kinds, list) and all(isinstance(k, str) for k in kinds)):
+            return None, {}
+        verdicts[name] = (kept[0], kept[1], kept[2], kinds)
+    return section["code"], verdicts
+
+
+def record_verdict(home, table, name, kinds):
+    """Keep what the hook judged of `name`'s body (shell/expansions.inert_kinds) with the table in the home's cache, for
+    this program: a verdict another program judged is dropped rather than kept beside it."""
+    code = table.current_program()
+    if table.code != code:
+        table.verdicts, table.code = {}, code
+    table.verdicts[name] = tuple(table.functions[name]) + (kinds,)
+    if table.fingerprint is not None:
+        write_cache(os.path.join(str(home), hookio.STATE_DIR, CACHE_NAME), table.fingerprint, table)
+
+
+def program_key():
+    """A key of the program reading the Bash tool's lines: the size and mtime of every source file under bin/, which a
+    merge or an edit of any of them changes.  A verdict on a body holds only for the reading that judged it.  Only
+    integers are hashed, whose hash, unlike a string's, is the same in every process."""
+    package = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    stats = []
+    for directory in [os.path.dirname(package)] + sorted(os.path.join(package, d) for d in os.listdir(package)):
+        with contextlib.suppress(OSError):
+            with os.scandir(directory) as listing:
+                for entry in sorted(listing, key=lambda e: e.name):
+                    if entry.name.endswith(".py") and entry.is_file():
+                        stat = entry.stat()
+                        stats.append((stat.st_size, stat.st_mtime_ns))
+    return hash(tuple(stats))
 
 
 def build_table(files):
@@ -321,10 +395,13 @@ def write_cache(cache, entries, built):
     if not os.path.isdir(os.path.dirname(cache)):
         return
     tmp = "%s.%d.tmp" % (cache, os.getpid())
+    stored = {"fingerprint": [list(e) for e in entries], "aliases": built.aliases,
+              "functions": {k: list(v) for k, v in built.functions.items()}}
+    if built.code is not None:
+        stored["verdicts"] = {"code": built.code, "bodies": {k: list(v) for k, v in built.verdicts.items()}}
     with contextlib.suppress(OSError):
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"fingerprint": [list(e) for e in entries], "aliases": built.aliases,
-                       "functions": {k: list(v) for k, v in built.functions.items()}}, f)
+            json.dump(stored, f)
         os.replace(tmp, cache)
     with contextlib.suppress(OSError):
         os.unlink(tmp)

@@ -1,6 +1,10 @@
-"""shell/expansions: Parameter expansions and a command's read points."""
+"""shell/expansions: Parameter expansions and a command's read points.
 
-from . import analyse, arg_writes, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax
+Past the ~250-line mark with SPD-134's verdicts on a function's body (inert_kinds, pristine, judge_body), a region with
+users of its own and a seam for a module of its own, kept here while the hook's module set (tests/test_package.py,
+HOOK_PATH) names no other module."""
+
+from . import analyse, arg_writes, git_writes, globbing, loop_bindings, positional, prepare, spud_calls, syntax
 from ..hooks import hookio, snapshots
 
 
@@ -189,6 +193,87 @@ def shell_function(name, a):
     call's words, so a body that calls itself with them reads it no further."""
     found = snapshots.shell_table(a.home)
     return found.body(name) if name in found.functions else None
+
+
+# SPD-134: a body the hook judges once and skips after.  A function of the shell's is judged inert when its reading, in
+# the one state judge_body reads it in, records nothing and changes nothing of the line's state, and the hook skips it
+# (analyse.read_shell_name) only at a call whose state differs from that one in nothing the reading reads but four
+# inputs it pins at their worst.  Why that dominates every line the skip reaches, input by input:
+#
+# - What the line has set: nothing.  pristine() holds every field of the analysis at its fresh value but those in _FREE,
+#   so no variable, doubt, function, alias, hash entry, `source` or `trap` (all_doubt), loop or function body, or text
+#   of the shell's around the call.  The adversary SPD-134's ticket proposed -- PATH assigned, an unreadable function
+#   and hash name in force -- does not dominate these: a function the line defines is read again on the input a call
+#   inside the body hands it (walk.read_call, SPD-212), which no unreadable name stands for; eval expands an alias the
+#   line defines; a doubt on IFS changes every reading of a value.  So the skip waits for a line that set none of them.
+# - The call's words: a body that reads them (positional.REFERENCE_RE: `$1`, `$@`, `$*`, `$#`, argv; READS_RE: `for f;
+#   do`, getopts) is never judged.  No word stands for every word: `sort $X f`, `sed $X f`, `tar $X` and `find . $X`
+#   record nothing where `sort -o note.txt f` writes.  Any other body is the same text for every call, and with nothing
+#   recorded the prune (analyse_shell_text), the one other place the words reach, has nothing to keep.
+# - The directory: judged with none known.  Every write, git call and script is recorded whatever the directory, which
+#   only says where it lands; a glob in a path command, read against a known directory, adds readings beside the
+#   literal one, itself a script finding; a cd's move is undone when the reading ends (analyse.isolated).
+# - The standard input: judged fed with text the line does not spell.  Its readers -- a shell, an interpreter, xargs
+#   -- record at least as much for that as for any text a line spells (script_files, inline_programs, find_xargs).
+# - The depth: judged at READING_DEPTH, the deepest the hook reads whole, where anything nested in the body (a
+#   substitution, eval, a `-c` string) is past the bound and recorded; read whole there, the body reads the same at every
+#   shallower depth, and a call deeper than that is read, and refused as the text past the bound it is.
+#
+# What the reading changes that is not state -- the kinds of command it runs, which the allow reads (all_spud) -- the
+# skip appends in turn, and leaves the directory as sure as isolated() leaves it.  A verdict holds for one body under
+# one program (hooks/snapshots.Table.verdict): the program_key of any other judges again.  When in doubt the answer is
+# None, and the body is read as before.
+
+# The fields of the analysis a call may hold at other than their fresh values and still be skipped: what the line
+# recorded so far, which the reading appends to and never reads (the prune reads only its own); the four inputs
+# judge_body pins (cwds, stdin, stdin_fed, and the depth, an argument); what the reading resets before it reads
+# (unsure) or after (cd_uncertain); caches of work done, which can only spare it a reading (isolated_done), or that it
+# reads for a function call a judged body does not make (bodies_read: judge_body refuses one that expands an alias or
+# function of the table; walking, function_inputs and body_walks: one the line or the body defines); and alias_scope,
+# read only for an alias the line defined.
+_FREE = frozenset({"home", "launcher", "findings", "kinds", "redirects", "git_calls", "git_writes", "arg_writes",
+                   "unparseable", "shell_expanded", "cwds", "stdin", "stdin_fed", "unsure", "cd_uncertain", "isolated_done",
+                   "bodies_read", "walking", "function_inputs", "body_walks", "alias_scope"})
+
+
+def inert_kinds(name, body, a, depth):
+    """The kinds of command a function of the shell's runs, where the hook may skip reading its body for this call at
+    `depth` (SPD-134), else None: the call is within the depth the body was judged at, the line has set nothing the
+    reading reads (pristine), and the body, whatever the call's words, was judged inert -- judged here the first time,
+    and the verdict kept with the table (hooks/snapshots.record_verdict)."""
+    if depth + 1 > analyse.READING_DEPTH or positional.REFERENCE_RE.search(body) or positional.READS_RE.search(body) \
+            or not pristine(a):
+        return None
+    found = snapshots.shell_table(a.home)
+    kinds = found.verdict(name)
+    if kinds is snapshots.UNJUDGED:
+        kinds = judge_body(a.home, body)
+        snapshots.record_verdict(a.home, found, name, kinds)
+    return kinds
+
+
+def pristine(a):
+    """Whether the analysis holds nothing a line could have set before this call, beside _FREE's fields."""
+    fresh = vars(syntax.ShellAnalysis())
+    return all(key in _FREE or (key in fresh and value == fresh[key]) for key, value in vars(a).items())
+
+
+def judge_body(home, body):
+    """The kinds of command a body's reading runs, where that reading -- as analyse.read_shell_name reads a body, at the
+    deepest depth read whole, with no directory known, standard input fed text the line does not spell, and nothing
+    pruned -- records nothing and changes nothing of the analysis but the kinds; else None."""
+    a = syntax.ShellAnalysis(home=home)
+    a.shell_reading = 1  # nested in a reading of the shell's text: nothing pruned, so every finding the body earns shows
+    before = _state(a)
+    analyse.analyse_shell_text(a, body, analyse.READING_DEPTH, [], own_process=True, substituted=True, stdin=None, fed=True)
+    kinds, a.kinds = a.kinds, []
+    return kinds if _state(a) == before else None
+
+
+def _state(a):
+    """Every field of the analysis but its cache of readings done, each container copied so a later change shows."""
+    return {key: value.copy() if isinstance(value, (dict, set, list)) else value
+            for key, value in vars(a).items() if key != "isolated_done"}
 
 
 def variable_readings(a, name):
