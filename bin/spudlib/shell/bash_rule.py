@@ -593,7 +593,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     # writes through its own options or the environment, and the files a command names as operands and writes
     # by argument, which are held to the same rule.
     # For a caller the path rule holds, each tree a recursive copy lands or find hands its command is walked too.
-    written, capped, unwalked = arg_writes.written_paths(analysis.arg_writes, walk=strict)
+    written, capped, unwalked = arg_writes.written_paths(analysis.arg_writes, walk_trees=strict)
     for entries, messages in (([(None, t, c, None) for t, c in analysis.redirects], REDIRECT_MESSAGES),
                               ([(n, t, c, None) for n, t, c in analysis.git_writes], GIT_WRITE_MESSAGES),
                               (written, ARG_WRITE_MESSAGES)):

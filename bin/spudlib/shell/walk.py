@@ -971,23 +971,23 @@ def walk_line(a, tokens, inner, bodies, expanded, depth, start, glued=True, stdi
 
 def _walks(a, line, tokens, inner, bodies, expanded, depth, start, glued, stdin, fed):
     """walk_line's walks of one reading of a line, `line`; the last one's reading stands."""
-    walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, line=line)
-    walk.walk(tokens)
-    found, defined, read, again = walk.found, walk.defined, {}, bool(walk.found)
+    shell_walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, line=line)
+    shell_walk.walk(tokens)
+    found, defined, read, again = shell_walk.found, shell_walk.defined, {}, bool(shell_walk.found)
     while True:
         calls = unread_inputs(a.function_inputs.get(line, {}), read)
         if not (calls or again):
-            return walk
+            return shell_walk
         spent = bool(calls) and a.body_walks >= positional.READINGS_PER_NAME
         if spent:
             calls = dict.fromkeys(defined, (None, True))  # every body on the line, on input the line does not spell
         elif calls:
             a.body_walks += 1
         restore_reading(a, start)
-        walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, found, calls, line)
-        walk.walk(tokens)
+        shell_walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, found, calls, line)
+        shell_walk.walk(tokens)
         if spent:
-            return walk
+            return shell_walk
         again = False
 
 

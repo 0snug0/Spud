@@ -315,16 +315,16 @@ def cwd_write_scan(args, entry):
     them, a "value" option taking the next word whatever it is; then the words that parse leaves, in order, where an
     option of the later parse sends the files to one file unless the word before it may take it as its value."""
     abbreviates, options, later = entry[0], entry[1], entry[2]
-    stdout, directory, suffixes, unread, kept = False, None, [], False, []
+    stdout, directory, suffixes, unreadable, kept = False, None, [], False, []
     i = 0
     while i < len(args):
         w = args[i]
         i += 1
         if w == "--":
             break
-        if w in ("-h", "--help") and not unread:
+        if w in ("-h", "--help") and not unreadable:
             return None  # usage, or the manual: nothing written, wherever it stood (exit 129, probed)
-        unread = unread or cwd_unread_word(w)
+        unreadable = unreadable or cwd_unread_word(w)
         spelled, rest = cwd_own_options(w, options, abbreviates)
         if rest is not None:
             kept.append(rest)
@@ -337,7 +337,7 @@ def cwd_write_scan(args, entry):
             if value is None and kind not in ("flag", "stdout"):
                 value = args[i] if i < len(args) else None
                 i += 1
-                unread = unread or (kind == "value" and value is not None and cwd_unread_word(value))
+                unreadable = unreadable or (kind == "value" and value is not None and cwd_unread_word(value))
             if kind == "stdout":
                 stdout = True
             elif kind == "dir" and value is not None:
@@ -355,7 +355,7 @@ def cwd_write_scan(args, entry):
             sent, taker = sent or bool(value), False
             continue
         taker = cwd_later_takes_value(w)
-    return sent, directory, suffixes, unread
+    return sent, directory, suffixes, unreadable
 
 
 def git_chdir_and_config(words, keys):
@@ -429,7 +429,7 @@ def git_cwd_write_targets(words):
     scan = None if entry is None else cwd_write_scan(args, entry)
     if scan is None:
         return []
-    sent, directory, suffixes, unread = scan
+    sent, directory, suffixes, unreadable = scan
     config, names, strftime = entry[3], entry[4], entry[5]
     base, configured = git_chdir_and_config(words, config or ())
     default = configured.get(config[0]) if config else None  # format.outputDirectory: where no -o is given
@@ -437,7 +437,7 @@ def git_cwd_write_targets(words):
         default = "./" + default  # a config value, which no shell expanded
     if config and configured.get(config[1]) is not None:
         suffixes = [configured[config[1]]] + suffixes  # format.suffix, which --suffix overrides
-    if unread:  # a word the hook cannot read may be a reset or take --stdout as its value
+    if unreadable:  # a word the hook cannot read may be a reset or take --stdout as its value
         here = [""] + ([default] if default is not None else [])
     elif sent:
         return []

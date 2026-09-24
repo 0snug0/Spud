@@ -97,11 +97,11 @@ def git_repository_reason(ctx, con, targets, cwds):
     repository is the one `-C`, `--git-dir`, GIT_DIR and friends name (git_repo_targets) and, when git discovers
     it, the one containing each directory the shell may be in.  A target outside every checkout the ledger knows already
     has the outside-repository refusal, which is read first."""
-    directories, unresolved = git_call_directories(targets, cwds)
+    call_dirs, unresolved = git_call_directories(targets, cwds)
     if unresolved:
         return GIT_SCOPE_UNRESOLVED_REASON
     known = None
-    for directory, as_git_dir, spelled in directories:
+    for directory, as_git_dir, spelled in call_dirs:
         where, gitdir, commondir = gitrepos.git_repository_dirs(directory, as_git_dir)
         if gitdir is None:
             continue  # no repository there: git reads no config of its own, runs no hook, and the hook runs nothing
@@ -127,9 +127,9 @@ def git_spud_repository_reason(ctx, con, targets, cwds):
     the line is Spud's own, and the check is about files a member planted.  The same reading as a member's, so it costs
     what that one costs: project_checkouts only once a repository is found, one scandir, and git only when a config file
     changed."""
-    directories, _unresolved = git_call_directories(targets, cwds)
+    call_dirs, _unresolved = git_call_directories(targets, cwds)
     known = None
-    for directory, as_git_dir, _spelled in directories:
+    for directory, as_git_dir, _spelled in call_dirs:
         where, gitdir, commondir = gitrepos.git_repository_dirs(directory, as_git_dir)
         if gitdir is None:
             continue

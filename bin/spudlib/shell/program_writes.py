@@ -172,7 +172,7 @@ def _open_writes(fam, args, method):
     only one of a method call (`Path.open('w')`); the first of a function is the path.  Symbols: any literal argument,
     since perl's two-argument open puts the mode at the front of the name (`open(F, ">x")`) and ruby's open runs a
     `|` command from its first."""
-    positional = []
+    positional_args = []
     for arg in args:
         kw = KEYWORD.match(arg)
         if kw and kw.group(1) in ("mode", "flag", "flags"):
@@ -181,13 +181,13 @@ def _open_writes(fam, args, method):
                 return lit
             continue
         if kw is None:
-            positional.append(arg)
-    for i, arg in enumerate(positional):
+            positional_args.append(arg)
+    for i, arg in enumerate(positional_args):
         lit = _literal(arg)
         if lit is None:
             continue
         body = lit[1:-1]
-        if fam.letters and (i >= 1 or (method and len(positional) == 1)) and WRITE_MODE.fullmatch(body):
+        if fam.letters and (i >= 1 or (method and len(positional_args) == 1)) and WRITE_MODE.fullmatch(body):
             return lit
         if fam.symbols and (body.lstrip()[:1] in (">", "+", "|") or body.lstrip().startswith("-|")
                             or body.rstrip().endswith("|")):
