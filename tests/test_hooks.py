@@ -9021,13 +9021,105 @@ class ProcessSubstitutionFileTest(BashHookCase):
                     self.assertEqual((r.code, r.decision, self.plain(r.reason)), (twin.code, twin.decision, twin.reason))
 
     def test_a_case_pattern_keeps_no_file_name(self):
-        """SPD-184's reading stays: a case's word and pattern are no command's, and the walk runs the words before a `|`
-        there as one (CaseSubstitutionTest)."""
+        """SPD-184's reading stays: a case's word and pattern are no command's (CaseSubstitutionTest), and a `|` there is
+        an alternative (SPD-187, CasePatternAlternativeTest)."""
         for line in ("case x in y) ;; <(true)|x) true;; esac", "case x in y) ;; =(true)|x) true;; esac"):
             for agent_id in (AGENT_A, AGENT_C, None):
                 with self.subTest(line=line, agent_id=agent_id):
                     self.assertSilent(line, agent_id)
         self.ledger_write("case x in <(true)) cd ledger && echo $(echo x > tickets/SPD-001.md);; esac")
+
+
+class CasePatternAlternativeTest(BashHookCase):
+    """SPD-187, filed by SPD-181's engineer: ShellWalk read a `|` in a case pattern as a pipeline operator and analysed the
+    words before it as a command -- for the first pattern the case's word and `in` among them -- so `case $1 in a|b) echo;;
+    esac` was refused to a member as a command word from a variable, and `case x in a) ;; git|b) echo;; esac` recorded a git
+    command.  A newline after `case word in` did the same with the word and `in`.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 -f -o nobareglobqual, zsh 5.9 -f and bash 3.2.57,
+    with `touch` a function that names itself on stderr: `case q in touch|b) echo m1;; esac` and `case q in a) ;; touch|b)
+    echo m2;; esac` ran nothing; `case q in a|$(touch s3))` and ``a|`touch s4` `` ran their substitutions; `case q in a|q)
+    echo m5;; esac | cat; echo after5` printed both; `case q in<newline>  a|b) ... ;;<newline>  *) echo star6 ;;<newline>esac`,
+    `a | q )`, `(a|q)` and `case q<newline>in a|q)` matched in all three shells.
+
+    zsh's brace form, `case word { ... }` (SPD-185), is read as before: the walk stays in a pattern after it, and reads what
+    follows as it did."""
+
+    def setUp(self):
+        super().setUp()
+        self.m = load_spud_module()
+
+    def findings(self, line):
+        return self.m.analyse_command(line, self.m.ShellAnalysis(cwd=str(self.home.path))).findings
+
+    def law_7(self, line):
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.findings(line))
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_lines_record_no_command(self):
+        self.assertNotIn(("var", "$1"), self.findings("case $1 in a|b) echo;; esac"))
+        self.assertEqual([f for f in self.findings("case x in a) ;; git|b) echo;; esac") if f[0] == "git"], [])
+        for line in ("case $1 in a|b) echo;; esac", "case x in a) ;; git|b) echo;; esac"):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+
+    def test_no_pattern_word_is_a_command(self):
+        for line in ("case $1 in a|b|c) echo;; esac", "case $1 in a | b ) echo;; esac", "case $1 in (a|b) echo;; esac",
+                     "case \"$1\" in git|push) echo;; esac", "case $1 in a) ;; $2|b) echo;; esac",
+                     "case $1 in a) true;& git|b) echo;; esac", "case $1 in a) true;| git|b) echo;; esac",
+                     "case $1 in\n  a|b) echo ;;\n  git|c) echo ;;\nesac", "case $1 in\n\n  a|b) echo ;;\nesac",
+                     "case $1\nin a|b) echo;; esac", "case $1\n\nin a|git) echo;; esac",
+                     "case x in (x|y)|git) echo;; esac", "case $1 in a|b) echo;; esac; case $2 in c|d) echo;; esac",
+                     "if true; then case $1 in a|b) echo;; esac; fi", "f() { case $1 in a|b) echo;; esac }; f x"):
+            with self.subTest(line=line):
+                found = self.findings(line)
+                self.assertNotIn(("var", "$1"), found)
+                self.assertNotIn(("var", "$2"), found)
+                self.assertEqual([f for f in found if f[0] == "git"], [])
+                self.assertSilent(line)
+
+    # -- what still runs ----------------------------------------------------------------------------------------------
+    def test_a_substitution_in_an_alternative_is_read(self):
+        for line in ("case x in a|$(git push)) echo;; esac", "case x in a|`git push`) echo;; esac",
+                     "case x in $(git push)|a) echo;; esac", "case x in a) ;; b|$(git push)|c) echo;; esac",
+                     "case x in (a|$(git push)) echo;; esac", "case x in a|<(git push)) echo;; esac",
+                     "case x in y) ;; b|=(git push)) true;; esac", "case $(git push) in a|b) echo;; esac",
+                     "case x in\n  a|$(git push)) echo ;;\nesac"):
+            self.law_7(line)
+
+    def test_the_body_and_what_follows_esac_are_read(self):
+        for line in ("case $1 in a|b) git push;; esac", "case $1 in a|b) echo;; c|d) git push;; esac",
+                     "case $1 in (a|b) git push;; esac", "case $1 in a | b ) git push;; esac",
+                     "case $1 in a|b) echo;; esac; git push", "case $1 in a|b) echo;; esac | git push",
+                     "case $1 in a|b) echo;; esac && git push", "case $1 in a|b) echo;; esac\ngit push",
+                     "case $1 in\n  a|b) echo ;;\nesac\ngit push", "echo x | case $1 in a|b) git push;; esac",
+                     "case $1 in a|b) echo;; esac | cat | git push", "{ case $1 in a|b) echo;; esac } | git push",
+                     "case $1 in a|b) case $2 in c|d) echo;; esac;; esac; echo | git push"):
+            self.law_7(line)
+
+    def test_a_case_with_no_pattern_closes_at_its_esac(self):
+        # `case q in esac | echo e1`, `case q in esac; echo e2`, `case q in<newline>esac | echo e3` and `case q<newline>in
+        # esac && echo e4` printed theirs in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2
+        for line in ("case x in esac | git push", "case x in esac; echo in | git push", "case x in\nesac | git push",
+                     "case x\nin esac && echo in | git push", "case x in esac; echo in|git push",
+                     "(case x in esac) | git push", "case $1 in esac; case $2 in a|b) echo;; esac | git push"):
+            self.law_7(line)
+
+    def test_the_brace_form_is_read_as_before(self):
+        # SPD-185 is queued: after `case word { ... }` the walk stays in a pattern, and a `|` there still ends a command
+        for line in ("case x { x) ;; }; echo a | git push", "case x { x|y) ;; }; echo a | git push",
+                     "case x { in) ;; }; echo a | git push", "case <(true) { in|y) ;; }; echo a | git push"):
+            self.law_7(line)
+
+    def test_a_pattern_the_reader_cannot_place_stays_refused(self):
+        # a case pattern's `)` inside a `$( )` ends the substitution for split_substitutions: unread, refused to a member
+        for line in ("x=$(case $1 in a|b) echo;; esac)", "echo $(case x in a|b) echo;; esac)"):
+            with self.subTest(line=line):
+                self.assertEqual(self.bash(line).decision, "deny")
 
 
 class AliasEvalTest(BashHookCase):
