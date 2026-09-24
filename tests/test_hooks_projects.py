@@ -24,6 +24,7 @@ import time
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from helpers import EXIT_ERROR, SPUD, HookResult, spawn_type
 from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split, run_main
@@ -886,9 +887,12 @@ class PlantedRepositoryTest(ProjectHookCase):
         """Every file and directory in the common git directory and in the worktree's git directory an hour old by mtime
         (ctime stays now: nothing but the kernel sets it).  Both caches keep an entry only once every stamp it is kept
         under is SETTLED_NS old (SPD-131's findings cache, SPD-238's scopes cache), so a test that wants them warm settles
-        the repository it built first, as PlantedCacheTest.settle does."""
+        the repository it built first, as PlantedCacheTest.settle does.  The tool checkout's (project spud's) git
+        directory too: since SPD-233 it is a known checkout restored from a snapshot the worker took moments before the
+        class's first test, so its stamps are no older than that snapshot, and SessionStart's line reads every known
+        checkout through the findings cache (SPD-240)."""
         then = time.time() - 3600
-        for gitdir in (self.common, self.wt_gitdir):
+        for gitdir in (self.common, self.wt_gitdir, self.home.tool / ".git"):
             for path in (gitdir, *gitdir.iterdir()):
                 os.utime(path, (then, then))
         os.utime(self.bad_wt / ".git", (then, then))
@@ -1011,6 +1015,10 @@ class PlantedCacheTest(ProjectHookCase):
             if os.path.lexists(path):
                 os.utime(path, (then, then))
 
+    def clock_at(self, ns):
+        """The clock the settle rule reads (gitrepos' time.time_ns) stopped at `ns` for the block (SPD-240)."""
+        return mock.patch("spudlib.hooks.gitrepos.time", mock.Mock(wraps=time, time_ns=lambda: ns))
+
     def planted(self):
         """The line board --brief carries naming a checkout, or None when every checkout reads clean."""
         lines = [line for line in self.cli("board", "--brief").stdout.split("\n") if line.startswith(PLANTED_LINE)]
@@ -1043,11 +1051,17 @@ class PlantedCacheTest(ProjectHookCase):
     def test_a_settled_read_is_kept_and_answers_the_next_one(self):
         """The cache is real: a finding only the entry holds is shown, so every invalidation test below reads a warm entry."""
         # SPD-233: every checkout is restored from the class's snapshot, so its files carry that build's mtimes, settled
-        # by now; setUp wrote badtakes' hooks/ this second, and the config and the tool checkout's (project spud's) own
-        # stamps are touched to now here, so no known checkout's entry may be kept by the first read.
-        for path in (self.common / "config", self.home.tool / ".git" / "config", self.home.tool / ".git" / "hooks"):
-            os.utime(path)
-        self.assertIsNone(self.planted())
+        # by now; badtakes' hooks/ and config and the tool checkout's (project spud's) own stamps are touched at one
+        # instant here, so no known checkout's entry may be kept by the first read.  SPD-240: the cache goes too, since a
+        # read of the settled snapshot before (setUp's, on a loaded machine) kept entries under the old stamps, which no
+        # read trusts now but stored() would still return; and that read runs on a clock stopped at the touch, however
+        # long its git runs take on a loaded machine.
+        now = time.time_ns()
+        for path in (self.hooks, self.common / "config", self.home.tool / ".git" / "config", self.home.tool / ".git" / "hooks"):
+            os.utime(path, ns=(now, now))
+        self.cache.unlink(missing_ok=True)
+        with self.clock_at(now):
+            self.assertIsNone(self.planted())
         self.assertFalse(self.stored(), "hooks/ and the config were written this second: nothing is kept yet")
         stored = self.warm()
         self.assertEqual(stored[str(self.bad)]["findings"], [])

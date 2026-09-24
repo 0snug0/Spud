@@ -835,11 +835,21 @@ class GitLocalConfigTest(BashHookCase):
             os.utime(path, (then, then))
 
     def unsettle(self, *names):
-        """The named files of the git directory touched to now, as a write this second leaves them: since SPD-233 the
-        checkout is restored from a snapshot taken when the worker began, so its files are already settled when a test
-        starts, and a test about an entry not kept yet makes its own stamps fresh first."""
+        """The named files of the git directory touched at one instant, returned in nanoseconds, as a write then leaves
+        them: since SPD-233 the checkout is restored from a snapshot taken when the worker began, so its files are already
+        settled when a test starts, and a test about an entry not kept yet makes its own stamps fresh first.  The scopes
+        cache goes with them: a hook that read the settled snapshot before (setUp's, on a loaded machine) kept an entry
+        under the old stamps, which no hook trusts now but scopes() would still return (SPD-240)."""
+        now = time.time_ns()
         for name in names:
-            os.utime(self.repo / ".git" / name)
+            os.utime(self.repo / ".git" / name, ns=(now, now))
+        (self.home.path / STATE / "git-config-scopes.json").unlink(missing_ok=True)
+        return now
+
+    def clock_at(self, ns):
+        """The clock the settle rule reads (gitrepos' time.time_ns) stopped at `ns` for the block: a hook that reads in the
+        tick of the write, however long its git run takes on a loaded machine (SPD-240)."""
+        return mock.patch("spudlib.hooks.gitrepos.time", mock.Mock(wraps=time, time_ns=lambda: ns))
 
     def scopes(self):
         """The scopes cache's entry for the home's repository, or None."""
@@ -963,8 +973,9 @@ class GitLocalConfigTest(BashHookCase):
         so an entry written then could answer for a file that changed after it: none is kept until every stamp is
         SETTLED_NS old, and the hook runs git again until then."""
         cmd = "git -C %s status" % self.repo
-        self.unsettle("config")  # the one stamp this repository's entry is kept under (no config.worktree, no include)
-        self.assertSilent(cmd)
+        written = self.unsettle("config")  # the one stamp this repository's entry is kept under (no config.worktree, no include)
+        with self.clock_at(written):
+            self.assertSilent(cmd)
         self.assertIsNone(self.scopes(), "the config was written this second: nothing is kept yet")
         self.settle()
         self.assertSilent(cmd)
