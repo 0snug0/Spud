@@ -1,14 +1,17 @@
 """PreToolUse for the edit tools, and the path rule both hooks share: deliverables, generated roots, worktrees elsewhere,
 path aliases, the state directory, paths outside every project, deliverable globs."""
 
+import importlib
 import json
 import os
 import shutil
 import subprocess
 import tempfile
+import time
 import unicodedata
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import EXIT_ERROR, git, load_spud_module, SpudTestCase
 from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, DB_WORDING, OUTSIDE, SESSION, STATE, case_insensitive_fs, HookCase
@@ -289,6 +292,41 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
         self.git("worktree", "add", "-q", "-b", name, str(path))
         return path
 
+    def cache(self):
+        return self.home.path / STATE / "worktrees" / "spud.json"  # one cache per project since SPD-014
+
+    def worktree_stamps(self):
+        """What the list's fingerprint stamps: the tool's <common>/worktrees and every worktrees/<id>/gitdir in it."""
+        admin = self.home.tool / ".git" / "worktrees"
+        return [admin, *sorted(admin.glob("*/gitdir"))]
+
+    def settle_worktrees(self):
+        """Every stamp the list is kept under an hour old by mtime (its ctime stays now: nothing but the kernel sets it).
+        The list is kept only once every stamp is SETTLED_NS old (SPD-250), and the class home is put back after a test
+        that added a worktree by removing its admin entry, which leaves worktrees/ young, so a test that wants the cache
+        written settles first."""
+        then = time.time() - 3600
+        for path in self.worktree_stamps():
+            os.utime(path, (then, then))
+
+    def unsettle_worktrees(self):
+        """Every stamp the list is kept under touched at one instant, returned in nanoseconds, as `git worktree add` leaves
+        them, with no cache left from before: the class home's stamps may already be settled when a test starts."""
+        now = time.time_ns()
+        for path in self.worktree_stamps():
+            os.utime(path, ns=(now, now))
+        self.cache().unlink(missing_ok=True)
+        return now
+
+    def clock(self, now):
+        """The clock the settle rule reads (hooks/worktrees' time.time_ns) answering now[0] for the block."""
+        return mock.patch("spudlib.hooks.worktrees.time", mock.Mock(wraps=time, time_ns=lambda: now[0]))
+
+    def put_back(self, stamps):
+        """Each path's mtime (and atime) put back to what os.stat read before, as `touch -r` or os.utime can."""
+        for path, st in stamps.items():
+            os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+
     def assertCheckoutHolds(self, spelled):
         """The tool's worktree `elsewhere`, spelled another way the filesystem honours: the lead's globs bind there, every
         other path is a deliverable of nobody's, and Spud writes none of it."""
@@ -324,6 +362,7 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
         self.assertSilent(later / "tests" / "x.py")
 
     def test_the_list_is_cached_until_the_worktrees_change(self):
+        self.settle_worktrees()
         self.assertSilent(self.elsewhere / "tests" / "x.py")
         path = self.home.env["PATH"]
         self.home.env["PATH"] = "/nonexistent"  # no git to run: the answer comes from the cache
@@ -334,6 +373,79 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
         r = self.edit(self.elsewhere / "tests" / "x.py")
         self.assertEqual((r.code, r.stdout), (2, ""), r)
         self.assertIn("failing closed", r.stderr)
+
+    def test_a_worktree_moved_with_its_mtimes_put_back_is_seen(self):
+        """SPD-250: `git worktree move` rewrites worktrees/<id>/gitdir, the id kept, so a move to a path of the same length
+        leaves its size as it was, and an mtime put back (touch -r, os.utime) leaves the mtime: the ctime, which nothing but
+        the kernel sets, is in the stamp, so the list is read again."""
+        extra = self.add_worktree("extra")
+        moved = self.home.tool.parent / ("%s-extrb" % self.home.tool.name)  # the same length as `extra`
+        self.settle_worktrees()
+        self.assertRefused(extra / "tests" / "x.py", "a checkout of project spud")  # listed, and kept
+        self.assertTrue(self.cache().is_file())
+        before = {p: os.stat(p) for p in self.worktree_stamps()}
+        self.git("worktree", "move", str(extra), str(moved))
+        self.put_back(before)
+        self.assertEqual(self.worktree_stamps(), list(before), "the same ids")
+        self.assertEqual([(os.stat(p).st_size, os.stat(p).st_mtime_ns) for p in before],
+                         [(st.st_size, st.st_mtime_ns) for st in before.values()], "sizes and mtimes as they were")
+        self.assertRefused(moved / "tests" / "x.py", "a checkout of project spud")
+        self.assertSilent(extra / "tests" / "x.py")  # gone: outside every project root, in the temp roots
+
+    def test_a_worktree_removed_and_another_added_under_its_id_is_seen(self):
+        """SPD-250: removing a worktree and adding another whose directory has the same name makes worktrees/<id>/gitdir
+        again, the same size when the path is the same length; with the mtimes put back only its inode and ctime differ."""
+        first = self.home.tool.parent / "aa" / "tool-w"
+        second = self.home.tool.parent / "bb" / "tool-w"
+        self.git("worktree", "add", "-q", "--detach", str(first))
+        self.settle_worktrees()
+        self.assertRefused(first / "tests" / "x.py", "a checkout of project spud")  # listed, and kept
+        self.assertTrue(self.cache().is_file())
+        before = {p: os.stat(p) for p in self.worktree_stamps()}
+        self.git("worktree", "remove", "--force", str(first))
+        self.git("worktree", "add", "-q", "--detach", str(second))
+        self.put_back(before)
+        self.assertEqual(self.worktree_stamps(), list(before), "the same ids")
+        self.assertEqual([(os.stat(p).st_size, os.stat(p).st_mtime_ns) for p in before],
+                         [(st.st_size, st.st_mtime_ns) for st in before.values()], "sizes and mtimes as they were")
+        self.assertRefused(second / "tests" / "x.py", "a checkout of project spud")
+        self.assertSilent(first / "tests" / "x.py")
+
+    def test_a_list_is_kept_only_once_its_stamps_have_settled(self):
+        """SPD-250: a worktree added, moved or removed in the clock tick of the stamp read leaves the stamp as it was on a
+        filesystem that keeps seconds (HFS+) or two (FAT), so the list is kept only once every stamp is SETTLED_NS old, as
+        gitrepos' two caches keep theirs (SPD-131, SPD-238), and git is run again until then."""
+        target = self.elsewhere / "tests" / "x.py"
+        written = self.unsettle_worktrees()
+        with self.clock([written]):
+            self.assertSilent(target)
+        self.assertFalse(self.cache().exists(), "the worktrees changed this second: nothing is kept yet")
+        self.settle_worktrees()
+        self.assertSilent(target)
+        self.assertTrue(self.cache().is_file(), "settled: the list is kept")
+        path = self.home.env["PATH"]
+        self.home.env["PATH"] = "/nonexistent"  # no git to run: the answer comes from the cache
+        self.assertSilent(target)
+        self.home.env["PATH"] = path
+
+    def test_the_clock_is_read_before_the_worktrees_are_stamped(self):
+        """SPD-250, as SPD-249 for gitrepos: the reading an entry keeps must begin a whole tick after every stamp's mtime,
+        so the settle rule's clock is read before the first stamp, not after the git run: a `git worktree list` that took
+        SETTLED_NS on a loaded machine would otherwise call settled the stamps read in the change's own tick."""
+        worktrees = importlib.import_module("spudlib.hooks.worktrees")
+        written = self.unsettle_worktrees()
+        real, now, runs = worktrees.git_worktree_list, [written], []
+
+        def slow(root):
+            out = real(root)
+            runs.append(root)
+            now[0] = written + worktrees.SETTLED_NS
+            return out
+
+        with self.clock(now), mock.patch.object(worktrees, "git_worktree_list", slow):
+            self.assertSilent(self.elsewhere / "tests" / "x.py")
+        self.assertEqual(len(runs), 1, "the miss runs git once")
+        self.assertFalse(self.cache().exists(), "the stamps were read in the change's second: a slow run makes them no older")
 
     def test_a_list_git_cannot_give_fails_the_enforcing_hook_closed(self):
         (self.home.tool / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")  # no longer a repository to git
@@ -390,8 +502,9 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
         directory, refused to a member whose glob is ** and to Spud.  Both scopes since SPD-097, so the globs really do reach
         every path the state directory is refused at: `home:**` at the home, the bare `**` in project spud's worktree."""
         self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**", "**"], cwd=self.elsewhere), AGENT_B)
+        self.settle_worktrees()
         self.assertSilent(self.elsewhere / "tests" / "x.py", agent_id=AGENT_B)  # lists the worktrees, writing the cache
-        cache = self.home.path / STATE / "worktrees" / "spud.json"  # one cache per project since SPD-014
+        cache = self.cache()
         self.assertTrue(cache.is_file())
         agents = (AGENT_B, None)
         self.assertStateHolds(cache, agents)

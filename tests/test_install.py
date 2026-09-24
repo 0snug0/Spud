@@ -193,6 +193,71 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertNotIn("hooks", left)
         self.assertNotIn("additionalDirectories", left["permissions"])
 
+    def as_if_installed_for(self, earlier, record_home=True):
+        """Turn this install's file and record into what an install for the home `earlier` wrote -- the hook lines' SPUD_HOME,
+        the home's additionalDirectories entry and its state-directory deny rules -- as a home move finds them.  With
+        record_home False the record is one written before install recorded its home (SPD-245), which leaves the hook
+        lines to say which home it was.  The launcher is left alone: the tool may sit inside the home."""
+        home, data = str(self.home.path), self.settings()
+        for groups in data["hooks"].values():
+            for g in groups:
+                for h in g["hooks"]:
+                    if h["command"].startswith("SPUD_HOME=%s " % home):
+                        h["command"] = "SPUD_HOME=%s " % earlier + h["command"][len("SPUD_HOME=%s " % home):]
+        permissions = data["permissions"]
+        permissions["additionalDirectories"] = list(dict.fromkeys(earlier if d == home else d for d in permissions["additionalDirectories"]))
+        permissions["deny"] = [d for d in permissions["deny"] if d not in state_deny_rules(home)] + state_deny_rules(earlier)
+        self.local.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        con = self.home.connect()
+        try:
+            edit = ("json_set(installed, '$.home', ?)", (earlier,)) if record_home else ("json_remove(installed, '$.home')", ())
+            con.execute("UPDATE projects SET installed = %s WHERE key = 'badtakes'" % edit[0], edit[1])
+            con.commit()
+        finally:
+            con.close()
+
+    def test_a_reinstall_for_another_home_replaces_its_entry_and_keeps_the_users_own(self):
+        """SPD-245: the additionalDirectories entry install writes is the ledger's, whichever home it named, so a reinstall
+        for another home -- what `home move` does to every installed project -- puts the new home where the old one stood
+        rather than beside it, and a directory the user added stays.  So do the state-directory deny rules (SPD-033).
+        A record from before install recorded its home is read by its hook lines, which name the home it was written for."""
+        home = str(self.home.path)
+        for record_home in (True, False):
+            with self.subTest(record_home=record_home):
+                self.local.write_text(BADTAKES_LOCAL, encoding="utf-8")
+                self.install()
+                self.assertEqual(json.loads(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))["home"], home)
+                earlier, mine = str(self.scratch_dir("earlier-")), str(self.scratch_dir("mine-"))
+                self.as_if_installed_for(earlier, record_home)
+                data = self.settings()
+                data["permissions"]["additionalDirectories"].append(mine)
+                self.local.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                self.cli("project", "sync", "badtakes", actor="spud")
+                data = self.settings()
+                self.assertEqual(data["permissions"]["additionalDirectories"], [home, mine])
+                self.assertEqual(data["permissions"]["deny"], state_deny_rules(self.home.path))
+                self.assertFalse([c for groups in data["hooks"].values() for g in groups for h in g["hooks"] for c in [h["command"]] if earlier in c])
+                self.assertEqual(json.loads(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))["home"], home)
+                self.cli("project", "uninstall", "badtakes", actor="spud")
+                left = self.settings()
+                self.assertEqual(left, dict(json.loads(BADTAKES_LOCAL), permissions={"allow": ["Bash(node -e ' *)"], "additionalDirectories": [mine]}))
+
+    def test_an_earlier_home_the_file_held_before_install_is_the_users(self):
+        """SPD-245: a directory the file listed before install first wrote it is the user's, whatever else it is -- here the
+        very home an earlier install ran for -- so neither the reinstall for this home nor uninstall takes it out, and
+        uninstall gives back the file's own bytes, as it does for the deny rules the file held (SPD-033)."""
+        earlier = str(self.scratch_dir("earlier-"))
+        original = '{\n    "permissions": {"additionalDirectories": [%s]},\n    "outputStyle": "Concise"\n}\n' % json.dumps(earlier)
+        self.local.write_text(original, encoding="utf-8")
+        self.install()
+        self.assertEqual(self.settings()["permissions"]["additionalDirectories"], [earlier, str(self.home.path)])
+        self.as_if_installed_for(earlier)
+        self.assertEqual(self.settings()["permissions"]["additionalDirectories"], [earlier])
+        self.cli("project", "sync", "badtakes", actor="spud")
+        self.assertEqual(self.settings()["permissions"]["additionalDirectories"], [earlier, str(self.home.path)])
+        self.cli("project", "uninstall", "badtakes", actor="spud")
+        self.assertEqual(self.local.read_text(encoding="utf-8"), original)
+
     def test_user_files_stay_while_another_project_is_installed_and_a_changed_one_stays_with_a_warning(self):
         second = self.make_repo("second-")
         self.add_project(second, "second", "SEC", "SECS")
@@ -491,6 +556,22 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertEqual(record["agent_sha256"], hashlib.sha256(self.rendered().encode("utf-8")).hexdigest())
         shown = self.cli_json("project", "show", "badtakes")["project"]
         self.assertNotIn("original", shown["install_record"])
+
+
+class AdditionalDirsMergeTest(unittest.TestCase):
+    """SPD-245: settings_sync.merge_additional_dirs, the merge install's reinstall for a moved home runs, on its own."""
+
+    def merge(self, current, dirs, drop=()):
+        settings = {"permissions": {"additionalDirectories": current}} if current is not None else {}
+        added = load_spud_module().merge_additional_dirs(settings, dirs, drop)
+        return settings["permissions"]["additionalDirectories"], added
+
+    def test_the_dropped_entry_gives_its_place_to_the_new_one_and_nothing_else_moves(self):
+        self.assertEqual(self.merge(["/a", "/old", "/b"], ["/new"], ("/old",)), (["/a", "/new", "/b"], ["/new"]))
+        self.assertEqual(self.merge(["/new", "/old", "/b"], ["/new"], ("/old",)), (["/new", "/b"], []))  # never twice
+        self.assertEqual(self.merge(["/a", 7, "/b"], ["/new"], ("/old",)), (["/a", "/b", "/new"], ["/new"]))  # nothing to drop: appended
+        self.assertEqual(self.merge(None, ["/new"], ("/old",)), (["/new"], ["/new"]))
+        self.assertEqual(self.merge(["/new"], ["/new"], ("/new",)), (["/new"], []))  # a dropped entry `dirs` names stays
 
 
 class QuotedPathInstallTest(InstallFixture, SpudTestCase):

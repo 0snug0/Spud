@@ -147,7 +147,7 @@ def move_check_vault(new):
 def strip_home_settings(ctx, settings):
     """The tool repository's tracked .claude/settings.json without what settings sync wrote for the home: the ledger hooks,
     the CLI allow rules, the Agent deny rules and the two env caps; every other key (the model, Eric's own rules) stays."""
-    install.strip_ledger_settings(ctx, settings, None, False)
+    install.strip_ledger_settings(settings, None, None)
     permissions = settings.get("permissions")
     if isinstance(permissions, dict):
         if isinstance(permissions.get("deny"), list):

@@ -11,6 +11,11 @@ from helpers import EXIT_ERROR, LaunchdMixin, RepoMixin, SpudTestCase, load_spud
 spud = load_spud_module()
 
 
+def state_deny_rules(home):
+    """SPD-033's Edit rules for a home's state directory, as test_install spells them (no scratch path needs escaping)."""
+    return ["Edit(/%s/.spud)" % home, "Edit(/%s/.spud/**)" % home]
+
+
 class PreconditionsTest(RepoMixin, SpudTestCase):
     """Every refusal comes before anything is written: no state renamed, nothing in the target, the pointer unchanged."""
 
@@ -198,9 +203,10 @@ class InstalledProjectsMoveTest(LaunchdMixin, RepoMixin, SpudTestCase):
                     self.assertTrue(command.startswith("SPUD_HOME=%s " % new), command)
                     self.assertTrue(command.endswith(" --project %s" % key), command)
                     self.assertIn(" -I -S %s hook " % launcher, command)
-                # The new home is added; the old one is kept beside it today, which proposal 347 asks about, so this
-                # asserts neither way on it.
-                self.assertIn(str(new), data["permissions"]["additionalDirectories"])
+                # SPD-245: the home install added is replaced, not joined -- the old one would keep every session here
+                # able to read and write it -- and the state directory's deny rules name the new home alone.
+                self.assertEqual(data["permissions"]["additionalDirectories"], [str(new)])
+                self.assertEqual([d for d in data["permissions"]["deny"] if ".spud" in d], state_deny_rules(new))
                 self.assertIn("Bash(python3.14 -I -S %s *)" % launcher, data["permissions"]["allow"])
                 self.assertFalse([line for line in commands + data["permissions"]["allow"] if str(old) in line])
         self.assertFalse((self.bare / ".claude" / "settings.local.json").exists())
@@ -217,6 +223,37 @@ class InstalledProjectsMoveTest(LaunchdMixin, RepoMixin, SpudTestCase):
         self.assertEqual([p for p in doctor["problems"] if not p.startswith("the render watcher ")], [])
         self.assertEqual([(p["key"], p["installed"], p["problems"]) for p in doctor["projects"]],
                          [("spud", True, []), ("badtakes", True, []), ("bare", False, [])])
+
+    def test_the_move_keeps_the_users_own_directories_and_uninstall_after_it_leaves_neither_home(self):
+        """SPD-245: badtakes' file holds directories of the user's own around install's entry -- one added after install,
+        and one the file held before install first wrote it, in the order the user keeps them.  The move replaces install's
+        entry where it stands and touches neither of the user's; an uninstall in the new home then takes the new home out
+        and leaves no trace of the old one, the user's two still there."""
+        old, new = self.home.path, self.target
+        self.cli("project", "uninstall", "badtakes", actor="spud")
+        before = str(self.scratch_dir("before-"))  # the user's, in the file before install ever wrote it
+        path = self.locals["badtakes"]
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps({"permissions": {"additionalDirectories": [before]}}, indent=2) + "\n", encoding="utf-8")
+        self.cli("project", "install", "badtakes", actor="spud")
+        data = self.local_settings("badtakes")
+        after = str(self.scratch_dir("after-"))  # the user's, added once install had written the file
+        data["permissions"]["additionalDirectories"].append(after)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        self.assertEqual(self.local_settings("badtakes")["permissions"]["additionalDirectories"], [before, str(old), after])
+        self.cli("render", actor="spud")  # the uninstall's and install's report entries, so the copied vault matches (3b)
+        self.cli("home", "move", "--to", new, actor="spud")
+        data = self.local_settings("badtakes")
+        self.assertEqual(data["permissions"]["additionalDirectories"], [before, str(new), after])
+        self.assertEqual([d for d in data["permissions"]["deny"] if ".spud" in d], state_deny_rules(new))
+        self.assertEqual(json.loads(self.cli("--json", "project", "sync", "badtakes", actor="spud", env=self.new_env()).stdout)["projects"][0]["written"], [])
+        self.cli("project", "uninstall", "badtakes", actor="spud", env=self.new_env())
+        left = self.local_settings("badtakes")
+        self.assertEqual(left, {"permissions": {"additionalDirectories": [before, after]}})
+        self.cli("project", "uninstall", "spud", actor="spud", env=self.new_env())
+        left = json.loads(self.locals["spud"].read_text(encoding="utf-8")) if self.locals["spud"].exists() else {}
+        self.assertNotIn("additionalDirectories", left.get("permissions", {}))
+        self.assertFalse([d for d in left.get("permissions", {}).get("deny", []) if ".spud" in d])
 
 
 if __name__ == "__main__":

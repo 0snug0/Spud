@@ -2,9 +2,10 @@
 
   python3.14 -I -S tests/probes/hook_timing.py [ROUNDS] LAUNCHER [LAUNCHER ...]
 
-Each launcher gets its own scratch SPUD_HOME (the shipped share/spud.config.json, rendered, and `spud init --no-schedule`)
-under tests/probes/probe_env.py's isolation, so nothing is written into any ledger, ~/.claude, ~/.config/spud or
-~/Library/LaunchAgents, and launchctl is never run.  Three warm-up rounds fill each home's bytecode and git-command caches; then every round runs every case
+Each launcher gets its own scratch SPUD_HOME (the shipped share/spud.config.json, rendered) and, beside it, a tool checkout
+of its own (tests/probes/probe_env.py's build_tool), which `spud init --no-schedule --project-root` registers as project 1:
+the shape a real home has (SPD-244).  Under probe_env's isolation, so nothing is written into any ledger, ~/.claude,
+~/.config/spud or ~/Library/LaunchAgents, and launchctl is never run.  Three warm-up rounds fill each home's bytecode and git-command caches; then every round runs every case
 once per launcher, in turn, so a machine slowing down slows every launcher alike.  Prints, per case, each launcher's
 median, min and max in ms, and the difference of each median from the first launcher's.  The pass for a change to the
 hook path: every hook case within 1 ms of main's median in the same run.
@@ -13,13 +14,11 @@ hook path: every hook case within 1 ms of main's median in the same run.
 import json
 import os
 import shutil
-import sqlite3
 import statistics
 import subprocess
 import sys
 import tempfile
 import time
-from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.dont_write_bytecode = True  # probe_env comes from this directory, and the checkout keeps no bytecode
@@ -46,48 +45,32 @@ def cases(home):
 def checkout_of(launcher):
     """The checkout a launcher belongs to, given `<checkout>/bin/spud`.
 
-    Each scratch home plays the tool for its own launcher, so it ships *that* launcher's `share/` (SPD-157).  One
-    share/ for every launcher -- this probe's own checkout's, as it was -- breaks the moment a branch adds a
-    `{{mark}}`: the branch's shipped files carry a mark main's `core/shipped.MARKS` does not name, main's `spud init`
-    refuses to write a file it cannot render, and the run ends in a traceback instead of a comparison.  Nothing on the
-    hook path reads share/ at all, so this changes what `setup` builds and nothing that is measured.
+    Each launcher's tool is built from *that* launcher's checkout, its `share/` included (SPD-157).  One share/ for every
+    launcher -- this probe's own checkout's, as it was -- breaks the moment a branch adds a `{{mark}}`: the branch's
+    shipped files carry a mark main's `core/shipped.MARKS` does not name, main's `spud init` refuses to write a file it
+    cannot render, and the run ends in a traceback instead of a comparison.  Nothing on the hook path reads share/ at
+    all, so this changes what `setup` builds and nothing that is measured.
     """
     return os.path.dirname(os.path.dirname(launcher))
 
 
-def seed_project_one(home, config, checkout):
-    """Project 1 as `spud init` inserted it before SPW-001: key `spud`, rooted at `checkout`, the
-    config's prefixes.  Init registers no project now (docs/design/2026-09-21-spud-init.md section 1.4), and a home with
-    no project is a home whose hooks read one row fewer -- so every launcher's home is seeded here, and each measures the
-    same work as the one before it."""
-    con = sqlite3.connect(os.path.join(home, ".spud", "ledger.db"), timeout=5)
-    try:
-        with con:
-            con.execute(
-                "INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at)"
-                " VALUES (1, 'spud', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (config["identity"]["name"], checkout, config["tickets"]["prefix"], config["teams"]["prefix"],
-                 datetime.now().astimezone().isoformat(timespec="seconds")),
-            )
-    finally:
-        con.close()
-
-
 def setup(launcher):
-    home = tempfile.mkdtemp(prefix="spud-hook-timing-")
-    # The config template and the rest of share/ are each launcher's own (`checkout_of`); only the marks are this probe's.
-    config = probe_env.write_config(home, os.path.join(checkout_of(launcher), "share", "spud.config.json"))
-    # SPD-101: helpers.Home's isolation, from the one helper every probe shares.  The home plays the tool (SPUD_TOOL_DIR),
-    # as SPW-001 made it, because init refuses a bin/spud in a linked worktree -- the second launcher here is exactly that
-    # -- and writes the vault scaffolding from the tool's share/; project 1 below names the main checkout of the launcher's
-    # repository, the same for every launcher, so each hook reads the same row and lists the same worktrees.  Its
+    """A scratch directory holding the home and, beside it, the tool (probe_env.build_tool), with project 1 that tool as
+    init registers it (SPD-244): every launcher's home the same shape, a real home's, so each measures the same work.
+    Returns (the scratch directory, the home, the environment)."""
+    root = tempfile.mkdtemp(prefix="spud-hook-timing-")
+    home = os.path.join(root, "home")
+    os.mkdir(home)
+    # The config template, bin/ and share/ are each launcher's own (`checkout_of`); only the marks are this probe's.
+    probe_env.write_config(home, os.path.join(checkout_of(launcher), "share", "spud.config.json"))
+    tool = probe_env.build_tool(root, checkout_of(launcher))
+    # SPD-101: helpers.Home's isolation, from the one helper every probe shares.  SPUD_TOOL_DIR is the scratch tool, a main
+    # checkout, since init refuses a bin/spud in a linked worktree -- the second launcher here is exactly that.  Its
     # LaunchAgents directory and launchctl are the scratch's, and init skips step 8: before this, this very line
     # installed a scratch render watcher over this Mac's.
-    env = probe_env.isolated_env(home)
-    probe_env.link_share(home, os.path.join(checkout_of(launcher), "share"))
-    subprocess.run([PY, "-I", "-S", launcher, "init", "--no-schedule"], env=env, check=True, capture_output=True)
-    seed_project_one(home, config, probe_env.main_checkout(launcher))
-    return home, env
+    env = probe_env.isolated_env(home, tool)
+    subprocess.run([PY, "-I", "-S", launcher, *probe_env.init_args(tool)], env=env, check=True, capture_output=True)
+    return root, home, env
 
 
 def once(argv, stdin, env):
@@ -109,15 +92,15 @@ def main():
     times = {}
     try:
         for rnd in range(3 + rounds):
-            for launcher, (home, env) in zip(launchers, homes):
+            for launcher, (_, home, env) in zip(launchers, homes):
                 for name, argv, payload in cases(home):
                     command = [PY, "-I", "-S", "-c", "pass"] if argv is None else [PY, "-I", "-S", launcher, *argv]
                     ms = once(command, json.dumps(payload) if payload else None, env)
                     if rnd >= 3:
                         times.setdefault((name, launcher), []).append(ms)
     finally:
-        for home, _ in homes:
-            shutil.rmtree(home, ignore_errors=True)
+        for root, _, _ in homes:
+            shutil.rmtree(root, ignore_errors=True)
     print("%d rounds, launchers interleaved; ms" % rounds)
     for name, _, _ in cases("/tmp"):
         first = statistics.median(times[(name, launchers[0])])

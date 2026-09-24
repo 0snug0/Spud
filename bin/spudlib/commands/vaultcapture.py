@@ -200,7 +200,7 @@ def head_commit(repo):
     A theme has no release assets at all -- Obsidian takes it from that branch -- so this is what makes a theme's pinned
     URL immutable, and an install a year from now the same install as today's.
     """
-    answer = vaultlock.download(vaultlock.HEAD_SHA_URL % repo, accept=vaultlock.HEAD_SHA_ACCEPT).decode("utf-8", "replace").strip()
+    answer = vaultlock.download(vaultlock.HEAD_SHA_URL % repo, accept_header=vaultlock.HEAD_SHA_ACCEPT).decode("utf-8", "replace").strip()
     if not COMMIT_RE.fullmatch(answer):
         raise kernel.SpudError(kernel.EXIT_ERROR, BAD_SHA % (vaultlock.HEAD_SHA_URL % repo, repo, answer[:80]))
     return answer

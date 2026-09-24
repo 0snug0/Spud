@@ -144,9 +144,13 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 # "escaped-subst" a `-c` string or `eval` text holds a backslash-escaped `$( )` or backtick the shell unescapes and runs
 #             but the reader read as literal (SPD-196).
 # "evaluated" a value a shell evaluates as code in a form the reader does not model: a `${(P)name}` subscript, a
-#             glob qualifier under GLOB_SUBST, a prompt/PROMPT/PS4 expansion, or bash arithmetic holding a substitution (SPD-197).
+#             glob qualifier under GLOB_SUBST, a prompt/PROMPT/PS4 expansion, or bash arithmetic holding a substitution (SPD-197);
+#             and code an assigning builtin is handed to run, `mapfile -C`'s callback or a `zstyle -e` value (SPD-254).
 # "procsub-list" a process substitution in a `for`/`foreach` list or an array value, whose command the walk joins into
 #             one word without reading (SPD-198).
+# "assigned" an assignment whose name the reader cannot read -- an arithmetic evaluation's (`(( $N = 5 ))`) or an assigning
+#             builtin's (`read $N`, `printf -v "$N"`, zsh's `unset -m`) -- so it cannot tell which of the line's variables
+#             it changes (SPD-225, SPD-254); shown is (what assigns, the text).
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
@@ -169,9 +173,14 @@ UNREAD_MESSAGES = {
                       "spell the command out, on the line where the hook reads it (`sh -c '...'`) or in a here-document"
                       " fed to the shell (`sh <<'EOF'` ... `EOF`)"),
     "evaluated": ("a value the shell evaluates as code in a form the hook does not read (%s): a `${(P)name}` whose"
-                  " subscript runs, a glob qualifier under GLOB_SUBST, a prompt, PROMPT or PS4 expansion, or bash"
-                  " arithmetic holding a substitution",
+                  " subscript runs, a glob qualifier under GLOB_SUBST, a prompt, PROMPT or PS4 expansion, bash"
+                  " arithmetic holding a substitution, a `mapfile -C` callback or a `zstyle -e` value",
                   "spell the commands out on the line, and set none of these from a value the hook cannot read"),
+    "assigned": ("%s assigns a variable whose name the hook cannot read (`%s`), so it cannot tell which of the line's"
+                 " variables that changes, and a later word, a write target or a function the line calls may read one of"
+                 " them as the value the line gave it",
+                 "spell the variable's name out where it is assigned, or set the name on the line first (`N=name; read -r"
+                 " $N` is read as `read -r name`)"),
     "procsub-list": ("a process substitution -- `<( )`, `>( )` or zsh's `=( )` -- in a `for` or `foreach` list or a"
                      " `name=( )` array value (`%s`), whose command the hook does not read where it joins the list into"
                      " one word",
@@ -593,7 +602,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     # writes through its own options or the environment, and the files a command names as operands and writes
     # by argument, which are held to the same rule.
     # For a caller the path rule holds, each tree a recursive copy lands or find hands its command is walked too.
-    written, capped, unwalked = arg_writes.written_paths(analysis.arg_writes, walk=strict)
+    written, capped, unwalked = arg_writes.written_paths(analysis.arg_writes, walk_trees=strict)
     for entries, messages in (([(None, t, c, None) for t, c in analysis.redirects], REDIRECT_MESSAGES),
                               ([(n, t, c, None) for n, t, c in analysis.git_writes], GIT_WRITE_MESSAGES),
                               (written, ARG_WRITE_MESSAGES)):

@@ -72,10 +72,12 @@ def _scan_pairs(text):
     """One pass over a line's masked outer text, quotes and escapes skipped: the index of the `)` matching each
     unquoted `(` and of the `}` matching each unquoted `{`, the sorted indexes of the unquoted characters a zsh glob group
     cannot hold (`&` `>`, a `<` that opens no range), and those of its unquoted `;`s, which a group in a case pattern may
-    hold (_zsh_group).  A newline, syntax.LINE_BREAK here, is none of them: a group holds it (SPD-183).  Marking a line
+    hold (_zsh_group); and the index of the `]` matching each unquoted `[`, for the `$[ ... ]` arithmetic expansion
+    (SPD-225).  A newline, syntax.LINE_BREAK here, is none of them: a group holds it (SPD-183).  Marking a line
     reads groups through it, in time linear in the line's length: scanning from every `(` of a line of unbalanced ones was
     quadratic."""
     parens, braces, bad, semicolons, opened, braced = {}, {}, [], [], [], []
+    brackets, bracketed = {}, []
     state, i, n = None, 0, len(text)
     while i < n:
         c = text[i]
@@ -98,6 +100,11 @@ def _scan_pairs(text):
         elif c == "}":
             if braced:
                 braces[braced.pop()] = i
+        elif c == "[":
+            bracketed.append(i)
+        elif c == "]":
+            if bracketed:
+                brackets[bracketed.pop()] = i
         elif c == "<":
             m = syntax.ZSH_RANGE_RE.match(text, i)
             if m:
@@ -109,7 +116,7 @@ def _scan_pairs(text):
         elif c in "&>":
             bad.append(i)
         i += 1
-    return parens, braces, bad, semicolons
+    return parens, braces, bad, semicolons, brackets
 
 
 def _zsh_group(text, i, scan, pattern=False):
@@ -128,7 +135,7 @@ def _zsh_group(text, i, scan, pattern=False):
     the pattern too: zsh rejects the whole case command then, whatever line its `)` stands on (probed: `case x in ((x;y))
     echo S8;; esac` failed near `;`, and so did `case x in (x ; echo RAN1` with `)) echo B1;; esac` on the next line, running
     nothing of either), a line that runs nothing."""
-    parens, _braces, bad, semicolons = scan
+    parens, _braces, bad, semicolons, _brackets = scan
     end = parens.get(i)
     if end is None:
         return None
@@ -367,12 +374,17 @@ def mark_zsh_patterns(text):
     sentinels rather than the pattern ones: both shells evaluate what stands between the parentheses, so an operator there is
     an operator of the arithmetic and never of the shell, and both readings get the same marking.
 
+    So is zsh's and bash's older spelling of an arithmetic expansion, `$[ ... ]`, one word to both whatever blanks and
+    operators it holds (SPD-225, probed in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: `echo $[ 3 > 2 ]` printed 1
+    and made no file 2, and `X=a; echo $[ X = 5 ]` left X 5 in all three), where the walk read `$[`, `3`, a redirection
+    to 2 and `]`.
+
     Both texts are the input, each LINE_BREAK a `;`, when it holds none of these."""
-    if "(" not in text and "<" not in text:
+    if "(" not in text and "<" not in text and "$[" not in text:
         text = text.replace(syntax.LINE_BREAK, ";")
         return text, text
     scan = _scan_pairs(text)
-    parens, braces = scan[0], scan[1]
+    parens, braces, brackets = scan[0], scan[1], scan[4]
     out, other, i, n = [], [], 0, len(text)
     command = True  # zsh's command position
     target = None  # after a redirection operator: the command position to restore after its target
@@ -519,6 +531,12 @@ def mark_zsh_patterns(text):
                 piece, state = ch, ch
             elif ch in _WORD_END:
                 break
+            elif ch == "$" and text.startswith("$[", j) and j + 1 in brackets:  # $[ arithmetic ], marked as $(( )) is
+                marked = "$" + text[j + 1 : brackets[j + 1] + 1].translate(_ARITH_WORD)
+                word.append(marked)
+                alternative.append(marked)
+                j = brackets[j + 1] + 1
+                continue
             elif ch == "$" and text.startswith("${", j):
                 piece = text[j : braces[j + 1] + 1] if j + 1 in braces else text[j:]
                 marked = _flag_groups(piece)  # its flags stay in the word (SPD-189)

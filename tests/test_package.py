@@ -1,12 +1,13 @@
 """The shape of the program's package (SPD-065): bin/spud_ledger.py is the entry and bin/spudlib/ holds the code.
 
 Parsed, never imported, except where a hook run's own imports are read: a module imports modules of the package, never
-names from them, and only at its top; every name the program defines is defined in one module, and no module binds a
-name it imports a module as, in any scope; an import cycle is tolerated only where no module reads another's name while
-it is being imported, at its top or in a function its import calls; every module is reachable from the entry; a hook run
-imports only its event's modules, all in HOOK_PATH; and no test sets or patches an attribute of the loaded program,
-through any name that holds it, since no call site reads one.  DamagedCopyTest holds each check to its promise: a copy
-of the package damaged the way the check says it catches, held in memory, must fail it (SPD-079).
+names from them, and only at its top; every name the program defines is defined in one module, no module binds a name
+it imports a module as, in any scope, and no function binds any module's name (SPD-237); an import cycle is tolerated
+only where no module reads another's name while it is being imported, at its top or in a function its import calls;
+every module is reachable from the entry; a hook run imports only its event's modules, all in HOOK_PATH; and no test
+sets or patches an attribute of the loaded program, through any name that holds it, since no call site reads one.
+DamagedCopyTest holds each check to its promise: a copy of the package damaged the way the check says it catches, held
+in memory, must fail it (SPD-079).
 """
 
 import ast
@@ -80,14 +81,16 @@ def package_imports(name, node):
 
 class Package:
     """The package as the checks read it, parsed and never imported: each module's text and tree, the modules each
-    imports at its top, and the alias each of those imports binds.  `edited` is a copy with one module's text replaced
-    or added, which parses that module alone -- the damaged copies DamagedCopyTest holds the checks to (SPD-079)."""
+    imports at its top, the alias each of those imports binds, and each module by its basename.  `edited` is a copy with
+    one module's text replaced or added, which parses that module alone -- the damaged copies DamagedCopyTest holds the
+    checks to (SPD-079)."""
 
     def __init__(self, texts, trees=None):
         trees = trees or {}
         self.texts = texts
         self.trees = {name: trees[name] if name in trees else ast.parse(text, name.replace(".", "/") + ".py") for name, text in texts.items()}
         self.graph, self.aliases = {}, {}
+        self.basenames = {name.rsplit(".", 1)[-1]: name for name in texts}  # walk -> shell.walk: unique, §7
         for name, tree in self.trees.items():
             self.graph[name], self.aliases[name] = set(), {}
             for node in tree.body:
@@ -163,20 +166,46 @@ def definition_problems(package):
     return problems
 
 
+def comprehension_targets(tree):
+    """[(line, name)] for each name a comprehension binds outside every function and lambda -- at a module's top or in a
+    class body, where symtable reads it into the enclosing scope (the compiler inlines a comprehension, PEP 709) and so
+    cannot tell it from a global or a class attribute."""
+    found, todo = [], [tree]
+    while todo:
+        node = todo.pop()
+        if isinstance(node, FUNCTIONS + (ast.Lambda,)):  # its body is a function scope, which symtable reads
+            todo.extend(getattr(node, "decorator_list", []) + node.args.defaults + [d for d in node.args.kw_defaults if d])
+            continue
+        if isinstance(node, ast.comprehension):
+            found += [(n.lineno, n.id) for n in ast.walk(node.target) if isinstance(n, ast.Name)]
+        todo.extend(ast.iter_child_nodes(node))
+    return found
+
+
 def alias_bindings(package, name):
-    """Where module `name` binds a name it imports a module as, in any scope and by any binding form.  symtable, the
-    compiler's own reading, answers what binds a name in each scope -- an assignment, a parameter, a def or a class, an
-    except, with or for target, a match capture, a del, a walrus, a type parameter, an import inside a function -- and at
-    the top, where the alias is itself an import, a second import binding the same name is the one form it cannot tell
-    apart (SPD-079)."""
+    """Where module `name` binds a name it imports a module as, in any scope and by any binding form, and where it binds
+    the basename of any module of the package as a local variable, a parameter or a comprehension's name, whether it
+    imports that module or not: a function binding one shadows the module the day its module imports it (§7 of the
+    spudlib-modules skill; SPD-237).  symtable, the compiler's own reading, answers what binds a name in each scope --
+    an assignment, a parameter, a def or a class, an except, with or for target, a match capture, a del, a walrus, a
+    type parameter, an import inside a function -- and at the top, where the alias is itself an import, a second import
+    binding the same name is the one form it cannot tell apart (SPD-079).  A module name is read in every function scope
+    (a def, a lambda, a type parameter list) and in each comprehension; a module's globals and a class's attributes are
+    not locals, and are left out."""
     aliases, top = package.aliases[name], symtable.symtable(package.texts[name], name.replace(".", "/") + ".py", "exec")
     problems, tables = [], [top]
     for table in tables:  # the list grows as it is read: every scope of the module, each once
         tables.extend(table.get_children())
+        local = table is not top and table.get_type() != symtable.SymbolTableType.CLASS
         for symbol in table.get_symbols():
-            if symbol.get_name() in aliases and (symbol.is_assigned() or symbol.is_parameter() or (symbol.is_imported() and table is not top)):
-                problems.append("%s binds %s, the name it imports a module as, %s" % (
-                    name, symbol.get_name(), "at its top" if table is top else "in %s %s" % (table.get_type(), table.get_name())))
+            bound = symbol.is_assigned() or symbol.is_parameter() or (symbol.is_imported() and table is not top)
+            where = "at its top" if table is top else "in %s %s" % (table.get_type().value, table.get_name())
+            if bound and symbol.get_name() in aliases:
+                problems.append("%s binds %s, the name it imports a module as, %s" % (name, symbol.get_name(), where))
+            elif bound and local and symbol.get_name() in package.basenames:
+                problems.append("%s binds %s, the name of module %s, %s" % (name, symbol.get_name(), package.basenames[symbol.get_name()], where))
+    problems += ["%s binds %s, the name of module %s, in a comprehension on line %d" % (name, bound, package.basenames[bound], line)
+                 for line, bound in comprehension_targets(package.trees[name]) if bound in package.basenames and bound not in aliases]
     imported = [a.asname or a.name.split(".")[0] for node in package.trees[name].body if isinstance(node, (ast.Import, ast.ImportFrom)) for a in node.names]
     return problems + ["%s imports two modules as %s" % (name, alias) for alias in aliases if imported.count(alias) > 1]
 
@@ -401,7 +430,7 @@ class PackageShapeTest(unittest.TestCase):
     def test_a_module_imports_modules_of_the_package_never_names_and_only_at_its_top(self):
         self.assertEqual([p for name in self.package.trees for p in import_problems(self.package, name)], [])
 
-    def test_every_name_is_defined_in_one_module_and_no_module_binds_an_alias(self):
+    def test_every_name_is_defined_in_one_module_and_no_module_binds_an_alias_or_a_module_name(self):
         self.assertEqual(definition_problems(self.package), [])
         self.assertEqual([p for name in self.package.trees for p in alias_bindings(self.package, name)], [])
 
@@ -482,6 +511,21 @@ class DamagedCopyTest(unittest.TestCase):
                 self.assertTrue(problems)
                 self.assertEqual([p for p in problems if " %s" % alias[module] not in p], [])
 
+    def test_a_module_name_bound_where_its_module_is_not_imported_fails(self):
+        # core/lazy imports no module of the package, so the check before SPD-237, which read only the aliases a module
+        # imports, passed every one of these.
+        self.assertNotIn("walk", self.package.aliases["core.lazy"])
+        for damage in MODULE_NAME_BINDINGS:
+            with self.subTest(damage):
+                problems = alias_bindings(self.appended("core.lazy", damage), "core.lazy")
+                self.assertTrue(problems)
+                self.assertEqual([p for p in problems if not p.startswith("core.lazy binds walk, the name of module shell.walk, ")], [])
+
+    def test_a_module_name_as_a_global_or_a_class_attribute_passes(self):
+        for damage in MODULE_NAME_ATTRIBUTES:
+            with self.subTest(damage):
+                self.assertEqual(alias_bindings(self.appended("core.lazy", damage), "core.lazy"), [])
+
     def test_a_read_across_the_cycle_through_a_call_at_import_fails(self):
         lines = len(self.package.texts["shell.analyse"].splitlines())
         for damage in CALLED_READS:
@@ -530,6 +574,27 @@ ALIAS_BINDINGS = [
     ("shell.analyse", "def walk():\n    pass\n"),
     ("shell.analyse", "class walk:\n    pass\n"),
     ("shell.analyse", "from . import zsh as walk\n"),
+]
+# Text appended to core/lazy, which imports no module of the package: each binds `walk`, shell/walk's basename, as a
+# local, a parameter or a comprehension's name, which shadows that module the day core/lazy imports it (SPD-237).
+MODULE_NAME_BINDINGS = [
+    "def _scratch(walk):\n    return walk\n",
+    "def _scratch():\n    walk = None\n    return walk\n",
+    "def _scratch(x):\n    for walk in x:\n        pass\n",
+    "def _scratch():\n    with open('x') as walk:\n        return walk\n",
+    "def _scratch(x):\n    return [walk for walk in x]\n",
+    "def _scratch(x):\n    return {k: walk for k, walk in x}\n",
+    "class _Scratch:\n    def method(self, *walk):\n        pass\n",
+    "_SCRATCH = lambda walk: walk\n",
+    "_SCRATCH = [walk for walk in ()]\n",
+    "class _Scratch:\n    KINDS = [walk for walk in ()]\n",
+]
+# Text appended to core/lazy that names `walk` without binding it as a local, a parameter or a comprehension's name.
+MODULE_NAME_ATTRIBUTES = [
+    "class _Scratch:\n    walk = None\n",
+    "class _Scratch:\n    def walk(self):\n        pass\n",
+    "class _Scratch:\n    def __init__(self):\n        self.walk = None\n",
+    "def _scratch(x):\n    return x.walk\n",
 ]
 # Text appended to shell/analyse: each reads shell/walk, which imports shell/analyse back, in a function the import runs.
 # The first is the review's own.

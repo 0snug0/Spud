@@ -90,9 +90,9 @@ class MultiosText(str):
     the str is text.  A reader that takes it as a str reads bash's; joined keeps both, and each_reading gives a shell
     each."""
 
-    def __new__(cls, text, zsh):
+    def __new__(cls, text, zsh_text):
         self = super().__new__(cls, text)
-        self.zsh = zsh
+        self.zsh = zsh_text
         return self
 
 
@@ -101,12 +101,12 @@ def _zsh(text):
     return text.zsh if isinstance(text, MultiosText) else text
 
 
-def _paired(bash, zsh):
+def _paired(bash, zsh_text):
     """One text for bash's reading and zsh's: None where bash's is None, the text where they agree, a MultiosText where
     they differ."""
-    if bash is None or zsh == bash:
+    if bash is None or zsh_text == bash:
         return bash
-    return MultiosText(bash, zsh)
+    return MultiosText(bash, zsh_text)
 
 
 def each_reading(text):
@@ -233,8 +233,8 @@ def command_input(tokens, bodies, piped, pipe_feeds, a=None):
         i += 2 if t in syntax.OUT_REDIRECTS else 1
     if not inputs:
         return piped
-    zsh = ([_zsh(piped)] if pipe_feeds else []) + inputs
-    return _paired(inputs[-1], None if None in zsh else "".join(zsh))
+    zsh_inputs = ([_zsh(piped)] if pipe_feeds else []) + inputs
+    return _paired(inputs[-1], None if None in zsh_inputs else "".join(zsh_inputs))
 
 
 def _string_text(word, a):

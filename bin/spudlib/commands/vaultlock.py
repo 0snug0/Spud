@@ -134,7 +134,7 @@ def served_name(url):
     return lazy.urllib_parse.quote(url, safe="")
 
 
-def download(url, timeout=TIMEOUT, accept=None):
+def download(url, timeout=TIMEOUT, accept_header=None):
     """`url`'s bytes: the one function every download of the vault commands goes through, and the one the suite replaces.
 
     **https and nothing else.**  Every URL here comes from the lock, and what a lock pins is a GitHub release asset;
@@ -162,8 +162,8 @@ def download(url, timeout=TIMEOUT, accept=None):
             raise VaultDownloadError(NOT_SERVED % (url, DOWNLOAD_ENV, where, served.name))
         return served.read_bytes()
     headers = {"User-Agent": USER_AGENT}
-    if accept:
-        headers["Accept"] = accept
+    if accept_header:
+        headers["Accept"] = accept_header
     # `http.client.IncompleteRead` -- a body cut short -- is an HTTPException and *not* an OSError, so until a review
     # caught it a truncated download left `spud vault install` and `spud init` as a traceback instead of a refusal.  It is
     # named through `urllib.request`, which imports `http.client` itself and is the only thing here that raises one, so
@@ -570,11 +570,11 @@ def missing_plugin_findings(ctx):
             data = read_base(path.read_text(encoding="utf-8"))
         except YamlRefusal:
             continue
-        views = data.get("views") if isinstance(data, dict) else None
-        if not isinstance(views, list):
+        base_views = data.get("views") if isinstance(data, dict) else None
+        if not isinstance(base_views, list):
             continue
         rel = VAULT_BASES + "/" + path.name
-        for view in views:
+        for view in base_views:
             if not isinstance(view, dict):
                 continue
             view_type = view.get("type")

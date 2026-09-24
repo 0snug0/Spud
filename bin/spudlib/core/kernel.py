@@ -93,6 +93,8 @@ EVENT_KINDS = (
     "ticket.worktree",
     # landing pull requests (migration 0005_pull_requests): recorded by Spud, settled by the reconciler
     "pr.recorded", "pr.state",
+    # a resume, written beside the member.started of the SubagentStart that resumed a returned member (migration 0010_member_resumed)
+    "member.resumed",
 )
 
 # The actor a reconciled pull-request state is written under.  A `gh pr view` read is nobody's judgment, so it

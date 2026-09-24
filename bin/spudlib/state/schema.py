@@ -496,7 +496,49 @@ ALTER TABLE members ADD COLUMN effort TEXT CHECK (effort IS NULL OR effort IN ('
 ALTER TABLE members ADD COLUMN escalates_id INTEGER REFERENCES members(id);   -- the failed opus member this re-plans on fable
 """
 
+# A resume's own kind (SPD-082).  Since SPD-050 a spudagent resumed after it returned was recorded on the member.started of
+# the SubagentStart that resumed it, marked by data `resumed`; from this migration on that SubagentStart writes the plain
+# member.started and, beside it, a member.resumed (hooks/recording), so `spud events --kind member.resumed` finds a resume,
+# member.started keeps meaning one SubagentStart, and the SubagentStop hold keys on a kind.  SQLite cannot alter a CHECK, so
+# events is rebuilt as 0002_projects, 0004_ticket_worktree and 0005_pull_requests rebuilt it; the views are dropped first,
+# since the rename re-parses every one of them, and VIEWS_AND_TRIGGERS re-creates them and the append-only triggers after.
+# Every row is copied as it was written, the resumes before this migration included: the log is append-only, so such a resume
+# stays a member.started with data resumed, and hooks/subagent_stop.last_resume reads both shapes.
+DDL_0010 = """
+DROP VIEW IF EXISTS v_board;
+DROP VIEW IF EXISTS v_fleet;
+DROP TRIGGER IF EXISTS events_no_update;
+DROP TRIGGER IF EXISTS events_no_delete;
+CREATE TABLE events_new (
+  id        INTEGER PRIMARY KEY,
+  at        TEXT    NOT NULL,
+  actor     TEXT    NOT NULL,
+  ticket_id INTEGER REFERENCES tickets(id),
+  member_id INTEGER REFERENCES members(id),
+  agent_id  TEXT,
+  kind      TEXT    NOT NULL CHECK (kind IN (
+              'ticket.created','ticket.status','ticket.priority','ticket.edited','ticket.worktree',
+              'member.planned','member.spawn_denied','member.spawned','member.started','member.resumed','member.stopped',
+              'member.log','member.result','member.blocked','member.outcome','member.status','member.edited',
+              'handoff','proposal.filed','proposal.decided','hook.denied','hook.error','render',
+              'report.entry','commit','import','config.synced',
+              'project.added','project.edited','project.installed','project.uninstalled','project.removed',
+              'session.claimed','session.released',
+              'pr.recorded','pr.state')),
+  body      TEXT    NOT NULL DEFAULT '',
+  data      TEXT    CHECK (data IS NULL OR json_valid(data))
+) STRICT;
+INSERT INTO events_new (id, at, actor, ticket_id, member_id, agent_id, kind, body, data)
+  SELECT id, at, actor, ticket_id, member_id, agent_id, kind, body, data FROM events;
+DROP TABLE events;
+ALTER TABLE events_new RENAME TO events;
+CREATE INDEX events_ticket ON events(ticket_id, id);
+CREATE INDEX events_member ON events(member_id, id);
+CREATE INDEX events_agent  ON events(agent_id, id);
+CREATE INDEX events_kind   ON events(kind, id);
+"""
+
 MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003), ("0004_ticket_worktree", DDL_0004),
               ("0005_pull_requests", DDL_0005), ("0006_owner_origin", DDL_0006), ("0007_project_scripts", DDL_0007),
-              ("0008_project_runners", DDL_0008), ("0009_member_effort", DDL_0009)]
+              ("0008_project_runners", DDL_0008), ("0009_member_effort", DDL_0009), ("0010_member_resumed", DDL_0010)]
 SCHEMA_VERSION = len(MIGRATIONS)

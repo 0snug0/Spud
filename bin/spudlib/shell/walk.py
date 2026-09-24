@@ -1,7 +1,7 @@
 """shell/walk: ShellFrame and ShellWalk: one pass over a line's tokens."""
 
-from . import (analyse, assignment_words, directories, globbing, heredocs, loop_bindings, positional, prepare, reevaluation,
-               script_files, stdin_text, syntax, unread)
+from . import (analyse, assignment_words, directories, expansions, globbing, heredocs, loop_bindings, positional, prepare,
+               reevaluation, script_files, stdin_text, syntax, unread)
 from ..hooks import hookio
 
 # The loops whose header names a variable, one header grammar to zsh (its parser's par_for; ShellWalk.names_end)
@@ -48,12 +48,17 @@ class ShellFrame:
     `do ... done` (resolve_body)."""
 
     __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints",
-                 "procsub", "serial", "bare", "defines", "arith", "bound", "form")
+                 "procsub", "serial", "bare", "defines", "arith", "bound", "form", "locals", "assigns")
 
     def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
         self.pattern = kind == "case"  # a case command reads a pattern first, and again after each ;;
         self.mark = mark  # how many assignments the line had made when it opened
+        # the locals the innermost function body the shell holds had declared when it opened (ShellAnalysis.body_locals),
+        # put back when it closes: a declaration inside a compound command, which may not run it (a condition, a loop) or
+        # runs it in a subshell, makes no name surely local after it -- a group's is read the same way, the safe side
+        # (SPD-246); None outside such a body
+        self.locals = None
         # the functions defined before a `( ... )` subshell opened, with their bodies (ShellAnalysis.functions and
         # function_bodies), restored when it closes; None for every other frame kind, whose function definitions reach a
         # call after it and are kept.
@@ -87,8 +92,9 @@ class ShellFrame:
         # a process substitution, nor for a `(` after words.
         self.serial, self.bare = 0, False
         # this `( ... )` frame is the subshell mark_zsh_patterns leaves for an arithmetic command `(( ... ))` (its outer
-        # parenthesis kept, its inside marked), so its close ends a condition it stands at the end of (SPD-177)
-        self.arith = False
+        # parenthesis kept, its inside marked), so its close ends a condition it stands at the end of (SPD-177); and the
+        # names that arithmetic assigned where the command stands (SPD-225, ShellWalk.pop), which a pipe after it doubts
+        self.arith, self.assigns = False, ()
         # the for loop's variable shell/loop_bindings bound for its body (SPD-146), unbound where the loop closes
         self.bound = None
         # a case's form (ShellWalk.case_in): True where `in` follows its word, False otherwise -- zsh's brace form
@@ -206,6 +212,8 @@ class ShellWalk:
         # a subshell's own function definitions do not escape, nor their bodies
         funcs = (set(self.a.functions), bodies_copy(self.a.function_bodies)) if kind == "sub" else None
         frame = ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned), funcs)
+        if self.a.body_locals is not None:
+            frame.locals = dict(self.a.body_locals[-1])
         frame.serial, frame.bare, self.opened, self.closed = self.opened, not self.words, self.opened + 1, None
         if frame.bare:  # the compound command a definition's header is followed by, and not a `<( )` in a command's words
             frame.defines, self.defining = self.defining, None
@@ -239,6 +247,9 @@ class ShellWalk:
         self.start_list()
 
     def pop(self):
+        # an arithmetic command's text, which the frame's own reading of its words (inert, all marked) does not read for
+        # what it assigns: read_arithmetic_command does, once the frame is closed (SPD-225)
+        arithmetic = " ".join(self.words) if self.stack[-1].arith else None
         self.finish()
         self.end_list()  # ... which joins the last element's text to the rest of what this compound command printed
         frame = self.stack.pop()
@@ -248,6 +259,8 @@ class ShellWalk:
         self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed, self.pipe_feeds = frame.stdin
         if frame.kind == "sub":
             self.a.functions, self.a.function_bodies = frame.funcs  # a function defined in a subshell does not reach a call after it
+        if frame.locals is not None:
+            self.a.body_locals[-1] = frame.locals  # a local declared inside it may not be one after it (SPD-246)
         if frame.kind in ("loop", "func"):
             self.a.loop_depth -= 1
         self.a.func_depth -= frame.kind == "func"
@@ -275,6 +288,8 @@ class ShellWalk:
         self.list_seen = directories.union_dirs(self.list_seen, after)
         if frame.kind != "sub":
             self.redirect_cwds = directories.union_dirs(frame.saved, after)
+        if arithmetic is not None:
+            self.read_arithmetic_command(frame, arithmetic)
         if self.stack and self.stack[-1].body == "compound":
             if self.stack[-1].kind == "cond":
                 # `if [[ -n x ]] { list }`: an `else` or an `elif` may still follow the group, so the conditional ends where a
@@ -282,6 +297,20 @@ class ShellWalk:
                 self.stack[-1].body = "sublist"
             else:
                 self.pop()  # the short loop whose body this `{ ... }` or `( ... )` was
+
+    def read_arithmetic_command(self, frame, text):
+        """What an arithmetic command `(( ... ))` assigns, recorded as the line's where the command stands (SPD-225):
+        certain where it surely runs in the line's shell, doubted after `&&` or `||` and in a pipeline element (probed in
+        zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: `((X=5))` and `true && (( X = 13 ))` assigned X in all three,
+        `(( X = 10 )) | cat` in none, `cat /dev/null | (( X = 9 ))` in zsh alone).  Its names stay on the frame, the
+        closed compound until its terminator, so a `|` after it (finish) doubts them: the command ran in the pipe's
+        process.  `text` is its words, the arithmetic between its outer parentheses marked as zsh.py marks it."""
+        unsure = self.conditional or self.piped
+        mark = len(self.a.assigned)
+        self.a.unsure += unsure
+        expansions.read_arithmetic(self.a, prepare.deglob(text))
+        self.a.unsure -= unsure
+        frame.assigns = tuple(self.a.assigned[mark:])
 
     def close_brace(self):
         """The `}` that closes a `{ list }` -- a group, a coproc's group, a function body.
@@ -420,6 +449,7 @@ class ShellWalk:
         if "in" not in self.words:
             if syntax.IDENTIFIER_RE.match(t):
                 self.a.doubt.add(t)
+                self.a.line_assigned.update(self.a.reaching((t,)))  # assigned as a variable is (SPD-246)
             return
         at = self.words.index("in")
         names = [n for n in self.words[:at] if syntax.IDENTIFIER_RE.match(n)]
@@ -427,6 +457,8 @@ class ShellWalk:
         # word that may start with `-` on
         if len(self.words) == at + 1:
             self.a.dashless_loops.update(names)
+            # the loop assigns its variables in the shell it runs in, a function body's global among them (SPD-246)
+            self.a.line_assigned.update(self.a.reaching(names))
         elif _value_may_start_with_dash(t):
             self.a.dashless_loops.difference_update(names)
         # a list holding a positional parameter (`for a in "$@"`), or -- once shell/positional has set the call's words
@@ -435,7 +467,7 @@ class ShellWalk:
         # word just read is tested, so a long list stays linear: each word reaches this once as `t`.
         word = prepare.deglob(t)
         if syntax.POSITIONAL_RE.search(word) is not None or word in self.a.shell_words:
-            self.a.member_vars.update(names)
+            self.a.fill_members(names)
 
     def end_header(self):
         """The loop's header, or an if/while/until condition ending in `]]`, is complete.  Its body may follow with no `do`
@@ -477,7 +509,7 @@ class ShellWalk:
             self.pop()
 
     # -- simple commands ----------------------------------------------------------------
-    def consume(self, words):
+    def consume(self, words, unsure=False):
         """Analyse the substitutions in these words (expanded before the command runs, each in its own process), and the
         text zsh's (e) flag evaluates in them with the variables the line holds here (shell/reevaluation), and take the
         here-document bodies their `<<` operators read; return the words without the operators and their delimiters.
@@ -494,6 +526,11 @@ class ShellWalk:
         (reevaluation.body_values, SPD-208): `x='a; git push'; sh <<EOF` fed `echo $x` pushes; where the line does not
         settle a value the body is an OutputBody too."""
         reevaluation.read_eval_words(words, self.a, self.depth)
+        # what the words' arithmetic assigns, where the shell expands them (SPD-225): `unsure`, the command may not run
+        # there (after && or ||, a pipeline element, a background job), as finish reads it
+        self.a.unsure += unsure
+        expansions.read_word_arithmetic(words, self.a)
+        self.a.unsure -= unsure
         self.substitutions = {}  # each word -> the bodies its substitutions lifted, which shell/loop_bindings reads (SPD-146)
         for w in words:
             lifted = []
@@ -520,6 +557,7 @@ class ShellWalk:
                 if self.bodies:
                     body = self.bodies.pop(0)
                     if self.expanded.pop(0):
+                        expansions.read_word_arithmetic((), self.a, (body,))  # its arithmetic may assign (SPD-225)
                         ran = reevaluation.read_expanded_body(body, self.a, self.depth + 1)
                         # bash expands the body's substitutions with the command's own prefix, zsh with the outer value (SPD-211)
                         ran = reevaluation.read_body_with_prefix(body, self.a, self.depth + 1, words) or ran
@@ -560,9 +598,12 @@ class ShellWalk:
         header, self.header = self.header, None
         redirect_cwds, self.redirect_cwds = self.redirect_cwds, syntax._CURRENT
         closed, self.closed = self.closed, None
+        if unsure and closed is not None and closed.assigns:
+            self.a.doubt.update(closed.assigns)  # `(( X = 5 )) | cat`: the arithmetic ran in the pipe's process (SPD-225)
+            loop_bindings.forget(self.a, closed.assigns)
         if not words:
             return
-        cleaned, bodies = self.consume(words)
+        cleaned, bodies = self.consume(words, bool(unsure or self.conditional or self.piped))
         if closed is not None and stdin_text.input_fed(words, bodies, False):
             # a compound command's own input redirections, which zsh and bash perform before it runs, so the commands in it
             # read that input: kept for walk_line to walk the line again with it standing where the compound opens
@@ -572,6 +613,11 @@ class ShellWalk:
             if header == "for" and self.stack and self.stack[-1].kind == "loop":
                 # its words, once per value in the body (SPD-146), read with the values the line settled before the header
                 loop_bindings.bind_loop(cleaned, self.stack[-1], a)
+            if header == "for":
+                for w in cleaned:  # `for (( init; test; step ))`: arithmetic the loop runs, its names doubted with it (SPD-225)
+                    if w.startswith("(" + _ARITH_OPEN):
+                        for part in prepare.deglob(w)[2:-2].split(";"):
+                            expansions.read_arithmetic(a, part)
             if header != "repeat":  # a for or select header assigns its name; a repeat count assigns nothing
                 for w in cleaned:
                     names = syntax._NAME_RE.findall(prepare.deglob(w))
@@ -959,23 +1005,23 @@ def walk_line(a, tokens, inner, bodies, expanded, depth, start, glued=True, stdi
 
 def _walks(a, line, tokens, inner, bodies, expanded, depth, start, glued, stdin, fed):
     """walk_line's walks of one reading of a line, `line`; the last one's reading stands."""
-    walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, line=line)
-    walk.walk(tokens)
-    found, defined, read, again = walk.found, walk.defined, {}, bool(walk.found)
+    shell_walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, line=line)
+    shell_walk.walk(tokens)
+    found, defined, read, again = shell_walk.found, shell_walk.defined, {}, bool(shell_walk.found)
     while True:
         calls = unread_inputs(a.function_inputs.get(line, {}), read)
         if not (calls or again):
-            return walk
+            return shell_walk
         spent = bool(calls) and a.body_walks >= positional.READINGS_PER_NAME
         if spent:
             calls = dict.fromkeys(defined, (None, True))  # every body on the line, on input the line does not spell
         elif calls:
             a.body_walks += 1
         restore_reading(a, start)
-        walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, found, calls, line)
-        walk.walk(tokens)
+        shell_walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, found, calls, line)
+        shell_walk.walk(tokens)
         if spent:
-            return walk
+            return shell_walk
         again = False
 
 
@@ -1013,17 +1059,21 @@ def reading_start(a):
     """The state a walk reads a line's commands with, and changes as it goes, that restore_reading puts back: the
     directories, the variables, the loop depth, the aliases, the loop names read as dashless, and the function bodies
     bound to their names (SPD-212: each walk of the line binds its own definitions again, and zsh's reading's do not
-    stand for bash's reading's while it walks), and shell/loop_bindings' loop and substitution values (SPD-146)."""
+    stand for bash's reading's while it walks), and shell/loop_bindings' loop and substitution values (SPD-146), and the
+    locals the innermost function body the shell holds has declared (SPD-246)."""
     return (a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases), set(a.dashless_loops), bodies_copy(a.function_bodies),
-            dict(a.loop_words), dict(a.derived), a.func_depth, dict(a.loop_derived))
+            dict(a.loop_words), dict(a.derived), a.func_depth, dict(a.loop_derived),
+            None if a.body_locals is None else dict(a.body_locals[-1]))
 
 
 def restore_reading(a, start):
     """Put back reading_start's state, copied, so one start serves every walk of the line."""
-    cwds, variables, loop_depth, aliases, dashless, function_bodies, loop_words, derived, func_depth, loop_derived = start
+    cwds, variables, loop_depth, aliases, dashless, function_bodies, loop_words, derived, func_depth, loop_derived, local = start
     a.cwds, a.vars, a.loop_depth, a.cd_uncertain = cwds, dict(variables), loop_depth, False
     a.aliases, a.dashless_loops, a.function_bodies = dict(aliases), set(dashless), bodies_copy(function_bodies)
     a.loop_words, a.derived, a.func_depth, a.loop_derived = dict(loop_words), dict(derived), func_depth, dict(loop_derived)
+    if local is not None:
+        a.body_locals[-1] = dict(local)
 
 
 def bodies_copy(function_bodies):

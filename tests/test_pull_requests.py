@@ -18,8 +18,8 @@ import json
 import os
 import unittest
 
-from helpers import EXIT_CONFLICT, EXIT_ERROR, EXIT_OWNERSHIP, EXIT_TRANSITION, EXIT_USAGE, GhMixin, Home, SpudTestCase
-from hookcase import HookCase, run_main
+from helpers import EXIT_CONFLICT, EXIT_ERROR, EXIT_OWNERSHIP, EXIT_TRANSITION, EXIT_USAGE, GhMixin, fixture
+from hookcase import HookCase, InProcessCase, InProcessHome, run_main
 
 URL = "https://github.com/0snug0/BadTakes/pull/361"
 URL2 = "https://github.com/0snug0/BadTakes/pull/362"
@@ -40,11 +40,11 @@ def headings(text):
     return [line for line in text.split("\n") if line.startswith("## ")]
 
 
-class PullRequestCase(SpudTestCase):
-    """An active ticket and a helper that records a pull request against it."""
+class PullRequestCase(InProcessCase):
+    """An active ticket and a helper that records a pull request against it.  SPD-242: the CLI in this process, the ticket
+    made once per class (hookcase.InProcessCase); gh stays the fake's process, set up per test (GhMixin)."""
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
         self.t = self.new_ticket("A ticket that lands by pull request", status="active")
 
     def record(self, url=URL, ticket=None, branch=BRANCH, worktree="/tmp/wt-bad-058", check=True, actor="spud", **extra):
@@ -765,7 +765,13 @@ class LandingImportTest(LandingCase):
     the pull request or when it was last read -- and a merged row whose ticket is done shows no owed line at all, so
     the columns that make a row actionable are exactly the ones the note drops.  A rebuilt row would claim a `pr
     record` and a `gh pr view` that never happened.  So the import reads past the two keys and the section, names them
-    in its event, and Spud re-records the pull request with one `spud pr record` -- its URL is in the note."""
+    in its event, and Spud re-records the pull request with one `spud pr record` -- its URL is in the note.
+
+    SPD-242: the second home is the process's second fixture (helpers.fixture, slot 1), an initialised home like the
+    first, restored per test, whose CLI runs in this process too."""
+
+    def other_home(self):
+        return fixture(slot=1).restore(InProcessHome)
 
     def test_the_tree_import_reads_past_the_landing_and_the_note_renders_without_it(self):
         self.record()
@@ -774,9 +780,7 @@ class LandingImportTest(LandingCase):
         self.home.json("render", "--out", first)
         source = (first / "ledger" / "tickets" / ("%s.md" % self.t["key"])).read_text(encoding="utf-8")
         self.assertIn("pr: 361", source)
-        other = Home()
-        self.addCleanup(other.cleanup)
-        other.init()
+        other = self.other_home()
         counts = other.json("import", first / "ledger")
         self.assertEqual((counts["tickets"], counts["prose_sections"]), (1, 0))  # no ## Landing prose is ever stored
         self.assertEqual(other.scalar("SELECT count(*) FROM pull_requests"), 0)
@@ -796,9 +800,7 @@ class LandingImportTest(LandingCase):
     def test_a_ticket_note_with_no_landing_imports_and_renders_byte_for_byte(self):
         first = self.home.path / "first"
         self.home.json("render", "--out", first)
-        other = Home()
-        self.addCleanup(other.cleanup)
-        other.init()
+        other = self.other_home()
         other.json("import", first / "ledger")
         second = other.path / "second"
         other.json("render", "--out", second)

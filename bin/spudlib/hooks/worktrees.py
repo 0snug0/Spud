@@ -1,8 +1,10 @@
-"""hooks/worktrees: Case folding, worktrees and project checkouts, file identity, path readings."""
+"""hooks/worktrees: Case folding, worktrees and project checkouts, file identity, path readings, and the file stamps and
+settle rule the worktree list and gitrepos' two caches are kept under."""
 
 import contextlib
 import json
 import os
+import time
 
 from . import hookio
 from ..core import homeconf, kernel, lazy
@@ -69,28 +71,65 @@ def repository_dir(root):
     return path if os.path.isdir(path) else None
 
 
+# -- the stamps a cache of a repository's files is kept under ---------------------------------------------------------
+#
+# Shared by the worktree list below and gitrepos' two caches (the config scopes and the checkout findings).  They live
+# here, not in gitrepos, because gitrepos imports this module and every hook imports this one: the reverse edge would be a
+# second import cycle and would put gitrepos on every hook's path.
+SETTLED_NS = 2 * 10**9  # how old every mtime an entry of any of the three caches is kept under must be before it is written
+
+
+def git_file_stamp(path):
+    """[path, mtime, size, inode, ctime] as os.stat reads them now, or [path, None, None, None, None] when it cannot.  The
+    ctime is in it because a program can put an mtime back (os.utime, `touch -r`) after writing the same number of bytes in
+    place, and nothing but the kernel sets a ctime: utime itself moves it (SPD-131); the inode, because a file removed and
+    made again, or replaced by a rename, is another file whatever its times say."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return [path, None, None, None, None]
+    return [path, st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns]
+
+
+def stamps_settled(stamps, now):
+    """True when every mtime in `stamps` (git_file_stamp's shape: the mtime second) is SETTLED_NS old at `now` (an absent
+    file has none): a change made in the same clock tick as a stamp read leaves the stamp as it was (APFS stamps are
+    nanoseconds, but HFS+ keeps seconds and FAT two), so no cache keeps an entry before then.  An mtime in the future is
+    never settled.
+
+    `now` is the clock read before the first thing the entry keeps is read, never after it (SPD-249): then every read
+    began a whole tick past every stamp's mtime, so a write after it moves the stamp, and one before it is in the stamp.
+    Read after a slow step (a git run on a loaded machine, against a 2 s FAT tick) it could call settled a stamp whose
+    file was read inside the tick a later write shares."""
+    return all(s[1] is None or now - s[1] >= SETTLED_NS for s in stamps)
+
+
 def worktrees_fingerprint(home):
     """What changes when a worktree of a checkout is added, moved, repaired or removed, read without running git: the
-    stat of <repository>/worktrees and of each worktrees/<id>/gitdir, the file gitrepository-layout(5) documents as
-    the path back to that worktree.  None when the checkout's `.git` names no repository directory, where only git can say.
-    A linked worktree (whose `.git` is a gitfile) has one too, so its list caches like a main checkout's: when it did
-    not, the fingerprint was None there and every hook run shelled out to `git worktree list` again."""
+    stamp (git_file_stamp) of <repository>/worktrees and of each worktrees/<id>/gitdir, the file gitrepository-layout(5)
+    documents as the path back to that worktree, each labelled by its name there rather than its path, so a checkout and
+    its linked worktree, which may spell the repository directory differently, answer alike.  The directory is stamped
+    before it is listed, so an id added or removed after the listing moves its stamp.  None when the checkout's `.git`
+    names no repository directory, or worktrees/ cannot be listed, where only git can say.  A linked worktree (whose `.git`
+    is a gitfile) has one too, so its list caches like a main checkout's: when it did not, the fingerprint was None there
+    and every hook run shelled out to `git worktree list` again.
+
+    The ctime and inode are in each stamp (SPD-250): `git worktree move` rewrites gitdir in place under the same id, the
+    same size for a path of the same length, and removing a worktree and adding one whose directory has the same name
+    makes gitdir again under that id; with an mtime put back only the ctime, or the inode, says so."""
     git_dir = repository_dir(home)
     if git_dir is None:
         return None
     admin = os.path.join(git_dir, "worktrees")
+    out = [["worktrees", *git_file_stamp(admin)[1:]]]
+    if out[0][1] is None:
+        return out  # no linked worktrees
     try:
         names = sorted(os.listdir(admin))
-        stamp = os.stat(admin).st_mtime_ns
-    except FileNotFoundError:
-        return ["no linked worktrees"]
-    out = [stamp]
+    except OSError:
+        return None
     for name in names:
-        try:
-            st = os.stat(os.path.join(admin, name, "gitdir"))
-            out.append([name, st.st_mtime_ns, st.st_size])
-        except FileNotFoundError:
-            out.append([name, None, None])
+        out.append([name, *git_file_stamp(os.path.join(admin, name, "gitdir"))[1:]])
     return out
 
 
@@ -151,13 +190,16 @@ def checkout_worktrees(ctx, project):
     """Every worktree git names for a project's root ([] when the root has no .git of its own, or is gone), kept in
     <home>/.spud/worktrees/<key>.json under the fingerprint it was listed at, so a hook runs git only after the
     worktrees change (about 8 ms with the subprocess import).  A cache that is missing, unreadable, stale or listed for
-    another root is listed anew; one that cannot be written is left unwritten."""
+    another root is listed anew; one that cannot be written is left unwritten.  A list is kept only once every stamp of
+    its fingerprint is settled (stamps_settled) by the clock read before the checkout's .git is read, so before anything
+    the entry keeps (SPD-250): until then git is run on every miss, as gitrepos' caches do."""
     root = project_root(ctx, project)
     if root in _WORKTREES:
         return _WORKTREES[root]
     if not os.path.lexists(os.path.join(root, ".git")):
         _WORKTREES[root] = []
         return []
+    now = time.time_ns()  # the settle rule's clock, before the fingerprint's first read and the git run after it
     fingerprint = worktrees_fingerprint(root)
     state = os.path.join(str(ctx.home), hookio.STATE_DIR)
     cache = os.path.join(state, "worktrees", "%s.json" % project["key"])
@@ -171,7 +213,7 @@ def checkout_worktrees(ctx, project):
                 listed = stored["worktrees"]
     if listed is None:
         listed = git_worktree_list(root)
-        if fingerprint is not None and os.path.isdir(state):
+        if fingerprint is not None and stamps_settled(fingerprint, now) and os.path.isdir(state):
             tmp = "%s.%d.tmp" % (cache, os.getpid())
             with contextlib.suppress(OSError):
                 os.makedirs(os.path.dirname(cache), exist_ok=True)

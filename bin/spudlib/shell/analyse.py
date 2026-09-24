@@ -37,6 +37,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         a.doubt.add(m.group(1))
         a.sticky.add(m.group(1))
         a.unseen_assigned.add(m.group(1))  # SPD-221: no loop body's basename settles it
+        a.line_assigned.update(a.reaching((m.group(1),)))  # ... and it is the line's variable (SPD-205, SPD-254)
     text, bodies, expanded = heredocs.strip_heredocs(command)
     text, apart = prepare.ansi_c_quotes(text)
     if apart is not None and a.unparseable is None:
@@ -78,9 +79,12 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
     # Every command and target either reading finds is checked, zsh's first; the directories and variables after the line are
     # those of both.  The quotes are the same, so both tokenize.
     zsh_cwds, zsh_vars, zsh_aliases, zsh_bodies = a.cwds, a.vars, a.aliases, a.function_bodies
+    zsh_locals = None if a.body_locals is None else a.body_locals[-1]
     walk.restore_reading(a, start)
     walk.walk_line(a, tokens if other == marked else syntax.shell_tokens(other) or [], inner, bodies, expanded, depth, start,
                    False, stdin, fed)
+    if zsh_locals is not None:  # a name is surely local only where both readings declared it so (SPD-246)
+        a.body_locals[-1] = {name: before for name, before in a.body_locals[-1].items() if name in zsh_locals}
     for name, found in zsh_bodies.items():  # a function body either reading defines (SPD-212, walk.read_call)
         a.function_bodies.setdefault(name, set()).update(found)
     a.cwds = directories.union_dirs(zsh_cwds, a.cwds)
@@ -98,14 +102,44 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
 
 def isolated(a, run):
     """Run an analysis whose directory changes stay in its own process (a substitution, `sh -c`, a shell fed a body).  Its variables
-    do not persist either: certain inside it, doubted after it."""
-    before, mark, unsure = a.cwds, len(a.assigned), a.unsure
+    do not persist either: certain inside it, doubted after it -- and nothing it declares local is local after it (SPD-246).
+    A function body the shell holds is read here too, in a scope of its own (read_body)."""
+    before, mark, unsure, scopes = a.cwds, len(a.assigned), a.unsure, a.body_locals
     a.unsure = 0
+    if scopes is not None:
+        a.body_locals = scopes[:-1] + [dict(scopes[-1])]
     run()
     a.cwds = before
     a.cd_uncertain = False
     a.unsure = unsure
+    a.body_locals = scopes
     a.doubt.update(a.assigned[mark:])
+
+
+def read_body(a, text, depth, stdin, fed):
+    """Read a function's body the shell holds, isolated, in a scope of its own (SPD-246): a name it surely declares local
+    (assignment_words.local_names) is not the line's while it runs, and when it returns the shell drops the local, so the
+    name is what it was before -- its value in `vars`, no loop binding or basename of the body's, and its doubt as it
+    stood before the call, unless the body assigned the name before declaring it (`V=x; local V`), which changed the
+    line's.  An assignment to any other name, the body's own `NAME=value` or a loop's variable, reaches the line's shell
+    and stays, doubted after the call as isolated doubts it."""
+    values, doubted, own = dict(a.vars), frozenset(a.doubt), {}
+
+    def run():
+        a.body_locals = (a.body_locals or []) + [{}]
+        analyse_command(text, a, depth, stdin, fed)
+        own.update(a.body_locals[-1])
+
+    isolated(a, run)
+    for name, before in own.items():
+        if before is syntax.UNSET:
+            a.vars.pop(name, None)
+        else:
+            a.vars[name] = before
+        a.derived.pop(name, None)
+        if values.get(name, syntax.UNSET) == before and name not in doubted:
+            a.doubt.discard(name)
+    loop_bindings.unbind(a, own)
 
 
 def analyse_isolated(a, command, depth, stdin=None, fed=False):
@@ -359,11 +393,12 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     if command_position and read_shell_name(words, a, depth, stdin, fed):
         # The shell this line runs in already defines the command word as an alias, whose body took the command
         return
-    if cmd in syntax.ASSIGNING_COMMANDS:
-        for x in words[1:]:  # `read X`, `printf -v X`, `unset X`, `getopts o X`: X may now hold anything (probed)
-            names = syntax._NAME_RE.findall(prepare.deglob(x))
-            a.doubt.update(names)
-            loop_bindings.unbind(a, names)  # and no loop's word any more (SPD-146)
+    if cmd in syntax.ASSIGNING_COMMANDS and directories.builtin_runs(effect):
+        # `read X`, `printf -v X`, `unset X`, `getopts o X`, `let X=1`: the line's own assignments, each builtin's names read
+        # by its grammar (SPD-254, SPD-225); a builtin's program run by its path or behind env assigns nothing here
+        expansions.read_assigning_builtin(words, a, effect)
+    if cmd in ("setopt", "unsetopt", "emulate") or cmd == "set" and any(prepare.deglob(w)[:2] in ("-o", "+o") for w in words[1:]):
+        a.arith_opaque = True  # an option may change how arithmetic reads a number (SPD-225, ShellAnalysis.arith_opaque)
     if cmd in ("source", ".", "trap"):
         a.all_doubt = True  # code the hook does not read may assign any variable
     if cmd in ("source", "."):
@@ -608,6 +643,11 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         directories.directory_change(words, a, effect)
     elif cmd in syntax.SHELL_DECLARATIONS:
         a.kinds.append("other")
+        if a.body_locals is not None and effect == "shell" and not a.unsure:
+            scope = a.body_locals[-1]  # a function body the shell holds, where it surely runs: its names are local (SPD-246)
+            for name in assignment_words.local_names(words):
+                scope.setdefault(name, a.vars.get(name, syntax.UNSET))
+        a.typed.update(assignment_words.typed_names(words))  # `declare -i X`: X's assignments are arithmetic (SPD-225)
         for w in words[1:]:
             m = assignment_words.declaration_word(w)
             if m:
@@ -707,17 +747,20 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted
     does not reach it: a body that writes `$data` after assigning it goes to the path rule like any spelled path, while the
     harness's `"$_cc_bin"` and the environment it reads, which no line settles, stay as unresolvable as they were."""
     outermost = a.shell_reading == 0
-    line_vars = frozenset(a.assigned) if outermost else frozenset()  # what the line assigned before this text (SPD-205)
+    # what the line's shell holds from the line before this text (SPD-205): what its own text assigned and what a function
+    # body it called assigned to a name the body did not declare local -- never a body's local, which is gone (SPD-246)
+    line_vars = frozenset(a.line_assigned) if outermost else frozenset()
     if outermost:
         a.shell_words = list(own_words)
+        a.member_vars = set(a.line_members)  # ... and an earlier body's local that its call's words filled is gone too
     marks = (len(a.findings), len(a.redirects), len(a.git_writes), len(a.arg_writes))
     a.shell_reading += 1
     try:
         if own_process:
             # not analyse_isolated's cache: a body read before without the member's words had its findings pruned, and
             # read_shell_name reads each call's once.  On the call's standard input, so a body running a shell or an
-            # interpreter reads the file the call feeds it (SPD-215)
-            isolated(a, lambda: analyse_command(text, a, depth, stdin, fed))
+            # interpreter reads the file the call feeds it (SPD-215); in a scope of its own, for its locals (SPD-246)
+            read_body(a, text, depth, stdin, fed)
         else:
             analyse_command(text, a, depth, stdin, fed)
     finally:
@@ -728,8 +771,9 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted
     if not outermost:
         return
     unread_words = [member_spelling(w) for w in own_words if unreadable_word(w)]
-    # the variables the line assigned before the text (always the member's), and, where the call passed words, those its
-    # positional parameters filled inside the body (SPD-205); with no call words there is nothing of the member's to fill one
+    # the variables the line's shell held from the line before the text (always the member's: line_vars), and, where the
+    # call passed words, those its positional parameters filled inside the body (SPD-205) or an earlier body's global they
+    # filled (line_members, SPD-246); with no call words there is nothing of the member's to fill one
     member = line_vars | (a.member_vars if own_words else frozenset())
     kept, a.shell_kept, a.shell_words = a.shell_kept, set(), []
     a.findings[marks[0]:] = [f for i, f in enumerate(a.findings[marks[0]:], marks[0])
@@ -745,8 +789,9 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted
 def names_member_var(detail, member):
     """Whether a finding names a variable the member's words fill (SPD-205): its detail holds a `$NAME` whose NAME the
     call's positional parameters filled (a for/select list over `$@`, a value holding a positional) or the line assigned
-    before the function's text.  Such a variable is the member's own, so the finding is kept, not dropped as the body's,
-    and refuses the member on doubt as the same reference does on a plain line.  The caller excludes a bare "var" (a
+    before the function's text -- itself, or through a function body's global, never a body's local (SPD-246).  Such a
+    variable is the member's own, so the finding is kept, not dropped as the body's, and refuses the member on doubt as
+    the same reference does on a plain line.  The caller excludes a bare "var" (a
     command word from a variable), where the harness's own shadows dispatch through their `$_cc_bin` and loop variables
     over the member's words the same way, so keeping those would refuse every grep a member runs."""
     return bool(member) and isinstance(detail, str) and any(name in member for name in _MEMBER_VAR_RE.findall(detail))
@@ -810,8 +855,14 @@ def record_assignment(a, found):
     that reads the variable as a plain assignment does -- PATH and zsh's `path` for shadowed_name, CDPATH, GIT_*.
     An element of zsh's `functions`, `commands` or `aliases` binds the name it keys as a definition, a `hash` or an `alias`
     line would, a name the hook cannot read standing for all of them; and a BASH_FUNC_ variable is refused
-    outright."""
+    outright.
+
+    SPD-225: a subscript is arithmetic, which the shells evaluate before they assign (`arr[X=1]=q` and `declare
+    arr2[X=1]=q` assigned X in zsh 5.9 and bash 3.2.57, probed), and so is the value a name with the integer or float
+    attribute is assigned (a.typed: `typeset -i X; X='T=12'` set T as well), whose own value the hook does not compute."""
     name, subscript, append, value = found
+    if subscript is not None:
+        expansions.read_arithmetic(a, prepare.deglob(subscript), doubtful=True)
     script_files.read_assignment(a, name)  # BASH_ENV, ENV, ZDOTDIR: a file of commands a shell started later runs
     script_runners.read_runner_assignment(a, name)  # npm_config_*, MAKEFLAGS ...: a runner's configuration, its shell among it
     if name.startswith(assignment_words.ENV_FUNCTION_PREFIX):
@@ -827,7 +878,11 @@ def record_assignment(a, found):
         else:
             names = a.functions if table == "function" else a.hashed
             names.update([syntax.UNKNOWN_NAME] if pairs is None else [prepare.deglob(key) for key, _ in pairs])
-    expansions.assign_variable(a, name, value, append or subscript is not None)
+    if name in a.typed:
+        expansions.read_arithmetic(a, prepare.deglob(value), doubtful=bool(append or subscript is not None))
+        expansions.assign_unknown(a, name)
+    else:
+        expansions.assign_variable(a, name, value, append or subscript is not None)
 
 
 def exported_function_names(words):

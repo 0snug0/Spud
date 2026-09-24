@@ -1,8 +1,10 @@
 #!/opt/homebrew/bin/python3.14
 """Headless probes for the ledger hooks (real `claude -p` sessions, real API usage).
 
-Each scenario builds a scratch SPUD_HOME (a copy of bin/spud, the shipped share/spud.config.json rendered, `spud init`,
-a ticket, the planned members it needs), generates a settings file with `spud settings sync`
+Each scenario builds a scratch SPUD_HOME (the shipped share/spud.config.json rendered, and beside it a tool checkout
+holding a copy of bin/ -- tests/probes/probe_env.py's build_tool -- which `spud init --project-root` registers as project 1,
+SPD-244; a ticket, the planned members it needs, their globs `home:` ones, since a bare glob is in the tool's checkout and
+would need a bound worktree), generates a settings file with `spud settings sync`
 on top of a capture hook that appends every raw payload, stamped with the capture time, to
 hooks.jsonl, then runs one `claude -p` session in that home with `--settings` and an `--agents`
 definition of `spudagent`.  Afterwards it prints what the harness saw (Agent calls, tool errors,
@@ -40,7 +42,6 @@ import json
 import os
 import shlex
 import shutil
-import sqlite3
 import subprocess
 import sys
 import time
@@ -92,8 +93,8 @@ CHILD_PROMPT = (
     "You are a probe spudagent. Do exactly what your task says, one tool call per step, with the exact parameters given. "
     "When a tool call is refused or errors, do not retry and do not try an alternative: quote the refusal text and go on. "
     "If the harness stops you and tells you to record something with `spud` commands (your Result, or a `member finish` for a "
-    "child you spawned), run each command exactly as the message shows it, as python3.14 -I -S $SPUD_HOME/bin/spud ... with "
-    "$SPUD_HOME expanded to the SPUD_HOME environment variable, choosing done for done|blocked|failed and replacing a "
+    "child you spawned), run each command exactly as the message shows it, as python3.14 -I -S {spud} ..., "
+    "choosing done for done|blocked|failed and replacing a "
     "placeholder such as '<verdict>' or '<what you produced ...>' with one short sentence, and then finish. "
     "If it tells you to wait for a child inside this turn, wait by running exactly "
     "python3.14 -I -S -c 'import time; time.sleep(20)' and then the `spud member show` command the message names, repeating "
@@ -105,14 +106,14 @@ LEAD_HOLD_CHILD = (
     "Step 1: your context holds a line starting with 'Ledger: your agent_id is'; take that agent_id and call it CHILD. "
     "Step 2: run exactly this Bash command: python3.14 -I -S -c 'import time; time.sleep(30)'\n"
     "Step 3: run exactly this Bash command, with CHILD replaced by your agent_id: "
-    "python3.14 -I -S $SPUD_HOME/bin/spud --as CHILD member result 'probe child: slept 30 seconds'\n"
+    "python3.14 -I -S {spud} --as CHILD member result 'probe child: slept 30 seconds'\n"
     "Step 4: return the word potato."
 )
 
 LEAD_HOLD_FG_CHILD = (
     "Step 1: your context holds a line starting with 'Ledger: your agent_id is'; take that agent_id and call it CHILD. "
     "Step 2: run exactly this Bash command, with CHILD replaced by your agent_id: "
-    "python3.14 -I -S $SPUD_HOME/bin/spud --as CHILD member result 'probe child: nothing to report'\n"
+    "python3.14 -I -S {spud} --as CHILD member result 'probe child: nothing to report'\n"
     "Step 3: return the word potato."
 )
 
@@ -123,10 +124,10 @@ def lead_prompt(child_prompt, background, last_steps):
     return (
         "Step 1: your context holds a line starting with 'Ledger: your agent_id is'; take that agent_id and call it LEAD.\n"
         "Step 2: run exactly this Bash command, with LEAD replaced by your agent_id: "
-        "python3.14 -I -S $SPUD_HOME/bin/spud --as LEAD member result 'probe lead: planned and spawned Russet'\n"
+        "python3.14 -I -S {spud} --as LEAD member result 'probe lead: planned and spawned Russet'\n"
         "Step 3: run exactly this Bash command, with LEAD replaced by your agent_id: "
-        "python3.14 -I -S $SPUD_HOME/bin/spud --as LEAD member new --persona scout --model haiku --name Russet "
-        "--brief 'Probe child: do what the prompt says.' --deliverable 'tests/**'\n"
+        "python3.14 -I -S {spud} --as LEAD member new --persona scout --model haiku --name Russet "
+        "--brief 'Probe child: do what the prompt says.' --deliverable 'home:tests/**'\n"
         "Step 4: call the Agent tool with subagent_type \"spudagent\", description \"SPUD-001/Russet (01.01, scout)\", "
         "model \"haiku\", run_in_background %s, and as its prompt the text between <child-prompt> and </child-prompt>: "
         "<child-prompt>%s</child-prompt>\n%s" % ("true" if background else "false", child_prompt, last_steps)
@@ -194,7 +195,7 @@ SCENARIOS = {
             "1. Call the Agent tool with subagent_type \"spudagent\", description \"SPUD-001/Kestrel (01, scout)\", "
             "model \"haiku\", run_in_background true, and this prompt: \"Step 1: your context holds a line starting with "
             "'Ledger: your agent_id is'; take that agent_id. Step 2: run exactly this Bash command, with AGENT replaced by that "
-            "agent_id: python3.14 -I -S $SPUD_HOME/bin/spud --as AGENT member log 'probe log line' . Step 3: return the word potato.\"\n"
+            "agent_id: python3.14 -I -S {spud} --as AGENT member log 'probe log line' . Step 3: return the word potato.\"\n"
             "2. Wait for the agent to finish, then report."
         ),
     },
@@ -228,11 +229,11 @@ SCENARIOS = {
     "stop-planned": {
         "members": [],
         "prompt": (
-            "1. Run exactly this Bash command: python3.14 -I -S $SPUD_HOME/bin/spud --as spud member new --ticket SPD-001 --persona scout "
-            "--model haiku --name Russet --brief 'Probe row: planned and never spawned.' --deliverable 'tests/**'\n"
+            "1. Run exactly this Bash command: python3.14 -I -S {spud} --as spud member new --ticket SPD-001 --persona scout "
+            "--model haiku --name Russet --brief 'Probe row: planned and never spawned.' --deliverable 'home:tests/**'\n"
             "2. Do not call the Agent tool at any point. Report the command's output and end your turn.\n"
             "3. If a Stop hook message then says a planned spudagent was never spawned, do not spawn it: run the "
-            "`spud --as spud member finish ... --status failed` command it names, exactly, as python3.14 -I -S $SPUD_HOME/bin/spud ..., "
+            "`spud --as spud member finish ... --status failed` command it names, exactly, as python3.14 -I -S {spud} ..., "
             "with '<why>' replaced by 'probe: never spawned', then end your turn again."
         ),
     },
@@ -246,8 +247,14 @@ def run(cmd, env, cwd=None, stdin=None, check=True):
     return proc
 
 
-def spud(env, home, *args):
-    return run([PYTHON, "-I", "-S", str(home / "bin" / "spud"), *args], env)
+def launcher(env):
+    """The scratch tool's bin/spud: the program the hook lines and allow rules name, and the one every prompt below spells
+    where it says {spud}."""
+    return os.path.join(env["SPUD_TOOL_DIR"], "bin", "spud")
+
+
+def spud(env, *args):
+    return run([PYTHON, "-I", "-S", launcher(env), *args], env)
 
 
 def write_config(home):
@@ -264,43 +271,26 @@ def write_config(home):
     return config
 
 
-def seed_project_one(home, config):
-    """Project 1 as `spud init` inserted it before SPW-001: key `spud`, rooted at the home, whose bin/spud this probe's
-    launcher is.  Init registers no project now (docs/design/2026-09-21-spud-init.md section 1.4) and the ticket below
-    needs one."""
-    con = sqlite3.connect(home / ".spud" / "ledger.db", timeout=5)
-    try:
-        with con:
-            con.execute(
-                "INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at)"
-                " VALUES (1, 'spud', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (config["identity"]["name"], str(home), config["tickets"]["prefix"], config["teams"]["prefix"],
-                 datetime.now().astimezone().isoformat(timespec="seconds")),
-            )
-    finally:
-        con.close()
-
-
 def build_home(root, scenario):
     home = root / "home"
-    (home / "bin").mkdir(parents=True)
-    shutil.copy2(SPUD, home / "bin" / "spud")
-    shutil.copy2(SPUD.parent / "spud_ledger.py", home / "bin" / "spud_ledger.py")
-    shutil.copytree(SPUD.parent / "spudlib", home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
-    config = write_config(home)
+    home.mkdir(parents=True)
+    write_config(home)
     for d in ("tests", "docs", ".claude"):
         (home / d).mkdir()
+    # SPD-244: the tool beside the home, a main checkout holding a copy of this checkout's bin/, whose bin/spud the hook
+    # lines, the allow rules and every prompt's {spud} name; init registers it as project 1.
+    tool = probe_env.build_tool(root)
     # SPD-101: helpers.Home's isolation, from the one helper every probe shares -- the home pointer, ~/.claude, the
     # LaunchAgents directory and launchctl all the scratch's, so neither this driver's `spud` nor the session's reaches
     # this Mac's own; it also drops CLAUDECODE and the session id the driver's session would otherwise stamp on the rows
-    # `member new` plans here (SPD-018).  The home is the tool: its bin/ is the copy above.  Init skips step 8.
-    env = probe_env.isolated_env(home, scratch=root)
-    spud(env, home, "init", "--no-schedule")
-    seed_project_one(home, config)
-    spud(env, home, "--as", "spud", "ticket", "new", "--title", "Probe %s" % scenario, "--status", "active")
+    # `member new` plans here (SPD-018).  Init skips step 8.
+    env = probe_env.isolated_env(home, tool, scratch=root)
+    spud(env, *probe_env.init_args(tool))
+    spud(env, "--as", "spud", "ticket", "new", "--title", "Probe %s" % scenario, "--status", "active")
     for name, persona, model in SCENARIOS[scenario]["members"]:
-        spud(env, home, "--as", "spud", "member", "new", "--ticket", "SPD-001", "--persona", persona, "--model", model,
-             "--name", name, "--brief", "Probe %s: do what the prompt says." % scenario, "--deliverable", "tests/**")
+        # home:tests/**, so the probe's writes land in the home as before: a bare glob is in the tool's checkout.
+        spud(env, "--as", "spud", "member", "new", "--ticket", "SPD-001", "--persona", persona, "--model", model,
+             "--name", name, "--brief", "Probe %s: do what the prompt says." % scenario, "--deliverable", "home:tests/**")
     capture = root / "hooks.jsonl"
     script = root / "capture.py"
     script.write_text(CAPTURE_SCRIPT, encoding="utf-8")
@@ -310,7 +300,7 @@ def build_home(root, scenario):
         groups.setdefault(event, []).append({"matcher": matcher, "hooks": [entry]} if matcher else {"hooks": [entry]})
     settings = home / ".claude" / "settings.json"
     settings.write_text(json.dumps({"hooks": groups}, indent=2) + "\n", encoding="utf-8")
-    spud(env, home, "settings", "sync", "--path", str(settings))
+    spud(env, "settings", "sync", "--path", str(settings))
     return home, env, settings, capture
 
 
@@ -484,7 +474,7 @@ def run_init_probe(root, model):
 
 
 def run_claude(home, env, settings, prompt, model, allow_spud):
-    agents = {"spudagent": {"description": "A probe spudagent (ledger hooks headless probe).", "prompt": CHILD_PROMPT, "model": "haiku"}}
+    agents = {"spudagent": {"description": "A probe spudagent (ledger hooks headless probe).", "prompt": CHILD_PROMPT.replace("{spud}", launcher(env)), "model": "haiku"}}
     allowed = ["Agent", "Write", "Edit", "Bash(git *)", "Bash(ls *)", "Bash(echo *)"]
     if allow_spud:
         allowed.append("Bash(python3.14 -I -S *)")
@@ -733,7 +723,7 @@ def main(argv=None):
     if args.scenario == SPUD_INIT_SCENARIO:
         return main_spud_init(root, args.model)
     home, env, settings, capture = build_home(root, args.scenario)
-    prompt = SCENARIOS[args.scenario]["prompt"].replace("{home}", str(home))
+    prompt = SCENARIOS[args.scenario]["prompt"].replace("{home}", str(home)).replace("{spud}", launcher(env))
     cmd, proc, elapsed = run_claude(home, env, settings, prompt, args.model, not args.no_allow_spud)
     (root / "stream.jsonl").write_text(proc.stdout, encoding="utf-8")
     (root / "stderr.txt").write_text(proc.stderr, encoding="utf-8")
@@ -750,15 +740,15 @@ def main(argv=None):
     out.append("--- subagent transcripts (local time) ---")
     out.extend(summarize_transcripts(capture))
     out.append("--- ledger: spud events ---")
-    out.append(spud(env, home, "events").stdout.rstrip())
+    out.append(spud(env, "events").stdout.rstrip())
     out.append("--- ledger: spawn_requests ---")
-    out.append(spud(env, home, "sql", "--readonly", "SELECT tool_use_id, caller_agent_id, description, model, run_in_background, member_id, agent_id, decision, reason FROM spawn_requests").stdout.rstrip())
-    names = json.loads(spud(env, home, "sql", "--readonly", "--json", "SELECT name FROM members ORDER BY lineage").stdout).get("rows", [])
+    out.append(spud(env, "sql", "--readonly", "SELECT tool_use_id, caller_agent_id, description, model, run_in_background, member_id, agent_id, decision, reason FROM spawn_requests").stdout.rstrip())
+    names = json.loads(spud(env, "sql", "--readonly", "--json", "SELECT name FROM members ORDER BY lineage").stdout).get("rows", [])
     for row in names:
         name = row["name"] if isinstance(row, dict) else row[0]
         out.append("--- ledger: spud member show SPUD-001/%s ---" % name)
-        out.append(spud(env, home, "member", "show", "SPUD-001/%s" % name).stdout.rstrip())
-        out.append(spud(env, home, "sql", "--readonly", "SELECT status, session_id, agent_id, resolved_model, total_tokens, duration_ms, tool_uses, substr(usage_json, 1, 200) AS usage_json, substr(return_text, 1, 200) AS return_text, stopped_at FROM members WHERE name = '%s'" % name).stdout.rstrip())
+        out.append(spud(env, "member", "show", "SPUD-001/%s" % name).stdout.rstrip())
+        out.append(spud(env, "sql", "--readonly", "SELECT status, session_id, agent_id, resolved_model, total_tokens, duration_ms, tool_uses, substr(usage_json, 1, 200) AS usage_json, substr(return_text, 1, 200) AS return_text, stopped_at FROM members WHERE name = '%s'" % name).stdout.rstrip())
     spool = home / ".spud" / "hook-errors.jsonl"
     out.append("--- spool: %s ---" % ("empty" if not spool.exists() or spool.stat().st_size == 0 else spool.read_text(encoding="utf-8")[:2000]))
     text = "\n".join(out)

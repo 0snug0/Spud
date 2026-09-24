@@ -13,13 +13,29 @@ Spud's Stop held with Law 9 and told him to `member finish` a member that was ru
 second stop also recorded `transcript_usage: false`, so the run figures stayed frozen at the first round while
 the transcript had grown.
 
+SPD-082 gave the resume a kind of its own: SPD-050 recorded it on that second member.started, marked by data `resumed`,
+because a new kind is a migration of the append-only table.  Since 0010_member_resumed the SubagentStart that resumes a
+member writes the plain member.started every start writes and, beside it, a member.resumed (hooks/recording.RESUME_KIND)
+carrying the stop it superseded and whether it cleared it; `spud events --kind member.resumed` finds it, and the SubagentStop
+hold keys on it.  A resume recorded before that migration keeps its old shape (tests/test_migrate_member_resumed.py).
+
 Every run is against a scratch SPUD_HOME (tests/helpers.py); the payload builders and the planned team come from
 tests/hookcase.py.
 """
 
 import unittest
 
+from helpers import load_spud_module
 from hookcase import AGENT_A, AGENT_B, AGENT_D, SESSION, HookCase
+
+spud = load_spud_module()
+RESUME_KIND = spud.RESUME_KIND  # the resume's own kind: every assertion below names it, never a literal
+
+
+class ResumeKindTest(unittest.TestCase):
+    def test_the_resume_has_a_kind_of_its_own_that_events_accepts(self):
+        self.assertIn(RESUME_KIND, spud.EVENT_KINDS)  # so `spud events --kind` offers it
+        self.assertNotEqual(RESUME_KIND, "member.started")  # member.started keeps meaning one SubagentStart
 
 
 class ResumeCase(HookCase):
@@ -60,15 +76,16 @@ class ResumeClearsTheReturnTest(ResumeCase):
         self.assertIsNone(after["stopped_at"])
         self.assertEqual(after["status"], "active")
         self.assertEqual(after["spawned_at"], m["spawned_at"])  # the run still starts at the first spawn
-        e = self.events("member.started")[-1]
-        self.assertEqual((e["actor"], e["member"], e["agent_id"]), ("hook:SubagentStart", m["ref"], AGENT_A))
-        self.assertEqual(e["data"]["resumed"], True)
-        self.assertEqual(e["data"]["was_stopped_at"], m["stopped_at"])
-        self.assertEqual(e["data"]["cleared"], True)
-        self.assertEqual(e["data"]["agent_type"], "spudagent")
-        self.assertEqual(e["data"]["session_id"], SESSION)
+        e = self.events(RESUME_KIND)[-1]
+        self.assertEqual((e["kind"], e["actor"], e["member"], e["agent_id"]), (RESUME_KIND, "hook:SubagentStart", m["ref"], AGENT_A))
+        self.assertEqual(e["data"], {"was_stopped_at": m["stopped_at"], "cleared": True})
         self.assertIn("resumed", e["body"])
         self.assertIn(m["stopped_at"], e["body"])
+        started = self.events("member.started")[-1]  # beside it, the plain start every SubagentStart writes
+        self.assertEqual(started["body"], "subagent %s started (spudagent)" % AGENT_A)
+        self.assertEqual((started["member"], started["data"]["agent_type"], started["data"]["session_id"]), (m["ref"], "spudagent", SESSION))
+        self.assertNotIn("resumed", started["data"])
+        self.assertEqual([x["kind"] for x in self.events(member=m["ref"])][-2:], ["member.started", RESUME_KIND])
 
     def test_a_second_start_for_a_member_that_never_stopped_is_the_plain_start(self):
         m = self.spawn(self.plan(), AGENT_A)
@@ -77,6 +94,7 @@ class ResumeClearsTheReturnTest(ResumeCase):
         e = self.events("member.started")[-1]
         self.assertEqual(e["body"], "subagent %s started (spudagent)" % AGENT_A)
         self.assertNotIn("resumed", e["data"])
+        self.assertEqual(self.events(RESUME_KIND), [])
         self.assertIsNone(self.row(m)["stopped_at"])
 
     def test_an_unbound_agent_id_is_the_plain_start(self):
@@ -85,8 +103,9 @@ class ResumeClearsTheReturnTest(ResumeCase):
         e = self.events("member.started")[-1]
         self.assertIsNone(e["member"])
         self.assertNotIn("resumed", e["data"])
+        self.assertEqual(self.events(RESUME_KIND), [])
 
-    def test_a_finished_members_resume_changes_nothing_but_the_event(self):
+    def test_a_finished_members_resume_changes_nothing_but_the_events(self):
         m = self.returned()
         self.home.json("member", "finish", m["ref"], "--status", "done", "--outcome", "Good work.", actor="spud")
         before = self.row(m)
@@ -95,9 +114,9 @@ class ResumeClearsTheReturnTest(ResumeCase):
         after = self.row(m)
         self.assertEqual((after["status"], after["stopped_at"], after["finished_at"]),
                          (before["status"], before["stopped_at"], before["finished_at"]))
-        e = self.events("member.started")[-1]
-        self.assertEqual((e["data"]["resumed"], e["data"]["cleared"]), (True, False))
-        self.assertEqual(e["data"]["was_stopped_at"], before["stopped_at"])
+        e = self.events(RESUME_KIND)[-1]
+        self.assertEqual((e["member"], e["data"]), (m["ref"], {"was_stopped_at": before["stopped_at"], "cleared": False}))
+        self.assertEqual([x["kind"] for x in self.events(member=m["ref"])][-2:], ["member.started", RESUME_KIND])
 
 
 class ResumeStopTest(ResumeCase):
@@ -144,6 +163,21 @@ class ResumeSubagentStopTest(ResumeCase):
         self.assertGreaterEqual(after["stopped_at"], m["stopped_at"])
         final = self.events("member.stopped")[-1]
         self.assertEqual((final["data"]["held"], final["data"]["unrecorded"]), (False, False))
+
+    def test_a_second_resume_asks_again_for_a_result_since_it(self):
+        m = self.returned()
+        self.resume()
+        self.home.json("member", "result", "Round 2 done.", actor=AGENT_A)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, last="Round 2."))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
+        self.resume()
+        self.assertEqual(len(self.events(RESUME_KIND, member=m["ref"])), 2)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, last="Round 3."))
+        self.assertEqual(r.json["decision"], "block", r)  # round 2's Result predates the second resume
+        self.assertIn("spud --as %s member result" % AGENT_A, r.json["reason"])
+        self.home.json("member", "result", "Round 3 done.", actor=AGENT_A)
+        r = self.home.hook("SubagentStop", self.sub_stop(AGENT_A, last="Round 3."))
+        self.assertEqual((r.code, r.stdout), (0, ""), r)
 
     def test_a_block_recorded_since_the_resume_answers_for_the_second_return(self):
         self.returned()

@@ -187,6 +187,8 @@ ALIAS_WORD_RE = lazy.LazyPattern(r"^([^=\s]+)=(.*)\Z", re.S)
 # The key an alias's name is recorded under in `assigned` and `doubt`, so every rule that doubts a variable the line assigned
 # doubts the alias too.  No variable name can hold it.
 ALIAS_KEY = "\x00alias\x00"
+# ShellAnalysis.body_locals's value for a name `vars` did not hold when a function body declared it local (SPD-246).
+UNSET = object()
 # The findings that say only that the hook cannot read a word, dropped from text the shell itself holds -- an
 # alias's body or a function's, out of Claude Code's snapshot of the user's profile.  The member did not write that text,
 # cannot spell it differently and cannot write the file it comes from, and Claude Code's own shadows for find, grep,
@@ -220,8 +222,10 @@ _NAME_CHAR_RE = lazy.LazyPattern(r"[A-Za-z0-9_]")
 _BARE_NAME_TAIL_RE = lazy.LazyPattern(r"\$[A-Za-z_][A-Za-z0-9_]*\Z")
 _IFS_BLANKS_RE = lazy.LazyPattern(r"[ \t\n]+")
 # Builtins that assign a shell variable named by an argument (`read X`, `printf -v X`, `getopts o X`, `unset X`, zsh's
-# `print -v X`, `vared X`, `zparseopts -A X`, `set -A X` ...): a variable any of their words names may no longer hold what the line
-# assigned it.  `trap`, `source` and `.` run code the hook does not read, so after them no variable is certain.
+# `print -v X`, `vared X`, `zparseopts -A X`, `set -A X` ...), each read by its own grammar (assignment_words.builtin_names)
+# and every name it assigns recorded as the line's assignment of a value the hook does not know (expansions.
+# read_assigning_builtin, SPD-254); `let` assigns by arithmetic (SPD-225).  `trap`, `source` and `.` run code the hook does
+# not read, so after them no variable is certain.
 ASSIGNING_COMMANDS = {"read", "getopts", "printf", "print", "mapfile", "readarray", "unset", "let", "wait", "vared", "zparseopts", "zstyle",
                       "zformat", "zregexparse", "strftime", "zstat", "stat", "sysread", "getln", "select", "foreach", "zle", "zcurses",
                       "zsocket", "ztcp", "zpty", "zselect", "zsystem", "private", "integer", "float", "set", "compadd", "compset"}
@@ -647,6 +651,11 @@ class ShellAnalysis:
         self.doubt, self.sticky, self.assigned = set(), set(), []
         self.unsure = 0
         self.all_doubt = False
+        # SPD-225: `typed`, the names a declaration on the line gave the integer or float attribute, whose assignments the
+        # shells evaluate as arithmetic and format their own way (assignment_words.typed_names); `arith_opaque`, the line ran
+        # an option builtin (setopt, unsetopt, emulate, `set -o`), which may change how arithmetic reads a number (zsh's
+        # FORCE_FLOAT turned `(( X = 5 ))` into 5.000000000e+00, probed), so no arithmetic literal is taken after it.
+        self.typed, self.arith_opaque = set(), False
         # `aliases`, what `alias NAME=body` defined on the line, name -> the body's text, None for one the hook
         # cannot read and for one `unalias` cleared; `alias_scope`, how many `eval` re-analyses deep the reading is, the only
         # place on one line where a name the line aliased is expanded (a shell expands an alias when it parses the text);
@@ -678,6 +687,16 @@ class ShellAnalysis:
         # a list holding `$@`/`$1`.., and a variable a value holding a positional assigns.  A finding naming one of them
         # is the member's own, so analyse_shell_text's prune keeps it rather than drop it as the body's (SPD-205).
         self.member_vars = set()
+        # SPD-246: a function body the shell already holds (a snapshot's) runs in the line's shell, so a name it assigns is
+        # still set after the call and a later text reads it -- unless the body declared it local, which is gone when it
+        # returns.  `line_assigned`, every name assigned where the assignment reaches the line's shell: everything the
+        # line's own text assigns (a for or select loop's variable too), and what such a body assigns to a name no body
+        # open around the assignment declared local; analyse_shell_text reads it as the line's variables (SPD-205).
+        # `body_locals`, None outside such a body, else one dict per body being read, innermost last: each name the body
+        # surely declared local (assignment_words.local_names) -> the value `vars` held for it before, UNSET for none,
+        # which analyse.read_body puts back when the body returns.  `line_members`, the member_vars no open body declared
+        # local, which outlive the reading that filled them, where a body's local does not.
+        self.line_assigned, self.body_locals, self.line_members = set(), None, set()
         # The names a `name () { ... }`/`function name` definition earlier on the line bound to a shell function, so
         # a later bare call of one of them (in command position) runs that function, not the program the hook read.  Kept as a
         # set like `hashed`, but scoped: a definition in a branch, a loop or another function's body may exist at the call, so
@@ -712,6 +731,17 @@ class ShellAnalysis:
     def all_spud(self):
         """Every simple command is a spud call (a `cd` beside it changes nothing that matters)."""
         return "spud" in self.kinds and all(k in ("spud", "cd") for k in self.kinds) and not self.unparseable
+
+    def reaching(self, names):
+        """The names whose assignment here reaches the line's shell: none an open function body declared local (SPD-246)."""
+        scopes = self.body_locals
+        return names if scopes is None else [n for n in names if not any(n in scope for scope in scopes)]
+
+    def fill_members(self, names):
+        """Names the call's words fill inside a function's body (member_vars), each one that reaches the line's shell kept
+        in line_members for a later reading (SPD-246)."""
+        self.member_vars.update(names)
+        self.line_members.update(self.reaching(names))
 
 
 def loop_name(word, first=False):

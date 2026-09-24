@@ -359,7 +359,7 @@ def unresolved(word):
     return "$" in word or "`" in word or hookio.SUBST in word or syntax.unknown_operand(word)
 
 
-def written_paths(entries, walk=False):
+def written_paths(entries, walk_trees=False):
     """([(named, target, cwds, directory)], capped, unwalked) for bash_reason: every file the recorded writes by argument
     name, each target a masked word checked as a redirection target is, `named` the spelling its reason gives and
     `directory` the kind the path rule reads a member's globs with; the first source glob whose files
@@ -369,10 +369,10 @@ def written_paths(entries, walk=False):
 
     A destination entry whose kind is RECURSIVE (cp -R, mv, rsync, ditto) lands each source that is a directory
     now as a whole tree ("tree"), under the source's name or, for a trailing `/` where the tool copies contents, as the
-    destination itself; an operand the line does not spell lands anywhere under the destination.  `walk` (a caller the
-    path rule holds): every tree such a copy lands, and every tree find hands its command ("find-tree", "walk"), is walked
-    (tree_walk.first_git_entry), and a git directory or config file found there is a target of its own where it lands, so
-    the rule against a member writing a .git path refuses a copied `.git` as it refuses writing one."""
+    destination itself; an operand the line does not spell lands anywhere under the destination.  `walk_trees` (a caller
+    the path rule holds): every tree such a copy lands, and every tree find hands its command ("find-tree", "walk"), is
+    walked (tree_walk.first_git_entry), and a git directory or config file found there is a target of its own where it
+    lands, so the rule against a member writing a .git path refuses a copied `.git` as it refuses writing one."""
     out, capped, unwalked = [], None, None
     for cmd, word, cwds, sources, how, suffix, kind in entries:
         targets, trees, walks = [], [], []  # walks: (the word a tree lands at, its source directory now, rsync's excludes)
@@ -411,7 +411,7 @@ def written_paths(entries, walk=False):
             if suffix:
                 out.append(("`%s` %s" % (cmd, target + suffix), target + suffix, cwds, None))
         out += [("`%s` %s" % (cmd, tree), tree, cwds, "tree") for tree in dict.fromkeys(trees)]
-        for landing, path, excludes in walks if walk else ():
+        for landing, path, excludes in walks if walk_trees else ():
             rel, short = tree_walk.first_git_entry(path, excludes)
             if short and unwalked is None:
                 unwalked = "`%s` %s" % (cmd, path)

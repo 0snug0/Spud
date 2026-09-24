@@ -851,6 +851,25 @@ class GitLocalConfigTest(BashHookCase):
         tick of the write, however long its git run takes on a loaded machine (SPD-240)."""
         return mock.patch("spudlib.hooks.gitrepos.time", mock.Mock(wraps=time, time_ns=lambda: ns))
 
+    def slow(self, name, written):
+        """The clock the settle rule reads stopped at `written` until gitrepos' `name` returns, and SETTLED_NS past it from
+        then on: that step of the reading took a whole settle interval, as a git run can on a loaded machine (SPD-249).
+        Returns the patches as one context and the list of the step's calls."""
+        gitrepos = importlib.import_module("spudlib.hooks.gitrepos")
+        worktrees = importlib.import_module("spudlib.hooks.worktrees")
+        real, now, calls = getattr(gitrepos, name), [written], []
+
+        def step(*args, **kwargs):
+            out = real(*args, **kwargs)
+            calls.append(args)
+            now[0] = written + worktrees.SETTLED_NS
+            return out
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch("spudlib.hooks.gitrepos.time", mock.Mock(wraps=time, time_ns=lambda: now[0])))
+        stack.enter_context(mock.patch.object(gitrepos, name, step))
+        return stack, calls
+
     def scopes(self):
         """The scopes cache's entry for the home's repository, or None."""
         try:
@@ -982,6 +1001,32 @@ class GitLocalConfigTest(BashHookCase):
         self.assertIn(str(self.repo / ".git" / "config"), self.stamped())
         with mock.patch("spudlib.hooks.gitrepos.git_run_config_scopes", return_value=None):
             self.assertSilent(cmd)  # a hit: git is not run (a run that failed would refuse the call)
+
+    def test_the_clock_is_read_before_the_git_run_the_entry_keeps(self):
+        """SPD-249: what makes an entry safe is that the reading it keeps began a whole tick after every stamp's mtime, so
+        the clock is read before the git run, not after it: a run that took SETTLED_NS on a loaded machine would otherwise
+        see stamps read in the write's own tick as settled, and a later write in that tick would leave them unchanged."""
+        cmd = "git -C %s status" % self.repo
+        written = self.unsettle("config")
+        patches, runs = self.slow("git_run_config_scopes", written)
+        with patches:
+            self.assertSilent(cmd)
+        self.assertEqual(len(runs), 1, "the miss runs git once")
+        self.assertIsNone(self.scopes(), "the stamps were read in the write's second: the slow run makes them no older")
+
+    def test_the_clock_is_read_before_the_config_files_are_read_for_their_includes(self):
+        """SPD-249: git_scope_stamps opens each config file right after stamping it, to find the files it includes, and
+        which files the entry is kept under comes from that text: the clock goes before it, so a slow read (a large config,
+        a 2 s FAT tick) cannot settle stamps whose files were read in the write's own tick."""
+        cmd = "git -C %s status" % self.repo
+        self.plant("[core]\n\tsshCommand = /bin/echo\n", name="extra")
+        self.plant("[core]\n\trepositoryformatversion = 0\n[include]\n\tpath = extra\n")
+        written = self.unsettle("config", "extra")
+        patches, reads = self.slow("git_scope_stamps", written)
+        with patches:
+            self.assertRefused(cmd, "sshcommand")
+        self.assertTrue(reads, "the stamps are read")
+        self.assertIsNone(self.scopes(), "the files were read in the write's second: a slow read makes them no older")
 
     def test_a_branch_switch_is_seen_where_an_include_depends_on_the_branch(self):
         """An includeIf "onbranch:<b>" puts the file it names in force only while HEAD names that branch, so the keys in

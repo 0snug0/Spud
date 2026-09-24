@@ -1,11 +1,21 @@
-"""The isolation every probe that builds a scratch SPUD_HOME runs under (SPD-101), shared, as tests/helpers.Home is the suite's.
+"""The shape and the isolation every probe that builds a scratch SPUD_HOME runs under (SPD-101, SPD-244), shared, as
+tests/helpers.Home is the suite's.
 
 Not a probe: the probes that build a home import it -- `python3.14 -I -S` puts no script directory on sys.path, so each
-sets sys.dont_write_bytecode and puts its own directory first before `import probe_env` -- and ask `isolated_env` for the
-environment their `spud` runs take.  What it sets is what helpers.Home sets for a test, for the same reasons:
+sets sys.dont_write_bytecode and puts its own directory first before `import probe_env`.  It imports nothing of the
+suite's (tests/helpers.py), and so repeats the few lines of it that it needs.
+
+The shape (SPD-244, the probes' half of SPD-233): a scratch directory, `root`, holding the home and, beside it, the tool,
+`<root>/tool/Spud` (build_tool): the main checkout of a git repository with one commit on main, holding a copy of a
+checkout's bin/ and a link to its share/, neither inside the other -- what a real home's tool is, and the only shape the
+CLI accepts.  Project 1 is that tool, registered by `spud init`'s own step 3 (init_args: `--project-root`), never by SQL.
+
+The isolation: a probe asks `isolated_env` for the environment its `spud` runs take, which sets what helpers.Home sets for
+a test, for the same reasons:
 
   SPUD_HOME               the scratch home
-  SPUD_TOOL_DIR           the tool: the scratch home, which ships share/ (link_share), unless the probe names another
+  SPUD_TOOL_DIR           the tool beside it (build_tool): what the hook lines, the allow rules and the /spud skill
+                          name, and where init reads share/ from
   SPUD_CONFIG_DIR         the home pointer init writes, under the scratch -- never ~/.config/spud
   SPUD_USER_CLAUDE_DIR    what `project install` writes, under the scratch -- never ~/.claude
   SPUD_LAUNCH_AGENTS_DIR  the two plists, under the scratch -- never ~/Library/LaunchAgents, which doctor and
@@ -22,6 +32,7 @@ vault went stale.  commands/schedule refuses that now for any home but the machi
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +48,11 @@ MACHINE_LAUNCHCTL = "/bin/launchctl"
 SESSION_VARIABLES = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR")
 REFUSAL = "spud probe guard: refusing to run launchctl"
 REFUSAL_EXIT = 70  # helpers.GUARD_LAUNCHCTL_EXIT's value, and for its reason: not launchctl's own 3, 5 or 113
+TOOL_DIR = "Spud"  # helpers.TOOL_DIR: the tool checkout's directory name, from which init derives project 1's name
+PROJECT_KEY = "spud"  # project 1's key, as helpers.Home.init registers it
+# helpers.isolated_git_env's identity: the scratch tool's one commit reads none of this Mac's git configuration.
+GIT_IDENTITY = {"GIT_AUTHOR_NAME": "Spud probe", "GIT_AUTHOR_EMAIL": "probe@example.invalid",
+                "GIT_COMMITTER_NAME": "Spud probe", "GIT_COMMITTER_EMAIL": "probe@example.invalid"}
 
 
 def refusing_launchctl(directory):
@@ -52,17 +68,17 @@ def refusing_launchctl(directory):
     return path
 
 
-def isolated_env(home, scratch=None, tool=None, base=None):
-    """The environment for a probe's `spud` runs against the scratch `home`: `base` (default os.environ) without the
-    session's variables, with every override the module docstring lists.  `scratch` holds the user-scope directories,
-    the LaunchAgents directory and the refusing launchctl (default: `home` itself, as helpers.Home does); `tool` is
-    SPUD_TOOL_DIR (default: `home`).  Checked by assert_isolated before it is returned."""
+def isolated_env(home, tool, scratch=None, base=None):
+    """The environment for a probe's `spud` runs against the scratch `home` and the `tool` beside it (build_tool), which is
+    SPUD_TOOL_DIR: `base` (default os.environ) without the session's variables, with every override the module docstring
+    lists.  `scratch` holds the user-scope directories, the LaunchAgents directory and the refusing launchctl (default:
+    `home` itself, as helpers.Home does).  Checked by assert_isolated before it is returned."""
     home = Path(home)
     scratch = home if scratch is None else Path(scratch)
     env = {k: v for k, v in (os.environ if base is None else base).items() if k not in SESSION_VARIABLES}
     env.update(
         SPUD_HOME=str(home),
-        SPUD_TOOL_DIR=str(home if tool is None else tool),
+        SPUD_TOOL_DIR=str(tool),
         SPUD_CONFIG_DIR=str(scratch / ".user-config"),
         SPUD_USER_CLAUDE_DIR=str(scratch / ".user-claude"),
         SPUD_LAUNCH_AGENTS_DIR=str(scratch / "LaunchAgents"),
@@ -100,20 +116,68 @@ def assert_isolated(env):
     return env
 
 
-def main_checkout(launcher):
-    """The main checkout of the repository `launcher` (`<checkout>/bin/spud`) belongs to, or that checkout itself when git
-    names no repository there.  What a probe comparing two launchers roots project 1 at, so main's launcher and a
-    worktree's read the same row: rooted at each launcher's own checkout, `project list` pads a longer root and doctor
-    calls a worktree's root `not the main checkout`, and no refactor could ever compare identical (SPD-101)."""
-    checkout = os.path.dirname(os.path.dirname(os.path.abspath(launcher)))
-    proc = subprocess.run(["git", "-C", checkout, "rev-parse", "--path-format=absolute", "--git-common-dir"], capture_output=True, text=True)
-    common = proc.stdout.strip() if proc.returncode == 0 else ""
-    return os.path.dirname(common) if common else checkout
+def git_env(base=None):
+    """helpers.isolated_git_env: `base` (default os.environ) with git reading none of this Mac's configuration -- no global
+    or system config, no global excludes file, no signing -- and a fixed identity."""
+    env = {k: v for k, v in (os.environ if base is None else base).items() if not k.startswith("GIT_")}
+    env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="2",
+               GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0="/dev/null",
+               GIT_CONFIG_KEY_1="commit.gpgsign", GIT_CONFIG_VALUE_1="false", **GIT_IDENTITY)
+    return env
 
 
-def link_share(home, share=None):
-    """The scratch home plays the tool, so it ships share/ (SPW-001): a symlink to `share` (default this checkout's)."""
-    os.symlink(str(REPO / "share" if share is None else share), str(Path(home) / "share"), target_is_directory=True)
+def git(repo, *args):
+    """git in `repo` under git_env, its stdout; stops the probe, naming the command, when git fails."""
+    proc = subprocess.run(["git", "-C", str(repo), *[str(a) for a in args]], capture_output=True, text=True, env=git_env())
+    if proc.returncode != 0:
+        sys.exit("git %s in %s exited %d: %s" % (" ".join(str(a) for a in args), repo, proc.returncode, proc.stderr))
+    return proc.stdout
+
+
+def tool_path(root):
+    """Where build_tool puts the tool of the scratch directory `root`: `<root>/tool/Spud`."""
+    return Path(root) / "tool" / TOOL_DIR
+
+
+def build_tool(root, checkout=None):
+    """The tool beside the scratch home, as helpers.build_tool builds the suite's (SPD-233): `<root>/tool/Spud`, the main
+    checkout of a git repository with one commit on main.  Its bin/ is a copy of `checkout`'s (default this checkout's),
+    without bytecode, so the launcher the hook lines and the allow rules name runs; its share/ is a link to `checkout`'s,
+    which init and `project install` render from, since no probe writes a shipped file.  `.claude/settings.local.json`,
+    which init's step 7 writes into it, is ignored as the real repository ignores it.  Returns the tool's path."""
+    checkout = Path(REPO if checkout is None else checkout)
+    tool = tool_path(root)
+    tool.mkdir(parents=True)
+    shutil.copytree(checkout / "bin", tool / "bin", ignore=shutil.ignore_patterns("__pycache__"))
+    os.symlink(str(checkout / "share"), str(tool / "share"), target_is_directory=True)
+    (tool / ".gitignore").write_text(".claude/settings.local.json\n", encoding="utf-8")
+    git(tool, "init", "-q", "-b", "main")
+    git(tool, "add", "-A")
+    git(tool, "commit", "-q", "-m", "tool")
+    return tool
+
+
+def worktree_path(tool, name):
+    """Where add_worktree puts the linked worktree `name` of `tool`: `<tool>/.claude/worktrees/<name>`, where a real
+    session's EnterWorktree puts one."""
+    return Path(tool) / ".claude" / "worktrees" / name
+
+
+def add_worktree(tool, name):
+    """A linked worktree of the tool (build_tool), made with plain `git worktree add` as the suite's worktree tests make
+    theirs (SPD-251): `<tool>/.claude/worktrees/<name>` on a new branch `worktree-<name>` from main, the layout and the
+    branch name a real session's EnterWorktree gives.  A `member new` run there binds its ticket to it, so the spawn,
+    subagent and member steps after it meet a planned row, as a real session's do.  Returns the worktree's path."""
+    path = worktree_path(tool, name)
+    git(tool, "worktree", "add", "-q", "-b", "worktree-" + name, path, "main")
+    return path
+
+
+def init_args(tool):
+    """A probe's `spud init`: the `tool` registered as project 1 by init's own step 3, key `spud`, its name the directory's
+    and its prefixes the config's, as helpers.Home.init registers it; and `--no-schedule`, since step 8 would reach
+    launchctl, and the scratch's is the refusing stub above."""
+    return ["init", "--no-schedule", "--project-root", str(tool), "--project-key", PROJECT_KEY]
 
 
 def write_config(home, template=None, name_pool=False):

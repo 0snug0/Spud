@@ -2279,5 +2279,284 @@ class GluedByNameWordTest(BashHookCase):
                 self.assertRefused(bad, "cannot follow", AGENT_A, cwd=str(s))
 
 
+# The unread form (SPD-217) a member earns for an assignment whose name the hook cannot read (SPD-225, SPD-254)
+NAME_UNREAD = "whose name the hook cannot read"
+EVALUATED_UNREAD = "evaluates as code"
+
+
+class ArithmeticAssignmentTest(BashHookCase):
+    """SPD-225 (proposal by SPUD-221/Howard): the hook settles a variable the line assigned (SPD-127, SPD-146, SPD-221) but
+    read no assignment an arithmetic evaluation makes, so `X=tests; ((X=5)); touch $X/a` was read as tests/a while the
+    shell writes 5/a -- a member planned tests/** was let write outside it, and `out=$(basename /x/z); ((out=3)); touch
+    "tests/$out"` was read as tests/z.
+
+    Probed in zsh 5.9 -f, zsh -f -o nobareglobqual and bash 3.2.57 (tests/probes/shell_probe.py, 2026-09-24), each line
+    starting from `X=tests`, printing X after it:
+    `((X=5))`, `echo $((X=5))`, `/bin/echo $((X=6))`, `Y=$((X=8))`, `let X=9`, `let 'X = 10' 'Z=11'`, `echo $[X=12]`,
+    `(( X = 5, W = 6 ))`, `(( X = W = 3 ))`, `echo "$((X=16))"`, `case $((X=27)) in`, `[[ $(( X = 58 )) == 58 ]]`, a
+    redirection target's `$(( X = 63 ))` and `: <<EOF` fed `$((X=26))` assigned in all three; `echo $((X=5)) $((X=6))` left 6;
+    `(( X = 012 ))` printed 12 in zsh and 10 in bash, `(( X = 5.5 ))` 5.5 in zsh and an error in bash, `(( X = 99999999999999999999 ))`
+    two different wrapped numbers; `Y=$((X=7)) /usr/bin/true` assigned in bash alone, `cat <<EOF` fed `$((X=26))` in
+    neither (bash expands an external command's body in its child), `cat /dev/null | (( X = 9 ))` in zsh alone;
+    `true && (( X = 13 ))` assigned, and `( (( X = 14 )) )`, `echo $((X=15)) | cat`, `(( X = 10 )) | cat`, `: $((X=11)) &`,
+    `(( 0 && (X = 30) ))`, `(( 1 || (X = 31) ))`, `: ${Q3:-$((X=25))}` with Q3 set, `(( X == 5 ))` and `[[ X=61 == 61 ]]`
+    did not.  A name's value is evaluated as arithmetic again: `Y='X=18'; (( Y ))`, `echo $((Y))` and `$(( Y + 1 ))` each
+    assigned X, and `N=X; (( $N = 21 ))` assigned X.  Every other place the shells evaluate arithmetic assigns as well:
+    `[[ X=22 -eq 22 ]]` and `[[ 1 -lt X=60 ]]` (not `[ 1 -eq 1 ]`), `${arr[X=2]}`, `arr[X=1]=q`, a `for (( ... ))` header,
+    bash's `${s:X=1:2}` (zsh reads that `:X` as a modifier and stops; `${s:$((X=1)):2}` assigned in both); and a name with
+    the integer attribute evaluates what it is assigned: `declare -i X; X=3+4` left 7, `X=tests` 0, `typeset -i X; X='T=12'`
+    set T to 12 as well, zsh's `integer X=3+4` 7 and `typeset -i 16 X; X=255` 16#FF.
+
+    The reading now: every such form records its names as the line's assignments where the shell makes them, with the value
+    the hook can know -- a decimal literal both shells read alike, assigned where the evaluation surely runs and persists --
+    and otherwise a value it cannot know, which refuses a member where the name is read by name or in a write target as a
+    value the line did not settle always did.  An assignment whose name the hook cannot read (`(( $N = 5 ))` with N
+    unsettled) refuses a member unread (SPD-217).  AGENT_A plans tests/** and bin/spud; the home is the cwd."""
+
+    def analysis(self, line):
+        m = load_spud_module()
+        return m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def written(self, line):
+        """The files the line's writes by argument name, as the reading resolves them."""
+        m = load_spud_module()
+        return [m.deglob(entry[1]) for entry in self.analysis(line).arg_writes]
+
+    def test_the_tickets_evidence(self):
+        self.assertEqual(self.written("X=tests; ((X=5)); touch $X/a"), ["5/a"])
+        self.assertEqual(self.written("X=tests; echo $((X=5)); touch $X/a"), ["5/a"])
+        self.assertEqual(self.written('out=$(basename /x/z); ((out=3)); touch "tests/$out"'), ["tests/3"])
+        # a member planned tests/** was let write where the shell does not
+        self.assertRefused("X=tests; ((X=5)); touch $X/a", "deliverables")
+        self.assertRefused("X=tests; echo $((X=5)); touch $X/a", "deliverables")
+        self.assertSilent('out=$(basename /x/z); ((out=3)); touch "tests/$out"')
+        # ... and Spud's write is read where the shell puts it: 5/SPD-001.md, not the generated ticket note
+        (self.home.path / "ledger" / "tickets").mkdir(parents=True, exist_ok=True)
+        self.assertRefused("X=ledger/tickets; echo x > $X/SPD-001.md", "into ledger/tickets/SPD-001.md", agent_id=None)
+        self.assertRefused("X=ledger/tickets; ((X=5)); echo x > $X/SPD-001.md", "into 5/SPD-001.md", agent_id=None)
+
+    def test_each_form_records_the_literal_it_assigns(self):
+        for form in ("((X=5))", "(( X = 5 ))", "(( X=5 ))", "echo $((X=5))", 'echo "$((X = 5))"', "echo $[X=5]", 'echo "$[X=5]"',
+                     "echo $(( X = 5 ))x", "let X=5", "let 'X = 5'", 'let "X=5"', "let -- X=5", "let Y=1 X=5", "(( Y = 1, X = 5 ))",
+                     "(( (X = 5) ))", "(( X = +5 ))", "Y=$((X=5))", "Y=1 Z=$((X=5))", ": $((X=5))", "echo $((X=4)) $((X=5))",
+                     "[[ $((X=5)) == 5 ]]", "((X=5)) && true", "((X=5)) || true", "((X=5)); true",
+                     "((X=5)) > /dev/null", "cat /dev/null | true; ((X=5))", "N=X; (( $N = 5 ))", "N=X; let $N=5",
+                     "Y='X=5'; (( Y ))", "Y='X=5'; echo $(( Y + 1 ))", "N='X = 5'; (( $N ))", "for i in 1; do :; done; ((X=5))",
+                     "/usr/bin/true $((X=5))", "X=b /usr/bin/true $((X=4)); X=a; : $((X=5))", "echo $[ X = 5 ]", "echo a$[ X = 5 ]b"):
+            with self.subTest(form):
+                self.assertEqual(self.written("X=a; %s; touch tests/$X" % form), ["tests/5"])
+                self.assertSilent("X=a; %s; touch tests/$X" % form)
+        self.assertEqual(self.written("X=a; (( X = -5 )); touch tests/$X"), ["tests/-5"])
+        # the shells expand an arithmetic expansion inside the expression before they evaluate it (probed: both left 6)
+        self.assertEqual(self.written("X=a; echo $(( (X = 6) + $(( X = 5 )) )); touch tests/$X"), ["tests/6"])
+
+    def test_a_value_the_hook_cannot_compute_is_unknown(self):
+        """A compound assignment, an increment, a number zsh and bash read apart (a leading 0 is octal to bash, a float is
+        zsh's alone, a number past 64 bits wraps differently), an expression, and an assignment under `?:`, `&&` or `||`,
+        which may not run."""
+        for form in ("((X++))", "((++X))", "((X--))", "((--X))", "(( X ++ ))", "((X+=1))", "((X-=1))", "((X*=2))", "((X/=2))",
+                     "((X%=2))", "((X<<=1))", "((X>>=1))", "((X&=1))", "((X|=1))", "((X^=1))", "((X**=2))", "((X = 012))",
+                     "((X = 05))", "((X = 0x10))", "((X = 2#101))", "((X = 1e3))", "((X = 5.5))", "((X = 99999999999999999999))",
+                     "((X = 1 + 2))", "((X = Y))", "((X = 5 == 5))", "((X = W = 5))", "((X = 5, X++))", "(( c ? (X = 5) : 0 ))",
+                     "(( 0 && (X = 5) ))", "(( 1 || (X = 5) ))", "(( a[X = 1] ))", "let X++", "let 'X += 1'", "echo $((X++))",
+                     "echo $[X+=1]", "Y='X++'; (( Y ))", "N=X; (( $N++ ))", "setopt force_float; ((X=5))"):
+            with self.subTest(form):
+                self.assertEqual(self.written("X=tests; %s; touch $X/a" % form), ["$X/a"])
+                self.assertRefused("X=tests; %s; touch $X/a" % form, VARIABLE_WORDING)
+
+    def test_an_assignment_that_may_not_run_or_persist_leaves_the_value_unknown(self):
+        for line in ("true && ((X=5))", "false || ((X=5))", "((X=5)) | cat", "cat /dev/null | ((X=5))", "( ((X=5)) )",
+                     "{ ((X=5)); }", "if ((X=5)); then :; fi", "while ((X=5)); do break; done", "((X=5)) &", "echo $((X=5)) | cat",
+                     "echo $((X=5)) &", ": ${Q:-$((X=5))}", ": ${Q:+$((X=5))}", 'echo "${Q:-$((X=5))}"', "Y=$((X=5)) true",
+                     "Y=$((X=5)) /usr/bin/true", "for i in 1; do ((X=5)); done", "f() { ((X=5)); }", "true && let X=5",
+                     "true && echo $((X=5))", "echo $(echo $((X=5)))", "cat <<EOF\n$((X=5))\nEOF\ntrue",
+                     # a redirection's target, expanded in an external command's own process (`/bin/echo hi > f$((X=5))`
+                     # left X in all three shells), and a prefix, which bash expands after the command's own words
+                     "/bin/echo hi > f$((X=5))", "echo hi 2> f$((X=5))", "cat <<< $((X=5))", "cat < /dev/null$((X=5))",
+                     "Y=$((X=5)) /usr/bin/true $((X=6))",
+                     # a compound command's word is doubted with the rest of what the compound assigns
+                     "case $((X=5)) in *) ;; esac"):
+            with self.subTest(line):
+                self.assertEqual(self.written("X=tests; %s; touch $X/a" % line), ["$X/a"])
+                self.assertRefused("X=tests; %s; touch $X/a" % line, VARIABLE_WORDING)
+        # a quoted delimiter's body is not expanded
+        self.assertEqual(self.written("X=tests; cat <<'EOF'\n$((X=5))\nEOF\ntouch $X/a"), ["tests/a"])
+
+    def test_a_name_the_hook_cannot_read_refuses_a_member(self):
+        for line in ("(( $N = 5 ))", "(( ${N} = 5 ))", "(( $N++ ))", "(( ++$N ))", "(( $N += 1 ))", "echo $(( $N = 5 ))",
+                     'echo "$(( $N = 5 ))"', "let $N=5", 'let "$N = 5"', "(( $(echo X) = 5 ))", "(( ${N:-X} = 5 ))",
+                     "(( a[1] = 1, $N = 2 ))", "(( $N[1] = 2 ))", "true && (( $N = 5 ))", "echo $[ $N = 5 ]"):
+            with self.subTest(line):
+                self.assertRefused(line, NAME_UNREAD)
+                self.assertSilent(line, agent_id=None)
+
+    def test_the_older_arithmetic_expansion_is_one_word(self):
+        """`$[ ... ]` is one word to both shells whatever blanks and operators it holds (probed: `echo $[ 3 > 2 ]` printed 1
+        and made no file 2 in all three), where the walk once read `$[`, `3`, a redirection to 2 and `]`."""
+        for line in ("echo $[ 3 > 2 ]", "echo $[ 1 | 2 ]; echo x", "x=$[ 1 < 2 ]"):
+            with self.subTest(line):
+                self.assertEqual(self.analysis(line).redirects, [])
+                self.assertSilent(line)
+        self.assertEqual([t for t, _ in self.analysis("echo $[ 3 > 2 ] > out.txt").redirects], ["out.txt"])
+        self.assertRefused("$[ 1 ] push", "spell the command out")  # a number names a command on a PATH of the line's own
+
+    def test_a_for_header_assigns_its_names(self):
+        self.assertEqual(self.written("X=tests; for ((X=0; X<1; X++)); do :; done; touch $X/a"), ["$X/a"])
+        self.assertRefused("X=tests; for ((X=0; X<1; X++)); do :; done; touch $X/a", VARIABLE_WORDING)
+        self.assertEqual(self.written("X=tests; for (( i = 0; i < 1; i++ )); do :; done; touch $X/a"), ["tests/a"])
+
+    def test_every_other_place_the_shells_evaluate_arithmetic(self):
+        for line in ("[[ X=5 -eq 5 ]]", "[[ 1 -lt X=5 ]]", "[[ X++ -ge 0 ]]", "[[ -n y && X=1 -ne 0 ]]", "a[X=1]=q", "a[X++]=q",
+                     "echo ${a[X=1]}", 'echo "${a[X=1]}"', "echo ${s:X=1:2}", "echo ${#a[X=1]}", "declare a[X=1]=q",
+                     "unset 'a[X=1]'", "read 'a[X=1]' < f"):
+            with self.subTest(line):
+                self.assertEqual(self.written("X=tests; %s; touch $X/a" % line), ["$X/a"])
+        for line in ("[[ X=5 == 5 ]]", "[ X=5 -eq 5 ]", "test X=5 -eq 5", "[[ X -eq 5 ]]", "echo ${a[1]}", "a[1]=q", 'echo "a[X=1]"',
+                     "echo 'a[X=1]'", "echo '${a[X=1]}'", "echo '$((X=5))'", "echo \\${a[X=1]}"):
+            with self.subTest(line):
+                self.assertEqual(self.written("X=tests; %s; touch $X/a" % line), ["tests/a"])
+
+    def test_a_name_with_the_integer_attribute_evaluates_what_it_is_assigned(self):
+        for line in ("typeset -i X; X=3+4", "declare -i X; X=tests", "declare -i X=5", "typeset -i X=tests", "integer X=3+4",
+                     "integer X; X=1", "float X=1", "typeset -F X; X=1", "typeset -E X; X=1", "declare -ix X; X=1",
+                     "typeset -i 16 X; X=255", "typeset -i X; read X < f; X=1"):
+            with self.subTest(line):
+                self.assertEqual(self.written("X=tests; %s; touch $X/a" % line), ["$X/a"])
+        # ... and what it is assigned may assign another name (`typeset -i X; X='T=12'` set T to 12 in both shells)
+        for line, target in (("typeset -i X; X=T=12", "12/a"), ("typeset -i X; X='T = 12'", "12/a"), ("integer X=T=12", "12/a"),
+                             ("declare -i X='T++'", "$T/a"), ("typeset -i X; X=T++", "$T/a")):
+            with self.subTest(line):
+                self.assertEqual(self.written("T=tests; %s; touch $T/a" % line), [target])
+        # another name reads as it did
+        self.assertEqual(self.written("Y=tests; typeset -i X; X=3; touch $Y/a"), ["tests/a"])
+
+    def test_arithmetic_that_assigns_nothing_changes_nothing(self):
+        for line in ("(( X > 2 ))", "(( X == 5 ))", "(( X != 5 ))", "(( X <= 5 ))", "(( X ))", "echo $(( X + 1 ))", "echo $((X*2))",
+                     "x=$(( 1 > 2 ))", "(( a[1] + 2 ))", "(( $n > 2 ))", "(( ${n} > 2 ))", "echo $[X+1]", "let 'X > 2'", "let X==5",
+                     "(( Y = 1 ))", "echo $(( Y = 1 ))", "for (( i = 0; i < 1; i++ )); do :; done", "Y='Z=1'; (( Y ))"):
+            with self.subTest(line):
+                self.assertEqual(self.written("X=tests; %s; touch $X/a" % line), ["tests/a"])
+                self.assertSilent("X=tests; %s; touch $X/a" % line)
+
+
+class AssigningBuiltinTest(BashHookCase):
+    """SPD-254 (proposal by SPUD-246/Oliver): a name an assigning builtin sets (read, printf -v, getopts, mapfile ...) was
+    only doubted, never recorded as the line's assignment, and its words were read loosely -- every identifier in every
+    word doubted, `printf '%s' X` and `unset -f X` among them.  SPD-205 keeps a function body's finding that names a
+    variable the line assigned (SPD-246: the line's variables are what survives in its shell), so `read GITVERB < f;
+    globalgit` passed a member where `GITVERB=$(echo push); globalgit` was refused (test_hooks_snapshots has the bodies).
+
+    Each builtin's own name operands are now read by its own grammar -- the options that take a value, `--`, the options
+    whose value is a name -- in zsh's reading and bash's alike, and each name is recorded as the line's assignment with a
+    value the hook does not know.  Probed in zsh 5.9 -f, zsh -f -o nobareglobqual and bash 3.2.57 (tests/probes/shell_probe.py,
+    2026-09-24), fed `a b`: `read -t 1 X Y` gave X=a Y=b in all three, `read -n 1 X Y` X=b in zsh (its -n takes no value, so
+    `1` took a) and X=a in bash; `read -p P X` failed in zsh (-p is its coprocess) and gave X in bash (P the prompt); `read
+    'X?prompt'` gave X in zsh alone, `read -a A` bash's array, `read -A A` zsh's; `read -tX Y` took X for the timeout in
+    both; `read -e X` echoed in zsh and assigned in bash; `read -r -- X`, `-d , X`, `-d, X`, `-u 0 X` and `-rt1 X` gave X
+    in all three.  `printf -v X` assigned in both, `printf -vX` in bash alone (zsh printed `-vX`), `printf -- -v X` in
+    neither; `print -v X` and `print -rv X` in zsh.  `getopts ab X -a` gave X=a.  `unset -f X` kept the variable X,
+    `unset -v X` unset it, zsh's `unset -m 'X*'` unset X by a pattern.  zsh's `set -A X a b`, `set -sA X b a` and
+    `set +A X c`, `zstyle -s ':x' y V` and `zformat -f V '%a' a:1` each assigned their name."""
+
+    def analysis(self, line):
+        m = load_spud_module()
+        return m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def names(self, line):
+        """The names the line assigned whose value the hook does not know."""
+        m = load_spud_module()
+        a = self.analysis(line)
+        return {n for n in a.line_assigned if m.SUBST in a.vars.get(n, "") or a.vars.get(n) == "$"}
+
+    def test_each_builtin_s_names_by_its_own_grammar(self):
+        for line, names in (
+                ("read X", {"X"}), ("read -r X Y", {"X", "Y"}), ("read", {"REPLY"}), ("read -r", {"REPLY"}), ("read -p P X", {"P", "X"}),
+                ("read -p 'Enter a name' X", {"X"}), ("read -t 1 X", {"X"}), ("read -tX Y", {"Y"}), ("read -rt1 X", {"X"}),
+                ("read -d , X", {"X"}), ("read -d, X", {"X"}), ("read -u 0 X", {"X"}), ("read -n 1 X", {"X"}), ("read -k 1 X", {"X"}),
+                ("read -a A", {"A"}), ("read -A A", {"A"}), ("read -ra A", {"A"}), ("read 'X?prompt: '", {"X"}), ("read -r -- X", {"X"}),
+                ("read -e X", {"X"}), ("read -s -r X", {"X"}), ("read 'a[1]'", {"a"}),
+                ("printf -v X %s hi", {"X"}), ("printf -vX %s hi", {"X"}), ("printf -v X -- %s", {"X"}), ("printf -- -v X", set()),
+                ("printf %s X", set()), ("printf '%s' X Y", set()), ("print -v X hi", {"X"}), ("print -rv X hi", {"X"}),
+                ("print -rn X", set()), ("print -u 2 -v X hi", {"X"}),
+                ("getopts ab X", {"X", "OPTARG", "OPTIND"}), ("getopts ab X -a", {"X", "OPTARG", "OPTIND"}),
+                ("mapfile X", {"X"}), ("mapfile -t X", {"X"}), ("mapfile", {"MAPFILE"}), ("mapfile -u 3 -O 1 -n 2 X", {"X"}),
+                ("readarray -d , -s 1 X", {"X"}), ("readarray -t", {"MAPFILE"}),
+                ("unset X", {"X"}), ("unset -v X Y", {"X", "Y"}), ("unset -f X", set()), ("unset 'a[1]'", {"a"}), ("unset -n X", {"X"}),
+                ("wait -p X", {"X"}), ("wait", set()), ("wait 1", set()),
+                ("set -A X a b", {"X"}), ("set -sA X b a", {"X"}), ("set +A X c", {"X"}), ("set -- a b", set()), ("set -e", set()),
+                ("set -o pipefail", set()),
+                ("vared X", {"X"}), ("vared -p P -c X", {"X"}), ("getln X Y", {"X", "Y"}), ("getln -A X", {"X"}),
+                ("zstyle -s ctx st X", {"X"}), ("zstyle -s ctx st X :", {"X"}), ("zstyle -a ctx st X", {"X"}), ("zstyle -b ctx st X", {"X"}),
+                ("zstyle -g X", {"X"}), ("zstyle -g X ctx st", {"X"}), ("zstyle ':x' y z", set()), ("zstyle -t ctx st v", set()),
+                ("zformat -f X '%a' a:1", {"X"}), ("zformat -a X : a:b", {"X"}),
+                ("zparseopts -a A h=H -help=H2", {"A", "H", "H2"}), ("zparseopts -D -E -A O v+:=V", {"O", "V"}), ("zparseopts h", set()),
+                ("strftime -s X %Y", {"X"}), ("strftime %Y", set()), ("sysread X", {"X"}), ("sysread -c N X", {"N", "X"}), ("sysread", {"REPLY"}),
+                ("zstat -A A f", {"A"}), ("zstat -H H f", {"H"}), ("zselect -a A 0", {"A"}), ("zselect -A A 0", {"A"}), ("zselect 0", {"reply"}),
+                ("zsystem flock -f V f", {"V"}), ("zsystem supports x", set()), ("V=X; read $V", {"X"}), ("V=X; printf -v \"$V\" %s y", {"X"}),
+                ("zregexparse p q a", {"p", "q"}), ("zpty -r w X", {"X"}), ("zpty -w w hi", set()), ("zsocket -l x", {"REPLY"}),
+                ("zle -N X", set()), ("compadd -A X a", set()), ("compset -p 1", set()), ("print -u$((2)) -v X hi", {"X"}),
+                ("print -u$((2)) hi", set()), ("unset 'a[$i]'", {"a"}), ("unset a[$i]", {"a"}), ('read -r "a[$i]"', {"a"})):
+            with self.subTest(line):
+                self.assertEqual(self.names(line), names)
+
+    def test_a_word_that_names_no_variable_leaves_it_as_it_was(self):
+        for line in ("printf '%s' X", "printf -- -v X", "unset -f X", "print X", "read -tX Y", "getopts X Y", "zstyle ':x' X y",
+                     "set -o X", "read -p X Y"):
+            with self.subTest(line):
+                expected = ["$X/a"] if line == "read -p X Y" else ["tests/a"]  # bash's prompt, zsh's name
+                self.assertEqual([load_spud_module().deglob(e[1]) for e in self.analysis("X=tests; %s; touch $X/a" % line).arg_writes],
+                                 expected)
+
+    def test_a_name_assigned_is_unknown_wherever_it_is_read(self):
+        for line in ("read X < f", "read -r X <<< a", "printf -v X %s a", "print -v X a", "getopts ab X", "mapfile X < f",
+                     "unset X", "wait -p X", "set -A X a", "zstyle -s c s X", "vared X", "sysread X", "V=X; read $V"):
+            with self.subTest(line):
+                self.assertRefused("X=tests; %s; touch $X/a" % line, VARIABLE_WORDING)
+                self.assertRefused("X=git; %s; $X push" % line, "")
+
+    def test_a_name_the_hook_cannot_read_refuses_a_member(self):
+        for line in ("read $V", 'read -r "$V"', "read -r ${V}", "read -a $V", "read -r X $V", "printf -v $V x", 'printf -v "$V" x',
+                     "print -v $V x", "getopts ab $V", "unset $V", "unset -v $V", "unset -m 'X*'", "mapfile $V", "readarray -t $V",
+                     "wait -p $V", "set -A $V a", "zstyle -s c s $V", "vared $V", "read $(echo X)", "read X*", "read $flags X",
+                     # an option the line spells, or settles, where the builtin reads its options
+                     "printf -v$V x", "X='-v Y'; printf $X hi"):
+            with self.subTest(line):
+                self.assertRefused(line, NAME_UNREAD)
+                self.assertSilent(line, agent_id=None)
+        # a value the line does not settle, where a builtin reads options, is read as the operand it is: no text the member
+        # wrote makes it an option, and a function's name is no variable's
+        for line in ('printf "$f\\n"', "for f in a b; do printf \"$f\\n\"; done", "sleep 1 & pid=$!; wait $pid", 'print -r -- "$x"',
+                     "set -- $x", "unset -f $V", "unset -f -- $V", 'X="git %d"; printf $X 1', 'read -p "Enter $what: " x < f'):
+            with self.subTest(line):
+                self.assertSilent(line)
+
+    def test_a_builtin_that_runs_code_it_is_handed_is_refused(self):
+        for line in ("mapfile -C cb -c 1 X < f", "readarray -C 'echo hi' X < f", "mapfile -tC cb X < f",
+                     "zstyle -e ':x' y 'reply=(a)'", "zstyle -e ':x' y 'git push'"):
+            with self.subTest(line):
+                self.assertRefused(line, EVALUATED_UNREAD)
+                self.assertSilent(line, agent_id=None)
+
+    def test_where_the_builtin_runs_decides_whether_the_line_keeps_it(self):
+        # in the shell: certain; behind a prefix one shell runs as a program or in a fork: unknown all the same
+        for line in ("read X < f", "builtin read X < f", "command read X < f", "true && read X < f", "read X < f | cat",
+                     "cat f | read X"):
+            with self.subTest(line):
+                self.assertIn("X", self.analysis("%s; true" % line).line_assigned)
+        # a program run by its path assigns nothing in the line's shell
+        self.assertEqual([load_spud_module().deglob(e[1]) for e in self.analysis("X=tests; /usr/bin/read X < f; touch $X/a").arg_writes],
+                         ["tests/a"])
+
+    def test_the_value_assigned_is_read_as_before(self):
+        """The builtins read here assign what the hook does not read -- input, a format's output, an option -- so a read of
+        the name is refused a member as a value the line did not settle was, and Spud keeps his own checks."""
+        self.assertRefused("read X < f; git $X", WORD_WORDING)
+        self.assertRefused("read X < f; $X push", "spell the command out")
+        self.assertSilent("read X < f; git $X", agent_id=None)
+        self.assertSilent("while read -r line; do echo \"$line\"; done < f")
+        self.assertSilent("IFS= read -r line < f; echo \"$line\"")
+        self.assertSilent("printf -v x '%s' a; echo \"$x\"")
+
+
 if __name__ == "__main__":
     unittest.main()
