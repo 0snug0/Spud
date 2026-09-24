@@ -572,6 +572,12 @@ class ShellAnalysis:
         # `derived`, a name a certain `NAME=$(basename ...)` assigned -> (the value, what it printed); `binding`, the one reading of
         # those a write channel is resolving its words under (loop_bindings.per_reading), None everywhere else.
         self.loop_words, self.func_depth, self.subst_words, self.derived, self.binding = {}, 0, {}, {}, None
+        # SPD-221 (shell/loop_bindings): `loop_derived`, a name a `NAME=$(basename ...)` certain in every pass of a for
+        # loop's body assigned -> (the value, that loop's frame, the function bodies open there, the loop names it read,
+        # ((their values, what it printed) per pass)); `body_loop`, the settled for loop whose body the simple command being
+        # read stands in directly and runs in every pass of, None elsewhere; `unseen_assigned`, the names something
+        # assigns where the walk does not read it then -- `${X:=v}`, and a function body, whenever it is called.
+        self.loop_derived, self.body_loop, self.unseen_assigned = {}, None, set()
 
     @property
     def all_spud(self):

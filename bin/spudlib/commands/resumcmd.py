@@ -9,18 +9,21 @@ from ..state import actors, ledgerdb, lookup, transcripts
 # member resum: a transcript sum stored before sums counted each API request once added every transcript entry; it is
 # re-summed once per API request from the member's transcript, merged through run_totals, its old figures kept in a
 # member.edited event.  The events table's kinds are fixed by its CHECK constraint, so the re-sum is recorded
-# as the member edit it is rather than as a kind that would take a migration of the append-only table.
+# as the member edit it is rather than as a kind that would take a migration of the append-only table.  The same re-sum
+# adds the per-model breakdown to a sum stored before SPD-013, and splits by attempt a request billed per attempt that a
+# breakdown stored before SPD-220 kept whole (transcripts.kept_whole), so its usage counts and its cost prices every attempt.
 RESUM_FIGURES = ("total_tokens", "tool_uses", "duration_ms")
 RESUM_KEPT = {None: "no sum", "imported": "imported", "breakdown": "counted"}  # stored_counting -> the action: nothing to do
-RESUM_LEFT = ("not found", "ambiguous", "unreadable", "no usage")  # a sum without its breakdown left as it is: exit 1
+RESUM_LEFT = ("not found", "ambiguous", "unreadable", "no usage")  # a sum member resum would re-sum, left as it is: exit 1
 
 
 def stored_counting(usage_json):
     """How a member's stored transcript sum was counted: "breakdown" (once per API request, with the per-model
-    breakdown that prices it), "request" (once per request without it, as sums were stored before the breakdown),
-    "entry" (the oldest sums, every transcript entry added) or "imported" (read back from a rendered note by the
-    importer, with no transcript behind it); None when usage_json holds no transcript sum.  member resum
-    re-sums "entry" and "request"."""
+    breakdown that prices it), "attempts" (with a breakdown stored before SPD-220, which kept a request billed per
+    attempt whole: its serving attempt alone in the usage, the request unpriced), "request" (once per request without
+    it, as sums were stored before the breakdown), "entry" (the oldest sums, every transcript entry added) or
+    "imported" (read back from a rendered note by the importer, with no transcript behind it); None when usage_json
+    holds no transcript sum.  member resum re-sums "entry", "request" and "attempts"."""
     stored, _ = transcripts.usage_parts(usage_json)
     if stored is None:
         return None
@@ -28,7 +31,9 @@ def stored_counting(usage_json):
         return "imported"
     if stored.get("counting") != transcripts.REQUEST_COUNTING:
         return "entry"
-    return "breakdown" if isinstance(stored.get("breakdown"), list) else "request"
+    if not isinstance(stored.get("breakdown"), list):
+        return "request"
+    return "attempts" if transcripts.kept_whole(stored["breakdown"]) else "breakdown"
 
 
 def find_transcript(recorded):
@@ -102,7 +107,7 @@ def resum_table(data):
     total = len(data["members"])
     resum = sum(1 for r in data["members"] if r["action"] == "re-sum")
     left = sum(1 for r in data["members"] if r["action"] in RESUM_LEFT)
-    return text + "\n" + "%s %d of %d member%s once per API request, with the per-model breakdown; %d left with a sum that added every entry or lacks the breakdown; %d already counted with the breakdown, imported, or without a transcript sum" % (
+    return text + "\n" + "%s %d of %d member%s once per API request, with the per-model breakdown; %d left with a sum that added every entry, lacks the breakdown or keeps a request billed per attempt whole; %d already counted with the breakdown, imported, or without a transcript sum" % (
         "dry run, nothing written: would re-sum" if data["dry_run"] else "re-summed", resum, total, "" if total == 1 else "s", left, total - resum - left)
 
 
@@ -156,7 +161,7 @@ def cmd_member_resum(ctx, args):
     left = [r for r in rows if r["action"] in RESUM_LEFT]
     data = {"dry_run": bool(args.dry_run), "members": rows, "resummed": resummed, "left": [r["ref"] for r in left]}
     if left:
-        return kernel.Result(data, resum_table(data), exit_code=kernel.EXIT_ERROR, stderr="%d sum%s without the per-model breakdown left as %s: %s" % (
+        return kernel.Result(data, resum_table(data), exit_code=kernel.EXIT_ERROR, stderr="%d sum%s without the per-model breakdown, or keeping a request billed per attempt whole, left as %s: %s" % (
             len(left), "" if len(left) == 1 else "s", "it is" if len(left) == 1 else "they are",
             "; ".join("%s (%s)" % (r["ref"], r["action"]) for r in left)))
     return kernel.Result(data, resum_table(data))
