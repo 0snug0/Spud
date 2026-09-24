@@ -14,6 +14,8 @@ the process working directory the payload's cwd, and `--project badtakes` on the
 launched in that project (a home session's line carries none).
 """
 
+import contextlib
+import importlib
 import json
 import os
 import shutil
@@ -1019,6 +1021,26 @@ class PlantedCacheTest(ProjectHookCase):
         """The clock the settle rule reads (gitrepos' time.time_ns) stopped at `ns` for the block (SPD-240)."""
         return mock.patch("spudlib.hooks.gitrepos.time", mock.Mock(wraps=time, time_ns=lambda: ns))
 
+    def slow(self, name, written, checkout, at=0):
+        """The clock the settle rule reads stopped at `written` until gitrepos' `name` returns for `checkout` (its argument
+        `at`), and SETTLED_NS past it from then on: that step of the checkout's reading
+        took a whole settle interval, as a git run can on a loaded machine (SPD-249).  Returns the patches as one context
+        and the list of the step's calls for that checkout."""
+        gitrepos = importlib.import_module("spudlib.hooks.gitrepos")
+        real, now, calls = getattr(gitrepos, name), [written], []
+
+        def step(*args, **kwargs):
+            out = real(*args, **kwargs)
+            if os.path.abspath(args[at]) == os.path.abspath(checkout):
+                calls.append(args)
+                now[0] = written + gitrepos.SETTLED_NS
+            return out
+
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch("spudlib.hooks.gitrepos.time", mock.Mock(wraps=time, time_ns=lambda: now[0])))
+        stack.enter_context(mock.patch.object(gitrepos, name, step))
+        return stack, calls
+
     def planted(self):
         """The line board --brief carries naming a checkout, or None when every checkout reads clean."""
         lines = [line for line in self.cli("board", "--brief").stdout.split("\n") if line.startswith(PLANTED_LINE)]
@@ -1069,6 +1091,34 @@ class PlantedCacheTest(ProjectHookCase):
         stored[str(self.bad)]["findings"] = [POISON]
         self.cache.write_text(json.dumps(stored), encoding="utf-8")
         self.assertNames(self.planted(), self.bad)  # read from the entry, not from the repository
+
+    def test_the_clock_is_read_before_the_findings_the_entry_keeps(self):
+        """SPD-249: what makes an entry safe is that the reading it keeps began a whole tick after every stamp's mtime, so
+        the clock is read before the checkout's findings are, not after them: a reading that took SETTLED_NS on a loaded
+        machine would otherwise see stamps read in the write's own tick as settled."""
+        self.settle(self.common, self.wt_gitdir)
+        written = time.time_ns()
+        os.utime(self.hooks, ns=(written, written))
+        self.cache.unlink(missing_ok=True)
+        patches, reads = self.slow("own_findings", written, self.bad, at=1)  # (home, where, ...)
+        with patches:
+            self.assertIsNone(self.planted())
+        self.assertTrue(reads, "the checkout's findings are read")
+        self.assertNotIn(str(self.bad), self.stored(), "hooks/ was written in the reading's second: nothing is kept for it")
+
+    def test_the_clock_is_read_before_the_gitfile_names_the_repository_the_entry_keeps(self):
+        """SPD-249: a linked worktree's entry is kept under its .git gitfile's stamp, read before git_repository_dirs opens
+        the file to learn which repository it names, and the entry keeps that repository: the clock goes before that read
+        too, so a slow one cannot settle a gitfile rewritten in its stamp's tick to name another repository."""
+        self.settle(self.common, self.wt_gitdir)
+        written = time.time_ns()
+        os.utime(self.bad_wt / ".git", ns=(written, written))
+        self.cache.unlink(missing_ok=True)
+        patches, reads = self.slow("git_repository_dirs", written, self.bad_wt)
+        with patches:
+            self.assertIsNone(self.planted())
+        self.assertTrue(reads, "the worktree's repository is found")
+        self.assertNotIn(str(self.bad_wt), self.stored(), "its gitfile was written in the reading's second: nothing is kept for it")
 
     def test_doctor_reads_the_repository_not_the_cache(self):
         stored = self.warm()

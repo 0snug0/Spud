@@ -269,7 +269,12 @@ def git_config_fingerprint(files):
 def stamps_settled(stamps, now):
     """True when every mtime in `stamps` is SETTLED_NS old at `now` (an absent file has none): a change made in the same
     clock tick as a stamp read leaves the stamp as it was (APFS stamps are nanoseconds, but HFS+ keeps seconds and FAT
-    two), so neither cache keeps an entry before then.  An mtime in the future is never settled."""
+    two), so neither cache keeps an entry before then.  An mtime in the future is never settled.
+
+    `now` is the clock read before the first thing the entry keeps is read, never after it (SPD-249): then every read
+    began a whole tick past every stamp's mtime, so a write after it moves the stamp, and one before it is in the stamp.
+    Read after a slow step (a git run on a loaded machine, against a 2 s FAT tick) it could call settled a stamp whose
+    file was read inside the tick a later write shares."""
     return all(s[1] is None or now - s[1] >= SETTLED_NS for s in stamps)
 
 
@@ -328,8 +333,10 @@ def git_own_config_keys(home, where, gitdir, commondir):
     hook runs git only after one of them changes: the Bash hook runs on every command line, and subprocess stays off its
     path, where importing it costs every run milliseconds.  A repository that sets nothing for itself costs no git run at
     all.  An answer is kept only under a complete set of stamps, every one of them settled (stamps_settled), as the
-    findings cache keeps its own (SPD-238).  The cache lives in the state directory, which the edit and Bash hooks refuse
-    to everyone, so nothing a member writes can widen what passes."""
+    findings cache keeps its own (SPD-238), by the clock read before git_scope_stamps opens the first config file for its
+    includes, and so before the git run (SPD-249).  The cache lives in the state directory, which the edit and Bash hooks
+    refuse to everyone, so nothing a member writes can widen what passes."""
+    now = time.time_ns()
     fingerprint, complete = git_scope_stamps(gitdir, commondir)
     if not any(os.path.lexists(s[0]) for s in fingerprint):
         return []  # no local or worktree scope: nothing for the repository to say, and nothing to run git for
@@ -345,7 +352,7 @@ def git_own_config_keys(home, where, gitdir, commondir):
     if listed is None:
         return None
     keys = [[scope, key] for scope, key in listed if scope in GIT_OWN_SCOPES]
-    if cache and stamps_settled(fingerprint, time.time_ns()) and os.path.isdir(state):
+    if cache and stamps_settled(fingerprint, now) and os.path.isdir(state):
         git_cache_write(cache, stored, {gitdir: {"fingerprint": fingerprint, "keys": keys}})
     return keys
 
@@ -522,8 +529,9 @@ def own_findings(home, where, gitdir, commondir, hooks):
 #   which nothing but the kernel sets.
 # - Each stamp is read before the file it covers, so a change after the read moves it; the commondir file, read inside
 #   git_repository_dirs, is read again after its stamp and the entry kept only when both readings agree.
-# - An entry is written only when every mtime it is kept under is SETTLED_NS old (stamps_settled), and only under a set of
-#   stamps git_scope_stamps calls complete: one short of what git reads could not see a change to the rest.
+# - An entry is written only when every mtime it is kept under is SETTLED_NS old (stamps_settled) by the clock read before
+#   .git was stamped and opened, so before anything the entry keeps was read (SPD-249), and only under a set of stamps
+#   git_scope_stamps calls complete: one short of what git reads could not see a change to the rest.
 # - An entry is trusted only whole: read for this checkout, its stamps covering at least .git, the commondir file, the four
 #   base config files and hooks/, every finding a key or a hook.  Anything else, and a cache that is missing, unreadable
 #   or not JSON, is a miss, which reads the repository.  A foreign repository, or a reading that failed, is never kept.
@@ -579,10 +587,11 @@ def checkout_held(entry, root):
     return where, gitdir, commondir, found
 
 
-def checkout_kept(home, known, root, dot, where, gitdir, commondir, fresh):
+def checkout_kept(home, known, root, now, dot, where, gitdir, commondir, fresh):
     """repository_findings for a checkout the cache missed, and its entry added to `fresh` when it may be kept: its own
     repository (a foreign one is its finding, asked anew each run), found at its root, read whole, re-read the same, and
-    every stamp settled.  `dot` is dot_stamp's, read before git_repository_dirs read .git."""
+    every stamp settled at `now`.  `now` is the clock and `dot` dot_stamp's, both read before git_repository_dirs read
+    .git (SPD-249)."""
     if not git_checkout_repository(known, where, gitdir, commondir):
         return repository_findings(home, known, where, gitdir, commondir)
     # The stamps before the reading they are kept with, and hooks/ listed anew after them, never the listing another
@@ -591,7 +600,6 @@ def checkout_kept(home, known, root, dot, where, gitdir, commondir, fresh):
     scope, complete = git_scope_stamps(gitdir, commondir)
     stamps = [git_file_stamp(os.path.join(gitdir, "commondir"))] + scope + [git_file_stamp(os.path.join(commondir, "hooks"))]
     found, keep = own_findings(home, where, gitdir, commondir, None)
-    now = time.time_ns()
     if (keep and complete and dot is not None and where == os.path.abspath(root) and git_repo_common_dir(gitdir) == commondir
             and (dot[0] == "dir" or now - dot[1] >= SETTLED_NS) and stamps_settled(stamps, now)):
         fresh[root] = {"where": where, "gitdir": gitdir, "commondir": commondir, "dot": dot, "fingerprint": stamps,
@@ -620,7 +628,9 @@ def checkout_findings(ctx, con, cached=False):
             if held is not None:
                 where, gitdir, commondir, kept = held
             else:
-                dot = dot_stamp(root) if cached else None  # before git_repository_dirs reads what it stamps
+                # the settle rule's clock, then the stamp of .git, before git_repository_dirs reads what it stamps
+                now = time.time_ns() if cached else None
+                dot = dot_stamp(root) if cached else None
                 where, gitdir, commondir = git_repository_dirs(root)
             if gitdir is None:
                 continue
@@ -635,7 +645,7 @@ def checkout_findings(ctx, con, cached=False):
                 own = kept if git_checkout_repository(known, where, gitdir, commondir) else \
                     repository_findings(ctx.home, known, where, gitdir, commondir)
             elif cached:
-                own = checkout_kept(ctx.home, known, root, dot, where, gitdir, commondir, fresh)
+                own = checkout_kept(ctx.home, known, root, now, dot, where, gitdir, commondir, fresh)
             else:
                 own = repository_findings(ctx.home, known, where, gitdir, commondir, hooks)
             found.extend((project, root, f) for f in own)
