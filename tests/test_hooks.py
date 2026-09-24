@@ -14193,7 +14193,7 @@ class ArgumentWriteTest(BashHookCase):
 
     def test_a_target_the_hook_cannot_resolve_is_refused(self):
         for command in ("cp tests/src.txt $D", "rm \"$F\"", "touch $(date).log", "mkdir -p \"$D\"/x", "sed -i '' s/a/b/ $F",
-                        "for f in a b; do touch tests/$f; done", "ln -s /tmp/x `pwd`/x", "cp -t \"$D\" tests/src.txt",
+                        "for f in $X; do touch tests/$f; done", "ln -s /tmp/x `pwd`/x", "cp -t \"$D\" tests/src.txt",
                         "cp \"$SRC\" tests/out/", "mv \"$SRC\" tests/out/"):  # the name a source takes inside a directory
             with self.subTest(command):
                 self.assertRefused(command, VARIABLE_WORDING)
@@ -15153,7 +15153,7 @@ class SpelledWriteTest(TreeWriteCase):
                                 ("curl -w @fmt https://example.com/x", ANYWHERE_WORDING),
                                 ("curl -o out/f \"$(cat list)\"", ANYWHERE_WORDING),  # may be -o anything
                                 ("wget -e robots=off --no-hsts -P out https://example.com/x", ANYWHERE_WORDING),
-                                ("for n in a b; do curl -o \"$n.html\" https://example.com/$n; done", VARIABLE_WORDING)):
+                                ("for n in a b; do curl -o \"$n.html\" https://example.com/$n; done", "deliverables")):  # a.html (SPD-146)
             with self.subTest(command):
                 self.assertRefused(command, needle, agent_id=AGENT_G)
         self.assertRefused("sort --compress-program='git push' -o out/s a.tar", "Law 7", agent_id=AGENT_G)
@@ -15553,11 +15553,13 @@ class TargetResolutionTest(BashHookCase):
         self.assertEqual([w[1] for w in a.arg_writes], ["$S/f"])
 
     def test_a_later_assignment_a_compound_and_a_loop(self):
-        """A later assignment wins in both shells; an assignment the hook doubts (a compound command's, a loop's own
-        variable) settles nothing, and the raw word keeps the refusal it had."""
+        """A later assignment wins in both shells; an assignment the hook doubts (a compound command's) settles nothing,
+        and the raw word keeps the refusal it had.  A loop's own variable over words the line settles is read once per
+        word (SPD-146), and over words it does not settle stays raw."""
         self.assertEqual(self.targets("S=%s/a; S=%s/b; echo hi > $S.f" % (PROBE, PROBE)), ["%s/b.f" % PROBE])
         self.assertEqual(self.targets("S=%s/a; { S=%s/b; }; echo hi > $S.f" % (PROBE, PROBE)), ["$S.f"])
-        self.assertEqual(self.targets("for S in %s/a; do echo hi > $S.f; done" % PROBE), ["$S.f"])
+        self.assertEqual(self.targets("for S in %s/a; do echo hi > $S.f; done" % PROBE), ["%s/a.f" % PROBE])
+        self.assertEqual(self.targets("for S in $X; do echo hi > $S.f; done"), ["$S.f"])
 
     # -- what the hook answers ---------------------------------------------------------
 
@@ -15593,7 +15595,7 @@ class TargetResolutionTest(BashHookCase):
 
     def test_a_target_the_line_does_not_settle_keeps_its_refusal(self):
         for command in ("echo x > $S/x.md", "printf x | tee $S/x.md", "echo x > $(pwd)/x.md",
-                        "for S in docs tests; do echo x > $S/x.md; done", "S=$OTHER; echo x > $S/x.md"):
+                        "for S in $X docs; do echo x > $S/x.md; done", "S=$OTHER; echo x > $S/x.md"):
             with self.subTest(command):
                 self.assertRefused(command, VARIABLE_WORDING)
                 self.assertRefused(command, VARIABLE_WORDING, agent_id=None)  # Spud too, since SPD-091
@@ -15667,6 +15669,162 @@ class TargetResolutionTest(BashHookCase):
         self.assertSilent("N=/dev/null; %s > $N" % log)
         self.assertSilent("N=tests/out/log.txt; %s > $N" % log)
         self.assertRefused("N=docs; %s > $N/log.txt" % log, "deliverables")
+
+
+class LoopWordTargetTest(BashHookCase):
+    """SPD-146: SPD-121 refused every write target holding an expansion the hook cannot settle, and SPD-127 settled only
+    what the line assigns plainly, so a for loop's variable and a name built with a substitution stayed raw and refused,
+    though a loop's words are on the line.  SPD-126's differential over the 945 Bash commands spudagents ran that name
+    dd, sort, curl, mkfifo, mktemp, split, perl, tar, patch or wget found 16 new refusals, 12 of exactly this shape, every
+    one writing into the session's own scratchpad.
+
+    A `for NAME in WORD ...` loop over words the line settles -- literal words, values the line settled, or a glob that
+    matches files now -- gives NAME one value per word, and a write target naming NAME is read once per value, as a glob
+    target is read once per match.  A loop the line cannot settle (`$@`, an unsettled `$x`, a substitution, a word that may
+    start with `-`, a brace list, a glob matching nothing) stays refused.  `$(basename WORD [SUFFIX])` is settled: exactly,
+    where WORD settles; where it does not, as one name inside the directory it is written relative to (the result holds no
+    `/`), while the substitution stands in double quotes after something the word spells, so it is one word and no option.
+    AGENT_A plans home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        home = self.home.path
+        for d in ("tests/out", "tests/glob", "docs"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        for f in ("tests/glob/g1.txt", "tests/glob/g2.txt", "docs/x.md"):
+            (home / f).write_text("orig\n", encoding="utf-8")
+        self.scratchpad = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def writes(self, command):
+        """Every write target the analysis recorded, in order: the redirections' and tee's, then the writes by argument."""
+        a = self.analysis(command)
+        return [t for t, _cwds in a.redirects] + [w[1] for w in a.arg_writes]
+
+    # -- a for loop's words ------------------------------------------------------------
+
+    def test_the_tickets_own_line_reads_each_word(self):
+        self.assertEqual(self.writes("for f in a b; do touch tests/$f; done"), ["tests/a", "tests/b"])
+        self.assertSilent("for f in a b; do touch tests/$f; done")
+
+    def test_every_write_channel_reads_the_loop_once_per_word(self):
+        for command, recorded in (
+            ("for f in a b; do echo x > tests/$f.txt; done", ["tests/a.txt", "tests/b.txt"]),
+            ("for f in a b; do echo x | tee tests/$f; done", ["tests/a", "tests/b"]),
+            ("for f in a b\ndo\n  mkdir -p tests/$f\ndone", ["tests/a", "tests/b"]),
+            ("S=tests; for f in a b; do touch $S/$f; done", ["tests/a", "tests/b"]),
+            ("S=tests/out; for f in $S/x $S/y; do touch $f; done", ["tests/out/x", "tests/out/y"]),
+            ("for a in x y; do for b in 1 2; do touch tests/$a$b; done; done", ["tests/x1", "tests/x2", "tests/y1", "tests/y2"]),
+            ("for f in a b; do curl -sS -o tests/$f.html https://example.com/$f; done", ["tests/a.html", "tests/b.html"]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), recorded)
+                self.assertSilent(command)
+
+    def test_one_value_stands_for_the_name_in_every_word_of_a_command(self):
+        """Each reading is one pass of the body: a source and a destination naming the variable take the same value."""
+        a = self.analysis("for f in a b; do cp tests/$f.in tests/out/$f; done")
+        self.assertEqual([(w[1], w[3]) for w in a.arg_writes], [("tests/out/a", ("tests/a.in",)), ("tests/out/b", ("tests/b.in",))])
+
+    def test_a_glob_list_is_read_once_per_file_it_matches(self):
+        self.assertEqual(self.writes("for f in tests/glob/*.txt; do cp $f $f.bak; done"),
+                         ["tests/glob/g1.txt.bak", "tests/glob/g2.txt.bak"])
+        self.assertSilent("for f in tests/glob/*.txt; do cp $f $f.bak; done")
+        r = self.assertRefused("for f in tests/glob/*.txt; do cp $f docs/; done", "deliverables")
+        self.assertIn("docs/g1.txt", r.reason)
+
+    def test_each_word_is_held_to_the_path_rule(self):
+        r = self.assertRefused("for d in tests docs; do echo x > $d/x.md; done", "deliverables")
+        self.assertIn("docs/x.md", r.reason)
+        self.assertNotIn(VARIABLE_WORDING, r.reason)
+        self.assertRefused("for f in a .git; do mkdir -p tests/$f/hooks; done", GIT_DIR_WORDING)
+        self.assertRefused("for f in a b; do touch docs/$f.md; done", "deliverables")
+
+    def test_a_loop_the_line_does_not_settle_stays_refused(self):
+        for command in ('for f in "$@"; do touch tests/$f; done', "for f in $X; do touch tests/$f; done",
+                        "for f in $(ls); do touch tests/$f; done", "for f in `ls`; do touch tests/$f; done",
+                        "for f; do touch tests/$f; done", "for f in 'a b'; do touch tests/$f; done",
+                        "for f in -rf x; do touch tests/$f; done", "for f in a{1,2}; do touch tests/$f; done",
+                        "for f in tests/none*.txt; do touch $f.x; done", "for f in 'a*'; do touch tests/$f; done",
+                        "for f in ~/x; do touch tests/$f; done", "for a b in 1 2; do touch tests/$a; done",
+                        "while read f; do touch tests/$f; done", "select f in a b; do touch tests/$f; done",
+                        "for f in a b; do read f; touch tests/$f; done", "for f in a b; do f=$X; touch tests/$f; done",
+                        "for f in a b; do unset f; touch tests/$f; done",
+                        "for f in a b; do g() { touch tests/$f; }; g; done",
+                        "for f in a b; do :; done; touch tests/$f",
+                        "for f in a; do for f in b; do :; done; touch tests/$f; done"):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING)
+
+    # -- basename -----------------------------------------------------------------------
+
+    def test_a_basename_of_a_settled_word_is_its_result(self):
+        for command, recorded in (
+            ('touch "tests/$(basename /x/y/z.txt)"', ["tests/z.txt"]),
+            ("touch tests/$(basename /x/y/z.txt)", ["tests/z.txt"]),
+            ('touch "tests/$(basename /x/y/z.txt .txt).md"', ["tests/z.md"]),
+            ('touch "tests/$(basename -- /x/y/z.txt)"', ["tests/z.txt"]),
+            ('touch "tests/$(basename /x/y/)"', ["tests/y"]),
+            ('F=/x/y/z.txt; touch "tests/$(basename "$F")"', ["tests/z.txt"]),
+            ('F=/x/y/z.txt; out=$(basename "$F"); touch "tests/$out"', ["tests/z.txt"]),
+            ('F=/x/y/z.txt; out="$(basename $F)"; touch tests/$out', ["tests/z.txt"]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), recorded)
+                self.assertSilent(command)
+        r = self.assertRefused('touch "docs/$(basename /x/y/z.md)"', "deliverables")
+        self.assertIn("docs/z.md", r.reason)
+
+    def test_a_basename_of_an_unsettled_word_is_one_name_in_its_directory(self):
+        """basename's result holds no `/`: quoted after a spelled prefix it is one entry of that directory, which a glob
+        covering every name there allows and no narrower glob does."""
+        for command in ('touch "tests/$(basename $P)"', 'touch "tests/$(basename "$P" .tar).txt"',
+                        'out=$(basename "$P"); touch "tests/$out"', 'echo x > "tests/out/$(basename $P)"'):
+            with self.subTest(command):
+                self.assertSilent(command)
+        for command in ('touch "docs/$(basename $P)"', 'out=$(basename "$P"); touch "docs/$out"'):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables")
+
+    def test_a_substitution_basename_does_not_settle_stays_refused(self):
+        for command in ("touch tests/$(basename $P)", 'touch "$(basename $P)"', 'out=$(basename "$P"); touch tests/$out',
+                        'out=$(basename "$P"); touch "$out"', 'touch "tests/$(basename -a $P)"', 'touch "tests/$(dirname $P)"',
+                        'touch "tests/$(basename $P | tr a b)"', 'touch "tests/$(basename $(pwd))"', 'touch "tests/$(cat f)"',
+                        'touch "tests/$(basename /)"', "touch \"tests/$(basename '/x/a b')\"",
+                        'basename() { echo ../../docs/x.md; }; touch "tests/$(basename a)"',
+                        'PATH=/tmp/p:$PATH; touch "tests/$(basename $P)"',
+                        'if true; then out=$(basename /x/z); fi; touch "tests/$out"',
+                        'for f in a b; do out=$(basename "$f"); touch "tests/$out"; done',
+                        'out=$(basename /x/z); read out; touch "tests/$out"', 'out=$(basename /x/z) touch "tests/$out"'):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING)
+
+    def test_an_assigned_basename_is_what_it_printed_where_it_ran(self):
+        """The substitution runs where the assignment does, so a later assignment of its operand changes nothing."""
+        self.assertEqual(self.writes('F=/x/.git; out=$(basename "$F"); F=/x/ok; touch "tests/$out"'), ["tests/.git"])
+        self.assertRefused('F=/x/.git; out=$(basename "$F"); F=/x/ok; touch "tests/$out"', GIT_DIR_WORDING)
+        self.assertEqual(self.writes('out=$(basename /x/z); out=tests/y; touch "$out"'), ["tests/y"])
+
+    # -- the differential's own lines ---------------------------------------------------
+
+    def test_the_differentials_lines_are_silent_in_the_scratchpad(self):
+        s = self.scratchpad
+        for command, recorded in (
+            ('S=%s; for who in juno hana gil; do curl -sS -b jar.txt -o "$S/$who.html" "https://example.com/u/$who"; done' % s,
+             ["%s/%s.html" % (s, who) for who in ("juno", "hana", "gil")]),
+            ('S=%s; for p in /data/x/a.tar.gz /data/y/b.zip; do curl -sSf -o "$S/$(basename $p)" "https://example.com$p"; done' % s,
+             ["%s/a.tar.gz" % s, "%s/b.zip" % s]),
+            ('S=%s; f=/data/x/c.tar; out=$(basename "$f"); curl -sSfL https://example.com/c -o "$S/$out"' % s, ["%s/c.tar" % s]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), recorded)
+                self.assertSilent(command)
+        self.assertSilent('S=%s; out=$(basename "$F"); curl -sSfL https://example.com/c -o "$S/$out"' % s)
+        self.assertRefused('for who in juno hana; do curl -sS -o "docs/$who.html" https://example.com/u/$who; done',
+                           "deliverables")
 
 
 SETTLED_SNAPSHOT = """\

@@ -243,7 +243,8 @@ def neutralize_quoted_globs(text):
     and _NAME_END where a quote or an escape continues a word right after a
     bare `$name` (`$X"t"` and `$X\\t` read $X, then t).  After the name of a `$name` in double quotes it leaves
     _QUOTED_NAME (SPD-167): bash splits an unquoted expansion's value at its blanks and never a quoted one's, and zsh splits
-    neither, so a reader of the words the shell passes (shell/stdin_text) knows which shell reads a word as one."""
+    neither, so a reader of the words the shell passes (shell/stdin_text) knows which shell reads a word as one.  After a
+    lifted substitution's placeholder in double quotes it leaves _QUOTED_SUBST, for the same reason (SPD-146)."""
     out = []
     i, n = 0, len(text)
     state = None  # None, "'" or '"'
@@ -281,6 +282,9 @@ def neutralize_quoted_globs(text):
             name = syntax._NAME_RE.match(text, i + 1).group()
             out.append("$" + name + syntax._QUOTED_NAME)  # `"$X"`: one word in both shells, whatever X holds
             i += 1 + len(name)
+        elif state == '"' and c == "_" and text.startswith(hookio.SUBST, i):
+            out.append(hookio.SUBST + syntax._QUOTED_SUBST)  # `"$(x)"`: its output one word in both shells (SPD-146)
+            i += len(hookio.SUBST)
         elif state == '"':
             if c == '"':
                 if out and out[-1] == "$":

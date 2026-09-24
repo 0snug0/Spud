@@ -28,7 +28,7 @@ options, and is ANY_PATH too.  Both are read with getopt_long's grammar (spelled
 
 import re
 
-from . import analyse, arg_writes, globbing, prepare, spelled_writes, syntax, tree_writes
+from . import analyse, arg_writes, globbing, loop_bindings, prepare, spelled_writes, syntax, tree_writes
 
 
 # curl 8 (curl --help all): the short options and the long ones that take the next word as their value.  The long tables of
@@ -109,8 +109,8 @@ def option_table(base):
 
 def read_download(cmd, base, words, a, depth):
     """Record what `words`, a curl or a wget, writes (module docstring); the line's own values are put in its words first."""
-    args = [arg_writes.resolved(w, a) for w in words[1:]]
-    (read_curl if base == "curl" else read_wget)(cmd, args, a, depth)
+    for args in loop_bindings.resolved_words(words[1:], a):  # once per reading of a loop's word or a basename (SPD-146)
+        (read_curl if base == "curl" else read_wget)(cmd, args, a, depth)
 
 
 def read_curl(cmd, args, a, depth):

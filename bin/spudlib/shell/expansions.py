@@ -1,6 +1,6 @@
 """shell/expansions: Parameter expansions and a command's read points."""
 
-from . import analyse, git_verbs, globbing, prepare, spud_calls, syntax
+from . import analyse, git_verbs, globbing, loop_bindings, prepare, spud_calls, syntax
 from ..hooks import hookio, snapshots
 
 
@@ -42,6 +42,7 @@ def assign_variable(a, name, value, append=False):
     or persist here (a.unsure) or runs in a loop or function body, which may assign again later (sticky); a certain assignment
     settles an earlier doubt."""
     a.vars[name] = ("$" if name in ("CDPATH", "cdpath") else hookio.SUBST) if append else value
+    loop_bindings.loop_assigned(a, name, value, append)  # a loop's binding of the name ends; `name=$(basename ...)` kept (SPD-146)
     if not append and syntax.POSITIONAL_RE.search(prepare.deglob(value)) is not None:
         a.member_vars.add(name)  # a value holding a positional fills the name with the call's words (SPD-205)
     a.assigned.append(name)

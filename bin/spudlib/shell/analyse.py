@@ -3,7 +3,7 @@
 import os
 import re
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, heredocs, inline_programs, interpreter_words, positional, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, heredocs, inline_programs, interpreter_words, loop_bindings, positional, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
 from ..hooks import hookio
 
 _MEMBER_VAR_RE = re.compile(r"\$\{?#?([A-Za-z_][A-Za-z0-9_]*)")  # a `$NAME` a tolerated finding names (SPD-205)
@@ -112,7 +112,8 @@ def analyse_isolated(a, command, depth, stdin=None, fed=False):
     its substitutions, and a nested line must not double its work at every level.  `stdin` and `fed`: the standard input
     the body runs on (analyse_command), part of that state (SPD-210)."""
     key = (command, depth, a.cwds, a.loop_depth, tuple(sorted(a.vars.items())), frozenset(a.doubt), frozenset(a.sticky),
-           a.all_doubt, a.alias_scope, stdin_text.reading_key(stdin, fed))
+           a.all_doubt, a.alias_scope, stdin_text.reading_key(stdin, fed),
+           tuple(sorted(a.loop_words.items())), tuple(sorted(a.derived.items())), a.func_depth)  # SPD-146's values too
     if key in a.isolated_done:
         return
     a.isolated_done.add(key)
@@ -147,7 +148,8 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, std
     words, targets = directories.separate_redirects(tokens)
     cwds = a.cwds if redirect_cwds is syntax._CURRENT else redirect_cwds
     settled = [arg_writes.resolved(t, a) for t in targets]
-    for target in settled:
+    # a target naming a for loop's variable, or a basename substitution, once per reading of it (SPD-146)
+    for target in [t for ws in loop_bindings.resolved_words(targets, a) for t in ws] if targets else ():
         a.redirects.append((target, cwds))
     outer_stdin, a.stdin = a.stdin, stdin
     outer_fed, a.stdin_fed = a.stdin_fed, stdin_text.input_fed(tokens, bodies, piped_fed)
@@ -354,7 +356,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         return
     if cmd in syntax.ASSIGNING_COMMANDS:
         for x in words[1:]:  # `read X`, `printf -v X`, `unset X`, `getopts o X`: X may now hold anything (probed)
-            a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(x)))
+            names = syntax._NAME_RE.findall(prepare.deglob(x))
+            a.doubt.update(names)
+            loop_bindings.unbind(a, names)  # and no loop's word any more (SPD-146)
     if cmd in ("source", ".", "trap"):
         a.all_doubt = True  # code the hook does not read may assign any variable
     if cmd in ("source", "."):
@@ -516,11 +520,11 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         a.findings.append(("spud", call))
     elif base == "tee":
         a.kinds.append("tee")
-        for w in words[1:]:
-            # the word as spelled decides whether tee reads it as an option, as this Mac's getopt does; what it names is
-            # the value the line settled, which is the file tee opens
-            if not w.startswith("-"):
-                a.redirects.append((arg_writes.resolved(w, a), a.cwds))
+        # the word as spelled decides whether tee reads it as an option, as this Mac's getopt does; what it names is
+        # the value the line settled, which is the file tee opens -- once per reading of a loop's word or a basename (SPD-146)
+        files = [w for w in words[1:] if not w.startswith("-")]
+        for target in [t for ws in loop_bindings.resolved_words(files, a) for t in ws] if files else ():
+            a.redirects.append((target, a.cwds))
     elif base in syntax.ARG_WRITE_COMMANDS:
         # A command that writes the files it names as operands, read where tee is, so bash_reason holds each to
         # the path rule as it holds a redirection target.  The words this Mac's getopt reads as options are read by name
@@ -595,7 +599,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         a.findings.extend(("env-function", name) for name in exported_function_names(words))
         if any(w.startswith(("-", "+")) for w in words[1:]):
             for w in words[1:]:  # an attribute (`declare -n X=Y`, `typeset -i`, `local -a`) changes what the name reads
-                a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(w)))
+                names = syntax._NAME_RE.findall(prepare.deglob(w))
+                a.doubt.update(names)
+                loop_bindings.unbind(a, names)
     else:
         a.kinds.append("other")  # CD, /usr/bin/cd, env cd: /usr/bin/cd in its own process, and the shell stays
     shadowed_name(a, cmd, path_names)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason

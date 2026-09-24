@@ -1,7 +1,7 @@
 """shell/walk: ShellFrame and ShellWalk: one pass over a line's tokens."""
 
-from . import (analyse, assignment_words, directories, globbing, heredocs, positional, prepare, reevaluation, script_files,
-               stdin_text, syntax, unread)
+from . import (analyse, assignment_words, directories, globbing, heredocs, loop_bindings, positional, prepare, reevaluation,
+               script_files, stdin_text, syntax, unread)
 from ..hooks import hookio
 
 # The loops whose header names a variable, one header grammar to zsh (its parser's par_for; ShellWalk.names_end)
@@ -48,7 +48,7 @@ class ShellFrame:
     `do ... done` (resolve_body)."""
 
     __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints",
-                 "procsub", "serial", "bare", "defines", "arith")
+                 "procsub", "serial", "bare", "defines", "arith", "bound")
 
     def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
@@ -89,6 +89,8 @@ class ShellFrame:
         # this `( ... )` frame is the subshell mark_zsh_patterns leaves for an arithmetic command `(( ... ))` (its outer
         # parenthesis kept, its inside marked), so its close ends a condition it stands at the end of (SPD-177)
         self.arith = False
+        # the for loop's variable shell/loop_bindings bound for its body (SPD-146), unbound where the loop closes
+        self.bound = None
 
 
 class ShellWalk:
@@ -229,6 +231,7 @@ class ShellWalk:
         self.stack.append(frame)
         if kind in ("loop", "func"):
             self.a.loop_depth += 1
+        self.a.func_depth += kind == "func"
         self.words, self.skip, self.header, self.expect_body = [], False, None, False
         self.start_list()
 
@@ -244,6 +247,8 @@ class ShellWalk:
             self.a.functions, self.a.function_bodies = frame.funcs  # a function defined in a subshell does not reach a call after it
         if frame.kind in ("loop", "func"):
             self.a.loop_depth -= 1
+        self.a.func_depth -= frame.kind == "func"
+        loop_bindings.unbind_frame(frame, self.a)
         assigned = self.a.assigned[frame.mark :]
         self.a.doubt.update(assigned)  # what a compound command assigned may not have run, or may not persist
         if frame.kind == "func":
@@ -415,10 +420,12 @@ class ShellWalk:
             return
         at = self.words.index("in")
         names = [n for n in self.words[:at] if syntax.IDENTIFIER_RE.match(n)]
-        if any(_value_may_start_with_dash(w) for w in self.words[at + 1 :]):
-            self.a.dashless_loops.difference_update(names)
-        else:
+        # read one word at a time, as it arrives, so a long list stays linear: dashless at its `in`, and not from the first
+        # word that may start with `-` on
+        if len(self.words) == at + 1:
             self.a.dashless_loops.update(names)
+        elif _value_may_start_with_dash(t):
+            self.a.dashless_loops.difference_update(names)
         # a list holding a positional parameter (`for a in "$@"`), or -- once shell/positional has set the call's words
         # where the body reads them -- one of the member's own words, fills the loop variable with what the member wrote,
         # so a finding on it is the member's own inside a function body (SPD-205, analyse_shell_text's prune).  Only the
@@ -484,10 +491,16 @@ class ShellWalk:
         (reevaluation.body_values, SPD-208): `x='a; git push'; sh <<EOF` fed `echo $x` pushes; where the line does not
         settle a value the body is an OutputBody too."""
         reevaluation.read_eval_words(words, self.a, self.depth)
+        self.substitutions = {}  # each word -> the bodies its substitutions lifted, which shell/loop_bindings reads (SPD-146)
         for w in words:
+            lifted = []
             for _ in range(w.count(hookio.SUBST) - w.count(PROCSUB_FILE)):  # a `<( )`'s file name lifted no body
                 if self.inner:
-                    analyse.analyse_isolated(self.a, self.inner.pop(0), self.depth + 1, *self.substitution_input())
+                    lifted.append(self.inner.pop(0))
+                    analyse.analyse_isolated(self.a, lifted[-1], self.depth + 1, *self.substitution_input())
+            if lifted and PROCSUB_FILE not in w:
+                bodies = tuple(lifted)
+                self.substitutions[w] = bodies if self.substitutions.get(w, bodies) == bodies else None
             if syntax.ZSH_CLOSE in w:
                 for code in globbing.qualifier_code(w):
                     # zsh runs it in the shell that expands the word, once for every file the glob matches (probed: a cd there
@@ -553,10 +566,14 @@ class ShellWalk:
             self.found[closed.serial] = (words, bodies)
         a = self.a
         if skip:
+            if header == "for" and self.stack and self.stack[-1].kind == "loop":
+                # its words, once per value in the body (SPD-146), read with the values the line settled before the header
+                loop_bindings.bind_loop(cleaned, self.stack[-1], a)
             if header != "repeat":  # a for or select header assigns its name; a repeat count assigns nothing
                 for w in cleaned:
                     a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(w)))
             return
+        outer_substitutions, a.subst_words = a.subst_words, self.substitutions
         before = a.cwds
         # an assignment in a command that may not run (after && or ||) or runs in its own process may not hold after it
         unsure = unsure or self.conditional or self.piped
@@ -574,7 +591,9 @@ class ShellWalk:
                 text, piped_fed = self.calls[defining]
                 stdin = stdin_text.command_input(words, bodies, text, False, a)
             a.loop_depth += 1
+            a.func_depth += 1
             analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, piped_fed)
+            a.func_depth -= 1
             a.loop_depth -= 1
             a.cwds = directories.union_dirs(before, a.cwds)
         else:
@@ -584,6 +603,7 @@ class ShellWalk:
             analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, self.piped_fed)
             self.printed = stdin_text.joined(self.printed, printed)
         a.unsure -= unsure
+        a.subst_words = outer_substitutions
         if a.cd_uncertain or (a.cwds != before and self.conditional):
             self.uncertain = True
         a.cd_uncertain = False
@@ -949,15 +969,17 @@ def reading_start(a):
     """The state a walk reads a line's commands with, and changes as it goes, that restore_reading puts back: the
     directories, the variables, the loop depth, the aliases, the loop names read as dashless, and the function bodies
     bound to their names (SPD-212: each walk of the line binds its own definitions again, and zsh's reading's do not
-    stand for bash's reading's while it walks)."""
-    return a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases), set(a.dashless_loops), bodies_copy(a.function_bodies)
+    stand for bash's reading's while it walks), and shell/loop_bindings' loop and substitution values (SPD-146)."""
+    return (a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases), set(a.dashless_loops), bodies_copy(a.function_bodies),
+            dict(a.loop_words), dict(a.derived), a.func_depth)
 
 
 def restore_reading(a, start):
     """Put back reading_start's state, copied, so one start serves every walk of the line."""
-    cwds, variables, loop_depth, aliases, dashless, function_bodies = start
+    cwds, variables, loop_depth, aliases, dashless, function_bodies, loop_words, derived, func_depth = start
     a.cwds, a.vars, a.loop_depth, a.cd_uncertain = cwds, dict(variables), loop_depth, False
     a.aliases, a.dashless_loops, a.function_bodies = dict(aliases), set(dashless), bodies_copy(function_bodies)
+    a.loop_words, a.derived, a.func_depth = dict(loop_words), dict(derived), func_depth
 
 
 def bodies_copy(function_bodies):

@@ -125,6 +125,9 @@ _LITERAL_EQUALS = chr(0xE020)  # a word's leading `=` that zsh's EQUALS is not t
 # of an unquoted one at its blanks (SPD-167); it ends the name as _NAME_END does.  deglob removes all five.
 _LITERAL_DOLLAR, _QUOTED_DOLLAR, _ARRAY_VALUE, _NAME_END = chr(0xE021), chr(0xE022), chr(0xE023), chr(0xE024)
 _QUOTED_NAME = chr(0xE025)
+# _QUOTED_SUBST follows the placeholder of a `$( )` or backtick body that stands in double quotes, whose output neither
+# shell splits or globs (SPD-146: shell/loop_bindings settles a quoted `$(basename ...)` as one name).  deglob removes it.
+_QUOTED_SUBST = chr(0xE027)
 # What newlines_as_separators writes, between two blanks, for an unquoted newline, where it once wrote `;` (SPD-183): the
 # `;` the walk reads everywhere but inside a zsh glob group, where zsh reads the newline as one more character of the
 # pattern and a spelled `;` ends the word.  mark_zsh_patterns replaces every one, with `;` or with the group's newline, so
@@ -152,7 +155,7 @@ _PUNCT_SENTINELS = {c: chr(0xE040 + i) for i, c in enumerate(_PUNCT_CHARS)}
 _PUNCT_UNSENTINEL = {v: k for k, v in _PUNCT_SENTINELS.items()}
 _SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **_ARITH_UNSENTINEL, **_PUNCT_UNSENTINEL,
                       **{_LITERAL_EQUALS: "=", _LITERAL_DOLLAR: "", _QUOTED_DOLLAR: "", _ARRAY_VALUE: "", _NAME_END: "",
-                         _QUOTED_NAME: ""})
+                         _QUOTED_NAME: "", _QUOTED_SUBST: ""})
 # The operands a line does not spell.  FIND_PATH stands where find's -exec, -execdir, -ok and -okdir put `{}`: a path
 # under find's starting points, which shell/find_xargs turns into a whole-subtree write of each starting point.  INPUT_OPERAND
 # stands for what xargs reads from its input -- appended after the words the line spells, or where -I or -J put it -- which
@@ -561,6 +564,13 @@ class ShellAnalysis:
         # `walking`, the readings under way, whose walk_line will still read a body on a call's input; `body_walks`, the
         # walks the whole analysis has made to read bodies on calls' inputs, which positional.READINGS_PER_NAME bounds.
         self.function_bodies, self.function_inputs, self.walking, self.body_walks = {}, {}, set(), 0
+        # SPD-146 (shell/loop_bindings): `loop_words`, each for loop's variable whose words the line settles -> (its
+        # values, the function bodies open where the loop is), until the loop closes or something assigns the name;
+        # `func_depth`, how many function bodies are open; `subst_words`, each word of the simple command being read that
+        # holds a lifted substitution -> its bodies in order (None where one word stands twice with other bodies);
+        # `derived`, a name a certain `NAME=$(basename ...)` assigned -> (the value, what it printed); `binding`, the one reading of
+        # those a write channel is resolving its words under (loop_bindings.per_reading), None everywhere else.
+        self.loop_words, self.func_depth, self.subst_words, self.derived, self.binding = {}, 0, {}, {}, None
 
     @property
     def all_spud(self):
