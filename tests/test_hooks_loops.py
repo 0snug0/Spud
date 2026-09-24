@@ -2532,5 +2532,73 @@ class ForSelectHeaderTest(BashHookCase):
                     self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
+class LoopOptionWordsTest(BashHookCase):
+    """SPD-274, handed on by SPD-269: a for loop over spelled words settled no value that may start with `-`, `~` or `=`
+    (loop_bindings.loop_values), so `for o in --tags --prune; do git fetch $o origin; done` was refused a member as an
+    unsettled leading expansion, though every value is on the line.  The dispatch reading now takes such a loop's values
+    once each, as the option or operand each is where it stands (a program option refused under Law 7 as spelled would
+    be); the write channels keep their rule, an option-looking value no path."""
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def finding(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_the_tickets_line_is_allowed(self):
+        for ok in ("for o in --tags --prune; do git fetch $o origin; done", 'for o in --tags; do git fetch "$o" origin; done',
+                   "for o in -q --dry-run; do git fetch ${o} origin; done", "for o in --heads --tags; do git ls-remote $o .; done",
+                   "for o in origin --tags; do git fetch $o; done"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, AGENT_C)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_a_program_option_among_the_values_is_refused_as_spelled(self):
+        for cmd in ("for o in --tags --upload-pack=sh; do git fetch $o r; done",
+                    "for o in --upload-pack=sh; do git ls-remote $o .; done"):
+            with self.subTest(cmd):
+                looped = self.refused_for_members(cmd)
+                self.assertNotIn("spell the words out", looped.reason)
+        # archive's -o takes the next word as the file it writes, spelled or looped alike
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(agent_id=agent_id):
+                looped, spelled = (self.bash(c, agent_id) for c in ("for o in -o; do git archive $o x HEAD; done",
+                                                                     "git archive -o x HEAD"))
+                self.assertEqual((looped.decision, looped.reason), (spelled.decision, spelled.reason))
+        spelled = self.refused_for_members("git fetch --upload-pack=sh r")
+        looped = self.refused_for_members("for o in --tags --upload-pack=sh; do git fetch $o r; done")
+        self.assertIn("--upload-pack=sh", looped.reason)
+        self.assertEqual(self.finding("for o in --upload-pack=sh; do git fetch $o r; done"),
+                         self.finding("git fetch --upload-pack=sh r"))
+        self.assertTrue(spelled.reason)
+
+    def test_an_unsettled_list_is_still_refused(self):
+        for cmd in ("for o in $(cat opts); do git fetch $o r; done", "for o in --tags $OPT; do git fetch $o r; done",
+                    "for o in --tags; do :; done; git fetch $o r", "for o in --tags; do f() { git fetch $o r; }; done"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, needle="spell the words out")
+
+    def test_the_write_channels_keep_their_rule(self):
+        """A value that may start with `-` is no path: a write naming it reads the raw word and the refusal it earns,
+        as before (SPD-146)."""
+        m = load_spud_module()
+        for body in ("touch $f", "cp README $f", "echo x > $f"):
+            unsettled = m.analyse_command("for f in $Q; do %s; done" % body, m.ShellAnalysis(cwd=str(self.home.path)))
+            for words in ("-x", "--x a", "~x", "=x"):
+                cmd = "for f in %s; do %s; done" % (words, body)
+                with self.subTest(cmd):
+                    a = m.analyse_command(cmd, m.ShellAnalysis(cwd=str(self.home.path)))
+                    self.assertEqual([w[1] for w in a.arg_writes], [w[1] for w in unsettled.arg_writes])
+                    self.assertEqual([t for t, _c in a.redirects], [t for t, _c in unsettled.redirects])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -15,7 +15,9 @@ def git_write_option_targets(words):
 
     Read in every spelling git takes: spaced, `=`-attached, a short option with its value attached or clustered, and any
     `--`-prefix of a long option, git's parse-options resolving an unambiguous one.  A verb GIT_WRITE_VERBS refuses whole
-    carries no target: Law 7's verb is the reason a member gets, and `git init`/`git clone` are Spud's own.  A verb Law 7
+    carries no target: Law 7's verb is the reason a member gets, and `git init`/`git clone` are Spud's own -- a member's
+    clone into scratch has its directories read by git_verbs.clone_finding instead (SPD-095), which holds them outside
+    every project, not to a member's globs, and leaves Spud's clone as it was.  A verb Law 7
     refuses through GIT_MEMBER_VERBS instead (read-tree, checkout-index, index-pack, repack, pack-objects,
     commit-graph, multi-pack-index, credential-store ...) keeps its target and its entry: Law 7 does not bind Spud, and
     the path rule still holds his own call to it."""

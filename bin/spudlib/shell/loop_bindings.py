@@ -7,9 +7,11 @@ ran that name a download or a spelled write found 16 new refusals, 12 of exactly
 
 A `for NAME in WORD ...` loop (bind_loop) whose every word the line settles -- a literal word, a value the line settled,
 or a glob matching files now, read as the files it matches -- gives NAME one value per word while its body is read, as a
-glob target is read once per match.  A word that may start with `-`, `~` or `=`, holds a blank, a quoted glob character,
-a brace list, a zsh pattern or anything unsettled, or a glob that matches nothing, settles no loop, and nor do more than
-LOOP_WORDS_CAP words.  The binding ends where the loop closes, and where anything assigns the name or doubts it
+glob target is read once per match.  A word that holds a blank, a quoted glob character, a brace list, a zsh pattern or
+anything unsettled, a glob that may start with `-`, `~` or `=` or matches nothing, settles no loop, and nor do more than
+LOOP_WORDS_CAP words.  A spelled word that may start with `-`, `~` or `=` settles the loop for the dispatch alone
+(dispatch_loop, SPD-274: `for o in --tags --prune; do git fetch $o origin; done` is two fetches, each option read where it
+stands, `--upload-pack=sh` refused as spelled), never for a write channel (bound_loop), where an option is no path.  The binding ends where the loop closes, and where anything assigns the name or doubts it
 (unbind): an assignment, `read`, `unset`, a declaration's attribute, `${NAME:=}`, code the hook does not read; and it is
 not read inside a function body opened in the loop, which runs where it is called.
 
@@ -73,16 +75,20 @@ def bind_loop(words, frame, a):
             a.loop_words.pop(name, None)
             return
         values += found
-    a.loop_words[name] = (tuple(values), a.func_depth)
-    frame.bound = name
+    plain = all(prepare.deglob(v)[0] not in "-~=" for v in values)
+    a.loop_words[name] = (tuple(values), a.func_depth, plain)
+    # a loop the write channels do not read (a value may start with `-`, `~` or `=`) is held as (name,), so certain_loop
+    # reads no basename in its body per pass, as before SPD-274; unbind_frame ends either at the close
+    frame.bound = name if plain else (name,)
 
 
 def unbind_frame(frame, a):
     """The loop closed: after it the name holds its last word, or what it held before when there were none."""
     if frame.bound is not None:
-        a.loop_words.pop(frame.bound, None)
+        name = frame.bound if isinstance(frame.bound, str) else frame.bound[0]
+        a.loop_words.pop(name, None)
         if a.loop_derived:
-            forget(a, (frame.bound,))
+            forget(a, (name,))
             for name in [n for n, entry in a.loop_derived.items() if entry[1] is frame]:
                 del a.loop_derived[name]  # its body's basenames: after the loop a name holds its last pass's
 
@@ -112,9 +118,11 @@ def loop_values(word, a):
             or any(c in value for c in syntax._ZSH_UNSENTINEL):
         return None
     text = prepare.deglob(value)
-    if not text or text[0] in "-~=":
+    if not text:
         return None
     if globbing.active_glob_word(value):
+        if text[0] in "-~=":
+            return None
         expansion = redirect_globs.expand_redirect_target(value, a.cwds)
         if expansion is None or expansion[1] or not expansion[0]:
             return None  # a directory it cannot follow, past the budget, or no match (bash's literal word, zsh's error)
@@ -174,7 +182,7 @@ def certain_loop(stack):
     the command runs once in every pass, unless what is around it within the body makes it conditional (ShellWalk.finish
     passes None then).  None for a command in any other compound command, a group or a condition among them."""
     top = stack[-1] if stack else None
-    if top is not None and top.kind == "loop" and top.bound is not None and top.body in ("long", "sublist"):
+    if top is not None and top.kind == "loop" and isinstance(top.bound, str) and top.body in ("long", "sublist"):
         return top
     return None
 
@@ -282,7 +290,17 @@ def write_readings(words, a):
 
 
 def bound_loop(name, a):
-    """The values a loop bound `name` to, where that binding holds here, or None."""
+    """The values a loop bound `name` to, where that binding holds here and no value may start with `-`, `~` or `=` (a
+    write channel's rule: an option is no path), or None."""
+    entry = a.loop_words.get(name)
+    if entry is None or not entry[2] or entry[1] != a.func_depth or name in a.sticky or a.all_doubt:
+        return None
+    return entry[0]
+
+
+def dispatch_loop(name, a):
+    """The values a loop bound `name` to, where that binding holds here, whatever they start with, or None: the
+    dispatch reads each where it stands as though spelled, an option among them as that option (SPD-274)."""
     entry = a.loop_words.get(name)
     if entry is None or entry[1] != a.func_depth or name in a.sticky or a.all_doubt:
         return None

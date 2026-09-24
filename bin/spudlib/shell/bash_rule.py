@@ -2,7 +2,8 @@
 
 import os
 
-from . import analyse, arg_writes, expansions, git_config, prepare, redirect_globs, runner_files, script_files, spud_calls, syntax
+from . import (analyse, arg_writes, expansions, git_config, git_verbs, prepare, redirect_globs, runner_files, script_files, spud_calls,
+               syntax, tree_writes)
 from ..hooks import hookio, pathrule, worktrees
 from ..state import lookup
 
@@ -150,14 +151,17 @@ GIT_INPUT_REASON = (
     " --batch`), or spell the words out; Spud commits, after the outcome is recorded")
 
 
-# A git call inside a trap's action (expansions.TrapDirs, SPD-122), refused a member after every reason the words as
-# spelled earn, so Law 7's verb check inside the action keeps its own reason.
+# A git call inside a trap's action (expansions.TrapDirs, SPD-122) -- or in a function zsh runs by itself, SPD-276 --
+# refused a member after every reason the words as spelled earn, so Law 7's verb check inside the action keeps its own
+# reason.
 TRAP_GIT_REASON = (
-    "Law 7: this line runs git inside a trap's action (`trap '...' <signal>`), which the shell runs later -- on exit, on a"
-    " signal, around a command under DEBUG, ERR, ZERR or RETURN, as a subshell or a function ends -- in whichever directory"
-    " it stands in then, so the hook cannot tell which repository that git reads, nor whose hooks and config it runs"
-    " (post-index-change under `git status`). Nobody needs git in a trap: run git as its own command on the line, where"
-    " the hook reads the directory it runs in; Spud commits, after the outcome is recorded")
+    "Law 7: this line runs git inside a trap's action (`trap '...' <signal>`, or a function zsh runs by itself: a"
+    " TRAPxxx function, zshexit, chpwd, command_not_found_handler, or one a zshexit_functions or chpwd_functions array"
+    " names), which the shell runs later -- on exit, on a signal, around a command under DEBUG, ERR, ZERR or RETURN, after"
+    " a cd, as a subshell or a function ends -- in whichever directory it stands in then, so the hook cannot tell which"
+    " repository that git reads, nor whose hooks and config it runs (post-index-change under `git status`). Nobody needs"
+    " git in a trap: run git as its own command on the line, where the hook reads the directory it runs in; Spud commits,"
+    " after the outcome is recorded")
 
 
 # The reason for an (e) expansion whose text the hook cannot read (shell/reevaluation, SPD-189).
@@ -193,6 +197,8 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 # "option"   an option Claude Code's shell snapshot sets that the reader does not model (held_options.line_options, SPD-263),
 #             which may change how the shell reads every line; shown is the snapshot's line and its file.  No spelling of
 #             the line gets past it, so the respelling is the profile's.
+# "function-body" a function body zsh's `functions` parameter is handed that the line does not spell -- a variable, a
+#             substitution, text appended to a body (walk.assign_function, SPD-278); shown is the assignment.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
@@ -233,6 +239,10 @@ UNREAD_MESSAGES = {
                " how the shell reads a line's words or runs its commands in a way the hook does not model",
                "no spelling of the line gets past a profile's option: ask Spud to have it taken out of the shell profile;"
                " the hook reads every snapshot in that directory, so the option counts until no snapshot there sets it"),
+    "function-body": ("zsh's `functions` parameter is handed a function body the line does not spell (`%s`): a variable,"
+                      " a substitution, or text appended to a body, which runs when the function is called, or by itself"
+                      " for a TRAPxxx, zshexit or chpwd name",
+                      "define the function with name() { ... } on the line, where the hook reads its body"),
 }
 
 
@@ -372,6 +382,13 @@ def written_targets(analysis, written):
     return sorted(out)
 
 
+def writes_but(analysis, own):
+    """written_targets over every write of the line but the writes by argument `own` holds, by identity: what a file a
+    command reads is held against where its own writes come after it opens the file (shell/tree_writes.rewritable)."""
+    mine = {id(e) for e in own}
+    return written_targets(analysis, arg_writes.written_paths([e for e in analysis.arg_writes if id(e) not in mine])[0])
+
+
 def target_has_active_glob(target):
     """True when a masked redirection or tee target holds an unquoted glob metacharacter the shell would expand (a quoted
     one is a sentinel, so GLOB_RE, which looks for bare `* ? [` or a brace list, does not see it)."""
@@ -469,6 +486,10 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                         " and git's own spellings and plumbing for them (commit, add, stage, checkout, switch, rebase, reset, push, merge,"
                         " cherry-pick, pull, init, init-db, read-tree, update-index, write-tree, checkout-index, hash-object, repack,"
                         " pack-refs ...); Spud commits, after the outcome is recorded" % shown_word(verb)), analysis
+        elif kind == "git-clone":  # a member's clone, allowed into scratch alone (SPD-095)
+            reason = git_verbs.clone_reason(ctx, con, detail)
+            if reason:
+                return reason, analysis
         elif kind == "git-config":
             return ("Law 7: this git call takes config the hook cannot read (%s): an alias or include defined on the line, or a variable"
                     " that injects config or points git at a config file of its own (HOME and XDG_CONFIG_HOME move git's global config to"
@@ -702,6 +723,14 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                 if line_writes is None:
                     line_writes = written_targets(analysis, written)
                 reason = runner_files.runner_reason(ctx, con, caller_agent_id, caller_member, cwd, mode, detail, line_writes, runner_cache)
+                if reason:
+                    return reason, analysis
+                continue
+            if kind == "archive":
+                # an archive or a patch whose names the hook cannot list, or one a write of the line may reach before the
+                # command reads it (shell/tree_writes, SPD-144, SPD-275): after every write the path rule refuses above,
+                # so the directory it extracts into, and each name it did list, keep their own reasons
+                reason = tree_writes.archive_reason(detail, writes_but(analysis, detail[4]) if detail[0] == "rewritable" else ())
                 if reason:
                     return reason, analysis
                 continue

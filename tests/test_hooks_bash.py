@@ -624,7 +624,7 @@ class ShellModelTest(BashHookCase):
         for cmd in ("true && cd %s; echo x > note.txt", "false || cd %s; echo x > note.txt", "if true; then cd %s; fi; echo x > note.txt",
                     "if false; then true; else cd %s; fi; echo x > note.txt", "case x in x) cd %s;; esac; echo x > note.txt",
                     "case x in\n  x) cd %s ;;\nesac\necho x > note.txt", "while false; do cd %s; done; echo x > note.txt",
-                    "f() { cd %s; }; f; echo x > note.txt", "function f { cd %s; }; echo x > note.txt", "cd %s/nonexistent; echo x > note.txt",
+                    "function f { cd %s; }; echo x > note.txt", "cd %s/nonexistent; echo x > note.txt",
                     "cd %s/nonexistent || echo x > note.txt", "case x in (x) cd %s;; esac; echo x > note.txt"):
             with self.subTest(cmd):
                 self.assertRefused(cmd % out, "deliverables")
@@ -636,7 +636,10 @@ class ShellModelTest(BashHookCase):
                 self.assertRefused(cmd, "generated", AGENT_C)  # ** : only the ledger branch's target is refused
         self.assertRefused("case x in (x) git push;; esac", "Law 7")
         for cmd in ("true && cd %s && echo x > note.txt", "if true; then cd %s; echo x > note.txt; fi", "mkdir -p %s/new && cd %s/new && echo x > note.txt",
-                    "cd %s/nonexistent && echo x > note.txt", "cd %s || exit 1; echo x > note.txt"):
+                    "cd %s/nonexistent && echo x > note.txt", "cd %s || exit 1; echo x > note.txt",
+                    # SPD-277: a call reads the body of a function the line defines where it runs, and its cd carries
+                    # into the rest of the line, as `cd %s; echo x > note.txt` does
+                    "f() { cd %s; }; f; echo x > note.txt"):
             with self.subTest(cmd):
                 self.assertSilent(cmd.replace("%s", str(out)))
 

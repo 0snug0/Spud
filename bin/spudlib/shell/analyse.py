@@ -24,12 +24,16 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
     no redirection or pipe of their own replaces it -- a `-c` string's and eval's, their command's (SPD-210)."""
     a = analysis or syntax.ShellAnalysis()
     if depth > READING_DEPTH:
-        unread.record_unread(a, "depth", (READING_DEPTH, unread.unread_shown(command)))  # SPD-195: past the bound, refused a member
+        unread.record_unread(a, "depth", (READING_DEPTH, unread.unread_shown(str(command))))  # SPD-195: past the bound, refused a member
         # ... and text that runs in the shell reading it (an eval's, a function's) may move its directory where the hook
         # cannot follow; a body in a process of its own puts the directories back after this (isolated, SPD-252)
         a.cwds = None
         a.dir_moves += 1
         return a
+    if isinstance(command, walk.LineBody):
+        # a function body the line defines, read where a call or a trap runs it (SPD-277, SPD-276): its tokens, as the
+        # walk that read the definition had them
+        return walk.read_line_body(a, command, depth, stdin, fed)
     if depth == 0:
         held_options.line_options(a)  # the options the shell's snapshot set before the line (SPD-263)
     if depth == 0 and not command.isascii() and unread.has_marker(command):
@@ -188,6 +192,8 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, std
     for an interpreter that runs the program it reads there (shell/inline_programs)."""
     words, targets = directories.separate_redirects(tokens)
     cwds = a.cwds if redirect_cwds is syntax._CURRENT else redirect_cwds
+    if a.cwds is not None:
+        a.stood.add(a.cwds)  # where the line stands while it runs, where a signal's action may run (SPD-276, TrapDirs)
     settled = [arg_writes.resolved(t, a) for t in targets]
     # a target naming a for loop's variable, or a basename substitution, once per reading of it (SPD-146)
     for target in [t for ws in loop_bindings.resolved_words(targets, a) for t in ws] if targets else ():
@@ -489,6 +495,8 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 unknown = None if refused else git_verbs.git_unknown_verb(verb, a.home)
                 if unknown is not None:  # not one of git's own commands: an alias or an external git-<verb>
                     a.findings.append(("git-verb", unknown))
+                elif verb == "clone":  # a member's clone into scratch (SPD-095): what it writes, held in bash_rule
+                    a.findings.append(("git-clone", git_verbs.clone_finding(git_words, a)))
                 else:  # one of git's own: Law 7's table first, then its allowlist, which refuses every other name
                     a.findings.append(("git", (verb, refused or git_verbs.git_not_allowed(verb))))
         if git_verbs.git_unspelled_word(git_words) is not None:
@@ -712,8 +720,10 @@ def record_assignment(a, found):
     value, which the hook does not compute, so its value is unknown as an appended one's is, and it counts for every rule
     that reads the variable as a plain assignment does -- PATH and zsh's `path` for shadowed_name, CDPATH, GIT_*.
     An element of zsh's `functions`, `commands` or `aliases` binds the name it keys as a definition, a `hash` or an `alias`
-    line would, a name the hook cannot read standing for all of them; and a BASH_FUNC_ variable is refused
-    outright.
+    line would, a name the hook cannot read standing for all of them -- and a `functions` element's body is read as a
+    definition's is, where the line spells it (walk.assign_function, SPD-278); an element of zshexit_functions or
+    chpwd_functions names a function zsh runs by itself (walk.hook_functions, SPD-276); and a BASH_FUNC_ variable is
+    refused outright.
 
     SPD-225: a subscript is arithmetic, which the shells evaluate before they assign (`arr[X=1]=q` and `declare
     arr2[X=1]=q` assigned X in zsh 5.9 and bash 3.2.57, probed), and so is the value a name with the integer or float
@@ -736,6 +746,11 @@ def record_assignment(a, found):
         else:
             names = a.functions if table == "function" else a.hashed
             names.update([syntax.UNKNOWN_NAME] if pairs is None else [prepare.deglob(key) for key, _ in pairs])
+            if table == "function":
+                walk.assign_function(a, found)  # ... and the body it spells, read as a definition's is (SPD-278)
+    if name in expansions.HOOK_ARRAYS:
+        # zshexit_functions, chpwd_functions: functions zsh runs by itself, read as a trap's action is (SPD-276)
+        walk.hook_functions(a, assignment_words.listed_names(value), expansions.HOOK_ARRAYS[name])
     if name in a.typed:
         expansions.read_arithmetic(a, prepare.deglob(value), doubtful=bool(append or subscript is not None))
         expansions.assign_unknown(a, name)

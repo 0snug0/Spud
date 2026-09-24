@@ -438,10 +438,11 @@ def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fres
     """Read words[i], a word the dispatch reads by name that holds an expansion.  A bare `$X` or `${X}` whose value the
     line assigned is read as the words the shells give it (variable_readings): one reading replaces it in place (_AGAIN), several
     are each analysed from the start (_STOP), and a doubtful value adds a "var-doubt" finding.  A bare reference past the
-    command word to a for loop's variable that shell/loop_bindings settled (bound_loop: every word of the list spelled or
-    settled by the line, none that may start with `-`, blank or glob) is read once per value, each the word it is in that
-    pass, as the write channels read it (SPD-269: `for r in origin upstream; do git fetch $r; done`, where git still reads
-    options, is two fetches of a spelled remote).  Anything else is not resolved: an
+    command word to a for loop's variable that shell/loop_bindings settled (dispatch_loop: every word of the list spelled or
+    settled by the line, none blank or glob) is read once per value, each the word it is in that pass (SPD-269: `for r in
+    origin upstream; do git fetch $r; done`, where git still reads options, is two fetches of a spelled remote), an
+    option among them the option it is (SPD-274: `for o in --tags --upload-pack=sh; ...` is refused as the spelled
+    `--upload-pack=sh` is).  Anything else is not resolved: an
     operator form (`${X:-git}`), zsh's flags and modifiers (`${(L)X}`, `$~X`, `$X:t`), a subscript, a concatenation (`$X$Y`,
     `g$X`), arithmetic, a `$'...'` whose escapes the shells decode apart (prepare.ansi_c_quotes), a substitution, a variable the
     line did not assign, or an empty value outside the command word.
@@ -452,7 +453,7 @@ def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fres
     w = words[i]
     name = variable_reference(w, command=i == 0)
     readings = doubtful = None
-    looped = loop_bindings.bound_loop(name, a) if name and i > 0 and not wrapper_command else None
+    looped = loop_bindings.dispatch_loop(name, a) if name and i > 0 and not wrapper_command else None
     if looped is not None and budget[0] > 0:
         readings, doubtful = [[value] for value in looped], False  # a settled for loop's variable, once per value (SPD-269)
     elif name and name in a.vars and budget[0] > 0:
@@ -629,27 +630,41 @@ def analyse_trap(words, a, depth):
     a sourced file, a function's move, text the reading drops, whatever ShellAnalysis.dir_moves counts, a cd in a
     substitution of the action's among them, read on the safe side -- which leaves the line's directory unknown from the
     trap on, since the action may run before any later command (SPD-252).  An action that moves nothing leaves it."""
-    cwds, variables, moved = a.cwds, dict(a.vars), False
+    moved, in_line = False, trap_runs_in_line(words, a)
     for k in trap_action_indices(words):
-        text = prepare.deglob(words[k])
-        a.cwds = None
-        calls, moves = len(a.git_calls), a.dir_moves
-        analyse.analyse_isolated(a, text, depth + 1)
-        if a.dir_moves != moves:
-            a.moving_traps.add(text)  # read once per starting state (analyse_isolated): a later reading of it knows too
-        moved = moved or text in a.moving_traps
-        # The action's git calls stay on the line, each with the directories it may run in standing in for the unknown
-        # ones the action was read at (TrapDirs, SPD-122): bash_rule refuses a member any of them and reads Spud's where
-        # the action may run.  Its own findings stand as they are.
-        a.git_calls[calls:] = [(targets, TrapDirs(a, text, cwds, found.action if isinstance(found, TrapDirs) else found))
-                               for targets, found in a.git_calls[calls:]]
-        for _targets, found in a.git_calls:
-            if isinstance(found, TrapDirs) and found.text == text and cwds not in found.starts:
-                found.starts.append(cwds)  # the same action set again elsewhere, whose reading analyse_isolated skipped
-        a.cwds, a.vars = cwds, dict(variables)
-    if moved and trap_runs_in_line(words, a):
+        moved = read_action(a, prepare.deglob(words[k]), depth, in_line) or moved
+    if moved and in_line:
         a.cwds = None
         a.dir_moves += 1
+
+
+def read_action(a, action, depth, in_line):
+    """Read one action a shell runs later, wherever the line stands then -- a trap's text, or a function body zsh runs by
+    itself (a walk.LineBody, read_deferred_body) -- with the directories unknown, in a process of its own as far as the
+    line's directories and variables go, and say whether it changes the directory of the shell it runs in (analyse_trap).
+    `in_line`: whether it may run before the line is over.  A function it calls that the line has not defined yet may be
+    defined by the time it runs (`trap cleanup EXIT; cleanup () { ... }`): its name is kept with the hook arrays' (walk.read_call,
+    ShellAnalysis.deferring), so a later definition's body is read as this action is (SPD-276)."""
+    cwds, variables = a.cwds, dict(a.vars)
+    a.cwds = None
+    calls, moves = len(a.git_calls), a.dir_moves
+    a.deferring.append(in_line)
+    try:
+        analyse.analyse_isolated(a, action, depth + 1)
+    finally:
+        a.deferring.pop()
+    if a.dir_moves != moves:
+        a.moving_traps.add(action)  # read once per starting state (analyse_isolated): a later reading of it knows too
+    # The action's git calls stay on the line, each with the directories it may run in standing in for the unknown
+    # ones the action was read at (TrapDirs, SPD-122): bash_rule refuses a member any of them and reads Spud's where
+    # the action may run.  Its own findings stand as they are.
+    a.git_calls[calls:] = [(targets, TrapDirs(a, action, cwds, found.action if isinstance(found, TrapDirs) else found))
+                           for targets, found in a.git_calls[calls:]]
+    for _targets, found in a.git_calls:
+        if isinstance(found, TrapDirs) and found.text == action and cwds not in found.starts:
+            found.starts.append(cwds)  # the same action set again elsewhere, whose reading analyse_isolated skipped
+    a.cwds, a.vars = cwds, dict(variables)
+    return action in a.moving_traps
 
 
 # SPD-122: where a git call inside a trap's action runs.  SPD-063 dropped such calls from the repository check, and SPD-066's
@@ -661,13 +676,14 @@ def analyse_trap(words, a, depth):
 # the line passes through, which one the hook cannot say.  bash_rule refuses a member every such call (nobody needs git in a
 # trap) and holds Spud's to the repository check in each directory the reading saw the line stand in.
 class TrapDirs:
-    """The directories a git call inside a trap's action (`text`) may run in, standing in its ShellAnalysis.git_calls entry
-    for the unknown ones the action was read at: `action`, the call's own when the action settled them itself (an
-    absolute cd in it), and otherwise every directory the reading saw the line stand in -- where the trap was set
-    (`starts`, one per place the same action was set), where the line ends, and where each other git call and each write
-    of the line runs, read once the line is.  A signal's action may also run in a directory the line only passes through,
-    which the reading does not keep.  Compared by the directories it stands for, so two lines whose trap reaches the same
-    ones read alike (tests/hookcase.HOOK_READING)."""
+    """The directories a git call inside a trap's action (`text`: its text, or the walk.LineBody of a function zsh runs by
+    itself, SPD-276) may run in, standing in its ShellAnalysis.git_calls entry for the unknown ones the action was read
+    at: `action`, the call's own when the action settled them itself (an absolute cd in it), and otherwise every
+    directory the reading saw the line stand in -- where the trap was set (`starts`, one per place the same action was
+    set), where the line ends, where each command of the line runs (ShellAnalysis.stood: a signal's action may run in a
+    directory the line only passes through, `cd tests/fake; sleep 9; cd ../..`, SPD-276), and where each other git call
+    and each write of the line runs, read once the line is.  Compared by the directories it stands for, so two lines
+    whose trap reaches the same ones read alike (tests/hookcase.HOOK_READING)."""
 
     def __init__(self, a, text, start, action):
         self.a, self.text, self.starts, self.action = a, text, [start], action
@@ -677,7 +693,7 @@ class TrapDirs:
         if self.action is not None:
             return self.action
         a = self.a
-        seen = self.starts + [a.cwds] + [found for _targets, found in a.git_calls if not isinstance(found, TrapDirs)]
+        seen = self.starts + [a.cwds] + list(a.stood) + [found for _targets, found in a.git_calls if not isinstance(found, TrapDirs)]
         seen += [found for _target, found in a.redirects] + [write[2] for write in a.git_writes + a.arg_writes]
         return frozenset(d for found in seen if found for d in found) or None
 
@@ -717,6 +733,54 @@ def trap_runs_in_line(words, a):
         if name in LINE_TRAPS or (in_function and name in FUNCTION_TRAPS):
             return True
     return False
+
+
+# SPD-276: the functions zsh runs by itself, later, wherever the line stands then, and not because the line calls them --
+# beside a TRAPxxx function, which is its signal's trap -- each name -> whether zsh may run it before the line is over, in
+# the line's shell, so a cd in it moves the rest of the line as a trap's action that runs inside the line does
+# (analyse_trap): chpwd after each cd, command_not_found_handler for a command zsh does not find, zsh_directory_name for a
+# `~[...]`; zshexit only as the shell exits.  HOOK_ARRAYS: the arrays whose elements name more of them.  Probed 2026-09-24
+# through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f, `$PWD` printed in each body: TRAPEXIT at
+# exit in the line's last directory, and as the function returned when defined in one; TRAPDEBUG before each command;
+# TRAPUSR1 on the signal, in the directory the line had passed into; chpwd and chpwd_functions after each cd, in the
+# directory entered, and a chpwd that cds moved the line; zshexit and zshexit_functions at exit; command_not_found_handler
+# for a command it did not find and zsh_directory_name for `~[x]`, in the line's directory.  bash 3.2.57 ran none of them
+# (tests/test_hooks_words.py FunctionTrapTest); bash 4's command_not_found_handle, which a newer bash on PATH runs for a
+# `bash -c` string, is read the same way, on the safe side.
+RUNNER_FUNCTIONS = {"zshexit": False, "chpwd": True, "command_not_found_handler": True, "command_not_found_handle": True,
+                    "zsh_directory_name": True}
+HOOK_ARRAYS = {"zshexit_functions": False, "chpwd_functions": True, "zsh_directory_name_functions": True}
+
+
+def runner(names, a):
+    """Whether zsh may run a body defined under one of `names` by itself inside the line (True), only on a signal the line
+    does not raise or as the shell or a function ends (False), or never (None): a TRAPxxx name (xxx its signal, read as
+    trap_runs_in_line reads the trap builtin's), a RUNNER_FUNCTIONS name, or one a hook array on the line lists
+    (ShellAnalysis.hook_names, UNKNOWN_NAME standing for every name).  Any TRAP-prefixed name counts, zsh's signal list
+    or not: the side that refuses a member git."""
+    found = None
+    in_function = a.func_depth > 0 or a.body_locals is not None
+    hooked = a.hook_names
+    for name in names:
+        if name.startswith("TRAP") and len(name) > 4:
+            in_line = name[4:] in LINE_TRAPS or (in_function and name[4:] in FUNCTION_TRAPS)
+        elif name in RUNNER_FUNCTIONS:
+            in_line = RUNNER_FUNCTIONS[name]
+        elif name in hooked or syntax.UNKNOWN_NAME in hooked:
+            in_line = hooked.get(name, False) or hooked.get(syntax.UNKNOWN_NAME, False)
+        else:
+            continue
+        found = bool(found) or in_line
+    return found
+
+
+def read_deferred_body(a, body, depth, in_line):
+    """A function body zsh runs by itself (runner), read as a trap's action is (read_action): its git calls refused a
+    member and read for Spud wherever the line stands, a relative write in it one the hook cannot place; and one that
+    runs inside the line and moves the shell leaves the rest of the line's directory unknown."""
+    if read_action(a, body, depth, in_line) and in_line:
+        a.cwds = None
+        a.dir_moves += 1
 
 
 def python_read_index(words, a, start=1):

@@ -7,14 +7,17 @@ Claude Code's own grep, find, rg or pkill is recorded as that reading records it
 shell/held_shadows (SPD-247), and the options the shell holds are read into the state a line starts from by
 shell/held_options (SPD-263), both taken out of this module on SPD-267.  It joins the shell reading's import cycle, every
 read of analyse inside a function body.  Past 250 lines as one reading: analyse_shell_text's prune and the helpers it
-keeps by are one rule, and read_shell_name and read_body are its only way in."""
+keeps by are one rule, and read_shell_name and read_body are its only way in.  A function body the line itself defines
+is read at each call through the same per-state reading (read_once, read_function, SPD-277), since a call runs it where
+the shell stands then exactly as it runs a snapshot's."""
 
 from . import analyse, directories, expansions, globbing, held_shadows, loop_bindings, positional, prepare, stdin_text, syntax, walk
 from ..hooks import hookio, snapshots
 
 
 def read_body(a, text, depth, stdin, fed):
-    """Read a function's body the shell holds, isolated, in a scope of its own (SPD-246): a name it surely declares local
+    """Read a function's body the shell holds -- or one the line defines, a walk.LineBody, which analyse_command reads as
+    the walk had its tokens (SPD-277) -- isolated, in a scope of its own (SPD-246): a name it surely declares local
     (assignment_words.local_names) is not the line's while it runs, and when it returns the shell drops the local, so the
     name is what it was before -- its value in `vars`, no loop binding or basename of the body's, and its doubt as it
     stood before the call, unless the body assigned the name before declaring it (`V=x; local V`), which changed the
@@ -61,11 +64,13 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     went; after a subshell body `( cd "$1" )`, which the walk of the body reads as the subshell it is, where the call
     started (tests/test_hooks_snapshots.py FunctionDirectoryTest).
 
-    A function the line itself defines under that name reads the call's standard input, `stdin` (`fed`: whether anything
-    stands there): its body is read with it where the line defines it, the line being walked again (walk.read_call and
-    walk_line, SPD-212).  An alias's body and a snapshot function's -- which no walk of the line defines -- read that same
-    input here, so `xs < x.sh` (alias xs=sh) and `shfn < x.sh` (a snapshot `shfn(){ sh }`) read the file's program as
-    `sh < x.sh` does, past SPD-145 and SPD-150 (SPD-215); a body is read once per call's words and standard input both.
+    A function the line itself defines under that name is read at the call as well, from the state the call starts in and
+    on its standard input, `stdin` (`fed`: whether anything stands there) -- walk.read_call and read_function, SPD-212 and
+    SPD-277 -- and where both it and the snapshot define the name, each body is read from the call's start and the
+    directories either leaves the line in are joined, since the line's definition may not have run.  An alias's body and
+    a snapshot function's read that same input here, so `xs < x.sh` (alias xs=sh) and `shfn < x.sh` (a snapshot `shfn(){
+    sh }`) read the file's program as `sh < x.sh` does, past SPD-145 and SPD-150 (SPD-215); a body is read once per call's
+    words and standard input both.
 
     The call's words reach a function's body as its positional parameters, so the body is read with them set where it
     reads those (shell/positional, SPD-203): `gitfn push`, whose body is `command git "$@"`, is `git push`.  It is read
@@ -98,9 +103,12 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
             return True
     if not function:
         return False
-    walk.read_call(a, cmd, stdin, fed)
+    line_moved = walk.read_call(a, cmd, depth, stdin, fed)  # a body the line itself defines under the name (SPD-277)
     body = expansions.shell_function(cmd, a)
-    if body is not None:
+    if body is None and line_moved is not walk.NO_BODY:
+        a.cwds = directories.settle(effect, before, line_moved)
+    elif body is not None:
+        a.cwds = before  # ... which may not be the one that runs: the snapshot's is read from the same start
         claude = snapshots.harness_shadow(cmd, body)  # Claude Code's own grep, find, rg or pkill (SPD-247)
         if claude is None:
             text, sound, filled = positional.substitution(body, words[1:])
@@ -114,29 +122,103 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
             read = (body, bool(words[1:]) and (a.shell_reading == 0 or bool(a.shell_words)), key)
         if read not in reads:
             a.shell_expanded.append((cmd, "a shell function"))
-            reads.add(read)
             # the substitutions the call's words were set in (SPD-258): the member's where the words are, the outermost
             # call's and a nested call's that passes one of them on; a nested call's own literals are its body's
             if a.shell_reading and not any(w in a.shell_words for w in words[1:]):
                 filled = ()
-            a.body_dirs[cmd, read] = _READING
+
+        def run():
             if claude is None or not held_shadows.read_shadow(a, cmd, claude, words[1:], depth):
                 analyse_shell_text(a, text, depth + 1, words[1:], own_process=True, substituted=sound, stdin=stdin,
                                    fed=fed, filled=filled)
-            after = None if a.body_dirs[cmd, read] is _REENTERED and a.cwds != before else a.cwds
-            a.body_dirs[cmd, read] = after
-        else:
-            after = a.body_dirs.get((cmd, read), before)
-            if after is _READING or after is _REENTERED:  # a call inside its own reading, from where that reading started
-                a.body_dirs[cmd, read], after = _REENTERED, before
-            a.dir_moves += after != before  # the move given again, as the reading counted it
+
+        after = read_once(a, cmd, read, before, run)
+        if line_moved is not walk.NO_BODY:
+            after = directories.union_dirs(after, line_moved)  # either function may be the one that runs
         a.cwds = directories.settle(effect, before, after)
     return False
 
 
 # ShellAnalysis.body_dirs' marks for a function body whose reading is under way, and for one a call inside that reading
-# reached again from the same state (read_shell_name)
+# reached again from the same state (read_once)
 _READING, _REENTERED = object(), object()
+
+
+def read_once(a, cmd, read, before, run):
+    """Read a function's body for a call once per `read` -- its text, the call's words where they reach it, its standard
+    input and the state it starts from -- with `run`, and return the directories the line is in after it (SPD-252): the
+    ones that reading left, given again to a call that reads exactly as it did (after a subshell put the directory back,
+    in the line's second walk), and, for a call inside its own reading from where that reading started, the directories
+    it started in -- left unknown once the reading is over if the body moves them, since the shell would move them again
+    from where the inner call returns."""
+    reads = a.bodies_read.setdefault(cmd, set())
+    if read in reads:
+        after = a.body_dirs.get((cmd, read), before)
+        if after is _READING or after is _REENTERED:  # a call inside its own reading, from where that reading started
+            a.body_dirs[cmd, read], after = _REENTERED, before
+        a.dir_moves += after != before  # the move given again, as the reading counted it
+        return after
+    reads.add(read)
+    a.body_dirs[cmd, read] = _READING
+    run()
+    after = None if a.body_dirs[cmd, read] is _REENTERED and a.cwds != before else a.cwds
+    a.body_dirs[cmd, read] = after
+    return after
+
+
+def read_function(a, cmd, body, depth, stdin, fed):
+    """A call's reading of a function body the line defines (SPD-277, walk.read_call), a LineBody: read as a body the
+    shell's snapshot holds is (read_body), in a scope of its own, from the state the call starts in, once per that state
+    and standard input (read_once) -- but as the member's own text, which no finding is pruned from -- and the directories
+    the line is in after it.  Its readings are bounded as SPD-212 bounded them: a reading on a call's input counts
+    against positional.READINGS_PER_NAME across the analysis (ShellAnalysis.body_walks), past which a call's input is
+    read as input the line does not spell, refused a member a shell or an interpreter reading it; and a body read from
+    that many states reads a call from any other once more, from directories the hook cannot follow, and gives every later
+    one that reading.  A call inside the body's own reading, from another state, is read a level deeper, so a body that
+    calls itself from ever other states stops at analyse.READING_DEPTH.
+
+    Returns (the directories, the pair of texts that reading printed, SPD-272: ShellAnalysis.body_printed), the texts
+    kept per reading as the directories are, so a call that reads exactly as one read before prints what it printed,
+    and one inside its own reading from where that reading started prints text the hook cannot spell (None)."""
+    before, counted = a.cwds, False
+    if fed and a.body_walks >= positional.READINGS_PER_NAME:
+        stdin = None  # past the bound: input the line does not spell (SPD-212)
+    elif fed:
+        counted = True
+    # keyed by the body, not the name `cmd`, whose readings of a snapshot function of the same name count apart; and by
+    # the writes the line has made so far, which a reading holds a file it runs from against (a sed or awk -f script,
+    # SPD-151; an archive, tree_writes): `f; echo x > f.awk; f`, where f runs `awk -f f.awk`, reads the second call again
+    # -- but not for a call inside the body's own reading, which the body's own writes would read again without end
+    writes = None if body.active else (len(a.redirects), len(a.git_writes), len(a.arg_writes))
+    read = (cmd, stdin_text.reading_key(stdin, fed), a.reading_state(), writes)
+    if read not in a.bodies_read.get(body, ()) and body.readings >= positional.READINGS_PER_NAME:
+        read = (cmd, stdin_text.reading_key(stdin, fed), None, None)
+
+    def run():
+        a.body_walks += counted
+        body.readings += 1
+        if read[2] is None:
+            a.cwds = None
+            a.dir_moves += 1
+        body.active += 1
+        marks = [len(getattr(a, field)) for field in _PRUNED] if a.shell_reading else None
+        a.read_printed = None  # a reading past analyse.READING_DEPTH walks nothing, and prints text the hook cannot spell
+        try:
+            read_body(a, body, depth + (body.active > 1), stdin, fed)
+        finally:
+            body.active -= 1
+        a.body_printed[body, read] = a.read_printed
+        if marks is not None:
+            # called from the shell's own text (a snapshot function's body): what the member's body earns is the member's,
+            # which analyse_shell_text's prune keeps
+            a.shell_own.update(id(entry) for field, mark in zip(_PRUNED, marks) for entry in getattr(a, field)[mark:])
+
+    after = read_once(a, body, read, before, run)
+    return after, a.body_printed.get((body, read))
+
+
+# The analysis's lists analyse_shell_text prunes of what falls on a member for text it did not write
+_PRUNED = ("findings", "redirects", "git_writes", "arg_writes")
 
 
 def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted=None, stdin=None, fed=False, filled=()):
@@ -212,14 +294,15 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted
     # with neither there is nothing of the member's to fill one
     member = line_vars | a.line_filled | (a.member_vars if own_words or fed else frozenset())
     kept, a.shell_kept, a.shell_words = a.shell_kept, set(), []
+    own, a.shell_own = a.shell_own, set()  # the entries of a function body the line defines, the member's text (SPD-277)
     a.shell_line_vars = frozenset()
     a.findings[marks[0]:] = [f for i, f in enumerate(a.findings[marks[0]:], marks[0])
-                             if f[0] not in syntax.SHELL_TEXT_TOLERATED or i in kept or names_member_var(f[1], member)
+                             if f[0] not in syntax.SHELL_TEXT_TOLERATED or i in kept or id(f) in own or names_member_var(f[1], member)
                              or any(spells_member_word(f[1], spelled) for spelled in unread_words)]
     supplied = frozenset(prepare.deglob(w) for w in own_words)
-    a.redirects[marks[1]:] = [e for e in a.redirects[marks[1]:] if keeps_write(e[0], supplied, member)]
-    a.git_writes[marks[2]:] = [e for e in a.git_writes[marks[2]:] if keeps_write(e[1], supplied, member)]
-    a.arg_writes[marks[3]:] = [e for e in a.arg_writes[marks[3]:] if keeps_write(e[1], supplied, member)]
+    a.redirects[marks[1]:] = [e for e in a.redirects[marks[1]:] if id(e) in own or keeps_write(e[0], supplied, member)]
+    a.git_writes[marks[2]:] = [e for e in a.git_writes[marks[2]:] if id(e) in own or keeps_write(e[1], supplied, member)]
+    a.arg_writes[marks[3]:] = [e for e in a.arg_writes[marks[3]:] if id(e) in own or keeps_write(e[1], supplied, member)]
 
 
 def names_member_var(detail, member):

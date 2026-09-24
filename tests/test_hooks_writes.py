@@ -991,11 +991,12 @@ class ExtractionWriteTest(TreeWriteCase):
                                 ("curl -s https://example.com/x", []), ("curl -K cfg https://example.com/x", [(m.ANY_PATH, "tree")])):
             with self.subTest(command):
                 self.assertEqual(self.writes(command), writes)
-        # SPD-144: a patch fed by a pipe from a program is text the line does not spell, so after the tree its names are a
-        # write the line cannot place, refused a member; a `<` file the line names is read, above
-        (tree, kind), (unlisted, _) = self.writes("cat x.patch | patch -p1")
+        # SPD-144: a patch fed by a pipe from a program is text the line does not spell, so after the tree its names are an
+        # "archive" finding the hook cannot list (SPD-275), refused a member; a `<` file the line names is read, above
+        (tree, kind), = self.writes("cat x.patch | patch -p1")
         self.assertEqual((tree, kind), (".", "tree"))
-        self.assertTrue(unlisted.startswith(m.ANY_PATH) and "from standard input" in unlisted, unlisted)
+        findings = self.hook_reading("cat x.patch | patch -p1")["findings"]
+        self.assertTrue(any(k == "archive" and d[0] == "stdin" and "from standard input" in d[2] for k, d in findings), findings)
 
     def test_into_the_members_own_subtree_is_silent(self):
         for command in ("tar -xf a.tar -C out", "tar xzf a.tar -C out", "tar -x -C out -f a.tar", "tar -xf a.tar --directory=out/x",
@@ -2250,6 +2251,8 @@ class LoopWordTargetTest(BashHookCase):
             ("S=tests/out; for f in $S/x $S/y; do touch $f; done", ["tests/out/x", "tests/out/y"]),
             ("for a in x y; do for b in 1 2; do touch tests/$a$b; done; done", ["tests/x1", "tests/x2", "tests/y1", "tests/y2"]),
             ("for f in a b; do curl -sS -o tests/$f.html https://example.com/$f; done", ["tests/a.html", "tests/b.html"]),
+            # SPD-277: a function the loop's body defines and calls is read at each call, where the loop has set f
+            ("for f in a b; do g() { touch tests/$f; }; g; done", ["tests/a", "tests/b"]),
         ):
             with self.subTest(command):
                 self.assertEqual(self.writes(command), recorded)
@@ -2284,7 +2287,7 @@ class LoopWordTargetTest(BashHookCase):
                         "while read f; do touch tests/$f; done", "select f in a b; do touch tests/$f; done",
                         "for f in a b; do read f; touch tests/$f; done", "for f in a b; do f=$X; touch tests/$f; done",
                         "for f in a b; do unset f; touch tests/$f; done",
-                        "for f in a b; do g() { touch tests/$f; }; g; done",
+                        "for f in a b; do g() { touch tests/$f; }; done; g",
                         "for f in a b; do :; done; touch tests/$f",
                         "for f in a; do for f in b; do :; done; touch tests/$f; done"):
             with self.subTest(command):

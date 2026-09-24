@@ -26,11 +26,12 @@ the shell may be in):
   its redirections name in turn, after its pipe (stdin_text.command_input).  Since SPD-210 so does such input given to
   the command around the shell: a `-c` string, eval, a group, a subshell, a loop, a conditional (`sh -c sh < x.sh`,
   `{ sh; } < x.sh`, `(sh) < x.sh`), and a command substitution in their commands' words.  Since SPD-212 so does the
-  input a call hands a function the line defines (`f() { sh; }; f < x.sh`, walk.walk_line).
+  input a call hands a function the line defines (`f() { sh; }; f < x.sh`), which each call reads the body on, where
+  it runs (walk.read_call, SPD-277).
 - "xargs": a shell's `-c` string an xargs reads from input the line does not spell (`cat f | xargs -0 sh -c`).
 - "function": a call given input of a function the line defines in text whose reading is over before the call -- an
-  `eval` string's (`eval 'f() { sh; }'; f < x.sh`) -- whose body no walk reads again on that input (SPD-212,
-  walk.read_call); a function the line defines anywhere else is read on each call's input (walk.walk_line).
+  `eval` string's (`eval 'f() { sh; }'; f < x.sh`) -- whose body the call reads without that input (SPD-212,
+  walk.read_call); a function the line defines anywhere else is read at each call, on that call's input (SPD-277).
 - "startup": a variable that names a file of commands a shell runs when it starts -- BASH_ENV (any non-interactive
   bash, a script's `#!/bin/bash` included), ENV and ZDOTDIR -- assigned anywhere on the line, and HOME assigned on a line
   that starts a shell, whose ~/.zshenv (and an interactive shell's rc files) then come from the line's own directory.
@@ -71,7 +72,8 @@ cannot resolve, which any write may be):
   against the line around it.  Refused a member where any write of the line names the file (script_reason's `written`).
 
 Both earn WRITTEN_REASON, which names the two-call respelling; Spud is never refused them, as every "script" finding is
-read for a member alone.  The shell scripts above need neither: an allow-listed one runs only where the line writes none
+read for a member alone.  An archive or a patch the hook lists is held to the same two forms (shell/tree_writes, SPD-275),
+through an "archive" finding and a reason of its own, rewritten() deciding its "rewritable" as it decides a script's.  The shell scripts above need neither: an allow-listed one runs only where the line writes none
 of it at all, in any order, and the hook opens no shell script, interpreter program or runner file but these -f files and
 the runner files shell/runner_files holds to the same `written`.  What refuses more than it must, on purpose: a line the
 reading walks twice (zsh's reading and bash's, a compound's own input, a function's calls) meets in its second walk the

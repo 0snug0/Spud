@@ -1,11 +1,13 @@
 """PreToolUse(Bash): here-documents and standard input -- a body, its expansions, what a shell or a command reads on its
 input, multios, and a document fed to a compound command or a function."""
 
+import os
 import shutil
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import load_spud_module, wall_clock
 from hookcase import AGENT_A, AGENT_C, SCRIPT_WORDING, BashHookCase
@@ -1125,6 +1127,280 @@ class CompoundOutputTest(BashHookCase):
             self.unspelled(line)
 
 
+# SPD-273: compound commands whose other commands print nothing on standard output, each before a pipe into sh with a
+# git push in its spelled text.  Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0)
+# under -f -o nobareglobqual and under -f, and in GNU bash 3.2.57, a `touch` in each text: all three shells ran every one.
+SILENT_OUTPUT = (
+    "if true; then echo 'git push'; fi | sh",
+    "while true; do echo 'git push'; break; done | sh",
+    "until false; do echo 'git push'; break; done | sh",
+    "{ :; echo 'git push'; } | sh",
+    "if [[ -n x ]]; then echo 'git push'; fi | sh",
+    "if [ -n x ] && test x; then echo 'git push'; fi | sh",
+    "while (( 1 )); do echo 'git push'; break; done | sh",
+    "while ((1)); do echo 'git push'; break; done | sh",
+    "if ! false; then echo 'git push'; fi | sh",
+    "for i in a b; do echo 'git push'; continue; done | sh",
+    "{ echo 'git push'; exit; } | sh",
+    "{ echo 'git push'; return 3; } | sh",
+    "{ true --help; false -v x; : --help; echo 'git push'; } | sh",
+    "{ true > /dev/null; echo 'git push'; } | sh",
+    "if true; then echo 'git push'; elif false; then :; else true; fi | sh",
+    "! echo 'git push' | sh",
+    "builtin true; if builtin test x; then echo 'git push'; fi | sh",
+)
+
+
+class PrintedTextCase(BashHookCase):
+    """The readings SilentCommandOutputTest and PrinterShadowTest check a line for: the text a shell after a pipe runs,
+    read as git's, as a script the hook does not read, or as neither."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        home = self.home.path
+        (home / "ledger" / "tickets").mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def verbs(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "git"]
+
+    def forms(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def law_7(self, line):
+        """The analysis finds the push and nothing unread; a member is refused it, and Spud never is."""
+        with self.subTest(line=line):
+            self.assertIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def law_1(self, form):
+        """A write into the ledger in the text the shell runs is refused Spud (Law 1) and a member (a generated file)."""
+        line = form % self.TARGET
+        with self.subTest(line=line):
+            self.assertRefused(line, "Law 1", agent_id=None)
+            self.assertRefused(line, "generated")
+
+    def unspelled(self, line):
+        """A "stdin" script finding, refused a member with SPD-145's reason; silent for Spud."""
+        with self.subTest(line=line):
+            self.assertIn("stdin", self.forms(line))
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """No push, no script finding, and silent for every caller."""
+        with self.subTest(line=line):
+            self.assertNotIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertSilent(line)
+            self.assertSilent(line, agent_id=None)
+
+
+class SilentCommandOutputTest(PrintedTextCase):
+    """SPD-273, filed by SPD-185's engineer: printed_text knew only the printers (echo, print, printf, cat, tee), so any
+    other command in a compound printed text the hook could not spell -- a condition's `true` or `[[ ]]`, a loop's `break`
+    -- and that absorbed the whole compound's text.  On the SPD-185 tree `if true; then echo 'echo x > <ledger file>'; fi |
+    sh` recorded only a script stdin finding: a member was refused a shell after the pipe on the unspelled-input reason,
+    and Spud's reading never saw the spelled text the shell runs (a Law 1 write in it went unread), the class SPD-214 closed
+    for a compound's own redirections.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, and in GNU bash 3.2.57: `true`, `false`, `:`, `test`, `[`, `[[ ... ]]`, `(( ... ))`,
+    `break`, `continue`, `return` and `exit` printed no byte on standard output in any shell, alone, with `--help` or with
+    `-v x` (`test 1 -eq` and `[ ]` too), and `! false` printed nothing while `! echo hi` printed hi; every line of
+    SILENT_OUTPUT ran its text in all three shells.  A command whose output the hook does not know still leaves the
+    compound's text unread."""
+
+    def test_the_tickets_evidence_is_read_as_the_shell_runs_it(self):
+        self.law_7("if true; then echo 'git push'; fi | sh")
+        self.law_7("while true; do echo 'git push'; break; done | sh")
+
+    def test_the_text_reaches_spud_s_reading(self):
+        for form in ("if true; then echo 'echo x > %s'; fi | sh", "while true; do echo 'echo x > %s'; break; done | sh",
+                     "{ :; echo 'echo x > %s'; } | sh", "if [[ -n x ]]; then echo 'echo x > %s'; fi | sh"):
+            self.law_1(form)
+
+    def test_every_command_that_prints_nothing(self):
+        for line in SILENT_OUTPUT:
+            self.law_7(line)
+
+    def test_text_that_holds_nothing_the_rules_read_is_allowed(self):
+        """Each was refused a member before, as a shell reading input the line does not spell."""
+        for line in ("true | sh", ": | sh", "if true; then echo 'git status'; fi | sh",
+                     "while true; do echo 'ls'; break; done | sh", "if [[ -n x ]]; then :; fi | sh"):
+            self.data(line)
+
+    def test_a_command_the_hook_does_not_read_still_leaves_the_text_unread(self):
+        for line in ("if true; then ls; fi | sh", "while true; do cat x.sh; break; done | sh",
+                     "if grep -q x f; then echo 'git push'; fi | sh", "{ true; wc -l f; } | sh", "{ true; pwd; } | sh"):
+            self.unspelled(line)
+
+    def test_the_controls_read_as_before(self):
+        self.law_7("echo 'git push' | sh")
+        self.law_7("for i in a; do echo 'git push'; done | sh")
+        self.data("{ true | echo 'git push' > /dev/null; } | sh")
+        self.data("if true; then echo 'git push'; fi; echo true | sh")
+
+
+class PrinterShadowTest(PrintedTextCase):
+    """SPD-272, filed by SPD-185's engineer: printed_text read echo, print, printf, cat and tee by name and never asked
+    whether the line defined a function of that name, so `echo() { printf 'git push\\n'; }; echo hi | sh` was read as
+    the shell running `hi` while zsh runs the function: a git write in the function's output reached the shell unread.
+    The same holds for the commands SPD-273 reads as printing nothing, and for a name the shell's snapshot defines.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, and in GNU bash 3.2.57, a `touch` in each text: a function the line defines named echo,
+    printf, cat, true, `:`, test or builtin ran in place of the command of that name, one defined inside an `if` too;
+    `builtin echo` and `command echo`, `command -p echo` too, ran the echo in place of the function; one defined in a
+    subshell did not reach a call after it; and `command -v echo` printed `echo`, a name and no text of its own.
+
+    Such a name prints what the function's body prints (SPD-272, finished by SPUD-272/Bertha on the SPD-277 tree): each
+    call reads the body where it runs (walk.read_call), and the text that reading prints is the call's, from the state
+    the call starts in and on the input it is given, so the text a shell after the pipe runs is read for Law 7 and
+    Spud's Law 1 as a printer's is.  A body whose own text the hook cannot spell -- a command it does not read, a
+    positional parameter, a body zsh's `functions` parameter is handed -- leaves the call's text unread, refused a
+    member as SPD-145 refuses a shell reading any.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, and in GNU bash 3.2.57, a `touch` in each text: `f3() { cat; }; echo '...' | f3 | sh`,
+    `f4() { echo "touch $X"; }; X=v1; f4 | sh` (made v1: the value at the call), `f5 2>/dev/null | sh` and `echo() {
+    printf ...; }; echo hi | sh` ran the text in all three; `f() { ...; } > /dev/null; f | sh`, `function k { ...; } >
+    /dev/null`, `w > /dev/null | sh` and `q() { ...; } > out.txt; q | sh` ran it in zsh alone, whose MULTIOS joins the
+    definition's own output redirections to the call's pipe; `z() echo '...' > /dev/null; z | sh` (zsh's one-command
+    body) and `s() ( ... ) > /dev/null; s | sh` ran it in neither."""
+
+    def test_the_tickets_evidence_is_read_as_the_shell_runs_it(self):
+        self.law_7("echo() { printf 'git push\\n'; }; echo hi | sh")
+
+    def test_a_body_s_text_reaches_spud_s_reading(self):
+        for form in ("f() { echo 'echo x > %s'; }; f | sh", "echo() { printf 'echo x > %s\\n'; }; echo hi | sh",
+                     "f() { cat; }; echo 'echo x > %s' | f | sh", "f() { if true; then echo 'echo x > %s'; fi; }; f | sh"):
+            self.law_1(form)
+
+    def test_every_name_the_line_defines_prints_its_body(self):
+        for line in ("printf() { echo 'git push'; }; printf 'hi\\n' | sh",
+                     "print() { echo 'git push'; }; print hi | sh",
+                     "cat() { echo 'git push'; }; cat <<'EOF' | sh\nhi\nEOF",
+                     "true() { echo 'git push'; }; true | sh",
+                     ":() { echo 'git push'; }; : | sh",
+                     "test() { echo 'git push'; }; if test x; then :; fi | sh",
+                     "function echo { printf 'git push\\n'; }; echo hi | sh",
+                     "echo () printf 'git push\\n'; echo hi | sh",
+                     "if true; then echo() { printf 'git push\\n'; }; fi; echo hi | sh",
+                     "f() { echo 'git push'; }; f | sh"):
+            self.law_7(line)
+        # a function named for a command the rules read is refused a member on its own, and its text is read
+        for line in ("tee() { echo 'git push'; }; echo hi | tee | sh",
+                     "builtin() { printf 'git push\\n'; }; builtin echo hi | sh",
+                     "command() { printf 'git push\\n'; }; command echo hi | sh"):
+            with self.subTest(line=line):
+                self.assertIn("push", self.verbs(line))
+                self.assertIn("function", [kind for kind, _ in self.analysis(line).findings])
+                self.assertEqual(self.forms(line), [])
+                self.assertRefused(line, "Law 7")
+
+    def test_each_call_prints_its_own_text(self):
+        """The body is read at each call (SPD-277), from the state and on the input the call has there."""
+        for line in ("f() { cat; }; echo 'git push' | f | sh",
+                     "f() { cat; }; echo hi | f; echo 'git push' | f | sh",
+                     "f() { echo \"$X\"; }; X='git push'; f | sh",
+                     "X=hi; f() { echo \"$X\"; }; f; X='git push'; f | sh",
+                     "f() { echo 'git push'; }; f 2>/dev/null | sh",
+                     "f() { echo 'git push'; } > /dev/null; f | sh",
+                     "function f { echo 'git push'; } > /dev/null; f | sh",
+                     "f() { echo 'git push'; }; f > /dev/null | sh"):
+            self.law_7(line)
+        for line in ("f() { cat; }; echo 'git push' | f; echo hi | f | sh", "f() { echo 'git status'; }; f | sh",
+                     "X='git push'; f() { echo \"$X\"; }; X=hi; f | sh", "f() { echo 'git push'; }; f; echo hi | sh"):
+            self.data(line)
+
+    def test_a_body_whose_text_the_hook_cannot_spell_is_unread(self):
+        for line in ("echo() { ls; }; echo hi | sh", "f() { cat x.sh; }; f | sh", "f() { cat; }; f < x.sh | sh",
+                     "f() { echo \"$1\"; }; f 'git push' | sh", "f() { echo 'git push'; ls; }; f | sh",
+                     "functions[echo]='printf \"git push\\n\"'; echo hi | sh"):
+            self.unspelled(line)
+
+    def test_a_definition_that_may_not_have_run_prints_the_command_s_text_too(self):
+        """A definition in a condition, a loop, after `&&` or in an eval's text may not run before the call (the hook does
+        not read a condition's outcome), and one in a pipeline element before a `|` or in a list before a `&` runs in a
+        process of its own, so the command of the function's name may be what runs: a printer's text is read beside the
+        body's, and a program's, which the hook does not know, leaves the call's text unread.  Probed 2026-09-24 as the
+        class docstring says: `echo() { printf 'touch p1\\n'; } | cat; echo 'touch b1' | sh` and `printf() { ...; } &
+        wait; printf 'touch b2\\n' | sh` made b1 and b2 in all three shells, and `if true; then print() { ... }; fi; print
+        ... | sh` ran the function's text."""
+        for line in ("if true; then echo() { printf 'hi\\n'; }; fi; echo 'git push' | sh",
+                     "true && echo() { printf 'git push\\n'; }; echo hi | sh",
+                     "for i in a; do echo() { printf 'git push\\n'; }; done; echo hi | sh",
+                     "echo() { printf 'hi\\n'; } | cat; echo 'git push' | sh",
+                     "printf() { echo hi; } & printf 'git push\\n' | sh",
+                     "{ echo() { printf 'hi\\n'; }; } | cat; echo 'git push' | sh"):
+            self.law_7(line)
+        for line in ("if true; then f() { echo 'git push'; }; fi; f | sh", "eval 'f() { echo \"git push\"; }'; f | sh",
+                     "true && f() { echo 'git push'; }; f | sh", "f() { echo 'git push'; } | cat; f | sh"):
+            self.unspelled(line)
+        self.law_7("{ f() { echo 'git push'; }; f | sh; } | cat")  # the call runs where the definition did
+
+    def test_builtin_and_command_run_the_shell_s_own(self):
+        for line in ("echo() { printf 'hi\\n'; }; builtin echo 'git push' | sh",
+                     "echo() { printf 'hi\\n'; }; command echo 'git push' | sh",
+                     "builtin echo 'git push' | sh", "command echo 'git push' | sh", "command -p echo 'git push' | sh",
+                     "builtin printf 'git push\\n' | sh", "command printf '%s\\n' 'git push' | sh",
+                     "true() { echo hi; }; if builtin true; then echo 'git push'; fi | sh"):
+            self.law_7(line)
+        self.data("true() { echo hi; }; builtin true | sh")
+        for line in ("command -v echo | sh", "command -V echo | sh", "builtin cat <<'EOF' | sh\nhi\nEOF"):
+            self.unspelled(line)
+
+    def test_a_name_no_function_holds_reads_as_before(self):
+        self.law_7("f() { echo hi; }; echo 'git push' | sh")
+        self.law_7("(echo() { printf 'hi\\n'; }); echo 'git push' | sh")
+        self.data("(echo() { printf 'git push\\n'; }); echo hi | sh")
+
+
+class SnapshotPrinterTest(PrintedTextCase):
+    """SPD-272: a printer's or a silent command's name the shell's snapshot defines as an alias or a function runs that
+    body in place of the command, as one the line defines does (ShellSnapshotTest has the snapshot's reading); `builtin`
+    still runs the shell's own."""
+
+    SNAPSHOT = ("# Functions\nprintf () {\n\tbuiltin echo 'git push'\n}\ntrue () {\n\tbuiltin echo 'git push'\n}\n"
+                "# Aliases\nalias -- cat='cat -v'\n")
+
+    def setUp(self):
+        super().setUp()
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True)
+        (snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh").write_text(self.SNAPSHOT, encoding="utf-8")
+
+    def analysis(self, command):
+        """The analysis in this home's own ~/.claude, where its snapshot is (ShellSnapshotTest.expansion)."""
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            return super().analysis(command)
+
+    def test_a_name_the_snapshot_defines_prints_its_body(self):
+        for line in ("printf 'hi\\n' | sh", "true | sh", "cat <<'EOF' | sh\nhi\nEOF", "{ true; echo hi; } | sh"):
+            self.unspelled(line)
+
+    def test_a_name_both_the_line_and_the_snapshot_define_is_unread(self):
+        """Either body may be the one that runs (held_text.read_shell_name), and the snapshot's text is not the line's."""
+        self.unspelled("printf() { echo 'git status'; }; printf 'hi\\n' | sh")
+
+    def test_the_shell_s_own_reads_as_before(self):
+        self.law_7("echo 'git push' | sh")
+        self.law_7("builtin printf 'git push\\n' | sh")
+        self.law_7("if builtin true; then echo 'git push'; fi | sh")
+
+
 class FunctionInputTest(BashHookCase):
     """SPD-212, filed by SPD-210's engineer: a function the line defines was read once, where it is defined, on the input
     that place stands on, and never with the input a call of it is given, so a shell in its body reading that input ran
@@ -1132,15 +1408,16 @@ class FunctionInputTest(BashHookCase):
     `{ sh; } < x.sh` records a script "stdin" finding, and read nothing of the here-string in `g() { sh; }; g <<< 'touch
     g1'`.  SPD-210 covered a redirection on the definition itself (`fn() { sh; } < x.sh`), not on the call.
 
-    The rule (walk.walk_line): a call of a function the line defines, in command position, hands the function's body the
-    standard input the call is given (its pipe and its own input redirections, as SPD-209 reads a command's), and the line
-    is walked again with that input standing where the body opens, once per distinct input, as SPD-210 walks it again for
-    a compound command's own input.  A call the second walk finds (in a body, in a group given input) is read the same
-    way.  These walks are bounded as SPD-203's per-call readings are (READINGS_PER_NAME), across the whole analysis: past
-    the bound a line's bodies are read once more on input the line does not spell, refused a member on doubt.  A
-    function an `eval` string defines is defined in the shell that runs the line, but its text's reading is over before
-    the call: a call of it given input is refused a member as such input is (script_files, "function"); a function a
-    substitution or a `-c` string defines stays in its own process.
+    The rule (walk.read_call, SPD-277): a call of a function the line defines, in command position, hands the function's
+    body the standard input the call is given (its pipe and its own input redirections, as SPD-209 reads a command's),
+    and the body is read at that call, from the state the call starts in, on that input -- with a compound body's own
+    input redirections after it, zsh reading the call's input and then the definition's (held_text.read_function).  A
+    call inside a body, or in a group given input, is read the same way where it runs.  The readings on a call's input
+    are bounded as SPD-203's per-call readings are (READINGS_PER_NAME), across the whole analysis: past the bound a
+    call's input is read as input the line does not spell, refused a member on doubt.  A function an `eval` string
+    defines is defined in the shell that runs the line, but its text's reading is over before the call: a call of it
+    given input is refused a member as such input is (script_files, "function"); a function a substitution or a `-c`
+    string defines stays in its own process.
 
     Probed 2026-09-23 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
     and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory, each file and
@@ -1211,15 +1488,15 @@ class FunctionInputTest(BashHookCase):
         self.law_7("d() { sh; } <<< 'git push'; d <<< 'true'")
 
     def test_the_readings_of_one_body_have_a_bound(self):
-        """READINGS_PER_NAME distinct inputs are each read; one more, or a chain of calls longer than that, reads every
-        body on the line once more on input the line does not spell: refused a member on doubt, Spud reading on."""
+        """READINGS_PER_NAME distinct inputs are each read; one more, or a chain of calls longer than that, reads the
+        call's body on input the line does not spell: refused a member on doubt, Spud reading on."""
         cap = load_spud_module().READINGS_PER_NAME
         inputs = "m() { sh; }; " + "; ".join("m <<< 'true %d'" % k for k in range(1, cap + 1))
         self.data(inputs)
         self.unspelled(inputs + "; m <<< 'git push'")
         chain = "f1() { sh; }; " + "; ".join("f%d() { f%d; }" % (k + 1, k) for k in range(1, cap + 2))
         self.unspelled(chain + "; f%d <<< 'git push'" % (cap + 2))
-        # the bound holds across the analysis, so a line nested in a body read on each input cannot multiply the walks
+        # the bound holds across the analysis, so a line nested in a body read on each input cannot multiply the readings
         nested = "f() { echo $(g() { sh; }; %s); }; " % "; ".join("g <<< 'true %d'" % k for k in range(1, cap + 1))
         nested += "; ".join("f <<< 'true %d'" % k for k in range(1, cap + 1))
         self.assertEqual(self.analysis(nested).body_walks, cap)

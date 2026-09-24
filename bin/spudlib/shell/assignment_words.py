@@ -154,6 +154,48 @@ def array_value(elements):
     return syntax._ARRAY_VALUE + " ".join(e.translate(_ELEMENT_BLANKS) for e in elements)
 
 
+def _elements(value):
+    """The masked elements of the value walk.py joins for `name=( ... )` (array_value), or None for no array value."""
+    if not value.startswith(syntax._ARRAY_VALUE):
+        return None
+    return value[len(syntax._ARRAY_VALUE) :].split(" ") if value != syntax._ARRAY_VALUE else []
+
+
+def function_bodies(name, subscript, append, value):
+    """SPD-278: ([(the function's name, the body text)] an assignment to zsh's `functions` spells, the text of a body it
+    does not spell or None).  `functions[key]=body` spells one, under UNKNOWN_NAME where the hook cannot read the key
+    (special_bindings); `functions=(k body ...)` and `functions+=( ... )` one per pair, and nothing for elements odd in
+    number (zsh binds none).  A body it does not spell -- a variable or a substitution in it, text appended to a body
+    (`functions[k]+=...`), an element that may become any number of words, so no body is sure of its name -- is handed
+    back to be refused a member as text the reader did not read (SPD-217)."""
+    if subscript is not None:
+        shown = "%s[%s]%s=%s" % (name, prepare.deglob(subscript), "+" if append else "", prepare.deglob(value))
+        if append or hookio.SUBST in value or syntax._EXPANDING_DOLLAR_RE.search(value):
+            return [], shown
+        key = prepare.deglob(subscript)
+        return [(syntax.UNKNOWN_NAME if _unreadable(subscript) or not key else key, prepare.deglob(value))], None
+    elements = _elements(value)
+    if elements is None:
+        return [], None
+    if any(_unreadable(e, element=True) for e in elements):
+        return [], "%s%s=(%s)" % (name, "+" if append else "", " ".join(prepare.deglob(e) for e in elements))
+    if len(elements) % 2:
+        return [], None
+    return [(prepare.deglob(elements[k]), prepare.deglob(elements[k + 1])) for k in range(0, len(elements), 2)], None
+
+
+def listed_names(value):
+    """SPD-276: the function names an assignment to one of zsh's hook arrays (chpwd_functions and its kin) lists -- every
+    element of `name=( ... )` and `name+=( ... )`, the one value of `name[k]=f` or of a scalar `name=f` -- or None where
+    an element may become any number of words the hook cannot read."""
+    elements = _elements(value)
+    if elements is None:
+        elements = [value] if value else []
+    if any(_unreadable(e, element=True) for e in elements):
+        return None
+    return [prepare.deglob(e) for e in elements]
+
+
 def _unreadable(text, element=False):
     """The hook cannot say what this subscript or array element becomes: it holds an expansion or a substitution (an
     element may then become any number of words); a subscript starts with zsh's subscript flags (`functions[(e)foo]=` ran
@@ -182,9 +224,9 @@ def special_bindings(name, subscript, append, value):
         if _unreadable(subscript) or not prepare.deglob(subscript):
             return table, None
         return table, [(subscript, None if append else value)]
-    if not value.startswith(syntax._ARRAY_VALUE):
+    elements = _elements(value)
+    if elements is None:
         return table, None
-    elements = value[len(syntax._ARRAY_VALUE) :].split(" ") if value != syntax._ARRAY_VALUE else []
     if len(elements) % 2 or any(_unreadable(e, element=True) for e in elements):
         return table, None
     return table, [(elements[k], elements[k + 1]) for k in range(0, len(elements), 2)]
