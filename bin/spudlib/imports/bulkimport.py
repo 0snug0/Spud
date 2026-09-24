@@ -9,27 +9,49 @@ from ..render import notefiles, sectiontext
 from ..state import ledgerdb, lookup
 
 
+def handoff_rows(con, ticket, text):
+    """A ## Handoffs body -> [{at, from_id, to_id, what, whole}], read as sectiontext.render_handoff_rows writes it.
+
+    A dated handoff line naming members of this ticket (or Spud) is a row; its `at` is the line's date.  A line
+    indented two spaces under a handoff line continues that row, as a Log entry's lines and a proposal's Why continue
+    theirs (SPD-078): the indent comes off, so a `what` holding newlines reads back whole.  A handoff line naming a
+    party that is no member here is kept whole (`whole`, no ids), its continuation lines verbatim with it, so it
+    renders as it was.  An empty line between a handoff line and its next continuation line is a blank line of the
+    `what` (an editor may have trimmed the render's `  `); any other blank line, and a comment, only separates rows.
+    Any other line is a row of its own, kept whole, with no date (`at` None).  The rule is core/markdown.continued_rows,
+    which the Log reads by too (SPD-236)."""
+    rows = []
+    for line, more in markdown.continued_rows(text, markdown.parse_handoff_line):
+        if line.strip().startswith("<!--"):
+            continue
+        parsed = markdown.parse_handoff_line(line)
+        if not parsed:
+            rows.append({"at": None, "from_id": None, "to_id": None, "what": line, "whole": True})
+            continue
+        date, frm, to, what = parsed
+        from_id = handoff_party_id(con, ticket, frm)
+        to_id = handoff_party_id(con, ticket, to)
+        if from_id == "?" or to_id == "?":
+            rows.append({"at": date, "from_id": None, "to_id": None, "what": "\n".join([line] + more), "whole": True})
+        else:
+            rows.append({"at": date, "from_id": from_id, "to_id": to_id, "what": markdown.joined_row(what, more), "whole": False})
+    return rows
+
+
 def import_handoffs(con, at, ticket, text):
     """Returns the columns whose value had to be derived (an unparsed line has no date of its own)."""
     derived = {}
-    for line in text.split("\n"):
-        if not line.strip() or line.strip().startswith("<!--"):
-            continue
-        parsed = markdown.parse_handoff_line(line)
-        if parsed:
-            date, frm, to, what = parsed
-            from_id = handoff_party_id(con, ticket, frm)
-            to_id = handoff_party_id(con, ticket, to)
-            if from_id == "?" or to_id == "?":
-                con.execute("INSERT INTO handoffs (ticket_id, at, what) VALUES (?, ?, ?)", (ticket["id"], date, line))
-            else:
-                con.execute(
-                    "INSERT INTO handoffs (ticket_id, at, from_member_id, to_member_id, what) VALUES (?, ?, ?, ?, ?)",
-                    (ticket["id"], date, from_id, to_id, what),
-                )
-        else:
-            con.execute("INSERT INTO handoffs (ticket_id, at, what) VALUES (?, ?, ?)", (ticket["id"], ticket["created_at"], line))
+    for row in handoff_rows(con, ticket, text):
+        if row["at"] is None:
+            con.execute("INSERT INTO handoffs (ticket_id, at, what) VALUES (?, ?, ?)", (ticket["id"], ticket["created_at"], row["what"]))
             derived["handoffs.at"] = "created"
+        elif row["whole"]:
+            con.execute("INSERT INTO handoffs (ticket_id, at, what) VALUES (?, ?, ?)", (ticket["id"], row["at"], row["what"]))
+        else:
+            con.execute(
+                "INSERT INTO handoffs (ticket_id, at, from_member_id, to_member_id, what) VALUES (?, ?, ?, ?, ?)",
+                (ticket["id"], row["at"], row["from_id"], row["to_id"], row["what"]),
+            )
     return derived
 
 

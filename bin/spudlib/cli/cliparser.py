@@ -33,15 +33,20 @@ from ..state import backup, schema
 
 
 def text_arg(value):
-    """@path reads a file, @- reads stdin; trailing newlines are dropped."""
+    """@path reads a file, @- reads stdin; trailing newlines are dropped.  A text that is a lone '-', typed or read, is
+    refused (SPD-099): it is `-` typed for `@-`, and stored it would silently replace the whole text it stood for."""
     if value == "@-":
-        return sys.stdin.read().rstrip("\n")
-    if value.startswith("@") and len(value) > 1:
+        text = sys.stdin.read().rstrip("\n")
+    elif value.startswith("@") and len(value) > 1:
         path = Path(value[1:]).expanduser()
         if not path.is_file():
             raise lazy.argparse.ArgumentTypeError("no such file: %s" % path)
-        return path.read_text(encoding="utf-8").rstrip("\n")
-    return value
+        text = path.read_text(encoding="utf-8").rstrip("\n")
+    else:
+        text = value
+    if text.strip() == "-":
+        raise lazy.argparse.ArgumentTypeError("a text of just '-' is refused: @- reads standard input, @path a file")
+    return text
 
 
 def date_arg(value):

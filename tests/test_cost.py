@@ -14,6 +14,7 @@ of them found)."""
 
 import copy
 import json
+import tempfile
 import unittest
 from fractions import Fraction
 from pathlib import Path
@@ -471,6 +472,66 @@ class PerAttemptCostTest(TranscriptCase):
             with self.subTest(label):
                 got = self.sum_of([entry("msg_1", "claude-opus-4-8", figures, "2026-09-23T09:00:01.000Z")])
                 self.assertEqual(spud.run_cost(json.dumps(got["usage_json"]), table()), (None, reasons))
+
+
+class SingleAttemptRefusalTest(unittest.TestCase):  # SPD-224, home-free
+    """A request served in one attempt that ended in a refusal before any output (stop_reason "refusal", 0 output tokens)
+    is not billed, fallback or none: the refusals docs, "How refusals are billed".  One refused mid-output is billed as
+    before, and so is every other request served in one attempt, one that returned nothing included."""
+
+    def sum_of(self, entries):
+        with tempfile.TemporaryDirectory() as scratch:
+            path = Path(scratch) / "agent.jsonl"
+            path.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+            return spud.transcript_usage(path)
+
+    def test_which_single_attempts_are_billed(self):
+        opus = "claude-opus-5"
+        refused = usage(input_tokens=412)
+        no_iterations = usage(input_tokens=412)
+        no_iterations.pop("iterations")
+        empty_list = usage(input_tokens=412)
+        empty_list["iterations"] = []
+        unbilled = [
+            ("a refusal before any output, one message iteration (the documented example)", refused),
+            ("a refusal before any output, no iterations", no_iterations),
+            ("a refusal before any output, an empty list", empty_list),
+        ]
+        for label, figures in unbilled:
+            with self.subTest(label):
+                self.assertEqual(spud.request_attempts(opus, figures, "refusal"), ([], {}))
+        mid_output = usage(input_tokens=412, output_tokens=7)
+        billed = [
+            ("a refusal mid-output", mid_output, "refusal"),
+            ("an ordinary request", usage(input_tokens=412, output_tokens=264), "end_turn"),
+            ("a request that returned nothing but did not refuse", refused, "end_turn"),
+            ("a request whose stop_reason is not recorded", refused, None),
+        ]
+        for label, figures, stop in billed:
+            with self.subTest(label):
+                self.assertEqual(spud.request_attempts(opus, figures, stop), ([(opus, figures)], {}))
+
+    def test_a_refusal_before_any_output_is_counted_but_costs_nothing(self):
+        """Three requests served in one attempt: claude-fable-5-1 refused before any output (not billed: the request
+        counts, its tokens do not), claude-opus-5 refused after 7 output tokens (billed), claude-sonnet-5 ended its turn."""
+        got = self.sum_of([
+            user("2026-09-24T09:00:00.000Z"),
+            ended(entry("msg_1", "claude-fable-5-1", usage(input_tokens=412, write_1h=22_898, read=109_053), "2026-09-24T09:00:01.000Z"), "refusal"),
+            ended(entry("msg_2", "claude-opus-5", usage(input_tokens=412, output_tokens=7, read=1_000), "2026-09-24T09:00:02.000Z"), "refusal"),
+            ended(entry("msg_3", "claude-sonnet-5", usage(output_tokens=100_000), "2026-09-24T09:00:03.000Z"), "end_turn"),
+        ])
+        identity = {"speed": "standard", "service_tier": "standard", "inference_geo": "not_available"}
+        no_tools = {"server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0}}
+        no_writes = {"cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0}}
+        self.assertEqual(got["usage_json"]["breakdown"], [
+            dict(model="claude-fable-5-1", **identity, requests=1, input_tokens=0, output_tokens=0, cache_read_input_tokens=0, **no_tools),
+            dict(model="claude-opus-5", **identity, requests=1, input_tokens=412, output_tokens=7, cache_read_input_tokens=1_000, **no_writes, **no_tools),
+            dict(model="claude-sonnet-5", **identity, requests=1, input_tokens=0, output_tokens=100_000, cache_read_input_tokens=0, **no_writes, **no_tools),
+        ])
+        self.assertEqual(got["usage_json"]["usage"], {"input_tokens": 412, "output_tokens": 100_007, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 1_000})
+        self.assertEqual((got["usage_json"]["messages"], got["total_tokens"]), (3, 101_419))
+        # claude-opus-5: 412 input x $5 + 7 output x $25 + 1,000 cache reads x $0.50 = $0.002735; claude-sonnet-5: 100,000 output x $10 = $1.
+        self.assertEqual(spud.run_cost(json.dumps(got["usage_json"]), table()), (Fraction("1.002735"), []))
 
 
 # =============================================================================

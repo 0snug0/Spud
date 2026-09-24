@@ -219,7 +219,9 @@ class LogEntriesTest(unittest.TestCase):
             entries,
             [
                 ("2026-09-12", "Read the config."),
-                ("2026-09-12", "Called `Agent`. Verbatim tool response:\n  > Error: No such tool available: Agent."),
+                # SPD-236: a v0 log's indented line is a continuation written with the render's own two-space
+                # indent, so the indent comes off, and the render puts it back: the Log re-renders as it was written
+                ("2026-09-12", "Called `Agent`. Verbatim tool response:\n> Error: No such tool available: Agent."),
                 ("2026-09-12T12:38", "created the file"),
                 ("2026-09-12T13:27", "Started."),
             ],
@@ -227,6 +229,40 @@ class LogEntriesTest(unittest.TestCase):
 
     def test_no_entries_in_a_comment_only_log(self):
         self.assertEqual(spud.parse_log_entries("<!-- the spudagent: dated lines -->"), [])
+
+    def test_a_multi_line_entry_reads_back_whole(self):
+        # SPD-236: the render's shape of 'a\n\nb\n  c' and of a body ending in a newline; the same with the `  ` line
+        # emptied by an editor; a blank line before the next dated line only separates the entries
+        rendered = "- 2026-09-24T01:10 a\n  \n  b\n    c\n- 2026-09-24T01:11 ends\n  \n\n- 2026-09-24T01:12 last"
+        expected = [("2026-09-24T01:10", "a\n\nb\n  c"), ("2026-09-24T01:11", "ends\n"), ("2026-09-24T01:12", "last")]
+        self.assertEqual(spud.parse_log_entries(rendered), expected)
+        self.assertEqual(spud.parse_log_entries(rendered.replace("a\n  \n  b", "a\n\n  b")), expected)
+        self.assertEqual(spud.parse_log_entries("- 2026-09-24T01:10 a\n\n\n- 2026-09-24T01:11 b"),
+                         [("2026-09-24T01:10", "a"), ("2026-09-24T01:11", "b")])
+
+    def test_an_unindented_line_joins_its_entry_verbatim(self):
+        # a v0 line the render never writes: an unindented line joins the entry above it as written, and the lines
+        # indented under it stay as written too (the Log then differs from its render and is kept as prose)
+        text = "- 2026-09-12 Did a thing\nwith no indent\n  indented under it\n- 2026-09-12 Next"
+        self.assertEqual(spud.parse_log_entries(text),
+                         [("2026-09-12", "Did a thing\nwith no indent\n  indented under it"), ("2026-09-12", "Next")])
+
+
+class ContinuedRowsTest(unittest.TestCase):
+    """SPD-236: the one continuation rule the Log and the handoffs read by (SPD-078)."""
+
+    def test_rows_and_their_continuations(self):
+        dated = lambda line: line.startswith("- ")  # noqa: E731
+        text = "<!-- c -->\n- one\n  two\n\n  \n    three\n\n- four\nprose\n  kept\n\n"
+        self.assertEqual(spud.continued_rows(text, dated), [
+            ("<!-- c -->", []),
+            ("- one", ["  two", "", "  ", "    three"]),
+            ("- four", []),
+            ("prose", []),
+            ("  kept", []),
+        ])
+        self.assertEqual(spud.joined_row("one", ["  two", "", "  ", "    three"]), "one\ntwo\n\n\n  three")
+        self.assertEqual(spud.continued_rows("", dated), [])
 
 
 class HandoffLineTest(unittest.TestCase):

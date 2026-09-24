@@ -192,6 +192,35 @@ class RenderShapeTest(SpudTestCase):
         line = section(text, "Handoffs").strip()
         self.assertRegex(line, r"^- \d{4}-\d{2}-\d{2} — Russet \(01\) → Spud: the file, complete\.$")
 
+    def test_single_line_rows_render_as_they_always_have(self):
+        # SPD-078 changed how a row holding a newline renders; a row with none must keep every byte: these are the
+        # sections a note carries for a handoff with and without a path, a Log entry, and a proposal of each fate
+        t = self.new_ticket("Rows")
+        lead = self.new_member(t["key"], name="Russet", persona="engineer", model="opus")
+        ref = lead["ref"]
+        self.home.json("member", "start", ref, actor="spud")
+        self.home.json("handoff", "add", "--ticket", t["key"], "--from", ref, "--to", "spud", "--what", "the file, complete.", actor="spud")
+        self.home.json("handoff", "add", "--ticket", t["key"], "--from", "spud", "--to", ref, "--what", "a draft", "--path", "docs/x.md", actor="spud")
+        self.home.json("member", "log", "one line", actor=ref)
+        ids = [self.home.json("proposal", "file", "--title", title, "--why", "Because.", "--evidence", "Seen.", "--priority", "P2",
+                              actor=ref)["proposal"]["id"] for title in ("Declined", "Created", "Open")]
+        self.home.json("proposal", "decide", str(ids[0]), "--decision", "decline", "--reason", "not now", actor="spud")
+        self.home.json("proposal", "decide", str(ids[1]), "--decision", "create", "--priority", "P3", actor="spud")
+        self.home.json("render")
+        ticket = (self.home.path / "ledger" / "tickets" / "SPD-001.md").read_text(encoding="utf-8")
+        member = (self.home.path / "ledger" / "teams" / "SPUD-001" / "Russet.md").read_text(encoding="utf-8")
+        day = r"\d{4}-\d{2}-\d{2}"
+        self.assertRegex(section(ticket, "Handoffs"), r"\A- %s — Russet \(01\) → Spud: the file, complete\.\n"
+                                                      r"- %s — Spud → Russet \(01\): a draft \(`docs/x\.md`\)\n\Z" % (day, day))
+        self.assertEqual(section(ticket, "Proposals received"),
+                         "- **Declined** — origin [[SPUD-001/Russet]] — decision: declined: not now.\n"
+                         "- **Created** — origin [[SPUD-001/Russet]] — decision: created as [[SPD-002]] at P3.\n")
+        self.assertRegex(section(member, "Log"), r"\A- %sT\d{2}:\d{2} one line\n\Z" % day)
+        self.assertEqual(section(member, "Ticket proposals"),
+                         "- **Declined** — suggested P2; declined by Spud: not now.\n  Why: Because.\n  Evidence: Seen.\n"
+                         "- **Created** — suggested P2; created as [[SPD-002]] at P3 by Spud.\n  Why: Because.\n  Evidence: Seen.\n"
+                         "- **Open** — suggested P2; open, with Spud.\n  Why: Because.\n  Evidence: Seen.\n")
+
     def test_render_out_never_generates_the_hand_written_notes(self):
         self.new_ticket("Only")
         out = self.home.path / "out"

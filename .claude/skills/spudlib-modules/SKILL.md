@@ -152,13 +152,13 @@ When you do split, nothing above changes: the new module still imports modules, 
 
 ## 8. What the guard test already checks
 
-`tests/test_package.py`, parsing every file — imports the package relatively, names only modules that exist, imports only at the top; every name defined in one module; no module binds a name it imports a module as; no import-time read across a cycle; every handler a function of its module; every module reachable from the entry; each hook's import set inside `HOOK_PATH`, and together equal to it; and no test patching the loaded program.
+`tests/test_package.py`, parsing every file — imports the package relatively, names only modules that exist, imports only at the top; every name defined in one module; no module binds a name it imports a module as, in any scope and by any binding form (`symtable`'s reading); no import-time read across a cycle, including one inside a function of the module's own that the import calls by name, however deep; every handler a function of its module; every module reachable from the entry; each hook's import set inside `HOOK_PATH`, and together equal to it; and no test patching the loaded program, through whatever chain of names, attributes and arguments holds it. `DamagedCopyTest` holds each check to its promise: a copy of the package, in memory, damaged the way the check says it catches, must fail it (SPD-079).
 
 ```bash
 python3.14 -I -S -m unittest discover -s tests -t tests -p test_package.py   # seconds, while you work
 ```
 
-Its reach has known gaps (SPD-079): it does not see an alias shadowed by a nested `def` or an `except … as`, nor an import-time read reached through a function call. Those are still violations of §1 and §5 — the test simply will not catch them for you.
+Its reach still has known gaps: a function the import runs without calling it by name — handed to another callable (`sorted(key=f)`), called through a table, an attribute or an instance's method; the loaded program handed on through a container, a class's constructor, another test module's import or its `__dict__`; and §7's rule, which it checks only in the module that imports the name. Those are still violations of §1, §5 and §7 — the test simply will not catch them for you.
 
 ## 9. Before you call the work done
 

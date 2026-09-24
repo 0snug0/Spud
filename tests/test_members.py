@@ -145,6 +145,40 @@ class BriefRequiredTest(SpudTestCase):
         m = self.home.json("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--brief", "@-", actor="spud", stdin="From stdin.\n")["member"]
         self.assertEqual(m["brief"], "From stdin.")
 
+    def test_a_lone_dash_brief_is_refused_naming_at_dash(self):
+        """SPD-099: `--brief -`, typed for `--brief @-`, stored the brief '-' and lost the whole brief.  It is refused, and
+        so is '-' read from stdin through @-, the same mistake one step removed; no row is written."""
+        t = self.new_ticket("Dash")
+        for value, stdin in (("-", "the real brief\n"), (" - ", None), ("@-", "-\n")):
+            proc = self.home.run("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--brief", value, actor="spud", stdin=stdin, check=False)
+            self.assertEqual(proc.returncode, EXIT_USAGE, (value, proc.stderr))
+            self.assertIn("--brief", proc.stderr)
+            self.assertIn("@-", proc.stderr)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM members"), 0)
+        m = self.new_member(t["key"])
+        proc = self.home.run("member", "edit", m["ref"], "--brief", "-", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_USAGE)
+        self.assertIn("@-", proc.stderr)
+        self.assertEqual(self.home.json("member", "show", m["ref"])["member"]["brief"], "Do the thing.")
+
+    def test_a_lone_dash_is_refused_for_every_text_argument(self):
+        """The refusal lives in text_arg, so it reaches every text a lone '-' would silently replace: a log line, a
+        result, an outcome, a summary.  A dash inside a longer text is untouched."""
+        t = self.new_ticket("Dash texts")
+        m = self.new_member(t["key"])
+        self.home.json("member", "start", m["ref"], actor="spud")
+        for args in (("member", "log", "-"), ("member", "result", "-")):
+            proc = self.home.run(*args, actor=m["ref"], check=False)
+            self.assertEqual(proc.returncode, EXIT_USAGE, (args, proc.stderr))
+            self.assertIn("@-", proc.stderr)
+        proc = self.home.run("member", "finish", m["ref"], "--status", "done", "--outcome", "-", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_USAGE)
+        proc = self.home.run("member", "finish", m["ref"], "--status", "done", "--outcome", "ok", "--summary", "-", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_USAGE)
+        self.assertEqual(self.home.json("member", "show", m["ref"])["member"]["status"], "active")
+        self.home.json("member", "log", "a - b", actor=m["ref"])
+        self.home.json("member", "log", "@-", actor=m["ref"], stdin="--\n")
+
 
 class ResumeTest(SpudTestCase):
     def test_blocked_member_resumes_with_member_start(self):
