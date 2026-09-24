@@ -14,12 +14,12 @@ second stop also recorded `transcript_usage: false`, so the run figures stayed f
 the transcript had grown.
 
 Every run is against a scratch SPUD_HOME (tests/helpers.py); the payload builders and the planned team come from
-tests/test_hooks.py.
+tests/hookcase.py.
 """
 
 import unittest
 
-from test_hooks import AGENT_A, AGENT_B, AGENT_D, SESSION, HookCase
+from hookcase import AGENT_A, AGENT_B, AGENT_D, SESSION, HookCase
 
 
 class ResumeCase(HookCase):

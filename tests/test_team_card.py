@@ -20,7 +20,7 @@ from helpers import (
     load_spud_module,
     real_config,
 )
-from test_hooks import AGENT_B, COMPLETION, PER_ENTRY_SUM, HookCase
+from hookcase import AGENT_B, COMPLETION, PER_ENTRY_SUM, HookCase
 
 spud = load_spud_module()
 FIXTURE = json.loads((Path(__file__).resolve().parent / "fixtures" / "team_card.json").read_text(encoding="utf-8"))
@@ -329,7 +329,7 @@ class RunAndTokensTest(TeamCardCase):
     def test_a_completion_without_a_transcript_sum_shows_no_tokens(self):  # case 16, since SPD-021
         m = self.new_member(self.t["key"], name="Pompadour", persona="engineer", model="opus")
         # what record_completion stores for a completed foreground Agent call before any transcript sum:
-        # the completion's figures under "completion" and total_tokens empty (tests/test_hooks.py's payload)
+        # the completion's figures under "completion" and total_tokens empty (tests/hookcase.py's payload)
         completion = {"source": "PostToolUse", "completion": COMPLETION}
         self.set("members", m["id"], status="active", spawned_at="2026-09-12T13:30:00-07:00", stopped_at="2026-09-12T13:30:05-07:00",
                  total_tokens=None, duration_ms=4791, tool_uses=1, usage_json=json.dumps(completion))

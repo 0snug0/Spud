@@ -18,7 +18,7 @@ import json
 import unittest
 
 from helpers import EXIT_CONFLICT, EXIT_ERROR, EXIT_OWNERSHIP, EXIT_TRANSITION, EXIT_USAGE, GhMixin, Home, SpudTestCase
-from test_hooks import HookCase
+from hookcase import HookCase
 
 URL = "https://github.com/0snug0/BadTakes/pull/361"
 URL2 = "https://github.com/0snug0/BadTakes/pull/362"
