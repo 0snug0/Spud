@@ -97,8 +97,8 @@ class MigratePullRequestsTest(unittest.TestCase):
         tickets = self.home.rows("SELECT * FROM tickets ORDER BY id")
         events = self.home.rows("SELECT * FROM events ORDER BY id")
         out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0005_pull_requests", "0006_owner_origin", "0007_project_scripts"], 7))
-        self.assertEqual(len(out["backups"]), 3)
+        self.assertEqual((out["applied"], out["user_version"]), (["0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9))
+        self.assertEqual(len(out["backups"]), 5)
         self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0005_pull_requests\.db$")
         backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
         try:
@@ -178,7 +178,7 @@ class MigratePullRequestsTest(unittest.TestCase):
         self.addCleanup(other.cleanup)
         out = other.init()
         self.assertEqual((out["applied"], out["user_version"], out["backups"]),
-                         (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts"], 7, []))
+                         (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9, []))
         self.assertEqual(other.scalar("SELECT count(*) FROM pull_requests"), 0)
 
 

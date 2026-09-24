@@ -12,6 +12,7 @@ from ..commands import (
     homeinit,
     homemove,
     homesync,
+    logread,
     membercmds,
     prcmds,
     proposalcmds,
@@ -112,6 +113,11 @@ def build_parser():
     q.set_defaults(func=schedule.cmd_schedule_uninstall)
     p = sub.add_parser("doctor", help="interpreter, SQLite, SPUD_HOME, database pragmas, config sanity")
     p.set_defaults(func=doctor.cmd_doctor)
+    p = sub.add_parser("logs", help="read the render watcher's or the daily backup's log, which the hooks keep a shell command from reading (read-only, any actor)",
+                       description=helptexts.LOGS_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
+    p.add_argument("name", nargs="?", choices=tuple(logread.LOGS), help="the log to read; none lists them")
+    p.add_argument("--tail", type=logread.tail_arg, metavar="N", help="the last N lines, across the rotation (default %d)" % logread.DEFAULT_TAIL)
+    p.set_defaults(func=logread.cmd_logs)
 
     p = sub.add_parser("config", help="spud.config.json mirrors")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
@@ -151,12 +157,17 @@ def build_parser():
     q = ps.add_parser("show", help="one project")
     q.add_argument("key")
     q.set_defaults(func=registry.cmd_project_show)
-    q = ps.add_parser("edit", help="change a project's name, landing, sessions, default branch, root, allowed scripts, or its prefixes before its first ticket (Spud's)")
+    q = ps.add_parser("edit", help="change a project's name, landing, sessions, default branch, root, allowed scripts and runner names, or its prefixes before its first ticket (Spud's)")
     q.add_argument("key")
     q.add_argument("--allow-script", action="append", metavar="PATH",
                    help="a repository script a member may run (`sh PATH`, `./PATH`, `source ./PATH`) from the checkout or its ticket's bound"
                         " worktree while it is outside the member's deliverables: relative to the checkout, a file in the main checkout (repeatable)")
     q.add_argument("--drop-script", action="append", metavar="PATH", help="take a script off the allow-list (repeatable)")
+    q.add_argument("--allow-runner", action="append", metavar="NAME",
+                   help="a script, task or target name a member may run through a script runner (`npm run NAME`, `npm test`, `deno task NAME`,"
+                        " `bun run`, `pnpm run`, `yarn NAME`, `make NAME`, and npm's pre/post hooks and lifecycle scripts by their own names)"
+                        " while the file that defines it is outside the member's deliverables (repeatable)")
+    q.add_argument("--drop-runner", action="append", metavar="NAME", help="take a runner name off the allow-list (repeatable)")
     q.add_argument("--name")
     q.add_argument("--landing", choices=("merge", "pr"))
     q.add_argument("--sessions", choices=("claim", "always"))
@@ -286,6 +297,13 @@ def build_parser():
     q.add_argument("--model", required=True, choices=kernel.MODELS)
     q.add_argument("--name", help="a pool name instead of a random draw")
     q.add_argument("--tier-reason", type=text_arg, help="required when the model is not the persona's default tier")
+    q.add_argument("--escalates", metavar="SPUD-nnn/<Name>",
+                   help="re-plan on fable, once, a sibling that returned failed or blocked on opus: records the link and, without"
+                        " --tier-reason, fills it as `escalation after SPUD-nnn/<Name> <status>`")
+    q.add_argument("--effort", choices=kernel.EFFORTS,
+                   help="the effort it runs at, spawned as subagent_type spudagent-<effort>; default the persona's `effort` in"
+                        " spud.config.json, else high (an escalation: the re-planned member's, never lower); haiku and a"
+                        " contractor record none")
     q.add_argument("--agent-type", help="native agent type (required for a contractor)")
     q.add_argument("--brief", type=text_arg, help="the brief, required and non-empty (no brief, no spudagent); @file or @- accepted")
     q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable): bare for the ticket's project, in the worktree the ticket"
@@ -310,12 +328,13 @@ def build_parser():
     q.add_argument("--summary", type=text_arg, help="one paragraph for the card")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry a root member's finish writes: SPD-nnn: <Name> (<lineage>, <persona>, <model>) <status>, then its summary; refused for a nested member")
     q.set_defaults(func=membercmds.cmd_member_finish)
-    q = ps.add_parser("edit", help="edit brief, deliverables, model, summary (the parent's); new deliverables bind and refuse as member new's do")
+    q = ps.add_parser("edit", help="edit brief, deliverables, model, effort, summary (the parent's); new deliverables bind and refuse as member new's do")
     q.add_argument("ref")
     q.add_argument("--brief", type=text_arg)
     q.add_argument("--deliverable", action="append")
     q.add_argument("--summary", type=text_arg)
     q.add_argument("--model", choices=kernel.MODELS)
+    q.add_argument("--effort", choices=kernel.EFFORTS, help="change a planned member's effort before it is spawned (a model change keeps it)")
     q.add_argument("--tier-reason", type=text_arg)
     q.add_argument("--agent-type")
     q.set_defaults(func=membercmds.cmd_member_edit)

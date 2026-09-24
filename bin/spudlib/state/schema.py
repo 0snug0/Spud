@@ -195,7 +195,7 @@ SELECT t.key, (SELECT pr.key FROM projects pr WHERE pr.id = t.project_id) AS pro
 
 CREATE VIEW v_fleet AS                            -- what Fleet.base shows
 SELECT t.key AS ticket, (SELECT pr.key FROM projects pr WHERE pr.id = t.project_id) AS project,
-       t.team_key, m.lineage AS id, m.name, m.persona, m.agent_type, m.model,
+       t.team_key, m.lineage AS id, m.name, m.persona, m.agent_type, m.model, m.effort,
        m.resolved_model, m.status, COALESCE(p.name, 'Spud') AS parent,
        m.spawned_at, m.finished_at, m.total_tokens, m.duration_ms, m.tool_uses
   FROM members m JOIN tickets t ON t.id = m.ticket_id LEFT JOIN members p ON p.id = m.parent_id
@@ -471,6 +471,32 @@ ALTER TABLE projects ADD COLUMN scripts TEXT NOT NULL DEFAULT '[]'
   CHECK (CASE WHEN json_valid(scripts) THEN json_type(scripts) = 'array' ELSE 0 END);  -- repository paths, relative to the checkout
 """
 
+# A project's allow-list of runner names (SPD-168): the Bash rule refuses a member every script runner -- `npm run <name>`,
+# `npm test`, `deno task <name>`, `bun run`, `pnpm run`, `yarn <script>`, `make <target>` -- that runs a name the project
+# does not allow, and lets through only the names listed here while the file that defines them is outside the member's
+# reach (shell/script_runners).  A JSON list of names, set by `spud --as spud project edit --allow-runner/--drop-runner`.
+# A plain ADD COLUMN, as 0007's.
+DDL_0008 = """
+ALTER TABLE projects ADD COLUMN runners TEXT NOT NULL DEFAULT '[]'
+  CHECK (CASE WHEN json_valid(runners) THEN json_type(runners) = 'array' ELSE 0 END);  -- script, task and target names
+"""
+
+# Opus first, fable once (SPD-222): two columns on members.  `effort` is the level a member was planned to run at --
+# chosen at planning as its model is (`member new --effort`, else its persona's), and spawned as the definition that sets
+# it, `spudagent-<effort>`; NULL for haiku, a contractor, and every row planned before this migration, whose effort was
+# the spawning session's and was never recorded, all three spawned as the base `spudagent` or their own type.  `escalates_id` is the
+# member a fable re-plan escalates: an opus member that returned failed, or blocked for want of capability, re-planned once
+# by `member new --escalates`.  Plain ADD COLUMNs; v_fleet names effort, so the two views are dropped first and
+# VIEWS_AND_TRIGGERS re-creates them after.
+DDL_0009 = """
+DROP VIEW IF EXISTS v_board;
+DROP VIEW IF EXISTS v_fleet;
+ALTER TABLE members ADD COLUMN effort TEXT CHECK (effort IS NULL OR effort IN ('low','medium','high','xhigh','max'));
+                                                  -- the effort planned; NULL before SPD-222, for haiku, for a contractor
+ALTER TABLE members ADD COLUMN escalates_id INTEGER REFERENCES members(id);   -- the failed opus member this re-plans on fable
+"""
+
 MIGRATIONS = [("0001_init", DDL_0001), ("0002_projects", DDL_0002), ("0003_parked", DDL_0003), ("0004_ticket_worktree", DDL_0004),
-              ("0005_pull_requests", DDL_0005), ("0006_owner_origin", DDL_0006), ("0007_project_scripts", DDL_0007)]
+              ("0005_pull_requests", DDL_0005), ("0006_owner_origin", DDL_0006), ("0007_project_scripts", DDL_0007),
+              ("0008_project_runners", DDL_0008), ("0009_member_effort", DDL_0009)]
 SCHEMA_VERSION = len(MIGRATIONS)

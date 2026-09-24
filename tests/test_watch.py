@@ -8,6 +8,7 @@ watcher installed, one installed and not running, one running with the vault cau
 behind.  VaultLagTest needs no watcher process for any of them.
 """
 
+import importlib
 import json
 import os
 import shutil
@@ -111,6 +112,82 @@ class WatcherTest(WatchCase):
             with self.subTest(extra=extra):
                 proc = self.home.run("render", "--watch", *extra, actor="spud", check=False)
                 self.assertEqual(proc.returncode, 2, proc)
+
+
+class LogRotationTest(WatchCase):
+    """SPD-170: a watcher start used to truncate render.log, and since SPD-119 ends the watcher on every deploy, each
+    restart erased the line saying why the last run ended.  A start now keeps the previous run's log, its tail at most
+    RENDER_LOG_KEEP bytes, in render.log.1, and truncates render.log in place: launchd holds render.log open as the
+    watcher's stdout and stderr, so the file itself must stay where it is."""
+
+    def start(self, append=True):
+        """One watcher run of two ticks whose stdout and stderr are the home's render.log, opened as launchd opens it."""
+        log = self.home.path / ".spud" / "logs" / "render.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with open(log, "ab" if append else "r+b") as out:
+            if not append:
+                out.seek(0, os.SEEK_END)  # a non-append fd whose offset is the old end: the seek must bring it back
+            proc = subprocess.run([sys.executable, "-I", "-S", str(SPUD), "--as", "spud", "render", "--watch", "--interval", "0.05", "--ticks", "2"],
+                                  env=self.home.env, stdout=out, stderr=out, timeout=30)
+        self.assertEqual(proc.returncode, EXIT_OK)
+        return log, log.with_name("render.log.1")
+
+    def test_a_start_keeps_the_previous_run_and_repeated_starts_stay_bounded(self):
+        self.new_ticket("Logged")
+        log = self.home.path / ".spud" / "logs" / "render.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        previous = "2026-09-22T10:00:00-07:00 stopped after 3 pass(es): the program changed on disk (x.py)\n"
+        log.write_text(previous, encoding="utf-8")
+        log, kept = self.start()
+        self.assertEqual(kept.read_text(encoding="utf-8"), previous)
+        now = log.read_text(encoding="utf-8")
+        self.assertIn(" watching ", now.split("\n", 1)[0], "render.log starts with this run")
+        self.assertIn("stopped after", now)
+        self.assertNotIn(previous, now)
+        first_run = now
+        log, kept = self.start(append=False)
+        self.assertEqual(kept.read_text(encoding="utf-8"), first_run, "the second start keeps the first run, not the one before")
+        self.assertNotIn("\0", log.read_text(encoding="utf-8"), "a non-append fd must be sought back, not leave a hole")
+        self.assertIn(" watching ", log.read_text(encoding="utf-8").split("\n", 1)[0])
+        keep = spud_module_keep()
+        with open(log, "a", encoding="utf-8") as f:
+            for i in range(keep // 40 + 100):
+                f.write("%08d a line of a long run that went on and on\n" % i)
+        for _ in range(3):
+            log, kept = self.start()
+            size = kept.stat().st_size + log.stat().st_size
+            self.assertLessEqual(kept.stat().st_size, keep)
+            self.assertLess(size, keep + 4096)
+        self.assertFalse(kept.with_name("render.log.1.tmp").exists())
+
+    def test_the_kept_tail_is_bounded_and_starts_at_a_line(self):
+        keep = spud_module_keep()
+        log = self.home.path / ".spud" / "logs" / "render.log"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        lines = ["%08d a line of a long run that went on and on\n" % i for i in range(keep // 40 + 100)]
+        log.write_text("".join(lines), encoding="utf-8")
+        self.new_ticket("Long")
+        log, kept = self.start()
+        text = kept.read_text(encoding="utf-8")
+        self.assertLessEqual(len(text.encode("utf-8")), keep)
+        self.assertTrue(text.endswith(lines[-1]))
+        self.assertIn(text.split("\n", 1)[0] + "\n", lines, "the kept tail starts at a whole line")
+
+    def test_a_stdout_that_is_not_the_render_log_is_left_alone(self):
+        self.new_ticket("Elsewhere")
+        other = self.home.path / "elsewhere.log"
+        other.write_text("kept as it was\n", encoding="utf-8")
+        with open(other, "ab") as out:
+            proc = subprocess.run([sys.executable, "-I", "-S", str(SPUD), "--as", "spud", "render", "--watch", "--interval", "0.05", "--ticks", "1"],
+                                  env=self.home.env, stdout=out, stderr=out, timeout=30)
+        self.assertEqual(proc.returncode, EXIT_OK)
+        self.assertTrue(other.read_text(encoding="utf-8").startswith("kept as it was\n"))
+        self.assertFalse((self.home.path / ".spud" / "logs" / "render.log.1").exists())
+
+
+def spud_module_keep():
+    """The bound on render.log.1, read from the program the suite runs (loaded with `spud` above)."""
+    return importlib.import_module("spudlib.commands.schedule").RENDER_LOG_KEEP
 
 
 class ConflictOnceTest(WatchCase):

@@ -34,7 +34,12 @@ DISPATCH = "hooks.dispatch"
 # file (SPD-150), shell.interpreter_words for the words such a run is read with -- one the line cannot settle where an
 # option may stand, and one an xargs reads from its input (SPD-152), shell.runtime_shells for the shell text a runtime's or a
 # package manager's subcommand runs (SPD-154), shell.script_files for a shell whose commands come from a file and the
-# project allow-list of repository scripts (SPD-145).
+# project allow-list of repository scripts (SPD-145), shell.script_runners and shell.runner_files for a script runner and the project allow-list
+# of runner names (SPD-168), shell.heredocs for where a here-document's body starts, taken out of shell.prepare (SPD-188),
+# shell.reevaluation for the text zsh's (e) flag evaluates in a word (SPD-189), shell.positional for the words a call hands a
+# function of the shell's, set where its body reads them (SPD-203), shell.unread for the one fail-closed finding, text the
+# reader did not read (SPD-217), shell.program_writes for the write markers an inline program's text shows (SPD-175),
+# shell.loop_bindings for the values a for loop's words and a basename substitution give a write target (SPD-146).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
@@ -42,10 +47,10 @@ HOOK_PATH = {
     "hooks.dispatch", "hooks.gitrepos", "hooks.hookio", "hooks.pathrule", "hooks.pretool", "hooks.recording", "hooks.sessionhooks",
     "hooks.snapshots", "hooks.stophook", "hooks.subagent_stop", "hooks.worktrees",
     "shell.analyse", "shell.arg_writes", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
-    "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.globbing", "shell.inline_programs",
-    "shell.interpreter_words", "shell.prepare", "shell.redirect_globs", "shell.runtime_shells", "shell.spud_calls",
-    "shell.script_files", "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
-    "shell.walk", "shell.zsh",
+    "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.globbing", "shell.heredocs", "shell.inline_programs",
+    "shell.interpreter_words", "shell.loop_bindings", "shell.positional", "shell.prepare", "shell.program_writes", "shell.redirect_globs", "shell.reevaluation", "shell.runner_files", "shell.runtime_shells", "shell.spud_calls",
+    "shell.script_files", "shell.script_runners", "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
+    "shell.unread", "shell.walk", "shell.zsh",
 }
 
 
@@ -245,9 +250,12 @@ class ShippedPathsTest(unittest.TestCase):
         `project install` writes, so the template this repository used to keep there was the definition every spudagent
         working a ticket in this checkout actually read -- an unrendered `{{launcher}}` and all.  A file full of {{marks}}
         was never a usable agent definition; it only shadowed the one that was.  It lives under share/ now, and nothing
-        here puts one back: this guard is the whole defect, in one line."""
-        shadow = REPO / load_spud_module().PROJECT_SCOPE_REL
-        self.assertFalse(shadow.exists(), "%s is back and shadows the installed definition (SPW-004)" % shadow)
+        here puts one back: this guard is the whole defect, in one line.  SPD-222 made it six definitions, the base and one
+        per effort level, and a project-scope copy of any of them would shadow its installed copy the same way."""
+        spud = load_spud_module()
+        for name in spud.SPUDAGENT_TYPES:
+            shadow = spud.project_scope_agent(REPO, name)
+            self.assertFalse(shadow.exists(), "%s is back and shadows the installed definition (SPW-004)" % shadow)
         # And this repository's CLAUDE.md, which named that path twice: the source is share/agents/spudagent.md, and the
         # only .claude/agents/spudagent.md left in the prose is the installed user-scope copy `project sync` refreshes.
         claude_md = (REPO / "CLAUDE.md").read_text(encoding="utf-8")
@@ -297,6 +305,16 @@ class HookPathTest(SpudTestCase):
             self.assertEqual(ours - HOOK_PATH, set(), event)
             seen |= ours
         self.assertEqual(seen, HOOK_PATH)  # the list stays exact: a module no hook imports any more leaves it
+
+    def test_a_command_imports_no_module_of_the_shell_package(self):
+        # Every command loads commands/doctor, and so hooks/snapshots: its ANSI-C decoder sat in shell/prepare, and every
+        # `spud` run -- each `member log` a spudagent makes -- paid for shell/prepare and shell/syntax (SPD-202, SPD-216).
+        proc = subprocess.run([sys.executable, "-I", "-S", "-c", MODULES_AT_EXIT, str(SPUD), "board"],
+                              capture_output=True, text=True, env=self.home.env)
+        self.assertEqual(proc.returncode, 0, proc)
+        imported = proc.stderr.rsplit("\nMODULES ", 1)[-1].split()
+        self.assertIn("spudlib.hooks.snapshots", imported)
+        self.assertEqual([m for m in imported if m.startswith("spudlib.shell")], [])
 
 
 if __name__ == "__main__":

@@ -103,8 +103,8 @@ class MigrateParkedTest(unittest.TestCase):
     def test_migrate_writes_the_pre_migration_backup_and_keeps_every_row_and_id(self):
         before = self.home.rows("SELECT * FROM tickets ORDER BY id")
         out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts"], 7))
-        self.assertEqual(len(out["backups"]), 5)
+        self.assertEqual((out["applied"], out["user_version"]), (["0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9))
+        self.assertEqual(len(out["backups"]), 7)
         self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0003_parked\.db$")
         backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
         try:
@@ -195,7 +195,7 @@ class MigrateParkedTest(unittest.TestCase):
         other = Home()
         self.addCleanup(other.cleanup)
         out = other.init()
-        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts"], 7, []))
+        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9, []))
         self.assertEqual(other.scalar("SELECT count(*) FROM pragma_table_info('tickets') WHERE name IN ('parked_until','parked_reason')"), 2)
 
 

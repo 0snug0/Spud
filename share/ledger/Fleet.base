@@ -15,6 +15,8 @@ properties:
     displayName: Persona
   model:
     displayName: Model
+  effort:
+    displayName: Effort
   status:
     displayName: Status
   parent:
@@ -53,6 +55,7 @@ views:
       - file.name
       - persona
       - model
+      - effort
       - parent
       - spawned
     sort:
@@ -69,6 +72,7 @@ views:
       - file.name
       - persona
       - model
+      - effort
       - status
       - parent
       - spawned
@@ -90,6 +94,7 @@ views:
       - id
       - formula.persona_on
       - model
+      - effort
       - status
       - formula.minutes
       - tokens_out

@@ -96,8 +96,11 @@ The harness writes an API response as one transcript entry per content block, ea
 request's message.id, requestId and usage.  A sum stored by an older spud added every entry, so its
 tokens run four to five times too high.  A sum made since counts each request once, by its last
 entry, and carries "counting": "request"; one stored before costs were priced keeps no per-model breakdown, so
-no cost can be priced from it.  Both are re-summed.  A sum with its breakdown is left as it is, so a
-second run changes nothing.
+no cost can be priced from it.  A third kept a request billed per attempt (a server-side fallback, a
+compaction) whole, stored before such a request was split by attempt: its serving attempt alone shows
+in the usage, and the request itself is unpriced.  All three are re-summed, the third split by attempt
+so its usage counts and its cost prices every attempt.  A sum whose breakdown already splits by
+attempt is left as it is, so a second run changes nothing.
 
 The transcript read is the recorded transcript_path when that is a file; else the one file with the
 same session directory and file name (<session>/subagents/agent-<id>.jsonl) under a project directory
@@ -110,9 +113,10 @@ An imported sum (no transcript behind it) and a member without a transcript sum 
 
 RESUM_EPILOG = """\
 exit codes: 0 every member listed is re-summed, already counted with its breakdown, imported, or holds no
-            transcript sum; 1 a sum without its breakdown was left as it is, because its transcript
-            was not found, is ambiguous, cannot be read or holds no usage (the other members are
-            still written, and --dry-run exits the same); 2 usage; 3 an actor other than Spud.
+            transcript sum; 1 a sum without its breakdown, or one whose breakdown kept a request billed
+            per attempt whole, was left as it is, because its transcript was not found, is ambiguous,
+            cannot be read or holds no usage (the other members are still written, and --dry-run exits
+            the same); 2 usage; 3 an actor other than Spud.
 """
 
 BACKUP_DESCRIPTION = """\
@@ -138,10 +142,28 @@ SCHEDULE_DESCRIPTION = """\
 Two macOS LaunchAgents.  local.spud.backup runs `spud --as spud backup --daily` at load and daily at
 the --at time; launchd fires a run missed during sleep at wake, and backup --daily writes one copy a day however often
 it runs.  local.spud.render runs `spud --as spud render --watch` at load and again whenever it exits (KeepAlive), so
-the vault follows the database within seconds; its log is <home>/.spud/logs/render.log, started afresh at each start.
+the vault follows the database within seconds; its log is <home>/.spud/logs/render.log, started afresh at each start with the previous run's kept in render.log.1.
 The plists are $SPUD_LAUNCH_AGENTS_DIR/<label>.plist (default ~/Library/LaunchAgents), launchctl is $SPUD_LAUNCHCTL
 (default /bin/launchctl), and the backup's output goes to ~/Library/Logs/spud-backup.log.  Every verb is Spud's
-(--as spud) and handles both agents.
+(--as spud) and handles both agents.  install and uninstall reach this Mac's own agents whenever either default is in
+use, and then only for the home ~/.config/spud/home names, run by the tool that home runs (no SPUD_TOOL_DIR, not a
+linked worktree); anything else is refused with exit 3 before a plist is written or launchctl runs (SPD-101).
+"""
+
+LOGS_DESCRIPTION = """\
+Read the LaunchAgents' logs, which a session cannot reach any other way: every hook refuses a shell command naming the
+home's .spud/, and a log is a file, not a row for `spud sql --readonly`.  Read-only, and any actor or none.
+
+  render   <home>/.spud/logs/render.log, the render watcher's (local.spud.render); each watcher start keeps the
+           last run's tail in render.log.1
+  backup   ~/Library/Logs/spud-backup.log, the daily backup's (local.spud.backup); never rotated
+
+With no name, lists each log's files, their sizes and last writes.  With a name, prints its last --tail lines
+(default 40).  --tail reads across the rotation: when render.log holds fewer lines than asked, the rest are the end of
+render.log.1, the previous run's, which is where the line saying why that run stopped is; each file's lines are then
+headed `==> <path> <==`.  `spud doctor` names this command when the watcher is down or stuck.
+
+--json: log, what, tail, lines (the count printed) and files, each with path, exists, bytes, modified, previous and lines.
 """
 
 HOME_MOVE_DESCRIPTION = """\

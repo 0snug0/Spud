@@ -12,14 +12,14 @@ bin/
   spud               the launcher: loads the entry by path, with today's bytecode rule
   spud_ledger.py     the entry: the finder, the public surface, HookCall, main, the refusal
   spudlib/           the program in nine directories, no __init__.py
-    core/      kernel · lazy · markdown · homeconf · launchagents
+    core/      kernel · lazy · markdown · homeconf · launchagents · shipped
     state/     schema · ledgerdb · lookup · actors · ops · transcripts · backup
     render/    prices · teamcard · workedon · sectiontext · notefiles
     imports/   noteimport · bulkimport · accept
-    commands/  reportentry · admincmds · doctor · schedule · settings_sync · publish · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind
+    commands/  reportentry · admincmds · vaultlock · vaultinstall · homesync · ghread · prcmds · doctor · logread · schedule · settings_sync · publish · homeinit · ticketcmds · proposalcmds · membercmds · resumcmd · views · homemove · renderwatch · worktreebind · vaultcapture
     projects/  sessions · registry · install · agentdef
-    hooks/     hookio · worktrees · pathrule · gitrepos · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
-    shell/     syntax · prepare · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · walk · analyse · redirect_globs · inline_programs · interpreter_words · bash_rule
+    hooks/     hookio · worktrees · pathrule · gitrepos · snapshots · pretool · recording · subagent_stop · sessionhooks · stophook · dispatch
+    shell/     syntax · prepare · heredocs · assignment_words · zsh · directories · git_verbs · git_programs · git_config · spud_calls · globbing · expansions · reevaluation · positional · runtime_shells · walk · analyse · redirect_globs · inline_programs · program_writes · interpreter_words · bash_rule · arg_writes · loop_bindings · tree_walk · tree_writes · find_xargs · spelled_writes · downloads · script_text · stdin_text · script_files · runner_files · script_runners · unread
     cli/       helptexts · cliparser
 ```
 
@@ -50,6 +50,7 @@ Also:
 - **No import inside a function.** It hides the edge from the guard test. The one exception is `hooks/dispatch`, which imports its event's handler module with `importlib` on purpose, to keep a hook's import set small — do not copy it elsewhere, and do not "simplify" it away.
 - **Standard-library imports are restated per module**, each module importing only what it uses.
 - **The five lazy modules stay lazy.** `argparse`, `fractions`, `hashlib`, `subprocess` and `tempfile` are reached as `lazy.subprocess.run(...)` through `core/lazy`. Importing one at a module's top puts 11 ms back on every hook run (SPD-016).
+- **A regex compiles lazily too.** `core/lazy.LazyPattern(pattern)` holds a pattern uncompiled until its first use, so a hook-path module can build a whole table of `re` patterns at its top level — `shell/syntax`'s word tables, `shell/program_writes`'s per-family markers — without paying `re.compile` on every hook run that never reaches them (SPD-216).
 
 ## 2. Where a new module goes
 
@@ -106,7 +107,8 @@ One more property worth not breaking: a handler module that fails to import is s
 
 ## 5. The one import cycle
 
-These `shell/` modules are one strongly connected component: `analyse`, `bash_rule`, `directories`, `expansions`, `git_config`, `git_programs`, `git_verbs`, `globbing`, `redirect_globs`, `walk`. That is real recursion — `analyse_words` builds a `ShellWalk` whose segments call `analyse_words` again — not tangled layering, and breaking it would take either one large module or function-local imports that hide the edges.
+These `shell/` modules are one strongly connected component: `analyse`, `arg_writes`, `bash_rule`, `directories`, `downloads`, `expansions`, `find_xargs`, `git_config`, `git_programs`, `git_verbs`, `globbing`, `inline_programs`, `interpreter_words`, `loop_bindings`, `redirect_globs`, `reevaluation`, `runner_files`, `runtime_shells`, `script_files`, `script_runners`, `script_text`, `spelled_writes`, `stdin_text`, `tree_walk`, `tree_writes`, `walk`. That is real recursion — `analyse_words` builds a `ShellWalk` whose segments call `analyse_words` again, and `arg_writes` and `loop_bindings` call straight into each other (a write channel's reading asks `loop_bindings.per_reading` for the loop's values, and `loop_bindings` reads back `arg_writes.resolved` for what each reading settles) — not tangled layering, and breaking it would take either one large module or function-local imports that hide the edges.
+`shell/program_writes` is not in it: `inline_programs`, inside the cycle, imports it for the per-family write-marker tables, but it imports nothing back except `core/lazy` — a leaf the cycle reaches, never one that reaches the cycle.
 
 It is safe under one condition the guard test enforces: **no module reads another module's name while that module is being imported, unless the module read cannot reach the reader.** In practice, a cross-module read belongs **inside a function body**. These run at import time and can fail depending on which module a run imports first:
 
@@ -114,7 +116,7 @@ It is safe under one condition the guard test enforces: **no module reads anothe
 - a module-level constant built from a peer's table (`GLOB_SAMPLES`),
 - a top-level call of your own function that reads a peer.
 
-That is why `_CURRENT` and the git flag tables live in `shell/syntax`, which imports nothing of the package: the import-time reads that do exist all point at a module that cannot reach back.
+That is why `_CURRENT` and the git flag tables live in `shell/syntax`, which imports nothing of the *cycle* — only `core/lazy`, for the `LazyPattern` its word tables are built from, and `core/lazy` cannot reach back into `shell/`: the import-time reads that do exist all point at a module that cannot reach back.
 
 **A second cycle is a smell, not a precedent.** Two directories importing each other means a shared name is sitting too high; move it down a layer, into `core/` or `state/`. Do not reach for a function-local import — it hides the edge from the test that would have caught the problem.
 

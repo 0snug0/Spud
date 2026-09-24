@@ -24,9 +24,9 @@ from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from helpers import EXIT_ERROR, SPUD, HookResult
+from helpers import EXIT_ERROR, SPUD, HookResult, spawn_type
 from test_hooks import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split
-from test_hooks import GIT_DIR_WORDING, GIT_HOOK_WORDING, GIT_NESTED_WORDING, GIT_SCOPE_WORDING, SCRIPT_WORDING, SPUD_PLANTED_WORDING, plant_git_dir
+from test_hooks import GIT_DIR_WORDING, GIT_HOOK_WORDING, GIT_NESTED_WORDING, GIT_SCOPE_WORDING, RUNNER_WORDING, SCRIPT_WORDING, SPUD_PLANTED_WORDING, plant_git_dir
 
 KEY = "badtakes"
 TICKET_PREFIX = "BAD"
@@ -237,11 +237,11 @@ class ProjectHookCase(HookCase):
         """PreToolUse(Agent) allow, SubagentStart and the background PostToolUse binding, all in session s."""
         tool_use_id = "toolu_" + agent_id
         description = self.bad_description(m)
-        pre = self.hook_in(s, "PreToolUse", self.agent_p(s, description, model=m["model"], subagent_type=m["agent_type"], tool_use_id=tool_use_id))
+        pre = self.hook_in(s, "PreToolUse", self.agent_p(s, description, model=m["model"], subagent_type=spawn_type(m), tool_use_id=tool_use_id))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
-        start = self.hook_in(s, "SubagentStart", self.start_p(s, agent_id, m["agent_type"]))
+        start = self.hook_in(s, "SubagentStart", self.start_p(s, agent_id, spawn_type(m)))
         self.assertEqual(start.code, 0, start)
-        post = self.hook_in(s, "PostToolUse", self.post_p(s, tool_use_id, agent_id, description, m["agent_type"]))
+        post = self.hook_in(s, "PostToolUse", self.post_p(s, tool_use_id, agent_id, description, spawn_type(m)))
         self.assertEqual((post.code, post.stdout), (0, ""), post)
         return self.cli_json("member", "show", m["ref"])["member"]
 
@@ -454,6 +454,9 @@ class AgentHookProjectTest(ProjectHookCase):
         dict(description="Explore the render code", subagent_type="general-purpose", model=None, isolation="worktree"),
         dict(description="parallel-worktrees: build the feed", subagent_type="general-purpose", model="sonnet"),
         dict(description="Find the config loader", subagent_type="Explore", model=None),
+        # SPD-222: the effort variants are enumerated, not matched by prefix, so an agent of Eric's own that happens to
+        # start with the word is his own
+        dict(description="Tidy the notes", subagent_type="spudagent-helper", model="haiku"),
     )
 
     # -- PreToolUse(Agent) ---------------------------------------------------------------
@@ -474,7 +477,8 @@ class AgentHookProjectTest(ProjectHookCase):
             ("subagent_type spudagent, a free description", dict(description="Do a thing", subagent_type="spudagent", model="haiku")),
             ("a BADS description, another agent type", dict(description="%s-001/Nobody (01, scout)" % TEAM_PREFIX, subagent_type="general-purpose", model="haiku")),
             ("a BADS description with isolation", dict(description=exact, subagent_type="spudagent", model="haiku", isolation="worktree")),
-        )
+        ) + tuple(("subagent_type %s, a free description" % variant, dict(description="Do a thing", subagent_type=variant, model="opus"))
+                  for variant in ("spudagent-low", "spudagent-medium", "spudagent-high", "spudagent-xhigh", "spudagent-max"))  # SPD-222
         for n, (what, spawn) in enumerate(cases):
             spawn = dict(spawn)
             with self.subTest(what):
@@ -591,6 +595,21 @@ class BashHookProjectTest(ProjectHookCase):
         self.assertDenied(self.bash(self.PLAIN, "cat %s" % (self.bad / ".spud" / "ledger.db")), STATE_WORDING)
         self.assertDenied(self.bash(self.PLAIN, "cat %s" % (self.home.path / ".spud" / "ledger.db")), STATE_WORDING)
         self.assertDenied(self.bash(self.PLAIN, "%s --as %s member result done" % (self.spud_cli, AGENT_A)), LAW_5)
+
+    def test_a_line_the_hook_cannot_read_is_refused_in_a_plain_session(self):
+        """SPD-191: a plain session and Eric's own subagents keep the ledger's own refusals -- the database, `spud hook`,
+        Laws 5 and 6, no write in the home -- and a line the hook cannot tokenize hid every one of them (it was silent).
+        It is refused there as it is to every caller (UnreadableLineTest), and a line the hook reads keeps its answer."""
+        for agent_id in (None, AGENT_D):
+            with self.subTest(agent_id=agent_id):
+                hidden = "%s --as spud ticket new --title x\necho 'x" % self.spud_cli
+                r = self.assertDenied(self.bash(self.PLAIN, hidden, agent_id), "the hook cannot read this line", hidden)
+                self.assertIn("the `'` that opens `'x` never closes", r.reason)
+                into_home = "echo x > %s \\" % (self.home.path / "CLAUDE.md")
+                self.assertDenied(self.bash(self.PLAIN, into_home, agent_id), "the hook cannot read this line", into_home)
+                self.assertDenied(self.bash(self.PLAIN, "echo x > %s" % (self.home.path / "CLAUDE.md"), agent_id), NOT_SPUD)
+                readable = "echo \"it's\" > %s" % (self.bad / "notes.txt")
+                self.assertHookSilent(self.bash(self.PLAIN, readable, agent_id), readable)
 
     def test_law_7_binds_members_and_not_erics_own_subagents(self):
         for command in ("git commit -m x", "git push", "git checkout -b feat/x"):
@@ -1146,6 +1165,61 @@ class ScriptFileProjectTest(ProjectHookCase):
     def test_a_plain_session_and_its_own_subagents_keep_todays_answer(self):
         plain_wt = self.PLAIN._replace(cwd=self.bad_wt)
         for command in ("bash scripts/other.sh", "./scripts/other.sh", "cat x.sh | sh"):
+            with self.subTest(command):
+                self.assertHookSilent(self.bash(plain_wt, command), command)
+                self.assertHookSilent(self.bash(plain_wt, command, AGENT_D), command)
+
+
+class ScriptRunnerProjectTest(ProjectHookCase):
+    """SPD-168 in another project: badtakes allows the runner names `test` and `check:functions` (what its members run as
+    their suite and the Edge Functions' type check), and a member of BAD-001, bound to bad_wt with `src/**`, runs them
+    from the worktree the ticket is bound to or from the main checkout, where package.json lies outside its globs, and
+    nowhere else -- not from another worktree of badtakes, and never a name the list does not hold.  The spud project's own
+    list is not badtakes'.  Spud and Eric's plain session keep today's answer: silent."""
+
+    PACKAGE = {"name": "bad-takes", "scripts": {"test": "node --test", "check:functions": "node scripts/deno-check.mjs",
+                                                "dist": "node build/dist-mac.js", "smoke": "electron . --smoke"}}
+
+    def setUp(self):
+        super().setUp()
+        self.other_wt = self.add_worktree(self.bad, "bad-002-other")
+        for root in (self.bad, self.bad_wt, self.other_wt):
+            (root / "package.json").write_text(json.dumps(self.PACKAGE), encoding="utf-8")
+            (root / "src").mkdir(exist_ok=True)
+        self.cli("project", "edit", KEY, "--allow-runner", "test", "--allow-runner", "check:functions", actor="spud")
+        self.cli("project", "edit", "spud", "--allow-runner", "dist", actor="spud")
+        self.spawn_in(self.CLAIMED, self.plan_bad(name="Russet"), AGENT_A)
+
+    def bash(self, s, command, agent_id=None):
+        return self.hook_in(s, "PreToolUse", self.bash_p(s, command, agent_id))
+
+    def test_an_allowed_name_runs_from_the_bound_worktree_and_the_main_checkout(self):
+        for root in (self.bad_wt, self.bad):
+            s = self.CLAIMED._replace(cwd=root)
+            for command in ("npm test", "npm run check:functions", "SMOKE_SCOPE=home npm test", "npm --prefix %s test" % root):
+                with self.subTest(root=str(root), command=command):
+                    self.assertHookSilent(self.bash(s, command, AGENT_A), command)
+                    self.assertHookSilent(self.bash(s, command), command)
+
+    def test_it_is_refused_anywhere_else_and_for_any_other_name(self):
+        in_wt = self.CLAIMED._replace(cwd=self.bad_wt)
+        other = self.CLAIMED._replace(cwd=self.other_wt)
+        for s, command, needle in ((other, "npm test", "is not in project badtakes's checkout or your ticket's worktree"),
+                                   (in_wt, "npm --prefix %s test" % self.other_wt, "your ticket's worktree"),
+                                   (in_wt, "npm run dist", "`dist` is not on project badtakes's runner allow-list"),
+                                   (in_wt, "npm run smoke", "`smoke` is not"),
+                                   (in_wt, "cd src && npm test", "a file you may write")):
+            with self.subTest(cwd=str(s.cwd), command=command):
+                r = self.bash(s, command, AGENT_A)
+                self.assertEqual(r.decision, "deny", (command, r))
+                self.assertIn(RUNNER_WORDING, r.reason)
+                self.assertIn(needle, r.reason)
+                self.assertIn("project edit badtakes --allow-runner", r.reason)
+                self.assertHookSilent(self.bash(s, command), command)  # Spud
+
+    def test_a_plain_session_and_its_own_subagents_keep_todays_answer(self):
+        plain_wt = self.PLAIN._replace(cwd=self.bad_wt)
+        for command in ("npm run dist", "make", "npm_config_script_shell=/tmp/x npm test"):
             with self.subTest(command):
                 self.assertHookSilent(self.bash(plain_wt, command), command)
                 self.assertHookSilent(self.bash(plain_wt, command, AGENT_D), command)

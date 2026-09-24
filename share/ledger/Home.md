@@ -17,7 +17,8 @@ This note, [[Spud]], the two `.base` files and the templates under `ledger/_temp
 `Kestrel (01, writer, opus)` is name, ID, persona, model tier. A ticket key's prefix names its project: `{{ticket_prefix}}-nnn` (team `{{team_prefix}}-nnn`) is project `{{project_key}}`; every note also carries a `project` property.
 - The **name** is unique within one ticket's team and may appear again on another ticket, which is why links are written `[[{{team_prefix}}-001/Kestrel|Kestrel]]`.
 - The **ID** is the position in that ticket's tree: `01` is {{identity_name}}'s first child on the ticket, `01.02` is that child's second child.
-- The **persona** says what kind of teammate it was: researcher, architect, reviewer (fable); engineer, designer (opus); writer (sonnet); scout (haiku).
+- The **persona** says what kind of teammate it was: researcher, architect, reviewer, engineer, designer (opus, by default at high effort); writer (sonnet, medium); scout (haiku, which takes no effort). A member planned on another tier says why in its tier reason, fable for a review of the hook path, the ledger's schema or security, and for the one escalation after a failure on opus.
+- The **effort** property is the level its parent planned it at, from low to max; it is left out where there is none.
 
 ## How to read a ticket note
 Brief, then Size, persona and model decision, then Team (a table of who ran as what, on which model, and how it went; the tree, indented, with what each member worked on and built; and the live Team view with totals), Handoffs, Proposals received, Outcome. The properties panel shows priority (P0 now, P1 next, P2 soon, P3 someday), status (queued, active, parked, done, declined; a parked ticket also shows parked_until and parked_reason), origin (owner or proposal), proposed_by for proposals, and lead.

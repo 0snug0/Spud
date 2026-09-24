@@ -3,15 +3,25 @@
 import os
 import re
 
-from . import globbing, prepare, syntax
+from . import arg_writes, globbing, prepare, syntax
 from ..hooks import hookio
 
 
+# The most directories the shell may be in that the hook tracks before it gives up and reads the rest with the
+# directory unknown (SPD-193): a line of relative conditional `cd`s doubles the set with each step (`cd a && ...; cd b
+# && ...` may leave the shell in the original directory, a/, b/, a/b/, ...), so without a bound the reading is 2^n; no
+# real line puts the shell in this many places, and past it a write target relative to the directory is refused (the
+# path rule's unfollowable reading), which is the fail-closed answer a member spells around with an absolute path.
+CWDS_CAP = 256
+
+
 def union_dirs(a, b):
-    """The directories the shell may be in when it may be in either set; None (not known) absorbs everything."""
+    """The directories the shell may be in when it may be in either set; None (not known) absorbs everything, and a
+    union past CWDS_CAP becomes None too, so a line of many conditional relative cds is read in bounded time (SPD-193)."""
     if a is None or b is None:
         return None
-    return a | b
+    both = a | b
+    return both if len(both) <= CWDS_CAP else None
 
 
 def redirect_descriptor(operator, operand):
@@ -149,6 +159,7 @@ def wrapped_directories(chdir, command, a):
     one it moved to, which no single set of directories reads.  An empty value leaves the directories as they are: chdir(2)
     fails on it, and env runs nothing after a directory it cannot enter (probed: exit 125)."""
     value, own_word = chdir
+    value = settled(value, a)  # a value the line settled, read as a cd target's is (SPD-147)
     if any(w.startswith("~+") or _FILENAME_GLOB_RE.search(w) for w in command[1:]):
         return None
     if value == "":
@@ -232,10 +243,23 @@ def cdpath_entries(a):
     return [prepare.deglob(e) for e in raw]
 
 
+def settled(word, a):
+    """The word with each variable the line settled put in its place, as SPD-127 reads a write target (arg_writes.resolved),
+    so a directory a write is relative to holds the same reading as the write itself (SPD-147): after `S=<dir>; cd
+    "$S/x"` the shell is in <dir>/x.  A value the line cannot settle stays spelled, and the `$` left in the word keeps the
+    directory unknown.  So does a value that puts a `~` at the word's start: no shell expands a tilde an expansion
+    produced, so `S='~'; cd "$S"` enters a directory named `~`, which the word as resolved would read as the home."""
+    value = arg_writes.resolved(word, a)
+    if value.startswith("~") and not word.startswith("~"):
+        return word
+    return value
+
+
 def cd_target(word, a, physical=False):
     """The directories one cd argument may lead to from the directories in force, or None when the hook cannot know:
-    `-` and `~-` (OLDPWD), a stack entry (+N, -N, ~N), `~name` (a user, or a zsh named directory), a variable, a glob or a
-    brace expansion, a CDPATH it cannot read, a relative target in a loop or a function body.  A bare relative target
+    `-` and `~-` (OLDPWD), a stack entry (+N, -N, ~N), `~name` (a user, or a zsh named directory), a variable the line did
+    not settle (a settled one is in place by now: settled), a glob or a brace expansion, a CDPATH it cannot read, a
+    relative target in a loop or a function body.  A bare relative target
     may also land under a CDPATH entry (bash tries those first, zsh after the current directory)."""
     if word == "":
         return a.cwds  # both shells stay
@@ -279,6 +303,7 @@ def cd_destinations(name, args, a):
     changes to the first, a later bash stays."""
     if name == "popd":
         return None
+    args = [settled(w, a) for w in args]  # a value the line settled is the word the builtin gets, option or target (SPD-147)
     physical = False
     while args and args[0].startswith("-") and args[0] != "-":
         if args[0] == "--":

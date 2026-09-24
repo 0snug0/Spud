@@ -16,13 +16,32 @@ def cmd_member_new(ctx, args):
         ops.check_prose_headings(args.brief, markdown.IMPORT_MEMBER_SECTIONS, "--brief")
         binder = worktreebind.Binder(ctx, worktreebind.working_directory())  # a code ticket binds a worktree
         binder.prepare(con, actor, worktreebind.planned_ticket(con, actor, args.ticket), args.deliverable)
-        m = ops.plan_member(ctx, con, actor, args.ticket, args.persona, args.model, name=args.name, tier_reason=args.tier_reason,
-                        agent_type=args.agent_type, brief=args.brief or "", deliverables=args.deliverable,
-                        session_id=actors.planning_session(os.environ), binder=binder)
+        m, note = ops.plan_member(ctx, con, actor, args.ticket, args.persona, args.model, name=args.name, tier_reason=args.tier_reason,
+                              agent_type=args.agent_type, brief=args.brief or "", deliverables=args.deliverable,
+                              session_id=actors.planning_session(os.environ), binder=binder, escalates=args.escalates,
+                              effort=args.effort)
         d = lookup.member_dict(con, m)
     finally:
         con.close()
-    return kernel.Result({"member": d}, "planned %s (%s, %s, %s) on %s" % (d["ref"], d["lineage"], d["persona"], d["model"], d["ticket"]))
+    return kernel.Result(dict({"member": d}, **spawn_data(d, note)), plan_line(d, note))
+
+
+def spawn_data(d, note):
+    """What member new and member edit add to --json beside the member (SPD-222): the subagent_type it is spawned as,
+    and the note when an --effort given was not recorded."""
+    data = {"subagent_type": kernel.spawn_type(d["agent_type"], d["effort"])}
+    if note:
+        data["note"] = note
+    return data
+
+
+def plan_line(d, note):
+    """`planned SPUD-nnn/<Name> (<lineage>, <persona>, <model>) on SPD-nnn at <effort> effort: spawn it as subagent_type
+    <type>` -- the handle, and the two things the Agent call must carry that the description does not (SPD-222)."""
+    at = " at %s effort" % d["effort"] if d["effort"] else ""
+    line = "planned %s (%s, %s, %s) on %s%s: spawn it as subagent_type %s" % (
+        d["ref"], d["lineage"], d["persona"], d["model"], d["ticket"], at, kernel.spawn_type(d["agent_type"], d["effort"]))
+    return line + ("\nnote: " + note if note else "")
 
 
 def cmd_member_start(ctx, args):
@@ -106,6 +125,7 @@ def cmd_member_edit(ctx, args):
             if args.summary is not None and args.summary != m["summary"]:
                 updates["summary"] = args.summary
             if args.agent_type is not None and args.agent_type != m["agent_type"]:
+                ops.check_agent_type(args.agent_type)
                 updates["agent_type"] = args.agent_type
             if args.model is not None and args.model != m["model"]:
                 default_tier = ctx.persona_tier(m["persona"])
@@ -114,6 +134,18 @@ def cmd_member_edit(ctx, args):
                 updates["model"] = args.model
             if args.tier_reason is not None and args.tier_reason != m["tier_reason"]:
                 updates["tier_reason"] = args.tier_reason
+            note = None
+            if args.effort is not None and m["status"] != "planned":
+                raise kernel.SpudError(kernel.EXIT_TRANSITION, "%s is %s; its effort changes only while it is planned, before it is spawned"
+                                       " (a re-run at another effort is a new member)" % (lookup.member_ref(con, m["id"]), m["status"]))
+            if "model" in updates or "agent_type" in updates or args.effort is not None:
+                # the effort follows the model and the definition it runs as, and --effort, above an escalation's floor
+                target = lookup.get_member_by_id(con, m["escalates_id"]) if m["escalates_id"] else None
+                floor = (lookup.member_ref(con, target["id"]), target["effort"]) if target is not None else None
+                effort, note = ops.planned_effort(ctx, m["persona"], updates.get("model", m["model"]), updates.get("agent_type", m["agent_type"]),
+                                                  effort=args.effort, kept=m["effort"], floor=floor)
+                if effort != m["effort"]:
+                    updates["effort"] = effort
             if updates:
                 con.execute("UPDATE members SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), m["id"]))
                 ledgerdb.write_event(con, at, actor.label, "member.edited", "%s edited: %s" % (lookup.member_ref(con, m["id"]), ", ".join(sorted(updates))),
@@ -123,7 +155,10 @@ def cmd_member_edit(ctx, args):
         changed = sorted(updates)
     finally:
         con.close()
-    return kernel.Result({"member": d, "changed": changed}, "%s edited: %s" % (d["ref"], ", ".join(changed) or "nothing to change"))
+    text = "%s edited: %s" % (d["ref"], ", ".join(changed) or "nothing to change")
+    if "effort" in changed or "model" in changed or "agent_type" in changed:
+        text += "; spawn it as subagent_type %s" % kernel.spawn_type(d["agent_type"], d["effort"])
+    return kernel.Result(dict({"member": d, "changed": changed}, **spawn_data(d, note)), text + ("\nnote: " + note if note else ""))
 
 
 def cmd_member_own(ctx, args, kind):
@@ -157,8 +192,13 @@ def cmd_member_own(ctx, args, kind):
 def format_member(d):
     lines = ["%s (%s, %s, %s) %s on %s" % (d["ref"], d["lineage"], d["persona"], d["model"], d["status"], d["ticket"])]
     lines.append("parent: %s   planned: %s   spawned: %s   finished: %s" % (d["parent"] or "Spud", d["planned_at"], d["spawned_at"] or "-", d["finished_at"] or "-"))
+    if d["effort"]:
+        lines.append("effort: " + d["effort"])
+    lines.append("subagent_type: " + kernel.spawn_type(d["agent_type"], d["effort"]))  # what the Agent call carries (SPD-222)
     if d["tier_reason"]:
         lines.append("tier reason: " + d["tier_reason"])
+    if d["escalates"]:
+        lines.append("escalates: " + d["escalates"])
     if d["deliverables"]:
         lines.append("deliverables: " + ", ".join(d["deliverables"]))
     for name, key in (("Brief", "brief"), ("Result", "result"), ("Blocked", "blocked"), ("Outcome", "outcome"), ("Summary", "summary")):

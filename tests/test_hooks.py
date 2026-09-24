@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from helpers import EXIT_ERROR, EXIT_USAGE, PROGRAM, SPUD, SpudTestCase, load_spud_module, real_config, wall_clock
+from helpers import EXIT_ERROR, EXIT_USAGE, PROGRAM, SPUD, SpudTestCase, load_spud_module, real_config, spawn_type, wall_clock
 from helpers import git as scratch_git
 
 
@@ -257,9 +257,9 @@ class HookCase(SpudTestCase):
     def spawn(self, m, agent_id, caller=None, tool_use_id=None, model=None, session=SESSION):
         """PreToolUse(Agent) allow followed by the background PostToolUse binding, all in session."""
         tool_use_id = tool_use_id or ("toolu_" + agent_id)
-        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=model or m["model"], subagent_type=m["agent_type"], agent_id=caller, tool_use_id=tool_use_id, session=session))
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=model or m["model"], subagent_type=spawn_type(m), agent_id=caller, tool_use_id=tool_use_id, session=session))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
-        st = self.home.hook("SubagentStart", self.sub_start(agent_id, m["agent_type"], session=session))
+        st = self.home.hook("SubagentStart", self.sub_start(agent_id, spawn_type(m), session=session))
         self.assertEqual(st.code, 0, st)
         post = self.home.hook("PostToolUse", self.post_agent_launched(tool_use_id, agent_id, self.description(m), caller=caller, session=session))
         self.assertEqual(post.code, 0, post)
@@ -273,18 +273,18 @@ class HookCase(SpudTestCase):
         reversed with order="completion-first"."""
         tool_use_id = "toolu_" + agent_id
         description = self.description(m)
-        pre = self.home.hook("PreToolUse", self.pre_agent(description, model=m["model"], subagent_type=m["agent_type"], tool_use_id=tool_use_id, run_in_background=False))
+        pre = self.home.hook("PreToolUse", self.pre_agent(description, model=m["model"], subagent_type=spawn_type(m), tool_use_id=tool_use_id, run_in_background=False))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
-        self.assertEqual(self.home.hook("SubagentStart", self.sub_start(agent_id, m["agent_type"])).code, 0)
+        self.assertEqual(self.home.hook("SubagentStart", self.sub_start(agent_id, spawn_type(m))).code, 0)
         transcript = self.write_transcript(agent_id, self.two_requests() if entries is None else entries)
         transcript.with_name("agent-%s.meta.json" % agent_id).write_text(json.dumps({
-            "agentType": m["agent_type"], "description": description, "toolUseId": tool_use_id, "spawnDepth": 1,
+            "agentType": spawn_type(m), "description": description, "toolUseId": tool_use_id, "spawnDepth": 1,
             "requestShape": "foreground", "requestNonInteractive": False, "model": m["model"]}), encoding="utf-8")
         first_call = self.pre_bash("ls", agent_id=agent_id)
         first_call["transcript_path"] = str(self.home.path / "transcripts" / ("%s.jsonl" % SESSION))
         self.assertEqual(self.home.hook("PreToolUse", first_call).code, 0)
         self.home.json("member", "result", "Built it.", actor=agent_id)
-        events = [("SubagentStop", self.sub_stop(agent_id, agent_type=m["agent_type"], transcript=str(transcript))),
+        events = [("SubagentStop", self.sub_stop(agent_id, agent_type=spawn_type(m), transcript=str(transcript))),
                   ("PostToolUse", self.post_agent_completed(tool_use_id, agent_id, description))]
         for event, payload in (events if order == "stop-first" else events[::-1]):
             r = self.home.hook(event, payload)
@@ -410,6 +410,56 @@ class PreAgentTest(HookCase):
         r = self.home.hook("PreToolUse", self.pre_agent(desc, model="sonnet", subagent_type="claude-code-guide"))
         self.assertEqual(r.decision, "allow", r)
 
+    def test_a_member_planned_at_an_effort_spawns_as_that_effort_s_definition(self):
+        """SPD-222: the Agent tool takes no effort, so the effort rides on the definition, `spudagent-<effort>`, and the check
+        holds the call to the planned one as it holds the model: any other definition would run the member at a level
+        nobody planned, the base at the spawning session's own."""
+        m = self.plan(persona="engineer", model="opus", effort="xhigh")
+        desc = self.description(m)
+        for n, (asked, needle) in enumerate((("spudagent", "not spudagent"), ("spudagent-high", "not spudagent-high"),
+                                              ("spudagent-XHIGH", "not spudagent-XHIGH"), (None, "not None"))):
+            r = self.home.hook("PreToolUse", self.pre_agent(desc, model="opus", subagent_type=asked, tool_use_id="toolu_e%d" % n))
+            self.assertEqual(r.decision, "deny", (asked, r))
+            self.assertIn("Law 3: %s is planned at xhigh effort, so it is spawned as subagent_type spudagent-xhigh, %s" % (m["ref"], needle), r.reason)
+            self.assertIn("`spud member edit --effort`", r.reason)
+        r = self.home.hook("PreToolUse", self.pre_agent(desc, model="opus", subagent_type="spudagent-xhigh", tool_use_id="toolu_eok"))
+        self.assertEqual(r.decision, "allow", r)
+        row = self.home.rows("SELECT * FROM spawn_requests WHERE tool_use_id = 'toolu_eok'")[0]
+        self.assertEqual((row["subagent_type"], row["decision"]), ("spudagent-xhigh", "allow"))
+
+    def test_a_member_at_no_effort_spawns_as_the_base_definition(self):
+        scout = self.plan(persona="scout", model="haiku")
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(scout), subagent_type="spudagent-high", tool_use_id="toolu_h1"))
+        self.assertEqual(r.decision, "deny")
+        self.assertIn("Law 3: %s is planned at no effort (haiku takes none), so it is spawned as subagent_type spudagent, the base"
+                      " definition, not spudagent-high" % scout["ref"], r.reason)
+        # A row planned before migration 0009 recorded no effort: it ran at the session's level, and still spawns as the base.
+        old = self.plan(persona="engineer", model="opus")
+        con = self.home.connect()
+        con.execute("UPDATE members SET effort = NULL WHERE id = ?", (old["id"],))
+        con.commit()
+        con.close()
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(old), model="opus", subagent_type="spudagent-high", tool_use_id="toolu_h2"))
+        self.assertEqual(r.decision, "deny")
+        self.assertIn("planned at no effort (it was planned before effort was recorded)", r.reason)
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(old), model="opus", subagent_type="spudagent", tool_use_id="toolu_h3"))
+        self.assertEqual(r.decision, "allow", r)
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(scout), subagent_type="spudagent", tool_use_id="toolu_h4"))
+        self.assertEqual(r.decision, "allow", r)
+
+    def test_a_variant_spawn_is_named_and_bound_at_subagent_start(self):
+        """SubagentStart names a background spawn waiting to bind by the agent type the harness reports, which for a member
+        planned at an effort is the variant its spawn named -- the exact type, never a prefix of it."""
+        m = self.plan(persona="engineer", model="opus")
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model="opus", subagent_type="spudagent-high", tool_use_id="toolu_v1"))
+        self.assertEqual(r.decision, "allow", r)
+        other = self.home.hook("SubagentStart", self.sub_start(AGENT_B, "spudagent"))
+        self.assertNotIn(m["name"], other.context or "")  # the base is another definition: it names no waiting variant
+        start = self.home.hook("SubagentStart", self.sub_start(AGENT_A, "spudagent-high"))
+        self.assertIn("You are %s (01, engineer)" % m["ref"], start.context)
+        self.assertEqual(self.home.hook("PostToolUse", self.post_agent_launched("toolu_v1", AGENT_A, self.description(m))).code, 0)
+        self.assertEqual(self.home.json("member", "show", m["ref"])["member"]["agent_id"], AGENT_A)
+
     def test_brief_must_be_non_empty(self):
         m = self.plan()
         con = self.home.connect()
@@ -445,7 +495,7 @@ class PreAgentTest(HookCase):
         self.assertEqual(row["member_id"], child["id"])
         # and a lead may not spawn Spud's members
         second = self.plan(persona="engineer", model="opus")
-        r = self.home.hook("PreToolUse", self.pre_agent(self.description(second), model="opus", agent_id=AGENT_A))
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(second), model="opus", subagent_type=spawn_type(second), agent_id=AGENT_A))
         self.assertEqual(r.decision, "deny")
         self.assertIn("parent", r.reason)
 
@@ -1474,9 +1524,12 @@ class PreBashTest(BashHookCase):
         self.assertAllowed("SPUD_HOME=%s %s --as spud board" % (self.home.path, self.spud_cli), agent_id=None)
         self.assertAllowed("%s --as %s member log 'a; b && c'" % (self.spud_cli, AGENT_A))
         self.assertAllowed("%s --as %s member log @- <<'EOF'\nDid a thing; git status was clean.\nEOF" % (self.spud_cli, AGENT_A))
-        for cmd in ("ls -la", "python3.14 -I -S -m unittest discover -s tests -t tests", "%s board | head" % self.spud_cli, "%s bogus" % self.spud_cli, "%s board && ls" % self.spud_cli, "echo 'unterminated"):
+        for cmd in ("ls -la", "python3.14 -I -S -m unittest discover -s tests -t tests", "%s board | head" % self.spud_cli, "%s bogus" % self.spud_cli, "%s board && ls" % self.spud_cli):
             self.assertSilent(cmd)
         self.assertEqual(self.denied(), [])
+        # SPD-191: a line the hook cannot tokenize stood silent here since SPD-008; it passed every law, and is refused now
+        # to every caller (UnreadableLineTest)
+        self.assertRefused("echo 'unterminated", "the hook cannot read this line")
 
     def test_missing_command_is_denied(self):
         p = self.pre_bash("ls")
@@ -1660,9 +1713,9 @@ class SpudAllowIdentityTest(BashHookCase):
                 self.assertSilentForBoth(spelled)
                 self.assertStillRefused(spelled)
         self.assertSilentForBoth("python3.14 -I -S -m spud_ledger {tail}")
-        # -c and - run code of the line's own, which SPD-150 refuses a member outright; neither is an allowed spud call
-        # for anyone, which is what this test is about.
-        for spelled in ("python3.14 -I -S -c 'import runpy' %s {tail}" % launcher,
+        # -c and - run code of the line's own, which SPD-150 refuses a member where it cannot read that it writes nothing
+        # (SPD-175); neither is an allowed spud call for anyone, which is what this test is about.
+        for spelled in ("python3.14 -I -S -c 'import runpy; exec(1)' %s {tail}" % launcher,
                         "python3.14 -I -S - %s {tail} < %s" % (launcher, launcher)):
             with self.subTest(spelled=spelled):
                 self.assertSilent(spelled.format(tail="--as spud board"), None)
@@ -2493,13 +2546,29 @@ class ZshGlobOperatorTest(BashHookCase):
         self.assertRefused("cat <1-2> ledger/tickets/SPD-001.md", "Law 1", agent_id=None)
 
     def test_a_subshell_either_shell_runs_is_still_read(self):
-        """bash runs `!(...)`, `{(...)}`, `if(...)`, `time(...)`, `then(...)`, `do(...)`, `else(...)` and `time -p (...)` as
-        subshells, zsh `{(...)}`, `else(...)` and `f()(...)` (probed): their commands are checked, whatever zsh's reading."""
+        """bash runs `!(...)`, `{(...)}`, `if(...)`, `time(...)`, `then(...)`, `do(...)`, `else(...)`, `time -p (...)`,
+        `f()(...)` and `g () (...)` as subshells, and zsh `{(...)}`, `f()(...)` and `g () (...)` only: zsh reads every other
+        reserved word glued to `(` as one glob word, `else(` included, which in `if false; then :; else(...); fi` stands in
+        the then-body (SPD-174, probed 2026-09-22 through tests/probes/shell_probe.py, `echo <label>` for the push: bash 3.2
+        printed the label for each of those ten; zsh 5.9, under -f and -f -o nobareglobqual alike, for `{(`, `f()(` and
+        `g () (` alone -- `!(` and `time(` failed with "no matches found" under nobareglobqual and "missing end of string"
+        under -f, the group read as glob qualifiers, the else line printed nothing, and `if(...) then :; fi`, `then(` and
+        `do(` in their places were parse errors, near fi and near done).  Their commands are checked in the other reading,
+        whatever zsh's; GluedReservedWordTest reads zsh's."""
         for cmd in ("!(git push)", "{(git push)}", "if(git push) then :; fi", "time(git push)", "if true; then(git push); fi",
                     "for i in 1; do(git push); done", "if false; then :; else(git push); fi", "time -p (git push)", "f()(git push); f",
                     "g () (git push)", "coproc CO (git push)", "echo a; (git push)"):
             with self.subTest(cmd):
                 self.assertRefused(cmd, "Law 7")
+        m = load_spud_module()
+        for cmd in ("{(git push)}", "f()(git push); f", "g () (git push)"):  # a subshell in zsh's reading too
+            with self.subTest(cmd):
+                self.assertEqual(m.mark_zsh_patterns(cmd), (cmd, cmd))
+        for cmd in ("!(git push)", "time(git push)", "if false; then :; else(git push); fi"):  # one glob word in zsh's
+            with self.subTest(cmd):
+                marked, other = m.mark_zsh_patterns(cmd)
+                self.assertEqual((m.deglob(marked), other), (cmd, cmd))
+                self.assertNotIn("(", marked)
         self.assertRefused("{(echo x > ledger/tickets/SPD-001.md)}", "generated", AGENT_C)
         self.assertRefused("time -p (echo x > ledger/tickets/SPD-001.md)", "generated", AGENT_C)
 
@@ -2554,7 +2623,7 @@ class ZshGlobOperatorTest(BashHookCase):
         self.assertSilent("echo x > tests/(keep|other).py")
         self.assertRefused("echo x > tests/(keep|other).py", "Law 1", agent_id=None)
         self.assertSilent("make 2>&1", agent_id=None)
-        self.assertSilent("make > /dev/null 2>&1")
+        self.assertSilent("cc --version > /dev/null 2>&1")
         self.assertSilent("ls > /dev/null")
         for ok in ("f() { echo hi; }; f", "arr=(a b); echo $arr", "typeset -a arr=(a b)", "x=$(( 1<2 )); (( 3 < 2 )) && echo y",
                    "[[ -n x && ( -d tests ) ]] && echo y", "case x in (x|y) echo y;; esac", "for f in tests/(keep|other).py; do echo $f; done",
@@ -3012,7 +3081,7 @@ class ReadWriteRedirectTest(BashHookCase):
     def test_input_redirections_are_unchanged(self):
         for ok in ("cat <ledger/tickets/SPD-001.md", "cat < docs/x.md", "cat 0<docs/x.md", "wc -l <ledger/tickets/SPD-001.md",
                    "cat <<<ledger/tickets/SPD-001.md", "cat <<EOF\nledger/tickets/SPD-001.md\nEOF", "cat <<-EOF\n\tx\n\tEOF",
-                   "cat <&0", "cat 3<&0", "cat <&-", "diff <(cat docs/x.md) docs/x.md", "make 2>&1", "ls > /dev/null",
+                   "cat <&0", "cat 3<&0", "cat <&-", "diff <(cat docs/x.md) docs/x.md", "cc --version 2>&1", "ls > /dev/null",
                    "exec 3<&0", "echo x >&2", "sh -c 'cat <docs/x.md'"):
             with self.subTest(ok):
                 self.assertSilent(ok)
@@ -4181,7 +4250,12 @@ class ParameterExpansionCommandWordTest(BashHookCase):
                 self.refused_for_members(cmd, "Law 7")  # bash's reading, the first element: `git push`
 
     def test_ansi_c_and_locale_quoting(self):
-        for cmd in ("$'git' push", "$'\\x67it' push", "$'\\147it' push", "$\"git\" push", "g$'i't push", "git $'push'", "git $'\\x70ush'"):
+        # SPD-202: an ANSI-C string both shells decode alike is read as its value, the command it spells (AnsiCQuotingTest);
+        # one whose escapes they decode apart, and bash's locale string, stay words the hook cannot resolve
+        for cmd in ("$'git' push", "$'\\x67it' push", "$'\\147it' push", "g$'i't push", "git $'push'", "git $'\\x70ush'"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "Law 7")
+        for cmd in ("$\"git\" push", "$'\\u0067it' push", "git $'\\u0070ush'", "g$'\\ci't push"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd)
 
@@ -4437,7 +4511,7 @@ class TrapActionTest(BashHookCase):
     def test_an_expansion_in_the_action_word(self):
         for cmd in ('trap "$X" EXIT', "trap $X EXIT", 'trap "$(echo git push)" EXIT', "trap `echo git push` EXIT",
                     "trap ${X:-'git push'} EXIT", "trap ${X} EXIT", "X=g; trap $X$Y EXIT", "X=it; trap \"g$X\" EXIT",
-                    "trap $'git push' EXIT", 'trap -- "$X" EXIT', "trap \"$(cat f)\" EXIT"):
+                    "trap $'\\u0067it push' EXIT", 'trap -- "$X" EXIT', "trap \"$(cat f)\" EXIT"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd, "cannot resolve")
         for cmd in ("X='git push'; trap \"$X\" EXIT", "X='git push'; trap $X EXIT", "X='git push'; trap ${X} EXIT",
@@ -4790,10 +4864,10 @@ class ElifShortConditionalTest(BashHookCase):
       one either -- zsh parses neither, and reading them would take a short conditional's body where no condition ended;
     - the long forms ELIF_LONG_FORMS were read correctly before this ticket and must stay that way.
 
-    A `( list )` body after an elif is read as it is after an `if`.  Where an earlier `{ ... }` on the line leaves
-    mark_zsh_patterns outside command position, zsh's reading takes that `( ... )` for one glob pattern word, and the
-    hook doubts a command word it cannot read: main does the same for `if c { a } if [[ -n y ]] ( cd /tmp/o )` and for
-    `{ true } ( cd /tmp/o )`, so the elif only joins them.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+    A `( list )` body after an elif is read as it is after an `if`: since SPD-142 the `}` that closes the if's body gives
+    mark_zsh_patterns its command position back, so zsh's reading takes that `( ... )` for the subshell zsh runs and no
+    longer for one glob pattern word (BraceCloseCommandPositionTest).  AGENT_A plans tests/** and bin/spud; AGENT_C plans
+    **."""
 
     def setUp(self):
         super().setUp()
@@ -5020,6 +5094,4084 @@ class ElifShortConditionalTest(BashHookCase):
                     self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
+# SPD-142: the lines in which a closing `}` gives zsh its command position back and a `( list )` read after it runs as a
+# subshell; each form's `%s` is that subshell's list.  Probed 2026-09-22 (BraceCloseCommandPositionTest): with `echo
+# <label>` in the slot zsh 5.9 printed the label for every form, and so it did with `{echo <label>}` (a group glued to its
+# words, SPD-132); with `echo x | tee l/t` there it wrote l/t, and with `cd o` the line ended where it began.
+BRACE_CLOSE_SUBSHELLS = (
+    # a short conditional's `{ }` body, then an elif whose condition ends in `[[ ... ]]` (SPD-136) and whose body is the
+    # subshell
+    "if [[ -z x ]] { true } elif [[ -n y ]] ( %s )",
+    "if [[ -z x ]] { true } elif [[ -n y ]] ( %s ); true",
+    "if [[ -z x ]] { true } elif [[ -n y ]] (%s)",
+    "if [[ -z x ]] { true } elif [[ -z y ]] { true } elif [[ -n z ]] ( %s )",
+    # ... an else whose body is the subshell, closed by fi
+    "if [[ -z x ]] { true } else ( %s ); fi",
+    "if [[ -z x ]] { true } else ( %s ) fi",
+    # ... an elif's or an else's own `{ }` body holding the subshell, apart from its brace or glued to it
+    "if [[ -z x ]] { true } elif [[ -n y ]] { ( %s ) }; true",
+    "if [[ -z x ]] { true } elif [[ -n y ]] { ( %s ) } fi",
+    "if [[ -z x ]] { true } elif [[ -n y ]] {( %s )}; true",
+    "if [[ -z x ]] { true } else { ( %s ) }",
+    "if [[ -z x ]] { true } else {( %s )}",
+    # ... an elif whose condition is the subshell
+    "if [[ -z x ]] { true } elif ( %s ) then true; fi",
+    "if [[ -z x ]] { true } elif ( %s ); then true; fi",
+    "if [[ -z x ]] { true } elif ( %s ) { true }; true",
+    # zsh's try-always form (SPD-124), its always block holding the subshell
+    "{ true } always { ( %s ) }",
+    "{ true } always {( %s )}",
+    "{ { true } always { ( %s ) } }",
+    # a group ending a long form's condition or body, before then, do, else or elif
+    "if { true } then ( %s ) fi",
+    "n=0; while { [[ $((n++)) -lt 1 ]] } do ( %s ) done",
+    "if false; then { true } else ( %s ); fi",
+    "if false; then { true } elif { true } then ( %s ) fi",
+    # the closing brace glued to the word before it, which zsh splits off (SPD-132): a command's last word, a one-word
+    # group, a redirection's target, a condition's `]]` and a case's esac
+    "if [[ -z x ]] { true} elif [[ -n y ]] ( %s )",
+    "if [[ -z x ]] {true} elif [[ -n y ]] ( %s )",
+    "if [[ -z x ]] {true} else ( %s ); fi",
+    "{true} always {( %s )}",
+    "if [[ -z x ]] { true > /tmp/k} elif [[ -n y ]] ( %s )",  # a temp-dir target, open to members in bash's `/tmp/k}` too
+    "if [[ -z x ]] { [[ -n y ]]} else ( %s ); fi",
+    "if [[ -z x ]] { case y in y) true;; esac} else ( %s ); fi",
+)
+# ... and an arithmetic command after such a brace, `%s` the command after it: zsh printed the label and made no file.
+BRACE_CLOSE_ARITHMETIC = (
+    "if [[ -z x ]] { true } elif (( 3 > 2 )) %s",
+    "if [[ -z x ]] { true } elif (( 3 > 2 )) then %s; fi",
+    "if [[ -z x ]] { true } else (( 3 > 2 )) && %s; fi",
+    "if [[ -z x ]] { true } else { (( 3 > 2 )) && %s }",
+    "{ true } always { (( 3 > 2 )) && %s }",
+    "if false; then { true } elif (( 3 > 2 )) then %s; fi",
+)
+# A `(` right after the closing `}`: zsh rejects every one of these lines, so nothing on them runs -- a parse error near
+# `(` after a group, an always block or a function body, near the list's first word after a short conditional's body, and
+# near the whole `( ... )` after a short loop's body, which zsh reads there as a glob pattern word.
+BRACE_CLOSE_PARSE_ERRORS = (
+    "{ true } ( %s )",
+    "{ true } always { true } ( %s )",
+    "f() { true } ( %s )",
+    "if [[ -n x ]] { true } ( %s )",
+    "repeat 1 { true } ( %s )",
+    "n=0; while [[ $((n++)) -lt 1 ]] { true } ( %s )",
+    "for f in a; { true } ( %s )",
+)
+# A pattern after a brace that closes no group -- quoted, escaped, a parameter expansion's, a brace list's, one inside a
+# word -- is a pattern to zsh, which ran each of these (the first four printed `} b c`, `} b c`, `b c` and `b c b c` with
+# files b and c present; the last two failed with "no matches found", a pattern matching nothing).
+BRACE_KEPT_PATTERNS = ("echo '}' (b|c)", "echo \\} (b|c)", "echo ${x} (b|c)", "echo {b,c} (b|c)", "echo }(b|c)", "echo a}(b|c)")
+
+
+class BraceCloseCommandPositionTest(BashHookCase):
+    """SPD-142, found while SPD-136 read the elif of zsh's short conditional: mark_zsh_patterns takes a `(` that opens a word
+    for a subshell in zsh's command position and for one of zsh's glob patterns outside it, and a closing `}` never gave
+    it command position back.  After `{ a }` it was still after the command word `a`, so a reserved word that goes on with
+    the compound command -- `else`, `elif`, `then`, `do`, the try-always form's `always` -- was read as one more argument,
+    the `[[` of an elif's condition opened nothing, and the `( list )` after them became one pattern word, where zsh runs
+    a subshell.
+
+    Probed 2026-09-22 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, which printed the same for every line, and in GNU bash 3.2.57, which rejects every line
+    here (it has no short forms, and a group's `}` wants a terminator before it); an `echo` stood in for each command:
+
+    - BRACE_CLOSE_SUBSHELLS ran their subshell.  zsh's `}` is significant wherever it stands, alone or split off the end
+      of a word (SPD-132): `{ echo a}`, `{true}`, `{ echo x > g}` (which made g, not `g}`), `{ [[ -n x ]]}` and `{ case
+      ... esac}` each closed their group, and after it zsh read `else`, `elif`, `fi`, `then`, `do`, `done`, `esac` and
+      `always` as the reserved words they are.  A brace that closes no group -- `echo a}`, `for f in a} b` -- is a parse
+      error;
+    - the hole: the other reading restores a `(` that opens a word, so a plain `( git push )` in these forms was refused
+      all the same, but that reading is bash's, which keeps a brace glued to a word, and a subshell glued to its `{` stayed
+      a pattern in both readings.  So `( {list} )` in any of these forms, and `{( list )}` after an else, an elif or an
+      always, ran their list in zsh while zsh's reading held one glob command word.  One whose words hold no `/` went
+      unchecked -- `{ true } always {( git push )}`, `... else {( rm -rf docs )}`, `... elif [[ -n y ]] ( {touch note.txt}
+      )`: Law 7, and the path rule (Law 5 for a member, Law 1 for Spud); one holding a `/` could name a file called sqlite
+      and was refused as direct access to the database, the right refusal for a tee into the ledger or a spud call, for the
+      wrong reason;
+    - the friction: the same misreading refused harmless lines to members and Spud alike, the ticket's evidence first
+      (`if [[ -z x ]] { true } elif [[ -n y ]] ( cd /tmp/o )`) and a member's write into its own deliverables beside it;
+      and an arithmetic command after the brace, read as a subshell holding `> 2`, was a write to a file named 2
+      (BRACE_CLOSE_ARITHMETIC, which zsh evaluated without making one);
+    - a brace glued to `]]` or `esac` left the scanner inside the condition or the case, where no `(` is a pattern:
+      `{ [[ -n x ]]}; echo x > (l|x)/t` and `{ case x in x) echo a;; esac}; echo x > (l|x)/t` wrote l/t in zsh, while the
+      hook read the same lines with the ledger in them as a subshell and a target `/tickets/SPD-001.md` (Spud's reading of
+      the esac line named `ledger` instead): after `]]}` Spud's Law 1 went unchecked, and every other refusal named a file
+      the line never writes;
+    - a `(` right after the `}` is a parse error in every form (BRACE_CLOSE_PARSE_ERRORS).  After a short loop's `{ }`
+      body zsh reads it as a pattern word -- the one place it reads a pattern right after a closing `}` -- and rejects the
+      line, as it rejects a `fi` or an `else` there (`if true; then repeat 1 { echo r } fi`): after that brace zsh is out of
+      command position for good.  The hook reads a subshell in all of them, fail closed, since nothing on such a line runs;
+    - a `}` that closes nothing leaves the pattern after it a pattern, as zsh reads and runs it (BRACE_KEPT_PATTERNS).
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        (self.out / "o").mkdir()
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    def every_payload(self, form):
+        for command, needle in self.member_payloads():
+            line = form % command
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertRefused(line, needle, agent_id)
+        for command, needle in self.spud_payloads():
+            line = form % command
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertRefused(line, needle, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_the_subshell_zsh_runs(self):
+        """zsh ran `cd o` there in a subshell and ended where it began; the hook read a glob command word that can name the
+        database and refused everyone."""
+        home = str(self.home.path)
+        line = "if [[ -z x ]] { true } elif [[ -n y ]] ( cd %s/o )" % self.out
+        self.assertEqual(self.m.mark_zsh_patterns(line), (line, line))  # no pattern in either reading
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+        a = self.analysis(line)
+        self.assertEqual((a.findings, a.cwds), ([], frozenset([home])))
+        push = self.analysis("if [[ -z x ]] { true } elif [[ -n y ]] ( git push )")
+        self.assertEqual(push.findings, [("git", ("push", "push"))])  # one reading, one push: no glob command word beside it
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_zsh_reads_every_form_as_the_subshell_it_runs(self):
+        for form in BRACE_CLOSE_SUBSHELLS:
+            for body in ("{git push}", "git push"):
+                line = form % body
+                with self.subTest(line=line):
+                    marked, other = self.m.mark_zsh_patterns(line)
+                    self.assertEqual(marked, other)  # no `(` on the line is a pattern in zsh's reading
+                    self.assertIn("(", marked)
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+
+    def test_a_group_in_the_subshell_is_refused(self):
+        """The hole: `( {git push} )` runs the push in every form (`{echo <label>}` printed its label in the probe), and
+        neither reading found it wherever zsh's reading took that `(` for a pattern."""
+        for form in BRACE_CLOSE_SUBSHELLS:
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+
+    def test_every_payload_in_a_subshell_glued_to_its_brace(self):
+        """`{( list )}` stayed one pattern word in both readings, so every check on the list was lost, not Law 7's alone."""
+        for form in ("if [[ -z x ]] { true } else {( %s )}", "if [[ -z x ]] { true } elif [[ -n y ]] {( %s )}; true",
+                     "{ true } always {( %s )}", "{true} always {( %s )}"):
+            self.every_payload(form)
+
+    def test_every_payload_in_a_group_inside_the_subshell(self):
+        for form in ("if [[ -z x ]] { true } elif [[ -n y ]] ( {%s} )", "if [[ -z x ]] { true } else ( {%s} ); fi",
+                     "{ true } always { ( {%s} ) }", "if false; then { true } else ( {%s} ); fi"):
+            self.every_payload(form)
+
+    def test_the_path_rule_inside_the_subshell(self):
+        """A write whose words hold no `/` was silent to everyone -- the path rule unchecked -- and one whose words hold a `/`
+        was refused as direct access to the database, a member's write into its own deliverables among them."""
+        for form in ("{ true } always {( %s )}", "if [[ -z x ]] { true } else {( %s )}",
+                     "if [[ -z x ]] { true } elif [[ -n y ]] ( {%s} )", "if [[ -z x ]] { true } else ( {%s} ); fi"):
+            for write in ("echo x | tee note.txt", "touch note.txt", "rm -rf docs"):
+                line = form % write
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")  # AGENT_A plans tests/** and bin/spud
+                    self.assertSilent(line, AGENT_C)
+                    self.assertRefused(line, "Law 1", agent_id=None)
+            line = form % "echo x | tee tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    # -- the friction ---------------------------------------------------------------------------------------------------
+    def test_a_harmless_subshell_is_silent_and_moves_nothing(self):
+        home = str(self.home.path)
+        for form in BRACE_CLOSE_SUBSHELLS:
+            line = form % ("cd %s/o" % self.out)
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+                self.assertEqual(self.analysis(line).cwds, frozenset([home]))  # the subshell's cd does not carry out
+
+    def test_an_arithmetic_command_after_the_brace_writes_nothing(self):
+        for form in BRACE_CLOSE_ARITHMETIC:
+            line = form % "true"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, agent_id=None)
+                self.assertEqual(self.analysis(line).redirects, [])
+            line = form % "git push"
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertSilent(line, agent_id=None)
+
+    # -- a brace glued to ]] or esac -------------------------------------------------------------------------------------
+    def test_a_pattern_after_a_brace_glued_to_a_condition_or_a_case(self):
+        """zsh splits the brace off `]]}` and `esac}` and closes the group: each of these lines, with l/t standing in for the
+        ledger file, wrote l/t in the probe, and the cd into `(l|x)` wrote it too."""
+        for line in ("{ [[ -n x ]]}; echo x > (ledger|x)/tickets/SPD-001.md",
+                     "{ [[ -n x ]]} && echo x > (ledger|x)/tickets/SPD-001.md",
+                     "{ case x in x) true;; esac}; echo x > (ledger|x)/tickets/SPD-001.md",
+                     "{ [[ -n x ]]}; echo x | tee (ledger|x)/tickets/SPD-001.md",
+                     "if [[ -z x ]] { [[ -n y ]]} else { echo x > (ledger|x)/tickets/SPD-001.md }"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_C, None):
+                    r = self.assertRefused(line, "generated", agent_id)
+                    self.assertIn("into (ledger|x)/tickets/SPD-001.md", r.reason)  # the target zsh opens, as the line spells it
+                self.assertIn("Law 1", self.bash(line, None).reason)
+        line = "{ [[ -n x ]]}; cd (ledger|x) && echo x > tickets/SPD-001.md"
+        self.assertRefused(line, "cannot follow", AGENT_C)
+        self.assertEqual(self.m.mark_zsh_patterns("{ [[ -n x ]]}; echo (b|c)")[0].count("("), 0)
+
+    # -- lines zsh rejects ----------------------------------------------------------------------------------------------
+    def test_a_subshell_right_after_the_brace_is_read_fail_closed(self):
+        """Nothing on these lines runs; the hook reads the subshell all the same, after a short loop's body too, where
+        zsh's own reading of the `(` is a pattern it then rejects."""
+        for form in BRACE_CLOSE_PARSE_ERRORS:
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertRefused(line, "Law 7")
+
+    # -- the other direction ----------------------------------------------------------------------------------------------
+    def test_a_pattern_after_a_brace_that_closes_nothing_stays_a_pattern(self):
+        for line in BRACE_KEPT_PATTERNS:
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(self.m.neutralize_quoted_globs(line))  # as analyse_command marks it
+                self.assertNotIn("(", marked)  # zsh's reading holds the group as one pattern word
+                self.assertEqual(self.m.deglob(marked), line)
+        for line in ("tee '}' (ledger|x)/tickets/SPD-001.md", "tee \\} (ledger|x)/tickets/SPD-001.md",
+                     "tee {tests,docs} (ledger|x)/tickets/SPD-001.md"):
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "generated", AGENT_C)  # the pattern still expands to the ledger file
+                self.assertIn("into (ledger|x)/tickets/SPD-001.md", r.reason)
+
+    # -- the directory model --------------------------------------------------------------------------------------------
+    def test_where_each_directory_goes(self):
+        """The try block's cd carries into the always block and past it (probed: `{ cd o } always { ( echo in-$PWD ) }`
+        printed in-.../o and ended in o), the always block's subshell's does not; a short conditional's body may not run."""
+        home, out = str(self.home.path), str(self.out)
+        a = self.analysis("{ cd %s } always { ( cd %s/o ) }; echo x > k.txt" % (out, out))
+        self.assertIn(("k.txt", frozenset([out])), a.redirects)
+        a = self.analysis("if [[ -n x ]] { cd %s } else ( cd %s/o ); fi; echo x > k.txt" % (out, out))
+        self.assertIn(("k.txt", frozenset([home, out])), a.redirects)
+        self.assertRefused("{ cd %s/ledger } always {( true )}; echo x > tickets/SPD-001.md" % home, "generated", AGENT_C)
+
+    # -- controls ---------------------------------------------------------------------------------------------------------
+    def test_a_terminator_or_an_operator_after_the_brace_was_always_read(self):
+        """A `;`, a newline, `&&`, `||` and `|` put the scanner in command position before this ticket too (probed: each
+        ran the subshell after it)."""
+        for form in ("{ true }; ( %s )", "{ true }\n( %s )", "{ true } && ( %s )", "{ false } || ( %s )", "{ true } | ( %s )",
+                     "if [[ -n x ]] { true }; ( %s )", "repeat 1 { true } && ( %s )", "f() { true }; ( %s ); f"):
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("if [[ -z x ]] { true } " + "elif [[ -n y ]] { true } " * 2000 + "elif [[ -n z ]] ( {git push} )",
+                     "{ " * 2000 + "true" + " }" * 2000 + " always {( git push )}",
+                     "{ true" + "}" * 50000 + " always {( git push )}",
+                     "{ " + "a}" * 20000 + " always {( git push )}",
+                     "{ echo " + "${x}" * 20000 + "} always {( git push )}",
+                     "if [[ -z x ]] { true} " + "else ( true ); fi; if [[ -z x ]] { true} " * 1000 + "else ( {git push} ); fi"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-173: the lines in which an arithmetic command's `))` leaves zsh in command position, so that a `( list )` read after
+# it runs as a subshell; each form's `%s` is that subshell's list.  Probed 2026-09-22 (ArithmeticCommandPositionTest):
+# with `echo <label>` in the slot zsh 5.9 printed the label for every form, and so it did with `{echo <label>}` (a group
+# glued to its words, SPD-132); with `echo x | tee l/t` there it wrote l/t, and with `cd o` the line ended where it began.
+ARITH_CLOSE_SUBSHELLS = (
+    # an if, while or until whose condition ends in an arithmetic command, the subshell its body (zsh's short forms), the
+    # ticket's evidence first
+    "if (( 1 )) ( %s )",
+    "if (( 1 )) (%s)",
+    "if (( 1 ))(%s)",
+    "if ((1)) ( %s )",
+    "if (( 1 )) ( %s ); true",
+    "n=0; while (( n++ < 1 )) ( %s )",
+    "n=1; until (( n-- < 1 )) ( %s )",
+    # ... that condition a list ending in one
+    "if (( 1 )) && (( 1 )) ( %s )",
+    "if true && (( 1 )) ( %s )",
+    "if (( 0 )) || (( 1 )) ( %s )",
+    "if ! (( 0 )) ( %s )",
+    # an elif whose condition is one, after a short conditional's `{ }` body (SPD-142) or after a long form's then
+    "if [[ -z x ]] { true } elif (( 1 )) ( %s )",
+    "if (( 0 )) { true } elif (( 1 )) ( %s )",
+    "if false; then true; elif (( 1 )) ( %s )",
+    # then or do right after the `))`, their body holding the subshell
+    "if (( 1 )) then ( %s ) fi",
+    "if (( 1 )) then ( %s ); fi",
+    "n=0; while (( n++ < 1 )) do ( %s ) done",
+    "if [[ -z x ]] { true } elif (( 1 )) then ( %s ) fi",
+    "if false; then true; elif (( 1 )) then ( %s ) fi",
+    # a `{ }` body holding the subshell, apart from its brace or glued to it
+    "if (( 1 )) { ( %s ) }; true",
+    "if (( 1 )) { ( %s ) } fi",
+    "if (( 1 )) {( %s )}; true",
+    "if (( 0 )) { true } elif (( 1 )) { ( %s ) }; true",
+    "n=0; while (( n++ < 1 )) { ( %s ) }",
+    "n=0; while (( n++ < 1 )) {( %s )}",
+    "n=1; until (( n-- < 1 )) { ( %s ) }",
+    # a compound command or a prefix word as the body, the subshell after it
+    "if (( 1 )) if [[ -n x ]] ( %s )",
+    "if (( 1 )) repeat 1 ( %s )",
+    "if (( 1 )) for f (a) ( %s )",
+    "n=0; if (( 1 )) while (( n++ < 1 )) ( %s )",
+    "if (( 1 )) case x in x) ( %s );; esac",
+    "if (( 1 )) time ( %s )",
+    "if (( 1 )) ! ( %s )",
+    # the arithmetic command's own redirection before the body
+    "if (( 1 )) > /dev/null ( %s )",
+)
+# ... and an arithmetic command right after the `))`, `%s` the command after it: zsh printed the label and made no file 2.
+ARITH_CLOSE_ARITHMETIC = (
+    "if (( 1 )) (( 3 > 2 )) && %s",
+    "if (( 1 )) (( 3 > 2 )) && %s; true",
+    "n=0; while (( n++ < 1 )) (( 3 > 2 )) && %s",
+    "if [[ -z x ]] { true } elif (( 1 )) (( 3 > 2 )) && %s",
+    "if (( 1 )) then (( 3 > 2 )) && %s; fi",
+    "n=0; while (( n++ < 1 )) do (( 3 > 2 )) && %s; done",
+)
+# A `( list )` after an arithmetic command that is no condition -- at the start of a line, after `time` or `!`, glued to
+# a `{` -- and a short conditional's `{ }` body with nothing after its `}`: zsh rejects every one of these lines, so
+# nothing on them runs.
+ARITH_CLOSE_PARSE_ERRORS = (
+    "(( 1 )) ( %s )",
+    "(( 1 )) {( %s )}",
+    "time (( 1 )) ( %s )",
+    "! (( 0 )) ( %s )",
+    "if (( 1 )) { ( %s ) }",
+)
+# A group after the body's command word stands outside command position, and zsh read it as the pattern it is: each
+# printed `b c` with files b and c present (`x b c` for the second).
+ARITH_KEPT_PATTERNS = ("if (( 1 )) echo (b|c)", "if (( 1 )) echo x (b|c)", "n=0; while (( n++ < 1 )) echo (b|c)")
+
+
+class ArithmeticCommandPositionTest(BashHookCase):
+    """SPD-173, filed by SPD-142's engineer: mark_zsh_patterns takes a `(` that opens a word for a subshell in zsh's command
+    position and for one of zsh's glob patterns outside it, and it ended an arithmetic command `(( ... ))` outside command
+    position, as a command word would, where zsh stays in it.  A `( list )` right after the `))` of an arithmetic condition
+    was then one pattern word, where zsh runs a subshell: SPD-142's shape after `))` instead of a closing brace.
+
+    Probed 2026-09-22 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, which printed the same for every line, and in GNU bash 3.2.57, which rejects every line
+    of the tables above (it has no short forms, and wants a terminator before a `then` or a `do`); an `echo` stood in for
+    each command:
+
+    - ARITH_CLOSE_SUBSHELLS ran their subshell.  zsh reads `((` as arithmetic only in command position or a for loop's
+      header (`echo (( 1 )) (b|c)` failed with "no matches found: (( 1 ))", a pattern), and its `))` leaves zsh in command
+      position: after an if's, elif's, while's or until's condition ending in one it read the `( list )` as the short
+      form's body, and `then`, `do`, `{`, `if`, `repeat`, `for`, `while`, `case`, `time` and `!` there as the reserved
+      words they are, and a second `((` as arithmetic again (ARITH_CLOSE_ARITHMETIC, which made no file 2);
+    - the hole: the other reading restores a `(` that opens a word, so a plain `( git push )` in these forms was refused
+      all the same, but that reading is bash's, which keeps a brace glued to a word, and a subshell glued to its `{` stayed
+      a pattern in both readings.  So `( {list} )` in any of these forms, and `{( list )}` as a `{ }` body, ran their list
+      in zsh while zsh's reading held one glob command word: the ticket's `if (( 1 )) ( {git push} )`, `while (( n++ < 1
+      )) ( {git push} )` and `if [[ -z x ]] { true } elif (( 1 )) ( {git push} )` were silent for a member (Law 7), and a
+      write there whose words hold no `/` went past the path rule (Law 5 for a member, Law 1 for Spud);
+    - the friction: one whose words hold a `/` could name a file called sqlite, so the ticket's `if (( 1 )) ( cd /tmp/o )`
+      was refused to members and Spud as direct access to the ledger database, and an arithmetic command after the `))`,
+      read as a subshell holding `> 2`, was a write to a file named 2;
+    - a `(` after an arithmetic command that is no condition -- at the start of a line (a parse error near `(`, while
+      `(( 1 )) (( 1 ))` failed near its second ` 1 `, a second arithmetic command), after `time` or `!`, glued to a `{`
+      -- is a parse error, and so is a short conditional's `{ }` body with nothing after its `}` (ARITH_CLOSE_PARSE_ERRORS;
+      `if (( 1 )) { echo g }` failed near `}`, as `if [[ -n x ]] { git push }` does, SPD-061).  The hook reads a subshell
+      in all of them, fail closed, since nothing on such a line runs;
+    - a group after the body's command word stands outside command position, and zsh reads it as the pattern it is
+      (ARITH_KEPT_PATTERNS).
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        (self.out / "o").mkdir()
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    def every_payload(self, form):
+        for command, needle in self.member_payloads():
+            line = form % command
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertRefused(line, needle, agent_id)
+        for command, needle in self.spud_payloads():
+            line = form % command
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertRefused(line, needle, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_the_subshell_zsh_runs(self):
+        """zsh ran each push in a subshell (`{echo <label>}` printed its label), and `cd o` there ended where it began; the
+        hook read a glob command word in each, silent for the three pushes and refused to everyone for the cd."""
+        for line in ("if (( 1 )) ( {git push} )", "while (( n++ < 1 )) ( {git push} )",
+                     "if [[ -z x ]] { true } elif (( 1 )) ( {git push} )"):
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(line)
+                self.assertEqual(marked, other)  # the subshell's `(` is punctuation in zsh's reading too
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+        home = str(self.home.path)
+        line = "if (( 1 )) ( cd %s/o )" % self.out
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+        a = self.analysis(line)
+        self.assertEqual((a.findings, a.cwds), ([], frozenset([home])))
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_zsh_reads_every_form_as_the_subshell_it_runs(self):
+        for form in ARITH_CLOSE_SUBSHELLS:
+            for body in ("{git push}", "git push"):
+                line = form % body
+                with self.subTest(line=line):
+                    marked, other = self.m.mark_zsh_patterns(line)
+                    self.assertEqual(marked, other)  # no `(` on the line is a pattern in zsh's reading
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+
+    def test_a_group_in_the_subshell_is_refused(self):
+        """The hole: `( {git push} )` runs the push in every form, and neither reading found it while zsh's reading took
+        that `(` for a pattern."""
+        for form in ARITH_CLOSE_SUBSHELLS:
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+
+    def test_every_payload_in_a_subshell_glued_to_its_brace(self):
+        """`{( list )}` stayed one pattern word in both readings, so every check on the list was lost, not Law 7's alone."""
+        for form in ("if (( 1 )) {( %s )}; true", "n=0; while (( n++ < 1 )) {( %s )}",
+                     "if (( 0 )) { true } elif (( 1 )) {( %s )}; true", "if (( 1 )) then {( %s )}; fi"):
+            self.every_payload(form)
+
+    def test_every_payload_in_a_group_inside_the_subshell(self):
+        for form in ("if (( 1 )) ( {%s} )", "n=0; while (( n++ < 1 )) ( {%s} )", "n=1; until (( n-- < 1 )) ( {%s} )",
+                     "if [[ -z x ]] { true } elif (( 1 )) ( {%s} )", "if (( 1 )) then ( {%s} ) fi"):
+            self.every_payload(form)
+
+    def test_the_path_rule_inside_the_subshell(self):
+        """A write whose words hold no `/` was silent to everyone -- the path rule unchecked -- save a tee inside `( {list}
+        )`, whose target bash's reading spells `note.txt}` and checked; and one whose words hold a `/` was refused as direct
+        access to the database, a member's write into its own deliverables among them."""
+        for form in ("if (( 1 )) {( %s )}; true", "n=0; while (( n++ < 1 )) {( %s )}",
+                     "if (( 1 )) ( {%s} )", "if [[ -z x ]] { true } elif (( 1 )) ( {%s} )"):
+            for write in ("echo x | tee note.txt", "touch note.txt", "rm -rf docs"):
+                line = form % write
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")  # AGENT_A plans tests/** and bin/spud
+                    self.assertSilent(line, AGENT_C)
+                    self.assertRefused(line, "Law 1", agent_id=None)
+            line = form % "echo x | tee tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    # -- the friction ---------------------------------------------------------------------------------------------------
+    def test_a_harmless_subshell_is_silent_and_moves_nothing(self):
+        home = str(self.home.path)
+        for form in ARITH_CLOSE_SUBSHELLS:
+            line = form % ("cd %s/o" % self.out)
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+                self.assertEqual(self.analysis(line).cwds, frozenset([home]))  # the subshell's cd does not carry out
+
+    def test_an_arithmetic_command_after_the_close_writes_nothing(self):
+        for form in ARITH_CLOSE_ARITHMETIC:
+            line = form % "true"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, agent_id=None)
+                self.assertEqual(self.analysis(line).redirects, [])
+            line = form % "git push"
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertSilent(line, agent_id=None)
+
+    # -- lines zsh rejects ----------------------------------------------------------------------------------------------
+    def test_a_subshell_zsh_rejects_is_read_fail_closed(self):
+        """Nothing on these lines runs; the hook reads the subshell all the same."""
+        for form in ARITH_CLOSE_PARSE_ERRORS:
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertRefused(line, "Law 7")
+
+    # -- the other direction ----------------------------------------------------------------------------------------------
+    def test_a_pattern_after_the_bodys_command_word_stays_a_pattern(self):
+        for line in ARITH_KEPT_PATTERNS:
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(self.m.neutralize_quoted_globs(line))  # as analyse_command marks it
+                self.assertEqual(marked.count("("), 1)  # the arithmetic command's own; the group is one pattern word
+                self.assertEqual(self.m.deglob(marked), line)
+        # with l/t standing in for the ledger file, each of these wrote l/t in the probe
+        for line in ("if (( 1 )) tee (ledger|x)/tickets/SPD-001.md", "if (( 1 )) echo x > (ledger|x)/tickets/SPD-001.md",
+                     "n=0; while (( n++ < 1 )) tee -a (ledger|x)/tickets/SPD-001.md"):
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "generated", AGENT_C)  # the pattern still expands to the ledger file
+                self.assertIn("into (ledger|x)/tickets/SPD-001.md", r.reason)
+
+    # -- the directory model --------------------------------------------------------------------------------------------
+    def test_where_each_directory_goes(self):
+        """The subshell's cd never carries out (probed: `if (( 1 )) ( cd o ); echo x > k.txt` made k.txt where the line
+        began, and `if (( 1 )) ( cd l ); echo x > t` and its while spelling made t there, not l/t)."""
+        home, out = str(self.home.path), str(self.out)
+        self.assertIn(("k.txt", frozenset([home])), self.analysis("if (( 1 )) ( cd %s ); echo x > k.txt" % out).redirects)
+        self.assertSilent("if (( 1 )) ( cd %s/ledger ); echo x > tickets/SPD-001.md" % home, AGENT_C)
+        self.assertSilent("n=0; while (( n++ < 1 )) ( cd %s/ledger ); echo x > tickets/SPD-001.md" % home, AGENT_C)
+
+    # -- where the form may stand -------------------------------------------------------------------------------------------
+    def test_every_enclosing_text_reads_the_subshell(self):
+        """The scanner reads every text the hook analyses, so the subshell is read wherever the form stands (probed: zsh ran
+        `{echo <label>}` in each of these, and in `zsh -f -c` for the zsh -c line)."""
+        for line in ("echo $(if (( 1 )) ( {git push} ))", "echo `if (( 1 )) ( {git push} )`",
+                     "eval 'if (( 1 )) ( {git push} )'", "zsh -c 'if (( 1 )) ( {git push} )'",
+                     "{ if (( 1 )) ( {git push} ) }", "( while (( n++ < 1 )) ( {git push} ) )",
+                     "f() { if (( 1 )) ( {git push} ) }; f", "case x in x) if (( 1 )) ( {git push} );; esac",
+                     "if true; then if (( 1 )) ( {git push} ); fi", "for f in a; do while (( n++ < 1 )) ( {git push} ); done",
+                     "time if (( 1 )) ( {git push} )"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    # -- controls ---------------------------------------------------------------------------------------------------------
+    def test_a_terminator_an_operator_or_a_for_header_before_the_subshell_was_always_read(self):
+        """A `;`, a newline, `&&`, `||` and `|` put the scanner in command position before this ticket too, and so did a for
+        loop's arithmetic header (probed: each ran the subshell after it)."""
+        for form in ("(( 1 )); ( %s )", "(( 1 ))\n( %s )", "(( 1 )) && ( %s )", "(( 0 )) || ( %s )", "(( 1 )) | ( %s )",
+                     "if (( 1 )); then ( %s ); fi", "n=0; while (( n++ < 1 )); do ( %s ); done",
+                     "for (( i=0; i<1; i++ )) ( %s )", "for (( i=0; i<1; i++ )) do ( %s ) done"):
+            line = form % "{git push}"
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("if (( 1 )) " * 2000 + "( {git push} )",
+                     "(( 1 )) " * 5000 + "( {git push} )",
+                     "n=0; " + "while (( n++ < 1 )) " * 1000 + "( {git push} )",
+                     "if (( 1 )) { " * 1000 + "( {git push} )" + " }" * 1000,
+                     "if " + "(( 1 )) && " * 2000 + "(( 1 )) ( {git push} )",
+                     "if " + "((" * 2000 + " 1 " + "))" * 2000 + " ( {git push} )"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-174: the reserved words the scanner keeps command position after (zsh.ZSH_COMMAND_POSITION_WORDS) but `{`.  With a
+# `(` glued to one, zsh reads one glob word, and with a file of that name present zsh -f ran the code of the word's
+# `(e:'echo <label>':)` at the start of a line and in a then-body, for every one of these (GluedReservedWordTest).
+GLUED_RESERVED_WORDS = ("if", "then", "else", "elif", "fi", "while", "until", "do", "done", "}", "!", "time", "coproc", "nocorrect")
+# The places a command word stands in, `%s` the glued word: `else(e:'echo <label>':)` ran its code in every one.
+GLUED_WORD_PLACES = (
+    "%s",
+    "true; %s",
+    "true && %s",
+    "false || %s",
+    "echo | %s",
+    "if %s; then :; fi",
+    "if true; then %s; fi",
+    "if true; then :; %s; fi",
+    "if false; then :; else %s; fi",
+    "{ %s; }",
+    "( %s )",
+    "x=1 %s",
+    "! %s",
+    "time %s",
+    "nocorrect %s",
+    "repeat 1 %s",
+    "for f (a) %s",
+    "if [[ -n x ]] %s",
+    "if (( 1 )) %s",
+    "> /dev/null %s",
+    "case x in x) %s;; esac",
+    "f() { %s }; f",
+)
+# The qualifier spellings whose code ran as `else(<qualifier>)` in a then-body, `%s` the code.
+GLUED_QUALIFIERS = ("e:'%s':", "e{%s}", "e[%s]", "oe:'%s':", ".e:'%s':", 'e:"%s":')
+
+
+class GluedReservedWordTest(BashHookCase):
+    """SPD-174, filed by SPD-142's engineer: mark_zsh_patterns' docstring and ZshGlobOperatorTest said zsh runs `else(` as
+    a subshell, as it runs `{(`.  It does not.  zsh reads a reserved word with a `(` glued to it as one glob word, its
+    group a pattern or, with bareglobqual (zsh's default), glob qualifiers, and the code of an `e` or `+` qualifier runs
+    for each file the word matches.  The scanner took every reserved word it keeps command position after, glued to a `(`
+    in command position, for that word and a subshell, in both readings, so that code went unread.
+
+    Probed 2026-09-22 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f and under -f -o
+    nobareglobqual, and in GNU bash 3.2.57; an `echo <label>` stood in for each command:
+
+    - the proposer's evidence: `if false; then :; else(echo else-glued-ran); fi` printed nothing in zsh and else-glued-ran
+      in bash; `if true; then :; else(echo NOT-this); fi` failed in zsh -f -o nobareglobqual with "no matches found:
+      else(echo NOT-this)", a pattern, and in zsh -f with "missing end of string", its group read as qualifiers (an `e`
+      whose string, delimited by `c`, never ends); `{(echo brace-glued-top)}` ran its subshell in all three;
+    - the hole: with a file named after the word present, zsh -f ran the code of `W(e:'echo <label>':)` for every word of
+      GLUED_RESERVED_WORDS, at the start of a line and in a then-body, `else(e:'echo <label>':)` in every one of
+      GLUED_WORD_PLACES, `else(...)` with every one of GLUED_QUALIFIERS, and `else(+f)`, `then(+f)` and `fi(+f)`,
+      which ran the function f.  A write there made its file (`else(e:'echo x > l/t':)` wrote l/t), and a cd there moved
+      the shell the line goes on in (`else(e:'cd d':) ; pwd` printed .../d).  zsh -f -o nobareglobqual read each group as a
+      pattern and ran nothing, and bash runs the word and a subshell where the word belongs (`!(`, `if(`, `then(`,
+      `else(`, `elif(`, `while(`, `until(`, `do(` and `time(` ran their subshell there) and rejects it anywhere else;
+    - a second hole beside it: zsh splits every brace off a run of them opening a word in command position, so
+      `{{(echo <label>)}}` ran its subshell in its two groups, at the start of a line and after `true;`, `time`, `!` and
+      a `then` (and a cd there stayed there), where the scanner took only a lone `{` for a group and read one pattern word
+      in both readings; bash rejects the line;
+    - zsh rejects the glued word after a closing `}` (`if [[ -z x ]] { : } else(...)`, `{ : } else(...)`), as a group's
+      last word (`{ :; }(...)`), in then's and do's own place (`if true; then(...); fi`, `for i in 1; do(...); done`), and
+      `{{{( list )}}}` (a parse error near `}}`): nothing on those lines runs, and the hook reads them fail closed.
+
+    The words the scanner never kept command position after -- `esac`, `always`, `case`, `for`, `select`, `repeat`,
+    `foreach`, `function` -- ran their code the same way (`esac(e:'echo <label>':)` at the start of a line), and were
+    already read as glob words.  zsh's reading now holds such a group in its word, where the walk reads its qualifier
+    code (globbing.qualifier_code) and the word as the glob command word it is, and the other reading restores the
+    parenthesis, bash's subshell, as before; a run of braces before a `(` is a run of groups and a subshell in both.
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        (self.out / "o").mkdir()
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it, the directory it runs in): Law 7, Law 6, Law 5's --as, and Law 1
+        through a redirection and through tee -- none holding a quote, so each fits between a qualifier's quotes.  The
+        writes run in the tickets directory, their targets holding no `/`: in a glued word's group a `/` is a bad pattern
+        to zsh (probed: `else(e:'echo x > sub/t':)` failed so under -f -o nobareglobqual, while -f ran the code), and the
+        hook's reading of a glob command word takes it for a directory's, the pattern after it naming any command, the
+        database's first -- refused all the same, but in the database's words rather than the path rule's."""
+        spud, tickets = self.spud_cli, str(self.home.path / "ledger" / "tickets")
+        return (("git push", "Law 7", None),
+                ("%s ticket new --title x" % spud, "Law 6", None),
+                ("%s --as spud member log hi" % spud, "Law 6", None),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as", None),
+                ("echo x > SPD-001.md", "generated", tickets),
+                ("echo x | tee SPD-001.md", "generated", tickets))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        spud, tickets = self.spud_cli, str(self.home.path / "ledger" / "tickets")
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as", None),
+                ("echo x > SPD-001.md", "Law 1", tickets),
+                ("echo x | tee SPD-001.md", "Law 1", tickets))
+
+    def every_payload(self, form):
+        for command, needle, cwd in self.member_payloads():
+            line = form % command
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertRefused(line, needle, agent_id, cwd)
+        for command, needle, cwd in self.spud_payloads():
+            line = form % command
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertRefused(line, needle, None, cwd)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_one_glob_word_in_zsh(self):
+        """zsh's reading holds `else` and its group as one word, and the other reading is the line as bash reads it, the
+        word and a subshell; `{(` is a group and a subshell in both."""
+        for line in ("if false; then :; else(echo else-glued-ran); fi", "if true; then :; else(echo NOT-this); fi"):
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(line)
+                self.assertNotIn("(", marked)  # the group is part of the word
+                self.assertEqual(self.m.deglob(marked), line)
+                self.assertEqual(other, line)
+        line = "{(echo brace-glued-top)}"
+        self.assertEqual(self.m.mark_zsh_patterns(line), (line, line))
+        self.assertRefused("{(git push)}", "Law 7")
+
+    def test_the_tickets_qualifier_corner(self):
+        """With a file named else present, zsh -f ran the code of `else(e:'...':)` and `else(+f)` in a then-body."""
+        line = "if true; then :; else(e:'git push':); fi"
+        self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+        r = self.assertRefused(line, "Law 7")
+        self.assertIn("git push", r.reason)
+        self.assertRefused(line, "Law 7", AGENT_C)
+        self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+        # ... and a write there is held to the path rule (in the tickets directory: see member_payloads)
+        line = "if true; then :; else(e:'echo x > SPD-001.md':); fi"
+        tickets = str(self.home.path / "ledger" / "tickets")
+        self.assertRefused(line, "Law 1", None, tickets)
+        self.assertRefused(line, "generated", AGENT_C, tickets)
+        line = "if true; then :; else(e:'echo x > k.txt':); fi"
+        self.assertRefused(line, "deliverables", AGENT_A)  # AGENT_A plans tests/** and bin/spud
+        self.assertSilent(line, AGENT_C)
+        self.assertRefused(line, "Law 1", agent_id=None)  # a file in the home that is not Spud's own
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_glued_word_reads_its_qualifier_code(self):
+        # every word the scanner keeps command position after but `{`: a word added there is probed and added here
+        self.assertEqual(set(GLUED_RESERVED_WORDS), self.m.ZSH_COMMAND_POSITION_WORDS - {"{"})
+        for word in GLUED_RESERVED_WORDS:
+            for form in ("%s", "if true; then :; %s; fi"):
+                line = form % ("%s(e:'git push':)" % word)
+                with self.subTest(line=line):
+                    marked, other = self.m.mark_zsh_patterns(line)
+                    self.assertNotIn("(", marked)  # zsh's reading: one glob word
+                    self.assertEqual(self.m.deglob(marked), line)
+                    self.assertEqual(other, line)  # the other reading: bash's, the word and a subshell
+                    r = self.assertRefused(line, "Law 7")
+                    self.assertIn("git push", r.reason)
+                    self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_every_place_reads_the_qualifier_code(self):
+        for place in GLUED_WORD_PLACES:
+            line = place % "else(e:'git push':)"
+            with self.subTest(line=line):
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_every_qualifier_spelling_reads_its_code(self):
+        for qualifier in GLUED_QUALIFIERS:
+            line = "if true; then :; else(%s); fi" % (qualifier % "git push")
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_every_payload_in_the_code(self):
+        """zsh -f ran the code of each form with `echo <label>` in the slot (`x=1 do(` and `true && fi(` too)."""
+        for form in ("if true; then :; else(e:'%s':); fi", "then(e:'%s':)", "time(e:'%s':)", "!(e:'%s':)", "x=1 do(e:'%s':)",
+                     "{ :; }(e:'%s':); }", "true && fi(e:'%s':)"):
+            self.every_payload(form)
+
+    def test_a_cd_in_the_code_is_not_followed(self):
+        """zsh runs the code in the shell that expands the word, once for every file it matches, so the directory after it
+        is one the hook cannot follow, as after any qualifier's cd (probed in zsh -f: `else(e:'cd d':) ; pwd` printed .../d,
+        `then(e:'cd e':); echo x > g` made e/g, `if true; then :; else(e:'cd d':); echo x > h; fi` made d/h, and
+        `time(e:'cd d':) > f` made d/f, the word expanded before its redirection opened)."""
+        for line in ("else(e:'cd ledger':); echo x > tickets/SPD-001.md",
+                     "if true; then :; else(e:'cd ledger':); echo x > tickets/SPD-001.md; fi",
+                     "time(e:'cd ledger':) > tickets/SPD-001.md"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "cannot follow", AGENT_C)
+
+    # -- a run of braces --------------------------------------------------------------------------------------------------
+    def test_a_run_of_braces_opens_its_groups_and_the_subshell(self):
+        for line in ("{{(git push)}}", "true; {{(git push)}}", "time {{(git push)}}", "! {{(git push)}}",
+                     "if true; then {{(git push)}}; fi"):
+            with self.subTest(line=line):
+                self.assertEqual(self.m.mark_zsh_patterns(line), (line, line))  # no pattern in either reading
+                r = self.assertRefused(line, "Law 7")
+                self.assertIn("git push", r.reason)
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertSilent(line, agent_id=None)
+        self.every_payload("{{(%s)}}")
+        self.every_payload("true; {{(%s)}}")
+
+    def test_a_cd_in_the_braced_subshell_stays_there(self):
+        home = str(self.home.path)
+        line = "{{(cd %s/o)}}" % self.out
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+        self.assertEqual(self.analysis(line).cwds, frozenset([home]))
+        self.assertSilent("{{(cd %s/ledger)}}; echo x > tests/zzone/k.py" % home, AGENT_C)
+
+    # -- lines zsh rejects ----------------------------------------------------------------------------------------------
+    def test_a_glued_word_zsh_rejects_is_read_fail_closed(self):
+        """Nothing on these lines runs in zsh; the hook reads the glued word's code all the same, and the subshell bash runs
+        after then and do."""
+        for line in ("if [[ -z x ]] { : } else(e:'git push':)", "{ : } else(e:'git push':)", "{ :; }(e:'git push':)",
+                     "if true; then(e:'git push':); fi", "for i in 1; do(e:'git push':); done", "{{{(git push)}}}"):
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertRefused(line, "Law 7")
+
+    # -- the other reading ------------------------------------------------------------------------------------------------
+    def test_bashs_subshell_is_still_read(self):
+        """bash ran the word and a subshell for each of these, `echo <label>` for the push, and zsh ran none of them, reading
+        one glob word (the if, then, do, while and until lines were parse errors near fi or done): both readings are
+        checked."""
+        for line in ("if false; then :; else(git push); fi", "if true; then(git push); fi", "for i in 1; do(git push); done",
+                     "if(git push) then :; fi", "time(git push)", "!(git push)", "if false; then :; elif(git push) then :; fi",
+                     "while(git push) do break; done", "until(git push) do :; done"):
+            with self.subTest(line=line):
+                marked, other = self.m.mark_zsh_patterns(line)
+                self.assertEqual(other, line)
+                self.assertNotIn("(", marked)
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    # -- controls -----------------------------------------------------------------------------------------------------------
+    def test_a_glued_word_already_read_as_one_still_is(self):
+        """Outside command position, and after a reserved word the scanner never kept command position after, a glued group
+        was always read as part of its word (probed: `esac(e:'echo <label>':)` ran its code at the start of a line, and
+        `always(`, `case(`, `for(`, `select(`, `repeat(`, `foreach(` and `function(` too)."""
+        for line in ("echo else(e:'git push':)", "esac(e:'git push':)", "always(e:'git push':)", "case(e:'git push':)",
+                     "for(e:'git push':)", "select(e:'git push':)", "repeat(e:'git push':)", "foreach(e:'git push':)",
+                     "function(e:'git push':)"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+
+    def test_the_line_after_a_glued_word_is_read_as_before(self):
+        """A parameter expansion and a group after the glued word are read as they always were."""
+        for line in ("else(e:'true':); x=git; ${x} push", "time(e:'true':) && x=git && ${x} push",
+                     "!(e:'true':); { git push }", "{{(true)}}; x=git; ${x} push", "if true; then :; fi(N); x=git; ${x} push"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+
+    def test_harmless_lines_stay_silent(self):
+        for line in ("if false; then :; else(true); fi", "if false; then :; else (true); fi", "time (true)", "! (true)",
+                     "{ (true) }", "{(true)}", "{{(true)}}", "if true; then :; else(N); fi", "echo else(e:'true':)"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("if true; then :; " + "else(e:'true':); " * 2000 + "else(e:'git push':); fi",
+                     "else(" * 20000 + "; then(e:'git push':)",
+                     "{" * 2000 + "(git push)" + "}" * 2000,
+                     "{" * 2000 + "a" + "(b)" * 20000 + "; time(e:'git push':)",
+                     "true; " + "!(e:'true':) " * 1000 + "&& then(e:'git push':)"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-178: a `for (( ... ))` header where it may stand, `%s` its short body.  With l/t present, zsh 5.9 (-f, and -f -o
+# nobareglobqual) wrote l/t for `echo <label> | ` and each of these with `tee (l|x)/t` in the slot (ForArithmeticBodyTest).
+FOR_ARITH_HEADERS = (
+    "for (( i=0; i<1; i++ )) %s",
+    "for ((i=0; i<1; i++)) %s",
+    "for (( i=0; i<1; i++ )) for (( j=0; j<1; j++ )) %s",
+    "repeat 1 for (( i=0; i<1; i++ )) %s",
+    "if true; then for (( i=0; i<1; i++ )) %s; fi",
+    "f() { for (( i=0; i<1; i++ )) %s }; f",
+    "for (( i=0; i<1; i++ )) if (( 1 )) %s",
+    "for (( i=0; i<1; i++ )) { %s }",
+)
+# A short body writing through a group right after its command word, `%s` the target: with l/t present and `(l|x)/t` in
+# the slot, zsh wrote, appended to, touched or removed l/t after the first header for each.
+FOR_ARITH_WRITERS = ("tee %s", "tee -a %s", "echo x > %s", "touch %s", "rm %s")
+
+
+class ForArithmeticBodyTest(BashHookCase):
+    """SPD-178, filed by SPD-173's engineer: mark_zsh_patterns reads `for` and `select` as a loop whose name comes next and
+    whose `for name ( word ... )` list may follow that name, and its arithmetic branch cleared none of it.  After a `for ((
+    ... ))` header the short body's first word was taken for the loop's name, and a `(` opening the word after it for the
+    word list: the glob pattern zsh expands there was read as a subshell, and the rest of its word as a command.  The target
+    of a tee or another writer into the pattern was lost -- Law 1 unchecked for Spud, and members refused for a path the
+    line never writes -- and the code of a glob qualifier after the group went unread (Law 7 and the path rule).
+
+    Probed 2026-09-22 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line but the qualifier's, and in GNU bash 3.2.57, which rejects every
+    short form, near its body's first word:
+
+    - the proposer's evidence: with l/t present, `echo new | for (( i=0; i<1; i++ )) tee (l|x)/t` wrote new to l/t, and `for
+      (( i=0; i<1; i++ )) echo (b|c)` printed `b c`, as the long form `do echo (b|c); done` did.  The hook on the SPD-173
+      tree read the ticket's two tee lines as a tee into /tickets/SPD-001.md: silent for Spud, and refused to a member as a
+      path outside every registered project;
+    - every header of FOR_ARITH_HEADERS wrote l/t with `tee (l|x)/t` as its body, and so did the first in eval, in `$( ...
+      )` and in `zsh -f -c`; after it each of FOR_ARITH_WRITERS wrote, appended to, touched or removed l/t, and `cat
+      (l|x)/t` printed it;
+    - the qualifier: with files b and c present, zsh -f ran the code of `for (( i=0; i<1; i++ )) ls (b|c)(e:'echo
+      QRAN-$REPLY':)` once for each, and `(e:'echo q > w':)` wrote w; zsh -f -o nobareglobqual read a second pattern and
+      found no match;
+    - the two other states the arithmetic branch now clears with the loop's name are never pending there on a line zsh runs:
+      `((` right after `repeat` opens its count word, not an arithmetic command (`repeat (( 1+1 )) echo rep` printed rep
+      twice, and `echo rt | repeat (( 1 )) tee (l|x)/t` wrote l/t, read so before this ticket), and right after a closing
+      brace it is a parse error (`{ echo a } (( 1 ))`, `{ echo a } (( 1 )) always { echo b }`, `if [[ -n x ]] { echo a }
+      (( 1 ))` and `{ echo a } always { echo b } (( 1 ))` each failed near ` 1 `);
+    - `select` has no arithmetic form: `select (( 1 )) tee (l|x)/t` and `select (( 1 )) git push` failed near `(( 1 ))`,
+      and `select (( i=0; i<1; i++ )) tee (l|x)/t` near `(( i=0`.  Nothing on those lines runs; the hook reads the body
+      after the `))` all the same, fail closed.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "(ledger|x)/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, named as the line spells it, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                r = self.assertRefused(line, "generated", agent_id)
+                self.assertIn(self.TARGET, r.reason)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_reads_the_pattern_zsh_expands(self):
+        for line in ("for (( i=0; i<1; i++ )) tee %s" % self.TARGET, "echo x | for (( i=0; i<1; i++ )) tee %s" % self.TARGET):
+            with self.subTest(line=line):
+                marked, _other = self.m.mark_zsh_patterns(line)
+                self.assertEqual(marked.count("("), 1)  # the header's own: the group is part of the tee's word
+                self.assertEqual(self.m.deglob(marked), line)
+                self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(line).redirects])
+            self.refused_everywhere(line)
+        # the ticket's controls, refused so before it
+        for line in ("for (( i=0; i<1; i++ )) echo x > %s" % self.TARGET, "for i in 1; do tee %s; done" % self.TARGET):
+            self.refused_everywhere(line)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_header_reads_its_body(self):
+        for header in FOR_ARITH_HEADERS:
+            self.refused_everywhere(header % ("tee %s" % self.TARGET))
+
+    def test_every_enclosing_text_reads_its_body(self):
+        for line in ("eval 'for (( i=0; i<1; i++ )) tee %s'", "x=$(for (( i=0; i<1; i++ )) tee %s)",
+                     "zsh -f -c 'for (( i=0; i<1; i++ )) tee %s'"):
+            self.refused_everywhere(line % self.TARGET)
+
+    def test_every_writer_reads_its_target(self):
+        for writer in FOR_ARITH_WRITERS:
+            self.refused_everywhere("for (( i=0; i<1; i++ )) " + writer % self.TARGET)
+
+    def test_the_qualifier_code_is_read(self):
+        line = "for (( i=0; i<1; i++ )) ls (b|c)(e:'git push':)"
+        self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+        r = self.assertRefused(line, "Law 7")
+        self.assertIn("git push", r.reason)
+        self.assertRefused(line, "Law 7", AGENT_C)
+        self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
+        # ... and a write there is held to the path rule, run in the tickets directory as GluedReservedWordTest runs its
+        # own, so the code holds no `/`
+        line = "for (( i=0; i<1; i++ )) ls (b|c)(e:'echo x > SPD-001.md':)"
+        tickets = str(self.home.path / "ledger" / "tickets")
+        self.assertRefused(line, "Law 1", None, tickets)
+        self.assertRefused(line, "generated", AGENT_C, tickets)
+        self.assertRefused(line, "generated", AGENT_A, tickets)
+
+    def test_the_body_reads_as_the_command_does_alone(self):
+        """The loop runs its body, and its header changes none of the body's words: every finding, redirection target and
+        written operand the body has on its own line, it has after each header."""
+        for body in [w % self.TARGET for w in FOR_ARITH_WRITERS] + ["cat %s" % self.TARGET, "echo (b|c)",
+                                                                    "ls (b|c)(e:'git push':)"]:
+            alone = self.analysis(body)
+            for header in FOR_ARITH_HEADERS[:6]:
+                line = header % body
+                with self.subTest(line=line):
+                    looped = self.analysis(line)
+                    self.assertEqual(looped.findings, alone.findings)
+                    self.assertEqual([t for t, _c in looped.redirects], [t for t, _c in alone.redirects])
+                    self.assertEqual([w[1] for w in looped.arg_writes], [w[1] for w in alone.arg_writes])
+
+    # -- lines zsh rejects --------------------------------------------------------------------------------------------
+    def test_a_select_with_an_arithmetic_header_is_read_fail_closed(self):
+        """zsh rejects each of these lines at its `((`, so nothing on them runs; the hook reads the body after the `))`."""
+        for line in ("select (( 1 )) tee %s" % self.TARGET, "select (( i=0; i<1; i++ )) tee %s" % self.TARGET):
+            self.refused_everywhere(line)
+        self.assertRefused("select (( 1 )) git push", "Law 7")
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_a_loop_name_and_word_list_are_still_read(self):
+        """A `for name ( word ... )` list is still a list, never a glob, with a command after it (ZshShortLoopTest), and a
+        group after the body's command word is a pattern there too (probed: `for f (a) echo (b|c)` printed `b c`, and `echo
+        fa | for f (a) tee (l|x)/t` wrote l/t); `repeat (( 1 ))` counts once, its body a body (`repeat (( 1 )) ( echo
+        rsub )` and `repeat (( 1 )) echo rlist` each printed their label once)."""
+        for line in ("for f (a b) (git push)", "for f (a b) git push",
+                     "for (( i=0; i<1; i++ )) ( git push )", "for (( i=0; i<1; i++ )) do git push; done",
+                     "for (( i=0; i<1; i++ )) { git push }", "for (( i=0; i<1; i++ )); git push",
+                     "repeat (( 1 )) git push", "repeat (( 1 )) ( git push )"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+        for line in ("for f (a) tee %s" % self.TARGET, "repeat (( 1 )) tee %s" % self.TARGET,
+                     "for (( i=0; i<1; i++ )) tee -a %s" % self.TARGET):
+            self.refused_everywhere(line)
+        for line in ("for (( i=0; i<1; i++ )) echo (b|c)", "for f (a) echo (b|c)"):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_C)
+                self.assertSilent(line, agent_id=None)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("for (( i=0; i<1; i++ )) " * 2000 + "tee %s" % self.TARGET,
+                     "echo x | " + "repeat 1 for (( i=0; i<1; i++ )) " * 1000 + "tee %s" % self.TARGET,
+                     "for (( i=0; i<1; i++ )) " + "tee (a|b) " * 5000 + self.TARGET):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in a.redirects])
+
+
+# SPD-180: zsh's foreach, `%s` its body.  FOREACH_HEADERS end their loop with `end`, the body a list of any length that
+# starts right after the header -- on its line, after a terminator or after a newline; FOREACH_CLOSED take a `{ list }` or
+# a `do ... done` body, which ends the loop with no `end`.  FOREACH_BODIES are body forms, each in `foreach f (a b) %s;
+# end`, and FOREACH_ENCLOSED the places a foreach may stand.  With `echo <label> >> ran.log` in the slot, every one of the
+# 51 lines logged its label in zsh 5.9 -f and -f -o nobareglobqual (tests/probes/shell_probe.py, 2026-09-23), and bash
+# 3.2.57 rejected the first near its `(`.
+FOREACH_HEADERS = (
+    "foreach f (a b) %s; end",
+    "foreach f ( a b ) %s; end",
+    "foreach f (a b)%s; end",
+    "foreach f (*) %s; end",
+    "foreach f () %s; end",
+    "foreach a b (1 2) %s; end",
+    "foreach f (a b) %s\nend",
+    "foreach f (a b); %s; end",
+    "foreach f (a b)\n%s\nend",
+    "foreach f in a b; %s; end",
+    "foreach f\nin a b; %s; end",
+    "foreach f; %s; end",
+    "foreach f g; %s; end",
+)
+FOREACH_CLOSED = (
+    "foreach f (a b) { %s }",
+    "foreach f (a b) {%s}",
+    "foreach f (a b); { %s }",
+    "foreach f (a b)\n{ %s }",
+    "foreach f (a b) do %s; done",
+    "foreach f (a b); do %s; done",
+    "foreach f in a b; do %s; done",
+    "foreach f in a b; { %s }",
+    "foreach f do %s; done",
+    "foreach f { %s }",
+    "foreach f g { %s }",
+)
+FOREACH_BODIES = ("%s", "( %s )", "( {%s} )", "true; %s", "true && %s", "false || %s", "%s | cat", "true; { %s }",
+                  "if true; then %s; fi", "case x in x) %s;; esac", "repeat 1 %s", "for g (c) %s")
+FOREACH_ENCLOSED = ("eval 'foreach f (a) %s; end'", "x=$(foreach f (a) %s; end)", "zsh -f -c 'foreach f (a) %s; end'",
+                    "fn() { foreach f (a) %s; end }; fn", "if true; then foreach f (a) %s; end; fi",
+                    "foreach f (a) foreach g (b) %s; end; end", "foreach f (a) true; foreach g (b) %s; end; true; end",
+                    "{ foreach f (a) %s; end }", "{ foreach f (a) %s; end}", "repeat 1 foreach f (a) %s; end",
+                    "time foreach f (a) %s; end", "! foreach f (a) %s; end", "coproc foreach f (a) %s; end",
+                    "echo x | foreach f (a) %s; end", "case x in x) foreach f (a) %s; end;; esac")
+
+
+class ForeachBodyTest(BashHookCase):
+    """SPD-180, filed by SPD-178's engineer: ShellWalk opened no loop for zsh's `foreach`, and mark_zsh_patterns read its
+    `( word ... )` list as a glob word, so a foreach whose body starts right after that list, on its line, was one command
+    named foreach and everything up to the next terminator its arguments.  A git write there was silent for a member (Law 7),
+    a redirection or a tee into a generated file recorded nothing (Law 1 for Spud, Law 5 for a member), `rm -rf docs` no
+    argument write, and a cd there was never followed.  SPD-042's `foreach f (a b); ...; end`, with a terminator after the
+    list, read its body as the commands after a `foreach` command, and still does, now as the loop's.
+
+    Probed 2026-09-22 (the proposer) and 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0)
+    under -f -o nobareglobqual and under -f, which printed the same for every line but the qualifier's, and in GNU bash
+    3.2.57, which has no foreach and rejects each of these lines near its `(`, or runs `foreach` and `end` as programs it
+    cannot find:
+
+    - the proposer's evidence: `foreach f (a b) echo fe-ran-$f; end` printed fe-ran-a and fe-ran-b; with l/t present `echo ft
+      | foreach f (a) tee (l|x)/t > /dev/null; end` and `foreach f (a) echo fr > (l|x)/t; end` wrote l/t; `foreach f (a) (
+      {echo fe-sub} ); end` ran the subshell; `foreach f (a) cd d; end; pwd` ended in d;
+    - the body: after the header, zsh's parser (par_for, the csh form) reads a `do ... done` or a `{ list }` as the body, which
+      ends the loop with no `end` (`foreach f (a) { echo x }; end` failed near `end`), and anything else as a list of any
+      length up to an `end` in command position -- several sublists, pipelines, and-or lists, a `( list )` subshell, compound
+      commands with their own closers (`foreach f (a b) echo s1-$f; echo s2-$f; end` printed both for each word).  That `end`
+      closes after a `}`, a subshell's `)` and an `esac` (`foreach f (a) echo x3; { echo y3 } end` ran), not after a `fi` or
+      a `done` (a parse error), and zsh splits it off a glued `}` (`{ foreach f (a) echo gc-$f; end}` ran);
+    - the header: one or more names (`foreach a b (1 2 3 4) echo two-$a$b; end` printed two-12 two-34), then `( word ... )`,
+      `in word ... TERM` or neither, the positional parameters (`foreach f; echo pos-$f; end`, `foreach f do ...; done`,
+      `foreach f { ... }`).  The list may hold a glob (`foreach f (*.txt)` listed a.txt b.txt) but no zsh group (`foreach f
+      (a|b)` failed near `|`); `foreach f in a b echo x; end` ran nothing, its list reaching the `;`; and there is no
+      arithmetic form (`foreach (( i=0; i<1; i++ ))` failed near it).  `foreach f () echo empty-$f; end` ran its body once
+      for each positional parameter;
+    - the loop runs in the shell itself: a cd in the body moved it, a second turn's `cd d` failed from inside d, and a
+      subshell body's did not carry out;
+    - the qualifier: with a directory l present, zsh -f ran the `e:` code of `foreach f (a) ls (l|x)(e:<code>:); end`
+      once, for l (it printed QRAN-l); zsh -f -o nobareglobqual read a second pattern and found no match.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "(ledger|x)/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def member_payloads(self):
+        """(command, the reason a member is refused for it): Law 7, Law 6, Law 5's --as, the database, and Law 1 through a
+        redirection and through tee."""
+        home, spud = self.home.path, self.spud_cli
+        return (("git push", "Law 7"),
+                ("%s ticket new --title x" % spud, "Law 6"),
+                ("%s --as spud member log hi" % spud, "Law 6"),
+                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+
+    def spud_payloads(self):
+        """Spud is never refused for git; these are the checks that do apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        return (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1"))
+
+    def every_payload(self, form):
+        for command, needle in self.member_payloads():
+            line = form % command
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertRefused(line, needle, agent_id)
+        for command, needle in self.spud_payloads():
+            line = form % command
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertRefused(line, needle, agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def refused_everywhere(self, line, target="ledger/tickets/SPD-001.md"):
+        """Refused to both members for the ledger file, named as the line spells it, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                r = self.assertRefused(line, "generated", agent_id)
+                self.assertIn(target, r.reason)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def path_rule(self, line):
+        """`rm -rf docs`, a tee and a touch with no `/` in their words: refused to AGENT_A, whose deliverables are tests/**
+        and bin/spud, allowed to AGENT_C, and refused to Spud, whose own files these are not."""
+        with self.subTest(line=line):
+            self.assertRefused(line, "deliverables")
+            self.assertSilent(line, AGENT_C)
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_the_loop_zsh_runs(self):
+        self.law_7("foreach f (a) git push; end")
+        self.law_7("foreach f (a) ( {git push} ); end")
+        self.refused_everywhere("foreach f (a) tee ledger/tickets/SPD-001.md; end")
+        self.path_rule("foreach f (a) rm -rf docs; end")
+        self.assertIn("docs", [w[1] for w in self.analysis("foreach f (a) rm -rf docs; end").arg_writes])
+        # the proposer's probes, the pattern zsh expands after the body's command word kept in its word and the list's
+        # own `(` left as it is
+        for line in ("echo x | foreach f (a) tee %s > /dev/null; end" % self.TARGET,
+                     "foreach f (a) echo x > %s; end" % self.TARGET):
+            with self.subTest(line=line):
+                marked, _other = self.m.mark_zsh_patterns(line)
+                self.assertEqual(marked.count("("), 1)
+                self.assertEqual(self.m.deglob(marked), line)
+                self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(line).redirects])
+            self.refused_everywhere(line, self.TARGET)
+        # `foreach f (a) cd /tmp; end; echo x > k.txt` checked k.txt only where the line began
+        home, out = str(self.home.path), str(self.out)
+        self.assertEqual(self.analysis("foreach f (a) cd %s; end" % out).cwds, frozenset([home, out]))
+        self.assertRefused("foreach f (a) cd %s/ledger; end; echo x > tickets/SPD-001.md" % home, "generated", AGENT_C)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_header_reads_its_body(self):
+        for header in FOREACH_HEADERS + FOREACH_CLOSED:
+            self.law_7(header % "git push")
+
+    def test_every_body_form_reads_its_commands(self):
+        for header in ("foreach f (a b) %s; end", "foreach f in a b; %s; end", "foreach a b (1 2) %s; end"):
+            for body in FOREACH_BODIES:
+                self.law_7(header % (body % "git push"))
+
+    def test_every_enclosing_text_reads_its_body(self):
+        for form in FOREACH_ENCLOSED:
+            self.law_7(form % "git push")
+            self.refused_everywhere(form % ("tee %s" % self.TARGET), self.TARGET)
+
+    def test_a_word_after_the_names_that_is_no_name_opens_the_body(self):
+        """zsh reads the word after each of a foreach's names in command position, so a reserved word or a redirection there
+        ends the names and opens the body of a loop over the positional parameters, while another identifier is one more
+        name (syntax.ZSH_RESERVED_WORDS and ShellWalk.names_end have the probes; with `set -- p`, `foreach f repeat 1
+        echo rp-$f; end`, `foreach f nocorrect ...`, `foreach f time ...`, `foreach f ! ...` and `foreach f foreach g (b)
+        ...; end; end` ran theirs too).  A `(` after a `{` or a `do` there opens a subshell (`foreach f {(echo gsub-$f)}`,
+        `foreach f do (echo dsub-$f); done` and `foreach f g { (echo bsub-$f) }` ran it), and a group after the body's
+        command word is a pattern (with l/t present, `echo pd | foreach f do tee (l|x)/t > /dev/null; done` wrote pd to
+        l/t, and `foreach f typeset -f > (l|x)/t; end` emptied it)."""
+        for line in ("foreach f repeat 1 git push; end", "foreach f time git push; end", "foreach f ! git push; end",
+                     "foreach f nocorrect git push; end", "foreach f foreach g (b) git push; end; end",
+                     "foreach f g if true; then git push; fi; end", "foreach f [[ -n x ]] && git push; end",
+                     "foreach f case x in x) git push;; esac; end", "foreach f export X=1; git push; end",
+                     "foreach f {(git push)}", "foreach f do (git push); done", "foreach f g { (git push) }"):
+            self.law_7(line)
+        self.refused_everywhere("foreach f typeset -f > %s; end" % self.TARGET, self.TARGET)
+        self.refused_everywhere("echo x | foreach f do tee %s > /dev/null; done" % self.TARGET, self.TARGET)
+        self.path_rule("foreach f repeat 1 rm -rf docs; end")
+        # a redirection ends the names too: its null command's target, and the command after it (with `set -- p`,
+        # `foreach f 2> o3 echo y3; end` printed y3 and made o3)
+        self.refused_everywhere("foreach f > ledger/tickets/SPD-001.md; end")
+        self.refused_everywhere("foreach f g > %s echo x; end" % self.TARGET, self.TARGET)
+        self.refused_everywhere("foreach f 2> ledger/tickets/SPD-001.md git status; end")
+        # ... and an identifier is one more name, nothing that runs
+        for line in ("foreach f git push; end", "foreach f g h; end"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [])
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_every_payload_for_every_caller(self):
+        for form in ("foreach f (a b) %s; end", "foreach f (a b) ( %s ); end", "foreach f (a b) ( {%s} ); end",
+                     "foreach f (a b) true; %s; end", "foreach f (a b) { %s }", "foreach f (a b) do %s; done",
+                     "foreach f in a b; %s; end", "foreach a b (1 2) %s; end", "foreach f do %s; done", "foreach f { %s }"):
+            self.every_payload(form)
+
+    def test_the_path_rule_in_the_body(self):
+        for form in ("foreach f (a b) %s; end", "foreach f (a b) ( {%s} ); end", "foreach f (a b) {%s}",
+                     "foreach a b (1 2) true; %s; end"):
+            for write in ("echo x | tee note.txt", "touch note.txt", "rm -rf docs"):
+                self.path_rule(form % write)
+            line = form % "echo x | tee tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_the_qualifier_code_is_read(self):
+        line = "foreach f (a) ls (b|c)(e:'git push':); end"
+        self.law_7(line)
+        tickets = str(self.home.path / "ledger" / "tickets")
+        line = "foreach f (a) ls (b|c)(e:'echo x > SPD-001.md':); end"
+        self.assertRefused(line, "Law 1", None, tickets)
+        self.assertRefused(line, "generated", AGENT_C, tickets)
+
+    def test_the_loop_variable_is_doubted(self):
+        """The names take each word of the list in turn, so a command word built from one is refused."""
+        for line in ("foreach X (git) $X push; end", "foreach X in git; $X push; end", "X=ls; foreach X (git) $X push; end",
+                     "foreach X (git) { $X push }", "foreach Y X (a git) $X push; end", "foreach X; $X push; end"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "cannot resolve")
+                self.assertRefused(line, "cannot resolve", AGENT_C)
+
+    # -- the loop model -----------------------------------------------------------------------------------------------
+    def test_a_cd_in_the_body_is_read_as_a_loops(self):
+        """A relative cd may repeat, so it is unfollowable; an absolute one leaves the union of before and after; a
+        subshell's does not carry out; the list runs to `end`, so a cd after a `;` inside it is the loop's too; and a cd after
+        the `end` is outside the loop and followed."""
+        home, out = self.home.path, self.out
+        for form in ("foreach f (a b) %s; end", "foreach f (a b) true; %s; end", "foreach f (a b) { %s }",
+                     "foreach f (a b) do %s; done", "foreach f in a b; %s; end", "foreach a b (1 2) %s; end"):
+            with self.subTest(form=form):
+                self.assertRefused((form % "cd docs") + "; echo x > note.txt", "cannot follow", AGENT_C)
+                self.assertRefused((form % ("cd %s/ledger" % home)) + "; echo x > tickets/SPD-001.md", "generated", AGENT_C)
+                self.assertEqual(self.analysis(form % ("cd %s" % out)).cwds, frozenset([str(home), str(out)]))
+        self.assertSilent("foreach f (a b) (cd %s/ledger); end; echo x > tickets/SPD-001.md" % home, AGENT_C)
+        self.assertEqual(self.analysis("foreach f (a b) (cd %s); end" % out).cwds, frozenset([str(home)]))
+        self.assertSilent("foreach f (a b) true; end; cd %s; echo x > note.txt" % out)
+        self.assertRefused("foreach f (a b) true; end; cd %s/ledger; echo x > tickets/SPD-001.md" % home, "generated", AGENT_C)
+
+    def test_the_list_runs_to_end(self):
+        """Every sublist before the `end` is the loop's body, and the loop's own redirection stands after it."""
+        m = self.m
+        a = self.analysis("foreach f (a b) echo a > ledger/tickets/SPD-001.md; echo b > tests/zzone/k.py; end")
+        self.assertEqual([m.deglob(t) for t, _c in a.redirects], ["ledger/tickets/SPD-001.md", "tests/zzone/k.py"])
+        self.refused_everywhere("foreach f (a) echo x; end > ledger/tickets/SPD-001.md")
+        self.refused_everywhere("foreach f (a) echo x; end >> ledger/tickets/SPD-001.md; echo y")
+
+    def test_the_body_reads_as_the_command_does_alone(self):
+        """The loop runs its body, and its header changes none of the body's words: every finding, redirection target and
+        written operand the body has on its own line, it has after each header."""
+        for body in [w % self.TARGET for w in FOR_ARITH_WRITERS] + ["cat %s" % self.TARGET, "echo (b|c)",
+                                                                    "ls (b|c)(e:'git push':)", "rm -rf docs"]:
+            alone = self.analysis(body)
+            for header in FOREACH_HEADERS[:7] + ("foreach f (a b) { %s }", "foreach f (a b) do %s; done"):
+                line = header % body
+                with self.subTest(line=line):
+                    looped = self.analysis(line)
+                    self.assertEqual(looped.findings, alone.findings)
+                    self.assertEqual([t for t, _c in looped.redirects], [t for t, _c in alone.redirects])
+                    self.assertEqual([w[1] for w in looped.arg_writes], [w[1] for w in alone.arg_writes])
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_end_closes_only_a_foreach(self):
+        """An `end` is the foreach's closer only in command position with a foreach open; elsewhere it is the word it was."""
+        for line in ("foreach f (a b); git push; end", "end; git push", "end && git push", "foreach f (a) echo end; git push; end",
+                     "foreach f (a) true; end; git push", "foreach f (a) true; end && git push", "{ true; end}; git push",
+                     "foreach f (a) true; end; end; git push", "for f (a) true; end; git push",
+                     "foreach f (a) if true; then true; fi; end; git push"):
+            self.law_7(line)
+        for ok in ("echo 'foreach f (a) git push; end'", "echo foreach f end", "grep -n foreach tests/zzone/k.py",
+                   "foreach f (a b) echo $f; end", "foreach f (a b) echo x > tests/zzone/k.py; end", "end",
+                   "foreach f (a b) echo (b|c); end", "foreach f (a b) { echo $f }; echo done"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, AGENT_C)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("foreach f (a) " * 2000 + "git push" + "; end" * 2000, "foreach f (" + "a " * 5000 + ") git push; end",
+                     "foreach f (a) { " * 500 + "git push" + " }" * 500, "end; " * 2000 + "git push",
+                     "foreach a " + "b " * 3000 + "(c) git push; end", "foreach f (a) true; " * 2000 + "git push",
+                     "foreach " * 500):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-182: the other spellings of a for or select header, `%s` its body.  zsh's parser (par_for) reads a for's header as it
+# reads a foreach's (SPD-180): one or more names, then `( word ... )`, `in word ... TERM` or neither -- the positional
+# parameters -- with the word after each name in command position, so a `do` or a `{` there opens a body over the positional
+# parameters and a word that is no name the first command of one.  The first name may be any identifier, `in` and a reserved
+# word among them, and every name a run of digits.  A select takes one name, and the word after it, unless `in` or `(`, is
+# its body's first.  FOR_OPENERS are the other words that open such a body: a reserved word, a subshell after a `{` or a
+# `do`; FOR_BODIES are body forms, each after `for a b (1 2)`, `for f do`, `for f {` and `select f` (where a `( list )`
+# is the word list instead); FOR_ENCLOSED are the places such a loop may stand.  With `set -- p`, a file holding 1 on
+# standard input for a select, and `echo <label> >> ran.log` in the slot, each of the 102 lines built from these and from
+# ForSelectHeaderTest's other loop forms logged its label in zsh 5.9 (arm64-apple-darwin26.0) -f and -f -o nobareglobqual (tests/probes/shell_probe.py,
+# 2026-09-23), and with `tee (l|x)/t<n>` in the slot each of the 39 headers and enclosing forms it writes through wrote its
+# l/t<n>; bash 3.2.57 ran only the lines whose loop is spelled `for f do` or `select f do` (and `zsh -f -c`'s, which zsh
+# ran), and rejected the rest.
+FOR_HEADERS = (
+    "for f do %s; done",
+    "for f { %s }",
+    "for f {%s}",
+    "for a b (1 2) %s",
+    "for a b (1 2) { %s }",
+    "for a b (1 2); %s",
+    "for a b do %s; done",
+    "for a b { %s }",
+    "for f g {%s}",
+    "for in (a b) %s",
+    "for do (a b) %s",
+    "for end (a) %s",
+    "for 1 (a b) %s",
+    "for f 1 (a b) %s",
+    "for f 12 (a b) %s",
+    "for if in a b; %s",
+)
+SELECT_HEADERS = (
+    "select f %s",
+    "select f do %s; done",
+    "select f { %s }",
+    "select f {%s}",
+    "select in (a) %s",
+)
+FOR_OPENERS = (
+    "for f repeat 1 %s",
+    "for f time %s",
+    "for f ! %s",
+    "for f nocorrect %s",
+    "for f if true; then %s; fi",
+    "for f [[ -n x ]] && %s",
+    "for f case x in x) %s;; esac",
+    "for f for g (x) %s",
+    "for f foreach g (x) %s; end",
+    "for f {(%s)}",
+    "for f do (%s); done",
+    "for f g { (%s) }",
+    "for f function g { %s }; g",
+    "select f if true; then %s; fi",
+    "select f repeat 1 %s",
+    "select f [[ -n x ]] && %s",
+    "select f {(%s)}",
+    "foreach in (a b) %s; end",
+    "foreach end (a) %s; end",
+    "foreach f 1 (a b) %s; end",
+)
+FOR_BODIES = ("%s", "( %s )", "{ %s }", "true && %s", "false || %s", "%s | cat", "if true; then %s; fi",
+              "case x in x) %s;; esac", "repeat 1 %s")
+FOR_ENCLOSED = ("eval 'for f do %s; done'", "x=$(for a b (1 2) %s)", "zsh -f -c 'for f { %s }' zc p",
+                "fn() { for f do %s; done }; fn q", "if true; then for a b (1 2) %s; fi", "{ for f { %s } }",
+                "time for f do %s; done", "! for f { %s }", "echo x | for f do %s; done",
+                "case x in x) for a b (1 2) %s;; esac", "for f (a) for g { %s }", "repeat 1 for f do %s; done",
+                "eval 'select f %s'", "x=$(select f %s)")
+
+
+class ForSelectHeaderTest(BashHookCase):
+    """SPD-182, filed by SPD-180's engineer: ShellWalk read every word of a for or select header up to a terminator, or up to
+    a `( ... )` list after exactly one name, as the header's, so the four spellings whose body starts on the header's line
+    with no terminator -- `for f do git push; done`, `for f { git push }`, `for a b (1 2) git push` and `select f git push`
+    -- were a header with nothing after it.  A git write there was silent for a member (Law 7), a redirection or a tee into a
+    generated file recorded nothing (Law 1 for Spud, Law 5 for a member), and mark_zsh_patterns read a `(` after the name, a
+    `do` or a `{` as a glob, so `for f do (git push); done` hid its subshell.  SPD-180 gave foreach zsh's reading of its
+    header; for and select share it (par_for) and now read so too, and so does foreach where its names were read short:
+    `foreach in (a b) ...; end` and `foreach f 1 (a b) ...; end` were silent as well.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line but the qualifier's, and in GNU bash 3.2.57:
+
+    - the ticket's evidence, with `set -- p`: `for f do echo fd-$f; done` printed fd-p (bash ran it too, the POSIX form),
+      `for f { echo fb-$f }` fb-p, `for a b (1 2 3 4) echo two-$a$b` two-12 and two-34, and `{ select f echo sel-$f; } <
+      in`, with 1 in the file, sel-p; bash rejected all but the first near the word after the name;
+    - the names: after the first, zsh reads each word in command position, so a reserved word or a redirection ends them and
+      opens the body (`for f > o1` made o1, `for f 2> o2 echo x` made o2, `for f &> o8 echo x` o8, and FOR_OPENERS ran
+      theirs), an identifier or a run of digits is one more name (`for f 1 (a b) echo n-$f$1` printed n-ab, and so did
+      foreach), and any other word is a parse error (`for f x-y`, `for f a[1] (x)`).  The first name is read with command
+      position off: `for in (a b)`, `foreach in (a b)`, `select in (a)`, `for do (a b)`, `for end (a)`, `for if in a b;`
+      and `for 1 (a b)` each ran their body for each word, and `for x-y (a)` and `for { ... }` failed near their word;
+    - select takes one name: `select f x-y` ran a command named x-y, `select a b c` one named b, and `select a b (1 2) echo
+      x` failed expanding `(1 2)` as b's glob argument (no matches found; unknown file attribute under -f); `select f (echo
+      x)` is its word list, and `select f` then a newline and `(echo x)` a subshell body;
+    - the body: a for's is a `do ... done`, a `{ list }` or one sublist (`for a b (1 2) echo s1-$a; echo s2-$a` printed
+      s1-1 then s2-1 once); `for f git push` ran nothing, git and push being names, and `for f git push; done` failed near
+      `done`; a `((` after a name is an arithmetic command, not a list (`for f ((1)) && echo $f` echoed the positional
+      parameter);
+    - the loop runs in the shell: `for f do cd d; done`, `for f { cd d }`, `for a b (1 2) cd d` and `{ select f cd d; } <
+      in` each ended in d, and `for f do (cd d); done` did not move it;
+    - with l/t present, the pattern after the body's command word was expanded: `echo fd | for f do tee (l|x)/t1 >
+      /dev/null; done`, `for f { echo fb > (l|x)/t2 }`, `for a b (1 2) echo ab > (l|x)/t3`, `echo abt | for a b (1 2) tee
+      (l|x)/t4 > /dev/null`, `{ select f echo sr > (l|x)/t6; } < in` and `{ select f tee (l|x)/t8 < in; } < in` each wrote
+      its l/t, and `for f g > (l|x)/t echo gx` wrote gx there; with b and c present, zsh -f ran the `e:` code of `for f do
+      ls (b|c)(e:<code>:); done`, of `for a b (1 2) ls (b|c)(e:<code>:)` and of `{ select f ls (b|c)(e:<code>:); } < in`
+      for the files it matched, and zsh -f -o nobareglobqual read a second pattern and found no match.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "(ledger|x)/tickets/SPD-001.md"
+    EVIDENCE = ("for f do %s; done", "for f { %s }", "for a b (1 2) %s", "select f %s")
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def every_payload(self, form):
+        """Law 7, Law 6, Law 5's --as, the database and Law 1 through a redirection and a tee for both members; for Spud, the
+        checks that apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        for command, needle in (("git push", "Law 7"), ("%s ticket new --title x" % spud, "Law 6"),
+                                ("%s --as spud member log hi" % spud, "Law 6"),
+                                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                                ("echo x | tee ledger/tickets/SPD-001.md", "generated")):
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=form % command, agent_id=agent_id):
+                    self.assertRefused(form % command, needle, agent_id)
+        for command, needle in (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1")):
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, needle, agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def refused_everywhere(self, line, target="ledger/tickets/SPD-001.md"):
+        """Refused to both members for the ledger file, named as the line spells it, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                r = self.assertRefused(line, "generated", agent_id)
+                self.assertIn(target, r.reason)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def path_rule(self, line):
+        """A write with no `/` in its words: refused to AGENT_A, whose deliverables are tests/** and bin/spud, allowed to
+        AGENT_C, and refused to Spud, whose own files these are not."""
+        with self.subTest(line=line):
+            self.assertRefused(line, "deliverables")
+            self.assertSilent(line, AGENT_C)
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_the_loop_zsh_runs(self):
+        for header in self.EVIDENCE:
+            self.law_7(header % "git push")
+            self.refused_everywhere(header % "tee ledger/tickets/SPD-001.md")
+            self.refused_everywhere(header % "echo x > ledger/tickets/SPD-001.md")
+            self.path_rule(header % "rm -rf docs")
+            self.assertIn("docs", [w[1] for w in self.analysis(header % "rm -rf docs").arg_writes])
+            # the pattern zsh expands after the body's command word is kept in its word, a list's own `(` left as it is
+            for line in (header % ("tee %s" % self.TARGET), header % ("echo x > %s" % self.TARGET)):
+                with self.subTest(line=line):
+                    marked, _other = self.m.mark_zsh_patterns(line)
+                    self.assertEqual(marked.count("("), line.count("(") - 1)
+                    self.assertEqual(self.m.deglob(marked), line)
+                    self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(line).redirects])
+                self.refused_everywhere(line, self.TARGET)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_header_reads_its_body(self):
+        for header in FOR_HEADERS + SELECT_HEADERS:
+            self.law_7(header % "git push")
+            self.refused_everywhere(header % ("tee %s" % self.TARGET), self.TARGET)
+
+    def test_every_word_that_opens_a_body_reads_it(self):
+        """A reserved word, a subshell after a `{` or a `do`, and a redirection after the names (FOR_OPENERS; with `set --
+        p`, `for f > o1` made o1, `for f 2> o2 echo x` made o2, `for f g >o3 echo x` wrote x to o3, `for f &> o8 echo x` made
+        o8, `for f g > (l|x)/t echo x` wrote x to l/t, `for f typeset -f > o4` made o4, and `{ select f > o5; } < in` and `{
+        select f 2> o6 echo x; } < in` made theirs)."""
+        for opener in FOR_OPENERS:
+            self.law_7(opener % "git push")
+        self.path_rule("for f repeat 1 rm -rf docs")
+        for line in ("for f > ledger/tickets/SPD-001.md", "for f 2> ledger/tickets/SPD-001.md git status",
+                     "for f &> ledger/tickets/SPD-001.md echo x", "select f > ledger/tickets/SPD-001.md",
+                     "select f 2> ledger/tickets/SPD-001.md echo x", "for f typeset -f > ledger/tickets/SPD-001.md"):
+            self.refused_everywhere(line)
+        self.refused_everywhere("for f g > %s echo x" % self.TARGET, self.TARGET)
+        self.refused_everywhere("echo x | for f do tee %s > /dev/null; done" % self.TARGET, self.TARGET)
+        self.refused_everywhere("select f tee %s < ledger/tickets/SPD-001.md" % self.TARGET, self.TARGET)
+        self.refused_everywhere("select f { echo x > %s }" % self.TARGET, self.TARGET)
+        self.refused_everywhere("select f echo x | tee %s > /dev/null" % self.TARGET, self.TARGET)
+        # a redirection's own descriptor stays the redirection's: `2>&1` duplicates, it writes no file named 1
+        self.law_7("for f 2>&1 git push")
+
+    def test_every_body_form_reads_its_commands(self):
+        """Each body form after each header, but a `( ... )` right after a select's name, which is its word list
+        (test_names_and_lists_run_nothing)."""
+        for header in ("for a b (1 2) %s", "for f do %s; done", "for f { %s }", "select f %s"):
+            for body in FOR_BODIES:
+                if not (header == "select f %s" and body[:1] == "("):
+                    self.law_7(header % (body % "git push"))
+
+    def test_every_enclosing_text_reads_its_body(self):
+        for form in FOR_ENCLOSED:
+            self.law_7(form % "git push")
+            self.refused_everywhere(form % ("tee %s" % self.TARGET), self.TARGET)
+
+    def test_every_payload_for_every_caller(self):
+        for form in self.EVIDENCE + ("for a b (1 2) ( %s )", "for f do ( {%s} ); done", "for f g { %s }", "for in (a b) %s",
+                                     "for f 1 (a b) %s", "select f { %s }", "select f do %s; done", "for f if true; then %s; fi"):
+            self.every_payload(form)
+
+    def test_the_path_rule_in_the_body(self):
+        for form in self.EVIDENCE + ("for f {%s}", "select f { %s }"):
+            for write in ("echo x | tee note.txt", "touch note.txt", "rm -rf docs"):
+                self.path_rule(form % write)
+            line = form % "echo x | tee tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_the_qualifier_code_is_read(self):
+        tickets = str(self.home.path / "ledger" / "tickets")
+        for header in ("for f do %s; done", "select f %s", "for a b (1 2) %s"):
+            self.law_7(header % "ls (b|c)(e:'git push':)")
+            line = header % "ls (b|c)(e:'echo x > SPD-001.md':)"
+            self.assertRefused(line, "Law 1", None, tickets)
+            self.assertRefused(line, "generated", AGENT_C, tickets)
+
+    def test_the_loop_variable_is_doubted(self):
+        """Each name takes the list's words in turn, or the positional parameters, so a command word built from one is
+        refused (with `set -- p`, `for X (echo) $X xv` printed xv and `for X do $X xd; done` ran a command named p)."""
+        for line in ("for X do $X push; done", "for X { $X push }", "for Y X (a git) $X push", "select X $X push",
+                     "select X do $X push; done", "for in (git) $in push", "foreach Y 1 (a git) $1 push; end",
+                     "for do (git) { $do push }"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "cannot resolve")
+                self.assertRefused(line, "cannot resolve", AGENT_C)
+
+    # -- the loop model -----------------------------------------------------------------------------------------------
+    def test_a_cd_in_the_body_is_read_as_a_loops(self):
+        """A relative cd may repeat, so it is unfollowable; an absolute one leaves the union of before and after; a
+        subshell's does not carry out; and a cd after a for's sublist body is outside the loop and followed."""
+        home, out = self.home.path, self.out
+        for form in self.EVIDENCE + ("for f g { %s }", "for in (a b) %s", "select f do %s; done"):
+            with self.subTest(form=form):
+                self.assertRefused((form % "cd docs") + "; echo x > note.txt", "cannot follow", AGENT_C)
+                self.assertRefused((form % ("cd %s/ledger" % home)) + "; echo x > tickets/SPD-001.md", "generated", AGENT_C)
+                self.assertEqual(self.analysis(form % ("cd %s" % out)).cwds, frozenset([str(home), str(out)]))
+        self.assertSilent("for f do (cd %s/ledger); done; echo x > tickets/SPD-001.md" % home, AGENT_C)
+        self.assertEqual(self.analysis("for f do (cd %s); done" % out).cwds, frozenset([str(home)]))
+        for form in ("for a b (1 2) true; %s", "select f true; %s"):
+            with self.subTest(form=form):
+                self.assertSilent(form % ("cd %s; echo x > note.txt" % out))
+                self.assertRefused(form % ("cd %s/ledger; echo x > tickets/SPD-001.md" % home), "generated", AGENT_C)
+
+    def test_the_body_reads_as_the_command_does_alone(self):
+        """The loop runs its body, and its header changes none of the body's words: every finding, redirection target and
+        written operand the body has on its own line, it has after each header."""
+        for body in [w % self.TARGET for w in FOR_ARITH_WRITERS] + ["cat %s" % self.TARGET, "echo (b|c)",
+                                                                    "ls (b|c)(e:'git push':)", "rm -rf docs"]:
+            alone = self.analysis(body)
+            for header in self.EVIDENCE + ("for in (a b) %s", "for f 1 (a b) %s", "select f do %s; done", "for f g { %s }"):
+                line = header % body
+                with self.subTest(line=line):
+                    looped = self.analysis(line)
+                    self.assertEqual(looped.findings, alone.findings)
+                    self.assertEqual([t for t, _c in looped.redirects], [t for t, _c in alone.redirects])
+                    self.assertEqual([w[1] for w in looped.arg_writes], [w[1] for w in alone.arg_writes])
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_names_and_lists_run_nothing(self):
+        """An identifier or a run of digits after a for's names is one more name, a word after `in` or inside `( ... )` a
+        word of the list, a `for` out of command position a word, and a group after the body's command word a pattern:
+        none of them runs."""
+        for line in ("for f git push", "for f g h", "for f git push; done", "foreach f 1 git push; end", "for f 1 2 git",
+                     "echo for f do git push", "for f in git push; do echo $f; done", "select f in git push; do true; done",
+                     "for f (git push) echo $f", "select f (git push) true", "select f ( git push )", "for a b (git push) true",
+                     "for f do echo (b|c); done", "select f echo (b|c)", "for a b (1 2) echo (b|c)"):
+            with self.subTest(line=line):
+                self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+        # select takes one name: the word after it is the body's command, the group after that its glob argument
+        self.assertNotIn(("git", ("push", "push")), self.analysis("select a b (1 2) git push").findings)
+
+    def test_the_other_spellings_keep_their_reading(self):
+        for line in ("for f in a b; do git push; done", "for f (a b) git push", "for f; git push", "for f\ndo git push\ndone",
+                     "select f in a b; do git push; done", "select f (a b) git push", "for (( i=0; i<1; i++ )) git push",
+                     "foreach f (a b) git push; end", "for f\n(git push)", "select f\n(git push)"):
+            self.law_7(line)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("for f do " * 2000 + "git push" + "; done" * 2000, "for f { " * 500 + "git push" + " }" * 500,
+                     "for a " + "b " * 3000 + "(c) git push", "select f " * 2000 + "git push",
+                     "for a " + "b " * 3000 + "do git push; done", "for f in " + "a " * 5000 + "; git push",
+                     "for " * 500, "select " * 500, "for f 1 do " * 1000 + "git push" + "; done" * 1000):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                if "git push" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-181: case patterns that hold a glob group, `%s` the arm's body.  With `( {echo <label>} )`, `{echo <label>}` and `{(
+# echo <label> )}` in the slot every one printed its label in zsh 5.9 -f and -f -o nobareglobqual, and with l/t present
+# `echo <label> | <the line with tee (l|x)/t > /dev/null in the slot>` wrote the label to l/t for every one but the two
+# extendedglob lines, whose pipe fed setopt (tests/probes/shell_probe.py, 2026-09-23); bash 3.2.57 rejected every one, near
+# its group, its `;&` or its `;|`.
+CASE_GROUP_PATTERNS = (
+    # a group opening the pattern's first word: `((x))` (the ticket's first line), the optional parenthesis around a group;
+    # `(x|y))` (its third), a group that is the pattern itself
+    "case x in ((x)) %s;; esac",
+    "case x in (x|y)) %s;; esac",
+    "case x in (x)) %s;; esac",
+    "case x in (((x))) %s;; esac",
+    "case x in ((x|y)) %s;; esac",
+    "case x in (a|(x|y))) %s;; esac",
+    "case x in ((x) | y) %s;; esac",
+    "case x in ( (x) ) %s;; esac",
+    "case ab in (a)(b)) %s;; esac",
+    "case xy in (x)y) %s;; esac",
+    "case 5 in (<1-9>)) %s;; esac",
+    "setopt extendedglob; case X in (#i)x) %s;; esac",
+    "setopt extendedglob; case X in ((#i)x)) %s;; esac",
+    # a group after a bar, or glued inside a word, an assignment's spelling among them
+    "case x in x|(y)) %s;; esac",
+    "case x in (x)|y) %s;; esac",
+    "case x in (x) | (y)) %s;; esac",
+    "case ab in a(b|c)) %s;; esac",
+    "case mode=x in mode=(a|x)) %s;; esac",
+    # a pattern after `;;` (the ticket's second line), `;&` and `;|`, glued to its terminator, or on a line of its own
+    "case x in a) true;; ((x)) %s;; esac",
+    "case x in a) true;; (x|y)) %s;; esac",
+    "case x in x) true;& ((x)) %s;; esac",
+    "case x in x) true;& (x|y)) %s;; esac",
+    "case x in x) true;| ((x)) %s;; esac",
+    "case x in x) true;| (x|y)) %s;; esac",
+    "case x in y) ;;((x)) %s;; esac",
+    "case x in\n((x)) %s;; esac",
+    "case x in\n  (x|y))\n    %s\n  ;;\nesac",
+    "case x in ((x))\n%s;; esac",
+    # a newline inside the group, which zsh reads as part of the pattern
+    "case x in ((x|\ny)) %s;; esac",
+    "case x in (x|\ny)) %s;; esac",
+)
+# ... and the places such a case may stand, `%s` its body: each printed its label too.
+CASE_GROUP_ENCLOSED = (
+    "eval 'case x in ((x)) %s;; esac'",
+    "x=$(case x in ((x)) %s;; esac)",
+    "echo `case x in (x|y)) %s;; esac`",
+    "zsh -f -c 'case x in ((x)) %s;; esac'",
+    "f() { case x in (x|y)) %s;; esac }; f",
+    "if true; then case x in ((x)) %s;; esac; fi",
+    "case x in x) case y in ((y)) %s;; esac;; esac",
+    "{ case x in (x|y)) %s;; esac }",
+    "for f (a) case x in ((x)) %s;; esac",
+    "time case x in (x|y)) %s;; esac",
+)
+
+
+class CasePatternGroupTest(BashHookCase):
+    """SPD-181, filed by SPD-178's engineer: mark_zsh_patterns ended a case pattern at the first `)` it met, so after a
+    pattern holding a glob group, `((x))` or `(x|y))`, the arm's body started outside command position: a `( {list} )`
+    subshell there was one glob word in zsh's reading and a command named `{git` in bash's, its commands unread.  After `;;`
+    its arithmetic branch took `((x))` for an arithmetic command and left the pattern open to the next `)`, so a tee into a
+    group in the body lost its target.  The proposer's evidence, on the SPD-178 tree: `case x in ((x)) ( {git push} );;
+    esac` and `case x in (x|y)) ( {git push} );; esac` recorded no finding (Law 7 for members), and `case x in a) true;;
+    ((x)) tee (ledger|x)/tickets/SPD-001.md;; esac` recorded only /tickets/SPD-001.md (silent for Spud, Law 1).
+
+    Probed 2026-09-22 (the proposer) and 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0)
+    under -f -o nobareglobqual and under -f, which printed the same for every line, and in GNU bash 3.2.57:
+
+    - zsh reads a pattern word whole, its groups with the blanks, bars and newlines in them, and the pattern ends at the
+      `)` after it (`(x|y)) echo C`, `(x)) echo I`, `x|(y)) echo E` and `(x)y) echo S16` each ran their body).  A first word
+      that starts and ends with a group and is followed by anything but a `)` or a `|` is the pattern in its optional
+      parentheses (`((x)) echo B`, `( (x) ) echo T`, `(x) echo A`), and its body starts after it in command position:
+      `((x)) { echo Z13 }`, `((x)) if true; then echo Z14; fi`, a `((` there an arithmetic command (`((x)) (( 3 > 2 ))
+      && echo Z28` made no file 2).  Anything else there is a parse error (`(x)|(y) ( echo P21 )`, `z|(x) echo Z7`);
+    - after `;;`, `;&` and `;|` a pattern is read, never an arithmetic command: `case y in a) true;; ((x)) echo wrong;;
+      esac` printed nothing and `case y in ((x)) echo wrong2;; ((y)) echo W;; esac` printed W.  `;|` is a terminator of
+      zsh's own (`echo a;| cat` failed near `;|`), which the hook read as `;` and `|`;
+    - a group in a pattern runs nothing: `case x in ((echo P2)) true;; esac`, `(echo P3|x))`, `x) true;| (echo P1))` and
+      `x) ;& (echo P4) )` printed nothing, and zsh generates no file names from a case's word or its patterns, so no glob
+      qualifier there runs code (`(x)(e:"echo QUAL":))`, `((x)(e:"echo QUAL2":))`, `x(e:"echo QUAL3":))`,
+      `(x|(e:"echo QUAL4":)))` with a file x present, `(x)(e:"echo QUAL":)|y)`, and the word `f*(e:"echo SUBJ":)` with a
+      file f1 present printed no QUAL or SUBJ under -f);
+    - `mode=(a|x)` is a group there, no array (`case mode=x in mode=(a|x)) echo m4;; esac` printed m4);
+    - bash rejects a group in a pattern, `;&` and `;|`, and reads the POSIX spellings as zsh does.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "(ledger|x)/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def every_payload(self, form):
+        """Law 7, Law 6, Law 5's --as, the database and Law 1 through a redirection and a tee for both members; for Spud, the
+        checks that apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        for command, needle in (("git push", "Law 7"), ("%s ticket new --title x" % spud, "Law 6"),
+                                ("%s --as spud member log hi" % spud, "Law 6"),
+                                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                                ("echo x > ledger/tickets/SPD-001.md", "generated"),
+                                ("echo x | tee ledger/tickets/SPD-001.md", "generated")):
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=form % command, agent_id=agent_id):
+                    self.assertRefused(form % command, needle, agent_id)
+        for command, needle in (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly"),
+                                ("echo x > ledger/tickets/SPD-001.md", "Law 1"),
+                                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1")):
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, needle, agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, named as the line spells it, and to Spud on Law 1."""
+        with self.subTest(line=line):
+            self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(line).redirects])
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                r = self.assertRefused(line, "generated", agent_id)
+                self.assertIn(self.TARGET, r.reason)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def path_rule(self, line):
+        """A write with no `/` in its words: refused to AGENT_A, whose deliverables are tests/** and bin/spud, allowed to
+        AGENT_C, and refused to Spud, whose own files these are not."""
+        with self.subTest(line=line):
+            self.assertRefused(line, "deliverables")
+            self.assertSilent(line, AGENT_C)
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_zsh_runs_it(self):
+        # zsh ran each subshell (`{echo case-sub}` and its kin printed their labels), and the hook found no push in the first
+        # two; the third was refused before, and checking the arithmetic branch alone would have made it silent
+        for line in ("case x in ((x)) ( {git push} );; esac", "case x in (x|y)) ( {git push} );; esac",
+                     "case x in a) true;; ((x)) ( {git push} );; esac"):
+            self.law_7(line)
+        # the pattern stays one word and the subshell's parentheses stay the shell's
+        marked, _other = self.m.mark_zsh_patterns("case x in (x|y)) ( {git push} );; esac")
+        self.assertEqual((marked.count("("), marked.count(")")), (1, 2))
+        # `((x))` after `;;` is a pattern (`case y in a) true;; ((x)) echo wrong;; esac` printed nothing): its optional
+        # parentheses are the shell's, the tee's group a pattern zsh expands (with l/u present, `echo cu | case x in a) ;;
+        # ((x)) tee (l|x)/u;; esac` wrote cu to l/u)
+        line = "case x in a) true;; ((x)) tee %s;; esac" % self.TARGET
+        marked, _other = self.m.mark_zsh_patterns(line)
+        self.assertEqual(marked.count("("), 1)
+        self.assertEqual(self.m.deglob(marked), line)
+        self.refused_everywhere(line)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_pattern_reads_its_body(self):
+        for form in CASE_GROUP_PATTERNS:
+            for body in ("( {%s} )", "{( %s )}", "{%s}", "( %s )", "%s"):
+                self.law_7(form % (body % "git push"))
+            self.refused_everywhere(form % ("tee " + self.TARGET))
+
+    def test_every_enclosing_text_reads_its_body(self):
+        for form in CASE_GROUP_ENCLOSED:
+            self.law_7(form % "( {git push} )")
+            self.law_7(form % "{( git push )}")
+            self.refused_everywhere(form % ("tee " + self.TARGET))
+
+    def test_every_payload_for_every_caller(self):
+        for form in ("case x in ((x)) ( {%s} );; esac", "case x in (x|y)) ( {%s} );; esac",
+                     "case x in a) true;; ((x)) ( {%s} );; esac", "case x in x) true;| (x|y)) {( %s )};; esac"):
+            self.every_payload(form)
+
+    def test_the_path_rule_in_the_body(self):
+        for form in ("case x in ((x)) ( {%s} );; esac", "case x in (x|y)) ( {%s} );; esac",
+                     "case x in a) true;; ((x)) ( {%s} );; esac", "case x in ((x|\ny)) {( %s )};; esac"):
+            for write in ("echo x | tee note.txt", "touch note.txt", "rm -rf docs"):
+                self.path_rule(form % write)
+            line = form % "echo x | tee tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_an_arithmetic_command_opens_the_body(self):
+        """After the pattern `((` is an arithmetic command, whose `>` opens no file (probed: `((x)) (( 3 > 2 )) && echo Z28`,
+        `(x|y)) (( 3 > 2 )) && echo A1` and `(x) (( 3 > 2 )) && echo A2` ran their echo and made no file 2)."""
+        for line in ("case x in ((x)) (( 3 > 2 )) && git push;; esac", "case x in (x|y)) (( 3 > 2 )) && git push;; esac",
+                     "case x in a) true;; ((x)) (( 3 > 2 )) && git push;; esac", "case x in (x) (( 3 > 2 )) && git push;; esac"):
+            self.law_7(line)
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).redirects, [])
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_a_pattern_runs_nothing(self):
+        """A group in a pattern is matched against the case's word, never run, and no glob qualifier in a pattern runs code.
+        The line after `;|` was refused before this ticket, which read `;|` as `;` then `|` and the group after it as a
+        subshell; the glued qualifier was refused, its code read as a glob's."""
+        for line in ("case x in ((git push)) true;; esac", "case x in (git push|x)) true;; esac",
+                     "case x in x) true;| (git push)) true;; esac", "case x in x) ;& (git push) ) true;; esac",
+                     "case x in x(e:'git push':)) true;; esac", "case x in ((x)(e:'git push':)) true;; esac",
+                     "case x in (x)(e:'git push':)|y) true;; esac", "case x in (x|(e:'git push':))) true;; esac"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [])
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_the_posix_spellings_keep_their_reading(self):
+        """bash reads these too, and they are marked as they are spelled, or read as they were."""
+        for line in ("case x in (x) git push;; esac", "case x in x) git push;; esac", "case x in (x|y) git push;; esac",
+                     "case x in ( x | y ) git push;; esac", "case x in x|y) git push;; esac",
+                     "case x in (x) ( {git push} );; esac", "case x in y) true;; (x) git push;; esac",
+                     "case x in x)\n(git push);; esac", "case x in x) true;; y) git push;; esac"):
+            self.law_7(line)
+        for line in ("case x in (x) git push;; esac", "case x in y) true;; (x) git push;; esac", "case x in x|y) true;; esac"):
+            with self.subTest(line=line):
+                self.assertEqual(self.m.mark_zsh_patterns(line), (line, line))
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("case x in " + "((x)) true;; " * 2000 + "(x|y)) ( {git push} );; esac",
+                     "case x in " + "(" * 3000 + "x" + ")" * 3000 + " ( {git push} );; esac",
+                     "case x in " + "x) true;| " * 2000 + "(x|y)) ( {git push} );; esac",
+                     "case x in (" + "a|" * 5000 + "x)) ( {git push} );; esac",
+                     "case x in " + "(x) | " * 2000 + "(y)) ( {git push} );; esac",
+                     "case x in " + "(" * 5000 + "x ( {git push} );; esac",
+                     "case x in " + "((x| ; " * 2000 + "y" + "))" * 2000 + " ( {git push} );; esac"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                if ")) ( {" in line:
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-183: a newline inside a zsh glob group, in a word zsh expands.  Each writes ledger/tickets/SPD-001.md in zsh (probed:
+# see GroupNewlineTest), the first the ticket's evidence.
+GROUP_NEWLINE_TARGETS = (
+    "(ledger|\nx)/tickets/SPD-001.md",
+    "(ledger|\n\nx)/tickets/SPD-001.md",
+    "(ledger|\t\n  x)/tickets/SPD-001.md",
+    "(x|\n|ledger)/tickets/SPD-001.md",
+    "(\nx|ledger)/tickets/SPD-001.md",
+    "led(ger|\nx)/tickets/SPD-001.md",
+    "(ledger|x)(|\n)/tickets/SPD-001.md",
+    "ledger/(tickets|\n)/SPD-001.md",
+    "ledger/tickets/SPD-00(1|\n2).md",
+    "(ledger|(x|\ny))/tickets/SPD-001.md",
+    "(ledger|\n# x\ny)/tickets/SPD-001.md",
+)
+
+
+class GroupNewlineTest(BashHookCase):
+    """SPD-183, filed by SPD-181's engineer: zsh reads a newline inside a glob group as part of the pattern in any word, not
+    only in a case pattern, but newlines_as_separators wrote every unquoted newline as ` ; `, and _zsh_group rejects a group
+    of a word holding a `;`, so the hook read a subshell there and a write into the group lost its target.  The proposer's
+    evidence, on the SPD-181 tree: `echo x > (ledger|<newline>x)/tickets/SPD-001.md` and `echo x | tee
+    (ledger|<newline>x)/tickets/SPD-001.md` recorded only /tickets/SPD-001.md (silent for Spud, Law 1).
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line but the qualifier's, and in GNU bash 3.2.57:
+
+    - a newline in a group is one more character of the pattern, wherever it stands in the group: each of
+      GROUP_NEWLINE_TARGETS wrote the ledger file through `>`, and the first through `>>`, `>|`, `&>`, `2>`, `tee -a`, `cp`,
+      `mv`, `rm` (which removed it), `touch -t` and `truncate -s 0` (the probe runs no git; `git diff --output=` opens the
+      file its word expands to as the others do), while `(ledger<newline>|x)` found no match, its first alternative being
+      `ledger` and a newline, and `echo (a|<newline>b)` failed with "no matches found: (a|\\nb)".  With a file named push
+      present, `echo (push|<newline>x)` and `echo p(u|<newline>x)sh` printed push, so a git verb spelled so is `git push`.
+      eval, `$( )` and `zsh -f -c` wrote l/t through `(l|<newline>x)/t`;
+    - under -f a glob qualifier's code with a newline in it ran (`ls tests/*(e{true<newline>echo QUAL-$REPLY})` printed
+      QUAL-); under nobareglobqual it is a group, and no file matched;
+    - a `#` after a newline in a group opens no comment there: `(ledger|<newline># x<newline>y)` is a pattern whose second
+      alternative holds it (the write above), as a `#` in the middle of any word is;
+    - a `;` spelled in a word's group ends the word there, the group left open: `x=a(l ; echo RAN7` with its `)` on the next
+      line printed RAN7 and then failed near that `)`, and `echo x > (l ; echo RAN3` failed with "bad pattern: (l ", so it
+      stays the plain reading's separator;
+    - `(` in command position opens a subshell whatever the newlines in it (`(echo A|<newline>cat)` printed A);
+    - bash rejected the first such line of every probe (`syntax error near unexpected token`), as it rejects any group
+      (ZshGlobOperatorTest).
+
+    A here-document whose `<<` line goes on into a group is not read here: the body starts after the line the command
+    ends on (proposal 292, SPD-188's HereDocumentBodyTest).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for rel in (self.TARGET, "docs/x.md", "tests/keep.py"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "generated", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_zsh_expands_it(self):
+        for line in ("echo x > (ledger|\nx)/tickets/SPD-001.md", "echo x | tee (ledger|\nx)/tickets/SPD-001.md"):
+            with self.subTest(line=line):
+                # zsh's reading, first; the other shell's, which bash rejects, still reads a subshell there
+                targets = [self.m.deglob(t) for t, _c in self.analysis(line).redirects]
+                self.assertEqual(targets, ["(ledger|\nx)/tickets/SPD-001.md", "/tickets/SPD-001.md"])
+            self.refused_everywhere(line)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_spelling_of_the_group(self):
+        for target in GROUP_NEWLINE_TARGETS:
+            for form in ("echo x > %s", "echo x | tee %s"):
+                self.refused_everywhere(form % target)
+            with self.subTest(target=target):
+                self.assertIn(target, [self.m.deglob(t) for t, _c in self.analysis("echo x > %s" % target).redirects])
+
+    def test_every_write_channel(self):
+        target = GROUP_NEWLINE_TARGETS[0]
+        for form in ("echo x >> %s", "echo x >| %s", "echo x &> %s", "echo x 2> %s", "echo x | tee -a tests/keep.py %s",
+                     "rm %s", "rm -f %s", "touch %s", "cp docs/x.md %s", "mv docs/x.md %s", "truncate -s 0 %s",
+                     "git diff --output=%s"):
+            with self.subTest(form=form):
+                self.assertRefused(form % target, "generated", AGENT_C)
+                self.assertRefused(form % target, "Law 1", agent_id=None)
+
+    def test_a_git_verb_spelled_with_a_newline_in_a_group(self):
+        for line in ("git (push|\nx)", "git p(u|\nx)sh", "git -C . (push|\nx)", "git (push|\nx) origin main",
+                     "git -C (ledger|\nx) push"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+
+    def test_glob_qualifier_code_holding_a_newline(self):
+        """zsh -f runs the code for each file the glob matches, newline and all; the hook reads it as a command."""
+        for line in ("ls tests/*(e{true\ngit push})", "cat tests/keep.py(e{true\ngit push})",
+                     "ls (tests|\nx)/*(e{git push})"):
+            self.law_7(line)
+
+    def test_every_enclosing_text(self):
+        for form in ("eval 'echo x > %s'", "x=$(echo x > %s)", "echo `echo x | tee %s`", "zsh -f -c 'echo x > %s'",
+                     "sh -c 'echo x | tee %s'", "if true; then echo x > %s; fi", "{ echo x | tee %s; }",
+                     "f() { echo x > %s; }; f", "echo a; echo x > %s", "echo a &&\necho x > %s"):
+            self.refused_everywhere(form % GROUP_NEWLINE_TARGETS[0])
+        line = "zsh <<'EOF'\necho x > %s\nEOF" % GROUP_NEWLINE_TARGETS[0]  # a body a shell reads
+        self.refused_everywhere(line)
+
+    def test_the_path_rule_reads_the_group(self):
+        """A member's own file through a group is its own, and a file outside its deliverables is not.  The groups are glued
+        inside their words, which the other reading keeps whole too: a group opening a word is a subshell there, whose
+        target (`/keep.py`) is outside every project, with a newline in it or not."""
+        for line in ("echo x | tee tests/(keep|\nx).py", "echo x > tests/keep.(py|\nzz)", "touch tests/(keep|\nx).py",
+                     "echo x | tee t(ests|\n)/keep.py"):
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+        for line in ("echo x | tee docs/(x|\ny).md", "rm docs/(x|\ny).md", "echo x > d(ocs|\n)/x.md"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "deliverables")
+                self.assertSilent(line, AGENT_C)
+        self.assertRefused("echo x > (nomatch|\nzz)/x.py", "matches no file", AGENT_C)
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_a_newline_is_still_a_separator_outside_a_group(self):
+        """In command position `(` opens a subshell, its newlines separators; after a group, a newline ends the command."""
+        for line in ("(ledger|\ngit push)", "(\ngit push)", "( echo a\ngit push )", "echo (a|b)\ngit push",
+                     "echo (tests|x)/keep.py\ngit push", "echo a\n(git push)", "x=$(echo a\ngit push)"):
+            self.law_7(line)
+        prepared = self.m.newlines_as_separators("echo a\necho (b|\nc)\n(echo d)")
+        marked, other = self.m.mark_zsh_patterns(prepared)
+        self.assertEqual([t for t in self.m.shell_tokens(marked) if t == ";"], [";", ";"])
+        self.assertEqual(self.m.deglob(marked), "echo a ; echo (b|\nc) ; (echo d)")
+        self.assertEqual(other, "echo a ; echo (b| ; c) ; (echo d)")
+        for text in ("echo a\ngit push", "a\n\nb", "a # c\nb"):  # no group: the text as the walk always read it
+            prepared = self.m.newlines_as_separators(text)
+            with self.subTest(text=text):
+                self.assertEqual(self.m.mark_zsh_patterns(prepared), (prepared.replace(self.m.LINE_BREAK, ";"),) * 2)
+
+    def test_a_spelled_semicolon_still_ends_the_word(self):
+        """zsh's lexer ends a word at a spelled `;` even inside a group, so the text after it is a command, run when the
+        group's `)` stands on a later line (probed: `x=a(l ; echo RAN7` then `)` printed RAN7) and a parse error when it
+        stands on the same one (`echo (a ; echo RAN1 )` failed near `)`): the plain reading stands either way."""
+        for line in ("x=a(l ; git push\n)", "echo x > (tests ; git push\n)/keep.py", "echo (a ; git push )",
+                     "echo (a|\nb ; git push\n)"):
+            self.law_7(line)
+        self.assertRefused("echo x > ledger/tickets/SPD-00(1;|3).md", "generated", AGENT_C)
+
+    def test_a_here_document_body_is_never_a_word(self):
+        """A body cat reads is data, whatever text it holds; the line writes only its own redirection target."""
+        for line in ("cat <<'EOF'\necho x > (ledger|\nx)/tickets/SPD-001.md\nEOF",
+                     "cat > /dev/null <<EOF\n(ledger|\nx)/tickets/SPD-001.md\nEOF"):
+            for agent_id in (AGENT_A, AGENT_C, None):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+        line = "cat <<EOF > tests/keep.py\n(ledger|\nx)/tickets/SPD-001.md\nEOF"
+        for agent_id in (AGENT_A, AGENT_C):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+
+    def test_a_case_pattern_reads_its_newline_as_the_newline(self):
+        """SPD-181's case pattern holds its newline as zsh reads it, and its body still follows the pattern."""
+        line = "case x in ((x|\ny)) tee (ledger|\nx)/tickets/SPD-001.md;; esac"
+        self.refused_everywhere(line)
+        self.law_7("case x in ((x|\ny)) {( git push )};; esac")
+        self.law_7("case x in (x|\ny)) git push;; esac")
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("echo x > (" + "a|\n" * 5000 + "ledger)/tickets/SPD-001.md",
+                     "echo x > " + "(ledger|\nx)" * 2000,
+                     "echo " + "(" * 3000 + "\n" * 3000 + ")" * 3000 + "\ngit push",
+                     "echo " + "(a\n" * 3000 + "\ngit push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                if line.endswith("git push"):
+                    self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-188: what keeps a command going past the line its `<<` operator stands on, each standing in a word of the command
+# (HereDocumentBodyTest has the probes); the body starts after the line on which the command's last word ends.
+HEREDOC_SPANNING = (
+    "'a\nb'",  # a single-quoted word
+    '"a\nb"',  # a double-quoted word
+    "a\\\nb",  # a backslash-newline
+    "$(echo a\n)",  # a command substitution
+    "`echo a\n`",  # backticks
+    "${X:-a\nb}",  # a parameter expansion
+    "<(cat\n)",  # a process substitution
+    "$((1 +\n2))",  # an arithmetic expansion
+    "(ledger|\nx)/tickets/SPD-001.md",  # zsh's glob group, which bash rejects
+)
+
+
+class HereDocumentBodyTest(BashHookCase):
+    """SPD-188, filed by SPD-183's engineer: strip_heredocs took the lines right after the line holding a `<<` operator as its
+    body, where zsh and bash start it after the newline that ends the operator's command.  A quoted word, a `$( )` or a zsh
+    glob group spanning lines keeps the command going, so the hook read the rest of the command as body text and lost its
+    targets.  The ticket's evidence, on the SPD-183 tree: `cat <<EOF | tee ledger/tickets/SPD-001.md 'a<newline>b' >
+    /dev/null` was unparseable (allowed to every caller), the group lines `cat <<EOF > (ledger|<newline>x)/...` and `| tee
+    (ledger|<newline>x)/...` recorded no target, and `cat <<EOF > $(echo ...<newline>)` read the substitution's first line
+    alone.  The operator itself was read from the line's text, so a `<<` in quotes, a comment, an arithmetic shift or a `<<<`
+    hid the lines after it (`echo '<<EOF'<newline>git push` was silent for a member), and a body inside a `$( )` was taken out
+    of the outer text, where no substitution read it (`x=$(sh <<EOF<newline>git push<newline>EOF<newline>)` too).
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory so
+    zsh could write a here-document's file:
+
+    - the body starts after the newline that ends the operator's command: `cat <<EOF | tee l/t 'a<newline>b' > /dev/null`,
+      the same with "a<newline>b" and with a backslash-newline before its `>`, `cat <<EOF > $(echo l/t<newline>)`, `cat
+      <<EOF > \\`echo l/t<newline>\\``, `cat <<EOF | tee l/t <(cat<newline>) > /dev/null` and `cat <<EOF > ${X:-l/t<newline>}`
+      each read the line after the command as the body (into l/t, or a file named l/t and a newline), in all three;
+      zsh's `cat <<EOF > (l|<newline>x)/t`, `| tee (l|<newline>x)/t`, `> (l|<newline>x|<newline>y)/t` and `>
+      (l|<newline>x)/(t|<newline>z)` wrote it into l/t, and so did one whose pattern held a quoted newline; bash rejects
+      each of those lines;
+    - an arithmetic command's newline (`cat <<EOF > l/t; (( n = 1 +<newline>2 ))`, n=3) and a for header's (`for (( i =
+      0;<newline>i < 1; i++ ))`) end no command either, in all three, and zsh's case pattern group (`case a in
+      (a|<newline>b)) echo RAN;; esac`) none in zsh: the body came after that line and the case ran its arm; a subshell's
+      newline does (`(cat <<EOF > l/t<newline>body<newline>EOF<newline>)` wrote body), and so does an array assignment's
+      (`cat <<EOF > l/t; arr=(a<newline>b)`: the body started there and the assignment went on past it, to a parse error);
+    - the bodies of two here-documents follow in the order their operators stand: `cat <<A <<B` read bodyA then bodyB (zsh's
+      multios catted both, bash bodyB alone), and `cat <<A - <(cat <<B<newline>bodyB<newline>B<newline>) > l/t<newline>bodyA
+      <newline>A` wrote bodyA and bodyB, the body of the one in the `<( )` inside it;
+    - a body inside a `$( )` is read inside it: `s=$(cat <<EOF<newline>in<newline>EOF<newline>)` held in, and so did the
+      same in backticks and in double quotes; `s=$(cat <<EOF)` read no body, and the next line ran as a command (in8, EOF:
+      command not found).  bash 3.2 ends the substitution at a body line's `)` (`a)b`, after which it ran the delimiter as a
+      command), zsh does not;
+    - `<<` is no operator in single or double quotes, escaped (`echo \\<<EOF` read a file named EOF), in a comment, in a
+      parameter expansion, in `(( x = 1 <<y ))` (x=2, with its `))` on the next line too) or in `$(( 1 <<y ))`, and `<<<`
+      opens a here-string, quoted or not: the line after each ran;
+    - a here-document inside a `sh -c`, `zsh -f -c` or eval string is that string's (`sh -c 'cat <<EOF > l/t<newline>body
+      <newline>EOF'` wrote body);
+    - the delimiter line matches whole: after `<<`, `EOF ` with a trailing blank and a tab-indented EOF end nothing, and after
+      `<<-` only leading tabs are stripped (`EOF<tab>` ends nothing).  In a body whose delimiter is unquoted a line ending in
+      one backslash joins the next (`a\\` then EOF read aEOF, the body going on to the next EOF), one ending in two does not
+      (the body was `a\\`), and a quoted delimiter's body keeps its backslash and ends at EOF; `E"O"F`, `'EOF'` and `\\EOF`
+      are the delimiter EOF, `<< 'E F'` ends at a line `E F`, `<<$Z` at a line `$Z`, and a body with no delimiter runs to
+      the end of the text;
+    - `sh -s <<EOF 'a<newline>b'` ran the body after that line as its script.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for rel in (self.TARGET, "docs/x.md", "tests/keep.py"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "generated", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """A body the line only reads as data: silent for every caller, and no push found."""
+        with self.subTest(line=line):
+            self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+            for agent_id in (AGENT_A, AGENT_C, None):
+                self.assertSilent(line, agent_id)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_with_its_targets(self):
+        tee = "cat <<EOF | tee ledger/tickets/SPD-001.md 'a\nb' > /dev/null\nbody11\nEOF"
+        self.assertFalse(self.analysis(tee).unparseable)
+        self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(tee).redirects])
+        self.refused_everywhere(tee)
+        for line in ("cat <<EOF > (ledger|\nx)/tickets/SPD-001.md\nbody2\nEOF",
+                     "cat <<EOF | tee (ledger|\nx)/tickets/SPD-001.md\nbody3\nEOF"):
+            with self.subTest(line=line):
+                # zsh's reading first, as GroupNewlineTest reads the group without a here-document
+                targets = [self.m.deglob(t) for t, _c in self.analysis(line).redirects]
+                self.assertEqual(targets[0], "(ledger|\nx)/tickets/SPD-001.md")
+            self.refused_everywhere(line)
+        # the substitution's command, every line of it (a target the line spells only through it is Spud's refusal too)
+        line = "cat <<EOF > $(echo ledger/tickets/SPD-001.md\ngit push\n)\nbody12\nEOF"
+        self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+        self.assertRefused(line, "Law 7")
+        self.assertRefused(line, "Law 7", AGENT_C)
+        self.law_7("cat <<EOF $(echo ledger/tickets/SPD-001.md\ngit push\n) > /dev/null\nbody12\nEOF")
+        self.refused_everywhere("cat <<EOF > $(echo a\ntee ledger/tickets/SPD-001.md < /dev/null\n)\nbody12\nEOF")
+        self.assertEqual(self.m.strip_heredocs("cat <<EOF > $(echo ledger/tickets/SPD-001.md\n)\nbody12\nEOF"),
+                         ("cat <<EOF > $(echo ledger/tickets/SPD-001.md\n)\n", ["body12"], [True]))
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_spanning_word_keeps_the_command_going(self):
+        for spanning in HEREDOC_SPANNING:
+            self.refused_everywhere("cat <<EOF %s | tee ledger/tickets/SPD-001.md > /dev/null\nbody\nEOF" % spanning)
+            self.law_7("cat <<EOF %s; git push\nbody\nEOF" % spanning)
+            self.law_7("sh -s <<EOF %s\ngit push\nEOF" % spanning)  # the body is still the shell's input
+            self.data("cat <<EOF %s > /dev/null\ngit push\nEOF" % spanning)
+
+    def test_an_arithmetic_command_or_header_keeps_it_going(self):
+        for line in ("cat <<EOF; (( n = 1 +\n2 )); echo x > ledger/tickets/SPD-001.md\nbody\nEOF",
+                     "cat <<EOF; for (( i = 0;\ni < 1; i++ )) do echo x > ledger/tickets/SPD-001.md; done\nbody\nEOF",
+                     "cat <<EOF; case a in (a|\nb)) echo x > ledger/tickets/SPD-001.md;; esac\nbody\nEOF"):
+            self.refused_everywhere(line)
+        for line in ("cat <<EOF; (( n = 1 +\n2 )); git push\nbody\nEOF", "cat <<EOF; for (( i = 0;\ni < 1; i++ )) git push\nbody\nEOF",
+                     "cat <<EOF; case a in (a|\nb)) git push;; esac\nbody\nEOF"):
+            self.law_7(line)
+
+    def test_a_newline_that_ends_a_command_starts_the_body(self):
+        """A subshell's newline and an array assignment's end a command line: the body starts after them."""
+        for line in ("(cat <<EOF > /dev/null\ngit push\nEOF\n)", "( cd docs && cat <<EOF > /dev/null\ngit push\nEOF\n)",
+                     "cat <<EOF > /dev/null; arr=(a\ngit push\nEOF\n)", "{ cat <<EOF > /dev/null\ngit push\nEOF\n}"):
+            self.data(line)
+        self.law_7("(cat <<EOF > /dev/null\nbody\nEOF\ngit push)")
+
+    def test_what_is_no_operator_hides_no_line(self):
+        for line in ("echo '<<EOF'\ngit push", 'echo "<<EOF"\ngit push', "echo \\<<EOF\ngit push", "true # <<EOF\ngit push",
+                     "# <<EOF\ngit push", "echo ${X:-<<EOF}\ngit push", "y=1; (( x = 1 <<y ))\ngit push",
+                     "y=1; (( x = 1 <<y\n))\ngit push", "echo $(( 1 <<y ))\ngit push", "cat <<<EOF\ngit push",
+                     "cat <<< EOF\ngit push", "cat <<<'EOF'\ngit push"):
+            self.law_7(line)
+        self.refused_everywhere("echo '<<EOF'\necho x > ledger/tickets/SPD-001.md")
+
+    def test_a_here_document_in_a_string_a_shell_runs(self):
+        for line in ("bash -c 'sh <<EOF\ngit push\nEOF'", "zsh -f -c 'sh <<EOF\ngit push\nEOF'", "eval 'sh <<EOF\ngit push\nEOF'",
+                     "sh -c \"sh <<EOF\ngit push\nEOF\""):
+            self.law_7(line)
+        self.data("bash -c 'cat <<EOF > /dev/null\ngit push\nEOF'")
+
+    def test_a_body_inside_a_substitution_is_read_there(self):
+        for line in ("x=$(sh <<EOF\ngit push\nEOF\n)", "echo $(sh <<EOF\ngit push\nEOF\n)", 'x="$(sh <<EOF\ngit push\nEOF\n)"',
+                     "echo `sh <<EOF\ngit push\nEOF\n`", "cat <<A > /dev/null $(sh <<B\ngit push\nB\n)\nbodyA\nA",
+                     "x=$(cat <<EOF)\ngit push\nEOF"):  # the substitution closed on the operator's line: no body, a command
+            self.law_7(line)
+        for line in ("x=$(cat <<EOF\ngit push\nEOF\n)", "x=$(cat <<'EOF'\nit's git push\nEOF\n)",
+                     'x="$(cat <<\'EOF\'\nit\'s git push\nEOF\n)"', "echo `cat <<EOF\ngit push\nEOF\n`",
+                     "cat <<A > /dev/null $(cat <<B\ngit push\nB\n)\ngit push\nA"):
+            self.data(line)
+
+    def test_bodies_follow_in_operator_order(self):
+        self.assertEqual(self.m.strip_heredocs("cat <<A <<-B\nbodyA\nA\n\tbodyB\n\tB\nnext"),
+                         ("cat <<A <<-B\nnext", ["bodyA", "\tbodyB"], [True, True]))
+        self.assertEqual(self.m.strip_heredocs("cat <<A - <(cat <<B\nbodyB\nB\n) > f\nbodyA\nA"),
+                         ("cat <<A - <(cat <<B\n) > f\n", ["bodyA", "bodyB"], [True, True]))
+        self.assertEqual(self.m.strip_heredocs("cat <<'A' \"a\nb\" <<B\nbodyA\nA\nbodyB\nB"),
+                         ("cat <<'A' \"a\nb\" <<B\n", ["bodyA", "bodyB"], [False, True]))
+        self.law_7("cat <<A <<B | sh\necho a\nA\ngit push\nB")
+
+    def test_the_delimiter_line(self):
+        for line in ("cat <<EOF > /dev/null\n\tEOF\ngit push\nEOF", "cat <<EOF > /dev/null\nEOF \ngit push\nEOF",
+                     "cat <<-EOF > /dev/null\n\tEOF\t\ngit push\nEOF", "cat <<EOF > /dev/null\na\\\nEOF\ngit push\nEOF",
+                     "cat <<E\"O\"F > /dev/null\ngit push\nEOF", "cat <<$Z > /dev/null\ngit push\n$Z",
+                     "cat <<EOF > /dev/null\ngit push"):
+            self.data(line)
+        for line in ("cat <<E\"O\"F > /dev/null\nx\nEOF\ngit push", "cat <<'EOF' > /dev/null\na\\\nEOF\ngit push",
+                     "cat <<EOF > /dev/null\na\\\\\nEOF\ngit push", "cat <<\\EOF > /dev/null\nx\nEOF\ngit push",
+                     "cat <<-EOF > /dev/null\n\t\tx\n\t\tEOF\ngit push", "cat <<$Z > /dev/null\nx\n$Z\ngit push",
+                     "cat << 'E F' > /dev/null\nx\nE F\ngit push"):
+            self.law_7(line)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("cat <<EOF " + "(a|\n" * 3000 + ")" * 3000 + "\ngit push\nEOF",
+                     "cat <<EOF " + "(" * 3000 + "\n" * 3000 + "git push",
+                     "cat " + "<<EOF (\n" * 2000 + "git push",
+                     "(" * 2000 + "cat <<EOF\n" * 2000 + "EOF\n" * 2000 + ")" * 2000 + "\ngit push",
+                     "( " * 3000 + "cat <<EOF\nx\nEOF\n" * 3000 + ")" * 3000 + "\ngit push",
+                     "x=(a " * 1000 + "cat <<EOF\nx\nEOF\n" * 1000 + "\ngit push",
+                     "(( " + "x <<y\n" * 2000 + "))\ngit push",
+                     "cat " + "$(" * 1500 + "<<EOF\n" + ")" * 1500 + "\nbody\nEOF\ngit push",
+                     "cat " + "<(" * 1500 + "<<EOF\n" + ")" * 1500 + "\nbody\nEOF\ngit push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+
+
+# SPD-192: the places an unquoted here-document's body is fed to a command, `%s` standing for one line of the body.  zsh
+# and bash expand the body wherever it is fed, before the command reads it: with `$(echo RAN > <file>)` for %s each made
+# its file (HereDocumentExpansionTest has the probes).
+HEREDOC_EXPANDED_FEEDS = (
+    "cat <<EOF > /dev/null\n%s\nEOF",
+    "cat <<-EOF > /dev/null\n\t%s\n\tEOF",
+    "cat <<$Z > /dev/null\n%s\n$Z",  # an unquoted `$` in the delimiter is no quoting: the delimiter is the line `$Z`
+    ": <<EOF\n%s\nEOF",
+    "true <<EOF\n%s\nEOF",
+    "nosuchcmd <<EOF\n%s\nEOF",
+    "<<EOF\n%s\nEOF",
+    "exec 3<<EOF\n%s\nEOF",
+    "cat <<EOF | wc -l > /dev/null\n%s\nEOF",
+    "cat <(cat <<EOF\n%s\nEOF\n) > /dev/null",
+    "x=$(cat <<EOF\n%s\nEOF\n)",
+    "{ cat <<EOF > /dev/null\n%s\nEOF\n}",
+    "if true; then cat <<EOF > /dev/null\n%s\nEOF\nfi",
+    "sh -c 'cat <<EOF > /dev/null\n%s\nEOF'",
+    "eval 'cat <<EOF > /dev/null\n%s\nEOF'",
+    "cat <<A > /dev/null\n$(cat <<B\n%s\nB\n)\nA",  # a body in a substitution of a body
+)
+# the spellings of one body line whose substitution runs, `%s` standing for its command: each made its file
+HEREDOC_EXPANDED_SPELLINGS = (
+    "$(%s)",
+    "`%s`",
+    "'$(%s)'",  # quotes are text in a body
+    '"$(%s)"',
+    "\\\\$(%s)",  # an escaped backslash, then the substitution
+    "${u:-$(%s)}",  # a default word
+    "$((1 + $(%s)))",  # arithmetic
+    "$[1 + $(%s)]",
+    "a\\\n$(%s)",  # a backslash-newline joins the lines first
+    "$(%s\n)",  # a substitution spanning the body's lines
+    "$(%s)\\\nEOF",  # a line joined to the next is no delimiter: the body goes on to the next EOF
+)
+# a delimiter any character of which is quoted: the body is text, never expanded, and ran nothing
+HEREDOC_QUOTED_OPERATORS = ("<<'EOF'", '<<"EOF"', "<<\\EOF", '<<E"O"F', "<<E\\OF", "<<$'EOF'", "<<-'EOF'")
+
+
+class HereDocumentExpansionTest(BashHookCase):
+    """SPD-192, filed by SPD-188's engineer: zsh and bash expand an unquoted here-document's body before its command reads
+    it, running every `$( )` and backtick substitution in it, and the hook read a body only where a shell is fed it, as
+    that shell's commands.  The ticket's evidence, on the SPD-188 tree and on main before it: `cat <<EOF<newline>$(git
+    push)<newline>EOF` and the same in backticks recorded no finding, so a member was allowed the push.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory,
+    each substitution an `echo RAN > <file>`:
+
+    - an unquoted body's substitution ran wherever the body was fed (HEREDOC_EXPANDED_FEEDS: cat, `<<-` with its tabs,
+      `<<$Z`, `:`, true, a command that does not exist, a bare redirection, `exec 3<<`, a pipeline element, a `<( )`, a
+      `$( )`, a group, an if, `sh -c` and eval strings, a body in a body's own substitution), in every spelling of
+      HEREDOC_EXPANDED_SPELLINGS: quotes are text there, `\\\\` is one backslash, a default word's and an arithmetic
+      expansion's substitutions run, and a backslash-newline joins two lines first;
+    - zsh's `${(e)x}` in a body ran x's substitution (bash: bad substitution);
+    - a body whose delimiter has any character quoted (HEREDOC_QUOTED_OPERATORS) ran nothing, and neither did `\\$( )` or
+      an escaped backtick in an unquoted one, a `\\$( )` in an unquoted body inside a body's `$( )`, nor a `$( )` in a quoted
+      one there;
+    - the body is expanded when its command runs, in its directory and with the values the line holds then: `cd d; cat
+      <<EOF` and `cd d && cat <<EOF` wrote into d, `cat <<EOF > /dev/null; cd d` where the line stood before the cd, `x=a;
+      cat <<EOF > /dev/null; x=b` into a, `false && cat <<EOF` ran nothing, and a function's body ran it once called; a
+      command's prefix assignment does not reach its body (`x=a; x=b cat <<EOF` and `x=a; x=b : <<EOF` wrote into a);
+    - `${u:=v}` in a body fed to cat left u unset, fed to `:` set it: the hook doubts u either way, as on the line;
+    - a here-string's word is expanded as any word is (`cat <<< "$(...)"` and `cat <<< $(...)` ran), which the hook read
+      already.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans home:**."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for rel in (self.TARGET, "docs/x.md"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def refused_everywhere(self, line):
+        """Refused to both members for the ledger file, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "generated", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """A body the line only reads as text: silent for every caller, and no push found."""
+        with self.subTest(line=line):
+            self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+            for agent_id in (AGENT_A, AGENT_C, None):
+                self.assertSilent(line, agent_id)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_the_shells_run_it(self):
+        self.law_7("cat <<EOF\n$(git push)\nEOF")
+        self.law_7("cat <<EOF\n`git push`\nEOF")
+
+    def test_a_write_in_a_body_substitution_is_checked(self):
+        for spelling in ("$(%s)", "`%s`"):
+            self.refused_everywhere("cat <<EOF > /dev/null\n%s\nEOF" % (spelling % "echo x > ledger/tickets/SPD-001.md"))
+            line = "cat <<EOF > /dev/null\n%s\nEOF" % (spelling % "echo x > docs/x.md")
+            with self.subTest(line=line):
+                self.assertRefused(line, "deliverables")
+                self.assertSilent(line, AGENT_C)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_place_a_body_is_fed(self):
+        for feed in HEREDOC_EXPANDED_FEEDS:
+            self.law_7(feed % "$(git push)")
+            self.law_7(feed % "`git push`")
+            self.refused_everywhere(feed % "$(echo x > ledger/tickets/SPD-001.md)")
+
+    def test_every_spelling_that_runs_a_substitution(self):
+        for spelling in HEREDOC_EXPANDED_SPELLINGS:
+            self.law_7("cat <<EOF > /dev/null\n%s\nEOF" % (spelling % "git push"))
+        self.law_7("x='$(git push)'; cat <<EOF > /dev/null\n${(e)x}\nEOF")  # zsh's (e) evaluates x's value there too
+
+    def test_a_quoted_delimiter_keeps_the_body_text(self):
+        body = "$(git push)\n`git push`\n${u:-$(git push)}\n$((1 + $(git push)))\n${(e)x}\n$(echo x > ledger/tickets/SPD-001.md)"
+        for operator in HEREDOC_QUOTED_OPERATORS:
+            self.data("x='$(git push)'; cat %s > /dev/null\n%s\nEOF" % (operator, body))
+            self.assertEqual(self.m.strip_heredocs("cat %s\nbody\nEOF" % operator)[2], [False])
+        for operator in ("<<EOF", "<<-EOF", "<< EOF"):
+            self.assertEqual(self.m.strip_heredocs("cat %s\nbody\nEOF" % operator)[2], [True])
+        self.assertEqual(self.m.strip_heredocs("cat <<'A' <<B <<\\C\nbodyA\nA\nbodyB\nB\nbodyC\nC"),
+                         ("cat <<'A' <<B <<\\C\n", ["bodyA", "bodyB", "bodyC"], [False, True, False]))
+
+    def test_an_escaped_substitution_runs_nothing(self):
+        for line in ("cat <<EOF > /dev/null\n\\$(git push)\n\\`git push\\`\nEOF",
+                     "cat <<A > /dev/null\n$(cat <<B\n\\$(git push)\nB\n)\nA",
+                     "cat <<A > /dev/null\n$(cat <<'B'\n$(git push)\nB\n)\nA"):
+            self.data(line)
+
+    def test_the_body_is_expanded_where_and_when_its_command_runs(self):
+        # the command's directory: a cd before it on the line, not one after its operator
+        self.refused_everywhere("cd ledger && cat <<EOF > /dev/null\n$(echo x > tickets/SPD-001.md)\nEOF")
+        self.refused_everywhere("cd ledger; cat <<EOF > /dev/null; cd ..\n$(echo x > tickets/SPD-001.md)\nEOF")
+        line = "cat <<EOF > /dev/null; cd ledger\n$(echo x > tickets/SPD-001.md)\nEOF"
+        with self.subTest(line=line):
+            self.assertSilent(line, AGENT_C)
+            self.assertRefused(line, "deliverables")
+        # the values the line holds then; a command's prefix assignment does not reach its body
+        for line in ("x=docs/x.md; cat <<EOF > /dev/null; x=%s\n$(echo y > $x)\nEOF",
+                     "x=docs/x.md; x=%s cat <<EOF > /dev/null\n$(echo y > $x)\nEOF",
+                     "x=docs/x.md; x=%s : <<EOF\n$(echo y > $x)\nEOF"):
+            with self.subTest(line=line):
+                self.assertSilent(line % self.TARGET, AGENT_C)
+                self.assertRefused(line.replace("docs/x.md", self.TARGET) % "docs/x.md", "generated", AGENT_C)
+
+    def test_what_stays_as_it_was(self):
+        """A body whose substitutions write nothing and run no verb is allowed to every caller; a shell fed an unquoted body
+        still reads it as its commands, and a body with no substitution is text."""
+        line = "cat <<EOF > /dev/null\nDate: $(date)\nUser: `whoami`\nHome: ${HOME:-x}\nEOF"
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+        self.law_7("sh <<EOF\n$(git push)\nEOF")
+        self.law_7("sh <<EOF\ngit push\nEOF")
+        self.data("cat <<EOF > /dev/null\ngit push\nEOF")
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("cat <<EOF\n" + "$(" * 3000 + ")" * 3000 + "\nEOF\ngit push",
+                     "cat <<EOF\n" + "`x`" * 3000 + "\nEOF\ngit push",
+                     "cat <<EOF\n" + "${(e)x}" * 3000 + "\nEOF\ngit push",
+                     "cat <<EOF\n" + "a" * 200000 + "$\nEOF\ngit push",
+                     "cat " + "<<EOF " * 500 + "\n" + "$(true)\nEOF\n" * 500 + "git push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                findings = self.analysis(line).findings
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), findings)
+
+
+class HereDocumentInputTest(BashHookCase):
+    """SPD-206, filed by SPD-192's engineer: the shell that expands an unquoted here-document's body hands its command the
+    text it expanded, and the hook handed a shell fed such a body the body as spelled, so its reading of that shell saw
+    other commands than the shell runs.  The ticket's evidence, on the SPD-192 tree: `sh <<EOF` fed each of the first
+    four lines below, a push in place of the echo, recorded no finding, and the joined line aimed at the ledger recorded
+    the target `ledger/tickets/SPD-00` and a backslash.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f and in GNU bash 3.2.57, which printed the same, with TMPPREFIX in the probe's directory:
+
+    - each of the three outer shells feeding /bin/sh an unquoted body ran `\\$(echo RAN > l/h1)`, `echo \\$(echo RAN >
+      l/h2)`, `\\`echo RAN > l/h3\\``, `echo hi > l/h\\\\` then a line `5` (sh joined them: h5), and `ec\\\\` then a line
+      `ho RAN > l/h6`: all five files were written; the first line ran too fed through `cat <<EOF | sh`, to `bash` and
+      to `zsh -f`, and to sh after `<<-` with its tabs;
+    - with the delimiter quoted, sh stopped at the first line with a syntax error and wrote nothing;
+    - `cat` fed `[\\a] [\\"] [\\'] [\\$] [\\`] [\\\\] [\\x] [a\\<newline>b] [\\\\\\\\]` printed `[\\a] [\\"] [\\'] [$] [`]
+      [\\] [\\x] [ab] [\\\\]`: a backslash escapes a `$`, a backtick, a backslash and a newline, and stays before anything
+      else; a default word's text is read the same (`${u:-\\$(echo X)}` printed `$(echo X)`), while a `$( )`'s and
+      backticks' text is the substitution's own (`$(echo '\\$x')` printed `\\$x`)."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+    JOINED = "echo hi > ledger/tickets/SPD-00\\\\\n1.md"  # an escaped backslash, then a newline
+
+    def setUp(self):
+        super().setUp()
+        p = self.home.path / self.TARGET
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_read_as_the_shell_receives_it(self):
+        for body in ("\\$(git push)", "echo \\$(git push)", "\\`git push\\`", "git pu\\\\\nsh"):
+            self.law_7("sh <<EOF\n%s\nEOF" % body)
+
+    def test_the_joined_line_names_the_ledger_file_whole(self):
+        line = "sh <<EOF\n%s\nEOF" % self.JOINED
+        self.assertEqual([t for t, _cwds in self.analysis(line).redirects], [self.TARGET])
+        self.assertRefused(line, "Law 1", agent_id=None)
+        self.assertRefused(line, "generated")
+
+    def test_every_reader_of_the_body_is_handed_the_same_text(self):
+        # a shell reading it on standard input through a printer (shell/stdin_text), each shell, and `<<-` with its tabs
+        for line in ("cat <<EOF | sh\n\\$(git push)\nEOF", "bash <<EOF\n\\$(git push)\nEOF",
+                     "zsh -f <<EOF\n\\$(git push)\nEOF", "sh <<-EOF\n\t\\$(git push)\n\tEOF"):
+            self.law_7(line)
+
+    def test_a_quoted_delimiter_hands_the_body_over_as_spelled(self):
+        for operator in HEREDOC_QUOTED_OPERATORS:
+            line = "sh %s\n%s\nEOF" % (operator, self.JOINED)
+            with self.subTest(line=line):
+                self.assertEqual([t for t, _cwds in self.analysis(line).redirects], ["ledger/tickets/SPD-00\\"])
+            line = "sh %s\n\\$(git push)\necho \\$(git push)\n\\`git push\\`\nEOF" % operator
+            with self.subTest(line=line):
+                self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+
+    def test_the_text_a_command_receives(self):
+        received = self.m.received_body
+        self.assertEqual(received("[\\a] [\\\"] [\\'] [\\$] [\\`] [\\\\] [\\x] [a\\\nb] [\\\\\\\\]"),
+                         "[\\a] [\\\"] [\\'] [$] [`] [\\] [\\x] [ab] [\\\\]")
+        self.assertEqual(received("${u:-\\$(echo X)}"), "${u:-$(echo X)}")
+        for kept in ("$(echo '\\$x')", "`echo '\\\\$y'`", "$(echo a\\\nb)", "no escape", "trailing\\"):
+            with self.subTest(kept=kept):
+                self.assertEqual(received(kept), kept)
+
+
+class HereDocumentOutputTest(BashHookCase):
+    """SPD-207, filed by SPD-206's engineer: a shell fed an unquoted here-document reads the body as its expansion leaves
+    it, and each command substitution there leaves its output in the text, which the shell then runs as commands: a
+    newline in the output starts another.  The hook reads the substitution where the outer shell runs it (SPD-192) and
+    hands the inner shell the body with the substitution as spelled (SPD-206), so the output was never read, and a member
+    could write a script into its scratchpad and run it through such a body -- what SPD-145 refuses as `sh x.sh` and as
+    `cat x.sh | sh`.  The ticket's evidence, on the SPD-206 tree: analyse_command recorded no finding for `sh <<EOF`
+    fed `echo a $(cat x.sh)` (LINE), nor for the same body with `git push` in a printf's output, while `echo "echo a
+    $(cat x.sh)" | sh` recorded a script "stdin" finding.
+
+    The rule: the text a command reads from such a body is text the line does not spell (shell/stdin_text), so a shell
+    that runs its standard input as commands is refused a member with SPD-145's reason for standard input the line does
+    not spell, whether the body is fed to it or printed into it through a pipe (shell/script_files); Spud keeps it.
+    A quoted delimiter, an unquoted body with no substitution, an escaped `\\$( )`, which the inner shell runs itself and
+    whose output is one of its words (SPD-206), and the same body fed to a command that only prints it read as before.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f and in GNU bash 3.2.57, which printed the same but where noted, with TMPPREFIX in the probe's directory:
+
+    - `sh` fed an unquoted body `echo a $(printf 'b\\necho RAN > l/p1')` printed `a b` and wrote l/p1, and so did the
+      same in backticks, in a default word (`${u:-$( )}`), after `<<-` with its tabs, fed to `sh -s`, `bash` and `zsh
+      -f`, and printed into `sh` and `bash` by `cat <<EOF |`; `echo a $(cat x.sh)`, x.sh holding `echo RAN > l/x1`,
+      wrote l/x1; zsh's `${(e)x}`, x holding such a substitution, wrote its file too (bash: bad substitution);
+    - `cat` fed the same body printed its two lines and wrote nothing; with the delimiter quoted (`<<'EOF'`, `<<"EOF"`,
+      `<<\\EOF`, `<<E"O"F`, `<<-'EOF'`) sh printed `a b echo RAN > l/q1` and wrote nothing, and so did `\\$(printf
+      ...)` in an unquoted body; a body holding `$((1 + 2))` and `${u:-b}` printed `a 3 b`."""
+
+    LINE = "sh <<EOF\necho a $(cat x.sh)\nEOF"  # the proposer's line
+    BODY = "echo a $(cat x.sh)"
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def forms(self, command):
+        """The forms of the script findings this line records."""
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def refused(self, line):
+        """Refused a member with SPD-145's reason for standard input the line does not spell; silent for Spud."""
+        with self.subTest(line=line):
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_refused_a_member(self):
+        self.refused(self.LINE)
+        self.refused("sh <<EOF\necho a $(printf 'b\\ngit push')\nEOF")
+        self.assertEqual(self.forms(self.LINE), ["stdin"])
+
+    def test_the_same_body_printed_into_a_shell(self):
+        for line in ("cat <<EOF | sh\n%s\nEOF", "cat <<EOF | bash\n%s\nEOF", "cat - <<EOF | sh -s\n%s\nEOF"):
+            self.refused(line % self.BODY)
+            self.assertEqual(self.forms(line % self.BODY), ["stdin"])
+
+    def test_every_shell_and_spelling(self):
+        for spelling in HEREDOC_EXPANDED_SPELLINGS:
+            self.refused("sh <<EOF\necho a %s\nEOF" % (spelling % "cat x.sh"))
+        for line in ("bash <<EOF\n%s\nEOF", "zsh -f <<EOF\n%s\nEOF", "sh -s <<EOF\n%s\nEOF", "env sh <<EOF\n%s\nEOF",
+                     "sh <<-EOF\n\t%s\n\tEOF", "sh - <<EOF\n%s\nEOF", "nice bash <<EOF\n%s\nEOF"):
+            self.refused(line % self.BODY)
+        self.refused("x='$(cat x.sh)'; sh <<EOF\necho a ${(e)x}\nEOF")  # zsh's (e) runs x's substitution in the body
+
+    def test_the_controls_read_as_before(self):
+        """The same body printed and nothing more, a quoted delimiter, an escaped substitution, and an unquoted body with
+        no substitution: no script finding, and silent for every caller."""
+        lines = ["cat <<EOF\n%s\nEOF" % self.BODY, "cat <<EOF > /dev/null\n%s\nEOF" % self.BODY,
+                 "cat <<'EOF' | sh\n%s\nEOF" % self.BODY, "sh <<EOF\necho a \\$(cat x.sh)\nEOF",
+                 "sh <<EOF\necho a $((1 + 2)) ${u:-b}\nEOF", "sh <<EOF\necho a\nEOF"]
+        lines += ["sh %s\n%s\nEOF" % (operator, self.BODY) for operator in HEREDOC_QUOTED_OPERATORS]
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual(self.forms(line), [])
+                self.assertSilent(line)
+                self.assertSilent(line, agent_id=None)
+
+    def test_the_reason_names_the_readable_form_and_an_earlier_reason_is_kept(self):
+        r = self.assertRefused(self.LINE, SCRIPT_WORDING)
+        for needle in ("Law 7: `sh` runs commands it reads on standard input that the line does not spell",
+                       "a command substitution's output in an unquoted here-document", "`sh <<'EOF'`"):
+            self.assertIn(needle, r.reason)
+        # read last, as SPD-145's refusals are: a git verb or a write the path rule refuses keeps its own reason
+        self.assertNotIn(SCRIPT_WORDING, self.assertRefused("sh <<EOF\ngit push\n%s\nEOF" % self.BODY, "Law 7").reason)
+        line = "sh <<EOF\necho x > docs/y.md\n%s\nEOF" % self.BODY
+        self.assertNotIn(SCRIPT_WORDING, self.assertRefused(line, "deliverables").reason)
+
+
+class HereDocumentValueTest(BashHookCase):
+    """SPD-208, filed by SPD-207's engineer: the shell that expands an unquoted here-document's body puts each parameter
+    expansion's value in the text, and a shell fed that text parses it again, so a separator, a redirection, a newline
+    or a substitution the value holds is a command the inner shell runs.  The hook handed that shell the body with `$x`
+    as spelled, which it read as one word.  The ticket's evidence, on the SPD-207 tree: analyse_command recorded no
+    finding for LINE, nor for the same line with a ledger file as the redirection target, nor for `Y=$(printf ...)`
+    and a body `echo a $Y`.
+
+    The rule (reevaluation.body_values, heredocs.received_body): a `$NAME` or `${NAME}` whose value the line settles --
+    arg_writes.resolved's reading -- is handed on as that value's text, and so is zsh's `${(e)NAME}` of a value holding
+    no expansion.  Any other parameter expansion is kept as spelled, as before, where every text it may leave is plain:
+    an environment variable the line never touches, a special parameter's number, a settled value or a spelled word
+    holding no shell syntax.  Otherwise the body holds text the line does not spell (heredocs.OutputBody), and a shell
+    reading it is refused a member with SPD-145's reason for standard input the line does not spell, as SPD-207 refuses
+    one fed a substitution's output; Spud reads on.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory, each file an
+    `echo RAN > l/<name>`:
+
+    - sh fed an unquoted body `echo $x`, x holding `a; echo RAN > l/v1`, printed a and wrote l/v1, and so did `${x}`, a
+      value holding a newline (`x=$'a\\necho RAN > l/v4'`) and one holding a substitution (`x='$(echo RAN > l/v5)'`,
+      which the inner shell ran, where `cat` fed the same body printed `$(echo RAN > l/v5)`); `Y=$(printf 'b\\necho RAN >
+      l/m4')` and a body `echo a $Y` wrote l/m4; zsh's `${(e)y}` wrote its file (bash: bad substitution); `echo
+      ${HOME:+a;echo RAN > l/v8}` wrote l/v8; `$1` in a function's body wrote its file once the function was called with
+      such a word, `$_` after `: 'a; echo RAN > l/v9'` wrote l/v9 in bash (zsh printed sh), and `for i in 1 2` fed sh
+      `echo pass $i $v` and then assigned v such a value, which its second pass wrote;
+    - with the delimiter quoted sh printed its words and wrote nothing; `echo "$x" '$x'` in an unquoted body printed the
+      value twice and wrote nothing, its quotes being the inner shell's; `echo d ${u:-b} $((1 + 2))` printed `d b 3`, and
+      `x=b` then `echo e $x` printed `e b`;
+    - `x='a; echo RAN > l/v13'; x=q sh <<EOF` with `echo pre $x` printed `pre a` and wrote l/v13 in zsh, and printed
+      `pre q` in bash, which expands a body with the command's own prefix assignments: `x=l/a3; x=l/b3 cat <<EOF` with
+      `[$x]` printed `[l/b3]` there and `[l/a3]` in zsh, and `u='c; echo RAN > l/w1' sh <<EOF` with `echo sh [$u]`
+      wrote `l/w1]` in bash and nothing in zsh."""
+
+    LINE = "x='a; git push'; sh <<EOF\necho $x\nEOF"  # the proposer's line
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        p = self.home.path / self.TARGET
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def unsettled(self, line):
+        """A "stdin" script finding, refused a member with SPD-145's reason for standard input the line does not spell;
+        silent for Spud."""
+        with self.subTest(line=line):
+            self.assertIn("stdin", [detail[0] for kind, detail in self.analysis(line).findings if kind == "script"])
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """Read as before: no push, no script finding, and silent for every caller."""
+        with self.subTest(line=line):
+            findings = self.analysis(line).findings
+            self.assertNotIn(("git", ("push", "push")), findings)
+            self.assertEqual([detail for kind, detail in findings if kind == "script"], [])
+            for agent_id in (AGENT_A, AGENT_C, None):
+                self.assertSilent(line, agent_id)
+
+    def test_the_tickets_evidence_is_refused(self):
+        self.law_7(self.LINE)
+        line = "x='a; echo x > %s'; sh <<EOF\necho $x\nEOF" % self.TARGET
+        self.assertEqual([t for t, _cwds in self.analysis(line).redirects], [self.TARGET])
+        for agent_id in (AGENT_A, AGENT_C):
+            self.assertRefused(line, "generated", agent_id)
+        self.assertRefused(line, "Law 1", agent_id=None)
+        self.unsettled("Y=$(printf 'b\\ngit push'); sh <<EOF\necho a $Y\nEOF")
+        self.law_7("y='a; git push'; sh <<EOF\necho ${(e)y}\nEOF")  # zsh's (e) of a value holding no expansion
+
+    def test_a_settled_value_is_read_as_the_inner_shell_parses_it(self):
+        for line in ("x='a; git push'; sh <<EOF\necho ${x}\nEOF",
+                     "x=$'a\\ngit push'; sh <<EOF\necho $x\nEOF",  # a newline in the value starts another command
+                     "x='$(git push)'; sh <<EOF\necho $x\nEOF",  # the inner shell runs the substitution the value spells
+                     "x='a; git push'; cat <<EOF | sh\necho $x\nEOF",
+                     "x='a; git push'; bash <<EOF\necho $x\nEOF",
+                     "x='a; git push'; zsh -f <<EOF\necho $x\nEOF",
+                     "x='a; git push'; sh <<-EOF\n\techo $x\n\tEOF",
+                     "x='a; git push'; x=b sh <<EOF\necho $x\nEOF",  # zsh's reading: the line's value
+                     "x=b; x='a; git push' sh <<EOF\necho $x\nEOF",  # bash's: the command's own prefix assignment
+                     "x=b; y='a; git push'; x=q sh <<EOF\necho $x $y\nEOF"):
+            self.law_7(line)
+        # the inner shell's own quotes keep the value one word, and a body only printed runs nothing
+        self.data("x='a; git push'; sh <<EOF\necho \"$x\" '$x'\nEOF")
+        self.data("x='$(git push)'; cat <<EOF\necho $x\nEOF")
+
+    def test_a_value_the_line_does_not_settle_is_refused_a_member(self):
+        for line in ("Y=$(cat x.sh); sh <<EOF\necho a $Y\nEOF",  # a substitution's output
+                     "read -r y < f; sh <<EOF\necho a $y\nEOF",  # text the line does not spell
+                     ": 'a; echo x'; sh <<EOF\necho $_\nEOF",  # bash's last word of the command before
+                     "sh <<EOF\necho $1 $@\nEOF",  # the positional parameters, which a function's call sets
+                     "x='a; echo x'; x='b; echo y' sh <<EOF\necho $x\nEOF",  # zsh's value and bash's, both commands
+                     "x='a; echo x'; sh <<EOF\necho ${x:-b}\nEOF",  # a value behind an operator
+                     "sh <<EOF\necho ${HOME:+a;echo x}\nEOF",  # a spelled word holding a separator
+                     # a loop may assign a variable after its body reads it, for the next pass
+                     "for i in 1 2; do sh <<EOF\necho $v\nEOF\nv='a; echo x'; done"):
+            self.unsettled(line)
+
+    def test_the_controls_read_as_before(self):
+        """A quoted delimiter, values holding no shell syntax, the environment's variables and the special parameters'
+        numbers, an escaped `\\$x`, and a body a command only prints."""
+        for operator in HEREDOC_QUOTED_OPERATORS:
+            self.data("x='a; git push'; sh %s\necho $x ${x} ${x:-b}\nEOF" % operator)
+        for line in ("x=hello; sh <<EOF\necho $x ${x} ${x:-b} ${#x} ${x%l*}\nEOF",
+                     "x=hello; x=world sh <<EOF\necho $x\nEOF",
+                     "sh <<EOF\necho $HOME ${HOME} ${u:-b} $((1 + 2)) $? $$ $# ${#}\nEOF",
+                     "x='a; git push'; sh <<EOF\necho \\$x\nEOF",
+                     "x='a; git push'; cat <<EOF\necho $x ${x:-b}\nEOF",
+                     "x='a; git push'; cat <<EOF > /dev/null\necho $x\nEOF"):
+            self.data(line)
+
+    def test_the_text_a_shell_receives(self):
+        values = {"$x": ("a; b", True), "${y}": (None, False)}.get
+        received = self.m.received_body("echo $x \\$x ${y} $(echo $x) `echo $x` $((1 + $x))", values)
+        self.assertEqual(received, "echo a; b $x ${y} $(echo $x) `echo $x` $((1 + $x))")
+        self.assertIsInstance(received, self.m.OutputBody)  # ${y}, which the line does not settle
+        received = self.m.received_body("echo $x ${u:-\\$(echo X)}", lambda text: ("v", True) if text == "$x" else (None, True))
+        self.assertEqual(received, "echo v ${u:-$(echo X)}")  # a kept expansion's escapes are taken off as before
+        self.assertNotIsInstance(received, self.m.OutputBody)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for body in ("${" * 3000, "${x:-" * 3000 + "}" * 3000, "echo $x" * 3000, "$[" * 3000, "${x}" * 3000,
+                     "${u:-b}" * 3000):
+            line = "x=a; sh <<EOF\n%s\nEOF\ngit push" % body
+            with self.subTest(body=body[:20]):
+                started = time.monotonic()
+                findings = self.analysis(line).findings
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), findings)
+
+
+class MultiosInputTest(BashHookCase):
+    """SPD-209, filed by SPD-207's engineer: zsh feeds a command every input its redirections name, one after
+    another -- its MULTIOS option, on by default -- and a pipe into the command is one of them, read first; bash feeds
+    it the last alone.  The hook read bash's way, and took a here-document's body over a `<` or a here-string wherever
+    they stood, so on the SPD-208 tree analyse_command recorded no finding for either of the proposer's lines: `cat
+    <<'A' <<'B' | sh` with `git push` in body A, where the Bash tool's zsh runs both bodies' lines, and `sh <<'EOF' <
+    x.sh`, where it runs the body and then x.sh, which SPD-145 refuses a member as `sh < x.sh`.
+
+    The rule (stdin_text.command_input, stdin_text.MultiosText): a command's standard input is read both ways, zsh's
+    -- the pipe that feeds the command itself, then each input redirection on descriptor 0 in the order it stands, `<>`
+    among them -- and bash's, the last of them.  A shell fed it reads each as its commands, and where either holds text
+    the line does not spell a member is refused it with SPD-145's reason; Spud reads on.  Both readings are taken
+    wherever the line stands, failing closed: the Bash tool's shell is zsh, but a line in a body bash or sh reads is
+    read bash's way, and zsh's text can hide in a here-document what bash's runs.  An xargs whose two readings differ
+    reads input the line does not spell.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's
+    directory, each command a `touch`, x.sh holding `touch f1`:
+
+    - zsh ran every input of `printf 'touch p1\\n' | sh <<'EOF'` (p1, then the body's h1), `sh <<'A' <<'B'`, `sh <<<
+      'touch s1' <<'EOF'`, `sh <<'EOF' <<< ...`, `sh <<'EOF' < x.sh`, `printf ... | sh < x.sh`, `sh < x.sh <<< ...`,
+      `cat <<'A' <<'B' | sh`, `cat <<'A' <<'B' | tee /dev/null | sh`, `printf ... | cat <<'EOF' | sh`, `sh <<< ...
+      <> x.sh`, `printf ... | sh <> x.sh` and `xargs -0 sh -c <<'A' <<'B'`; bash ran the last input alone in each,
+      and bodies `touch j\\` and `oined` made `joined` in zsh where bash ran `oined`;
+    - `sh <<< 'touch s1' 3< x.sh` ran s1 alone in all three, and `printf ... | { sh <<'EOF' ...; }` ran the body
+      alone: the pipe feeds the group, not the command in it;
+    - `cat <<'A' <<'B' | sh` with A `cat <<X` and B `touch h2` made nothing in zsh, B standing in cat's
+      here-document, and made h2 in bash; the same line in a body `bash <<'OUTER'` reads made h2 under all three."""
+
+    FIRST = "cat <<'A' <<'B' | sh\ngit push\nA\ntrue\nB"  # the proposer's lines: the push in body A
+    FILE = "sh <<'EOF' < x.sh\ntrue\nEOF"  # ... and the body, then x.sh
+    # zsh's text holds the push in cat's here-document; bash's runs it
+    HIDDEN = "cat <<'A' <<'B' | sh\ncat <<X\nA\ngit push\nB"
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def verbs(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "git"]
+
+    def forms(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def law_7(self, line):
+        """The analysis finds the push and nothing unread; a member is refused it, and Spud never is."""
+        with self.subTest(line=line):
+            self.assertIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def unspelled(self, line, spud=True):
+        """A "stdin" script finding, refused a member with SPD-145's reason; silent for Spud where `spud` says so."""
+        with self.subTest(line=line):
+            self.assertIn("stdin", self.forms(line))
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            if spud:
+                self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """No push, no script finding, and silent for every caller."""
+        with self.subTest(line=line):
+            self.assertNotIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertSilent(line)
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_refused_a_member(self):
+        self.law_7(self.FIRST)
+        self.assertEqual(self.verbs(self.FIRST), ["push"])
+        self.unspelled(self.FILE)
+        self.assertEqual(self.forms(self.FILE), ["stdin"])
+
+    def test_zsh_reads_every_input_in_turn(self):
+        """Each line hands a shell `git push` through an input bash's reading drops, or through two inputs zsh joins."""
+        for line in ("echo 'git push' | sh <<'EOF'\ntrue\nEOF",  # the pipe, then the body
+                     "sh <<< 'git push' <<'EOF'\ntrue\nEOF",
+                     "echo 'git push' | cat <<'EOF' | sh\ntrue\nEOF",
+                     "cat <<< 'git push' <<'EOF' | bash\ntrue\nEOF",
+                     "cat <<'A' <<'B' | tee /dev/null | sh\ngit push\nA\ntrue\nB",
+                     "{ cat <<'A' <<'B'; } | sh\ngit push\nA\ntrue\nB",
+                     "cat - <<'A' <<'B' | sh -s\ngit push\nA\ntrue\nB"):
+            self.law_7(line)
+        # zsh joins the two bodies' lines, as it made `joined`: the push neither body holds alone (body A, read alone as
+        # well, ends in a backslash that escapes nothing, which SPD-191 refuses every caller)
+        line = "sh <<'A' <<'B'\ngit \\\nA\npush\nB"
+        self.assertIn("push", self.verbs(line))
+        self.assertRefused(line, "Law 7")
+
+    def test_a_file_beside_another_input_is_refused_a_member(self):
+        """zsh reads the file too, after or before the text the line spells, so the shell reads text the line does not
+        spell -- and so does a shell fed a pipe from a file ahead of its own here-document."""
+        for line in (self.FILE, "sh < x.sh <<< 'git status'", "sh <<'EOF' 0< x.sh\ngit status\nEOF",
+                     "cat x.sh | sh <<'EOF'\ngit status\nEOF", "cat <<'EOF' < x.sh | sh\ngit status\nEOF",
+                     "cat x.sh | cat <<'EOF' | sh\ngit status\nEOF"):
+            self.unspelled(line)
+        # `<>` opens its file on standard input for reading and writing: Spud's own write of it is Law 1's, as it was
+        for line in ("sh <<< 'git status' <> tests/x.sh", "echo 'git status' | sh <> tests/x.sh"):
+            self.unspelled(line, spud=False)
+
+    def test_bash_reads_the_last_input_alone(self):
+        """Both readings are read wherever the line stands: HIDDEN's zsh text holds the push in cat's here-document,
+        which bash's runs, and a body bash reads is bash's reading; the here-string after a body is the input bash
+        reads."""
+        self.law_7(self.HIDDEN)
+        self.law_7("bash <<'OUTER'\n%s\nOUTER" % self.HIDDEN)
+        self.law_7("sh <<'EOF' <<< 'git push'\ntrue\nEOF")
+
+    def test_an_xargs_whose_readings_differ_reads_input_the_line_does_not_spell(self):
+        line = "cat <<'A' <<'B' | xargs -0 sh -c\ngit push\nA\ntrue\nB"
+        self.assertEqual(self.forms(line), ["xargs"])
+        self.assertRefused(line, "xargs reads from input the line does not spell")
+        self.assertSilent(line, agent_id=None)
+        self.law_7("echo 'git push' | xargs -0 sh -c")  # one input: one reading, as before
+
+    def test_a_single_input_reads_as_before(self):
+        for line in ("sh <<'EOF'\ngit push\nEOF", "cat <<'EOF' | sh\ngit push\nEOF", "echo 'git push' | sh",
+                     "sh <<< 'git push'", "echo 'git push' | { sh; }", "sh <<'A' <<'B'\ngit push\nA\ntrue\nB"):
+            self.law_7(line)
+        for line in ("sh < x.sh", "cat x.sh | sh", "echo 'git status' | sh < x.sh"):
+            self.unspelled(line)
+        for line in ("sh <<'EOF'\ngit status\nEOF", "cat <<'A' <<'B'\ngit push\nA\ntrue\nB",
+                     "sh <<'A' <<'B'\ngit status\nA\ntrue\nB", "sh <<< 'git status' 3< x.sh",
+                     "echo 'git push' | { sh <<'EOF'\ntrue\nEOF\n}"):  # the group's pipe is no input of sh's
+            self.data(line)
+
+
+class CompoundInputTest(BashHookCase):
+    """SPD-210, filed by SPD-207's engineer and widened by SPD-209's: a shell inside a `-c` string, a `{ }` group, a `( )`
+    subshell, a loop or a conditional runs on the standard input the command around it is given, and SPD-145 read that
+    input only on a shell's own simple command.  On the SPD-209 tree analyse_command recorded no finding for the
+    proposer's `sh -c sh < x.sh`, `{ sh; } < x.sh` and `(sh) < x.sh`, while `sh < x.sh` records a script "stdin"
+    finding; nor for `{ sh; } <<'EOF'` with `git push` in the body, nor for `{ sh; } <<'EOF' < x.sh`.
+
+    The rule: a `-c` string's commands, and `eval`'s, start from the input of the command that runs them
+    (analyse.analyse_command's `stdin` and `fed`), and so do the substitutions in a command's words, which read the input
+    of the list they stand in; and a compound command's own input redirections, which the walk reads after its closer,
+    stand where it opens (walk.walk_line: where any compound on the line has one, the line is walked again with each
+    compound's input known when it opens), read as SPD-209 reads a command's: zsh's reading, the pipe that feeds the
+    compound and then each input in turn, and bash's, the last.  A shell there reading text the line spells reads it as
+    its commands; one reading text the line does not spell is refused a member with SPD-145's reason, and Spud reads on.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's
+    directory, each file and body a `touch`:
+
+    - all three ran the file's line for `sh -c sh < i1.sh`, `{ sh; } < i2.sh`, `(sh) < i3.sh`, `cat i4.sh | { sh; }`,
+      `cat i5.sh | (sh)`, `for f in a; do sh; done < i6.sh`, `if true; then sh; fi < i7.sh`, `case x in x) sh;; esac <
+      i8.sh`, `while true; do sh; break; done < i9.sh`, `until false; do sh; break; done < i10.sh`, `eval sh < i11.sh`,
+      `sh -c '{ sh; }' < i12.sh`, `sh -c 'sh -c sh' < i13.sh`, `{ { sh; }; } < x.sh` and `{ sh; } 2> /dev/null < x.sh |
+      cat`; and the body's or the string's line for the group, the subshell, the `-c` string, for, if, case, while and
+      until fed a here-document or a here-string, for `{ { sh; }; } <<< ...`, `{ sh; } <<< ... | cat`, `fn() { sh; } <<<
+      ...` once fn was called, `eval sh <<< ...`, `sh -c '{ sh; }' <<< ...`, `sh -c 'sh -c sh' <<< ...`, `{ echo $(sh) >
+      /dev/null; } <<< ...`, the same in backticks, `(echo $(sh) > /dev/null) <<< ...` and `sh -c 'echo $(sh) >
+      /dev/null' <<< ...`; zsh ran `repeat 1 do sh; done <<< ...` (bash: a syntax error), and bash ran the line after `1`
+      in a body fed to `select f in a; do sh; break; done` (zsh's select took no choice there and ran nothing);
+    - zsh ran both inputs of `{ sh; } <<'EOF' < x.sh` (the body, then x.sh), of `(sh) <<'EOF' < x.sh`, of `printf
+      'touch p1\\n' | { sh; } < x.sh`, of `printf 'touch p2\\n' | { sh; } <<'EOF'` and of `{ sh; } <<< 'touch a1'
+      <<'EOF'`, and bash the last alone in each; in `{ printf 'touch r1\\n' | echo $(sh) > /dev/null; } <<< 'touch r2'`
+      zsh's substitution read r2, the group's input, and bash's r1, the pipe;
+    - none ran anything for `{ sh; } 3< x.sh`, `echo $(sh) <<< ...` (the substitution runs before the command's own
+      redirection), or `{ :; } <<< ...; sh`; `while read -r l; do echo "got $l"; done < x.sh` and `cat x.sh | while
+      ...` printed the line, and `{ cat; } <<'EOF'` its body."""
+
+    EVIDENCE = ("sh -c sh < x.sh", "{ sh; } < x.sh", "(sh) < x.sh")  # the proposer's lines
+    FOLDED = "{ sh; } <<'EOF'\ngit push\nEOF"  # SPD-209's engineer's, with `{ sh; } < x.sh`
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def verbs(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "git"]
+
+    def forms(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def law_7(self, line):
+        """The analysis finds the push and nothing unread; a member is refused it, and Spud never is."""
+        with self.subTest(line=line):
+            self.assertIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def unspelled(self, line):
+        """A "stdin" script finding, refused a member with SPD-145's reason; silent for Spud."""
+        with self.subTest(line=line):
+            self.assertIn("stdin", self.forms(line))
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """No push, no script finding, and silent for every caller."""
+        with self.subTest(line=line):
+            self.assertNotIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertSilent(line)
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_refused_a_member(self):
+        for line in self.EVIDENCE:
+            self.unspelled(line)
+            self.assertEqual(self.forms(line), ["stdin"])
+        self.law_7(self.FOLDED)
+        self.unspelled("{ sh; } <<'EOF' < x.sh\ntrue\nEOF")
+
+    def test_a_spelled_input_is_the_inner_shells_program(self):
+        """The shapes of the evidence, and every compound command, fed a here-document or a here-string."""
+        for line in ("(sh) <<'EOF'\ngit push\nEOF", "sh -c sh <<'EOF'\ngit push\nEOF", "{ sh; } <<< 'git push'",
+                     "(sh) <<< 'git push'", "sh -c sh <<< 'git push'",
+                     "for f in a; do sh; done <<'EOF'\ngit push\nEOF", "if true; then sh; fi <<< 'git push'",
+                     "case x in x) sh;; esac <<'EOF'\ngit push\nEOF", "while true; do sh; break; done <<< 'git push'",
+                     "until false; do sh; break; done <<< 'git push'", "repeat 1 do sh; done <<< 'git push'",
+                     "select f in a; do sh; break; done <<'EOF'\n1\ngit push\nEOF",
+                     "{ { sh; }; } <<< 'git push'", "{ sh; } <<< 'git push' | cat", "fn() { sh; } <<< 'git push'",
+                     "eval sh <<< 'git push'", "sh -c '{ sh; }' <<< 'git push'", "sh -c 'sh -c sh' <<< 'git push'"):
+            self.law_7(line)
+
+    def test_a_file_on_any_compound_is_refused_a_member(self):
+        for line in ("cat x.sh | (sh)", "for f in a; do sh; done < x.sh", "if true; then sh; fi < x.sh",
+                     "case x in x) sh;; esac < x.sh", "while true; do sh; break; done < x.sh",
+                     "until false; do sh; break; done < x.sh", "eval sh < x.sh", "sh -c '{ sh; }' < x.sh",
+                     "sh -c 'sh -c sh' < x.sh", "{ { sh; }; } < x.sh", "{ sh; } 2> /dev/null < x.sh | cat"):
+            self.unspelled(line)
+
+    def test_a_substitution_reads_the_input_of_its_list(self):
+        for line in ("{ echo $(sh) > /dev/null; } <<< 'git push'", "{ echo `sh` > /dev/null; } <<< 'git push'",
+                     "(echo $(sh) > /dev/null) <<< 'git push'", "sh -c 'echo $(sh) > /dev/null' <<< 'git push'",
+                     "{ printf x | echo $(sh) > /dev/null; } <<< 'git push'"):  # zsh's reading: the group's input
+            self.law_7(line)
+        self.unspelled("{ echo $(sh) > /dev/null; } < x.sh")
+
+    def test_zsh_reads_a_compounds_inputs_in_turn(self):
+        """The pipe into the compound, then each of its own input redirections: zsh reads them all, bash the last."""
+        for line in ("{ sh; } <<'EOF' < x.sh\ntrue\nEOF", "(sh) <<'EOF' < x.sh\ntrue\nEOF",
+                     "echo 'git status' | { sh; } < x.sh"):
+            self.unspelled(line)
+        for line in ("echo 'git push' | { sh; } <<'EOF'\ntrue\nEOF", "{ sh; } <<< 'git push' <<'EOF'\ntrue\nEOF"):
+            self.law_7(line)
+
+    def test_the_controls_read_as_before(self):
+        """Another descriptor, a loop that only reads its input, input that stops at the compound's end, and a
+        substitution in the words of a command whose own redirection comes after it."""
+        for line in ("{ sh; } 3< x.sh", "while read -r l; do echo \"got $l\"; done < x.sh",
+                     "cat x.sh | while read -r l; do echo \"got $l\"; done", "{ :; } <<< 'git push'; sh",
+                     "echo $(sh) <<< 'git push'", "{ cat; } <<'EOF'\ngit push\nEOF"):
+            self.data(line)
+
+
+class FunctionInputTest(BashHookCase):
+    """SPD-212, filed by SPD-210's engineer: a function the line defines was read once, where it is defined, on the input
+    that place stands on, and never with the input a call of it is given, so a shell in its body reading that input ran
+    unread.  On the SPD-210 tree analyse_command recorded no finding for the proposer's `f() { sh; }; f < x.sh`, while
+    `{ sh; } < x.sh` records a script "stdin" finding, and read nothing of the here-string in `g() { sh; }; g <<< 'touch
+    g1'`.  SPD-210 covered a redirection on the definition itself (`fn() { sh; } < x.sh`), not on the call.
+
+    The rule (walk.walk_line): a call of a function the line defines, in command position, hands the function's body the
+    standard input the call is given (its pipe and its own input redirections, as SPD-209 reads a command's), and the line
+    is walked again with that input standing where the body opens, once per distinct input, as SPD-210 walks it again for
+    a compound command's own input.  A call the second walk finds (in a body, in a group given input) is read the same
+    way.  These walks are bounded as SPD-203's per-call readings are (READINGS_PER_NAME), across the whole analysis: past
+    the bound a line's bodies are read once more on input the line does not spell, refused a member on doubt.  A
+    function an `eval` string defines is defined in the shell that runs the line, but its text's reading is over before
+    the call: a call of it given input is refused a member as such input is (script_files, "function"); a function a
+    substitution or a `-c` string defines stays in its own process.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory, each file and
+    body a `touch`:
+
+    - all three made the file for `g() { sh; }; g <<< 'touch g1'`, `f() { sh; }; f < x.sh`, a here-document fed to the call,
+      `printf 'touch p1\\n' | p` (p's body `sh`), `k() if true; then sh; fi; k <<< ...`, `s() ( sh ); s <<< ...`, `function
+      fk { sh; }` and `function fp () { sh; }` called with a here-string, `a() { sh; }; b() { a; }; b <<< ...`, a chain of
+      four such functions, `c() { sh; }; { c; } <<< ...`, `m <<< 'touch m1'; m <<< 'touch m2'` (both), `echo $(q <<<
+      ...)`, `eval "e <<< ..."`, `eval e < x.sh`, `r <<< ... > /dev/null`, `time t <<< ...`, `u() { v <<< 'touch
+      inner1'; }` called with other input (v's body `sh`), `f() { sh -c sh; }` and `h() { { sh; }; }` called with a
+      here-string, a definition and its call inside one subshell and inside one `sh -c` string, and a body that calls
+      itself with a here-string;
+    - zsh made d1 for `d() { sh; } <<< 'true'; d <<< 'touch d1'`, and `d() { cat; } < def.txt; d < call.txt` printed
+      call then def: zsh reads the call's input and then each of the definition's own in turn; bash read the
+      definition's alone (def, and no d1);
+    - zsh made z1 for its `z() sh; z <<< 'touch z1'` (bash: a syntax error), and `z() cat < def.txt; z < call.txt`
+      printed def alone: a simple command's own input replaces the call's, as it does in a `{ }` body (`f() { sh <<<
+      'true'; }; f <<< 'touch own1'` made nothing in any of the three);
+    - all three made ev2 for `eval 'ev() { sh; }'; ev <<< 'touch ev2'`;
+    - none made anything for `command cw <<< ...` (command runs no function), for `(o() { sh; }); o <<< ...` or `x=$(xf()
+      { sh; }; echo); xf <<< ...` (the definition stays in its subshell), or for a call with no input."""
+
+    EVIDENCE = ("g() { sh; }; g <<< 'touch g1'", "f() { sh; }; f < x.sh")  # the proposer's lines
+    SPELLED = "f() { sh; }; f <<'EOF'\ngit push\nEOF"  # a here-document body the inner shell runs as its program
+
+    # CompoundInputTest's readings of the analysis and its asserts, which this class makes of the same findings
+    analysis, verbs, forms = CompoundInputTest.analysis, CompoundInputTest.verbs, CompoundInputTest.forms
+    law_7, unspelled, data = CompoundInputTest.law_7, CompoundInputTest.unspelled, CompoundInputTest.data
+
+    def writes(self, command):
+        return sorted(str(e[1]) for e in self.analysis(command).arg_writes)
+
+    def test_the_tickets_evidence_is_refused_a_member(self):
+        touched, unspelled = self.EVIDENCE
+        # the here-string is the inner shell's program: the call reads as `sh <<< 'touch g1'` does
+        self.assertEqual(self.writes(touched), self.writes("sh <<< 'touch g1'"))
+        self.assertTrue(self.writes(touched))
+        self.assertEqual(self.bash(touched).reason, self.bash("sh <<< 'touch g1'").reason)
+        self.assertRefused(touched, "deliverables")
+        self.unspelled(unspelled)
+        self.assertEqual(self.forms(unspelled), ["stdin"])
+        self.law_7(self.SPELLED)
+
+    def test_every_input_a_call_is_given_reaches_the_body(self):
+        for line in ("f() { sh; }; f <<< 'git push'", "p() { sh; }; echo 'git push' | p",
+                     "k() if true; then sh; fi; k <<< 'git push'", "s() ( sh ); s <<< 'git push'",
+                     "function fk { sh; }; fk <<< 'git push'", "function fp () { sh; }; fp <<< 'git push'",
+                     "z() sh; z <<< 'git push'", "a() { sh; }; b() { a; }; b <<< 'git push'",
+                     "f1() { sh; }; f2() { f1; }; f3() { f2; }; f4() { f3; }; f4 <<< 'git push'",
+                     "c() { sh; }; { c; } <<< 'git push'", "m() { sh; }; m <<< 'git status'; m <<< 'git push'",
+                     "q() { sh; }; echo $(q <<< 'git push')", "e() { sh; }; eval \"e <<< 'git push'\"",
+                     "r() { sh; }; r <<< 'git push' > /dev/null", "t() { sh; }; time t <<< 'git push'",
+                     "v() { sh; }; u() { v <<< 'git push'; }; u <<< 'true'", "f() { sh -c sh; }; f <<< 'git push'",
+                     "f() { { sh; }; }; f <<< 'git push'", "(f() { sh; }; f <<< 'git push')",
+                     "f() { sh; f <<< 'git push'; }; f", "sh -c 'f() { sh; }; f <<< \"git push\"'"):
+            self.law_7(line)
+        for line in ("f() { sh; }; cat x.sh | f", "s() ( sh ); s < x.sh", "a() { sh; }; b() { a; }; b < x.sh",
+                     "c() { sh; }; { c; } < x.sh", "e() { sh; }; eval e < x.sh", "sh -c 'f() { sh; }; f < x.sh'",
+                     "z() sh; z < x.sh"):
+            self.unspelled(line)
+
+    def test_zsh_reads_the_calls_input_then_the_definitions(self):
+        """A definition's own input redirections (SPD-210) with a call's: zsh reads the call's and then each of them,
+        bash the definition's last alone, which SPD-210 already read."""
+        self.law_7("d() { sh; } <<< 'true'; d <<< 'git push'")
+        self.unspelled("d() { sh; } <<< 'true'; d < x.sh")
+        self.law_7("d() { sh; } <<< 'git push'; d <<< 'true'")
+
+    def test_the_readings_of_one_body_have_a_bound(self):
+        """READINGS_PER_NAME distinct inputs are each read; one more, or a chain of calls longer than that, reads every
+        body on the line once more on input the line does not spell: refused a member on doubt, Spud reading on."""
+        cap = load_spud_module().READINGS_PER_NAME
+        inputs = "m() { sh; }; " + "; ".join("m <<< 'true %d'" % k for k in range(1, cap + 1))
+        self.data(inputs)
+        self.unspelled(inputs + "; m <<< 'git push'")
+        chain = "f1() { sh; }; " + "; ".join("f%d() { f%d; }" % (k + 1, k) for k in range(1, cap + 2))
+        self.unspelled(chain + "; f%d <<< 'git push'" % (cap + 2))
+        # the bound holds across the analysis, so a line nested in a body read on each input cannot multiply the walks
+        nested = "f() { echo $(g() { sh; }; %s); }; " % "; ".join("g <<< 'true %d'" % k for k in range(1, cap + 1))
+        nested += "; ".join("f <<< 'true %d'" % k for k in range(1, cap + 1))
+        self.assertEqual(self.analysis(nested).body_walks, cap)
+        self.unspelled(nested)
+
+    def test_a_function_an_eval_defines_is_refused_on_doubt(self):
+        """Its body stands in text whose reading is over before the call: a call given input is refused a member."""
+        for line in ("eval 'f() { sh; }'; f <<< 'git push'", "eval 'f() { sh; }'; f < x.sh"):
+            with self.subTest(line=line):
+                self.assertEqual(self.forms(line), ["function"])
+                r = self.assertRefused(line, SCRIPT_WORDING)
+                self.assertIn("inside an `eval` string", r.reason)
+                self.assertSilent(line, agent_id=None)
+        self.law_7("eval 'f() { sh; }; f <<< \"git push\"'")  # the call inside the same string is read
+        self.data("eval 'f() { sh; }'; f")
+
+    def test_the_controls_read_as_before(self):
+        """A wrapper that runs no function, a definition kept in its subshell, a call before the definition or with no
+        input, a body that only prints its input, a body whose shell has input of its own, and a line zsh and bash read
+        apart, whose definitions each reading binds for itself."""
+        for line in ("cw() { sh; }; command cw <<< 'git push'", "(o() { sh; }); o <<< 'git push'",
+                     "x=$(f() { sh; }; echo); f <<< 'git push'", "f <<< 'git push'; f() { sh; }", "f() { sh; }; f",
+                     "f() { cat; }; f <<< 'git push'", "f() { sh <<< 'true'; }; f <<< 'git push'",
+                     "z() sh <<< 'true'; z <<< 'git push'", "f() { sh; }; f <<< 'git status'; {true}"):
+            self.data(line)
+        self.law_7("f() { sh; }; f <<< 'git push'; {true}")
+
+
+# SPD-184: the process substitutions zsh runs in a case's word and its patterns, `%s` standing for the list.  With a file
+# touched in place of %s, zsh 5.9 made it for each (CaseSubstitutionTest has the probes).
+CASE_EQUALS_FORMS = (
+    # `=( ... )` opening the case's word, or a top-level alternative of a pattern -- after `in`, a bar with or without blanks
+    # around it, `;;`, `;&`, `;|` or a newline: zsh parses its list as commands (the ticket's two lines first)
+    "case x in =(%s)) true;; esac",
+    "case =(%s) in x) true;; esac",
+    "case =(%s)x in x) true;; esac",
+    "case x in y|=(%s)) true;; esac",
+    "case x in y| =(%s)) true;; esac",
+    "case x in y |=(%s)) true;; esac",
+    "case x in (y)|=(%s)) true;; esac",
+    "case x in (y) | =(%s)) true;; esac",
+    "case x in =(true)|=(%s)) true;; esac",
+    "case x in =(%s)|y) true;; esac",
+    "case x in y) ;; =(%s)) true;; esac",
+    "case x in y) ;& =(%s)) true;; esac",
+    "case x in y) ;| =(%s)) true;; esac",
+    "case x in\n=(%s)) true;; esac",
+    "case x in =(true\n%s)) true;; esac",
+    "case x in =( (%s) )) true;; esac",
+    "case x in =(case y in y) %s;; esac)) true;; esac",
+)
+CASE_ANGLE_FORMS = (
+    # `<( ... )` and `>( ... )` anywhere in the case's word or a pattern, inside a group too: its list parsed as commands
+    "case x in <(%s)) true;; esac",
+    "case <(%s) in x) true;; esac",
+    "case x in >(%s)) true;; esac",
+    "case >(%s) in x) true;; esac",
+    "case x in a<(%s)) true;; esac",
+    "case x in a>(%s)) true;; esac",
+    "case x in y|<(%s)) true;; esac",
+    "case x in (<(%s))) true;; esac",
+    "case x in (y|<(%s))) true;; esac",
+    "case x in (y|>(%s))) true;; esac",
+    "case x in ((y)|<(%s))) true;; esac",
+    "case x in ( <(%s) ) true;; esac",
+    "case x in (y|<(%s)) true;; esac",
+    "case x in (y|<(%s))|z) true;; esac",
+    "case <(%s)q in *) true;; esac",
+    "case (y|<(%s)) in *) true;; esac",
+)
+# `=( ... )` opening the content of a pattern's optional parentheses: zsh lexed that content as the pattern's text, and
+# runs the list up to its first `)` with the pattern's `(` and `|` taken out, so the list holds no pipe and no redirection
+CASE_OPTIONAL_FORMS = (
+    "case x in ( =(%s) ) true;; esac",
+    "case x in (=(%s) ) true;; esac",
+    "case x in ( =(%s)) true;; esac",
+    "case x in (=(%s)|y) true;; esac",
+    "case x in ( =(%s)|y ) true;; esac",
+    "case x in (=(%s) | y) true;; esac",
+    "case x in y) ;; ( =(%s) ) true;; esac",
+    "case x in ( =(%s) <(true) ) true;; esac",
+)
+# a body after a pattern or a word holding a substitution
+CASE_SUBSTITUTION_BODIES = (
+    "case x in =(true)) %s;; esac",
+    "case =(true) in x) %s;; esac",
+    "case x in <(true)) %s;; esac",
+    "case <(true) in x) %s;; esac",
+    "case x in >(true)) %s;; esac",
+    "case x in y|=(true)) %s;; esac",
+    "case x in =(true)|x) %s;; esac",
+    "case x in =(true)x|x) %s;; esac",
+    "case x in (y|<(true))) %s;; esac",
+    "case x in (y|<(true)) %s;; esac",
+    "case x in ( =(true) ) %s;; esac",
+    "case x in ( =(true) <(true) ) %s;; esac",
+    "case x in =(case y in y) true;; esac)) %s;; esac",
+    "case x in y) ;; =(true)) %s;; esac",
+    "case (y|<(true)) in x) %s;; esac",
+)
+
+
+class CaseSubstitutionTest(BashHookCase):
+    """SPD-184, filed by SPD-181's engineer: mark_zsh_patterns read zsh's `=(` as a plain parenthesis, and ShellWalk took a
+    `(` in a case's word or pattern for the pattern's optional parenthesis and discarded every word before its `)` as
+    pattern text, so the list of a `=( ... )` there was never read.  A `<( ... )` or `>( ... )` there was read, but the
+    marking took its `)` for the pattern's own and read the arm's body outside command position.  The proposer's evidence:
+    `case x in =(git push)) true;; esac` and `case =(git push) in x) true;; esac` recorded no finding (Law 7 for members).
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, TMPPREFIX in the probe's directory, in zsh 5.9
+    (arm64-apple-darwin26.0) under -f -o nobareglobqual and under -f, which printed the same for every line, and in GNU bash
+    3.2.57, each line an eval with a file touched in the list (`case x in =(touch r01)) echo m01;; esac`):
+
+    - zsh runs a `=( ... )` opening the case's word (`case =(touch r02) in x)`, `case =(touch r63)x in *)`) or a top-level
+      alternative of a pattern: after `in`, `;;`, `;|` or a newline, and after a bar with or without blanks (`y|=(...)`,
+      `x| =(...)`, `x |=(...)`, `(x)|=(...)`, `(x) | =(...)`, `=(touch r80)|=(touch r81)` made both).  Its list is parsed as
+      commands: `x|=(tou|ch r100))` ran `tou` and `ch`, `=(true|touch r101))` made r101, and `=(case y in y) touch r17;;
+      esac))` and `=( (touch r18) ))` made theirs.  A pattern tests its alternatives in turn and stops at the first match
+      (`case x in x| =(touch r48))` made nothing, with the word q it made r48), and after `;&` the next body runs untested;
+      the hook reads every alternative;
+    - zsh runs a `=( ... )` opening the content of the pattern's optional parentheses (`( =(touch r09) )`, `(=(touch r45) )`,
+      `( =(touch r46))`, `(=(touch r61)|x)`, `(=(touch r65) | x)`, `( =(touch r40)|x )`, after `;;` too), and in a group
+      that holds a `<( )` (`( =(touch r82) <(true) )`).  That content is the pattern's text: the list ends at its first `)`
+      and loses the pattern's `(` and `|` (`( =(tou|ch r90) )` made r90, `( =(touch (r97|r98)) )` made r97r98, `( =(git
+      (push|)) )` ran git), a newline before it is no blank (`(<newline>=(touch r83) )` made nothing), and only the first
+      element counts (`( =(touch r105)|=(touch r106) )` made r105 alone);
+    - zsh leaves `=` elsewhere as pattern text: inside a group (`(x|=(touch r11)))`, `((x)|=(touch r24)))`, `((=(touch
+      r60)))`, `( ( =(touch r59) ) )`), in a group that is the pattern itself (`(=(touch r08)))`, `( =(touch r89) )|x)`),
+      after the first element of the optional parentheses (`( x|=(touch r43) )`, `( x | =(touch r52) )`, `(x|=(touch r62))
+      echo`), glued after other text (`a=(touch r10))`, `x|a=(touch r25))`, `case a=(touch r31) in`), in a later
+      alternative's group (`y|(=(touch r67)))`, `y|( =(touch r68) ))`), and in the case word's group (`case (=(touch r33))
+      in`);
+    - zsh runs `<( )` and `>( )` anywhere in the word or a pattern, groups included (`(<(touch r26)))`, `(x|<(touch r27)))`,
+      `(x|>(touch r28)))`, `a>(touch r29))`, `( <(touch r51) )`, `(x|<(touch r70))`, `((x)|<(touch r73)))`, `case <(touch
+      r78)q in`, `case (y|<(touch r112)) in`), its list parsed as commands (`(x|<(tou|ch r102)))` ran `tou` and `ch`);
+    - the pattern goes on after the substitution and the body after it runs in command position: `=(true)|x) echo m15`,
+      `=(true)x|x) echo m19`, `x|=(true)) (echo m20)`, `case =(true) in *) (echo m110)`, `(q|<(true)) (echo m72)`, `(q|<(true)))
+      (echo m77)`, `( =(true) ) ;; q) (echo m111)` and `=(case y in y) true;; esac)) ;; *) (echo m115)` each printed theirs;
+    - `$( )`, backticks and a `$( )` in `${z:-$( )}` or in a pattern's group ran, as they always were read; zsh 5.9 has no
+      `${ list; }` (bad substitution);
+    - bash rejects a `=( )` and a group in a case, and runs `<( )` and `>( )` in the word and outside a group in a pattern.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans home:**."""
+
+    TARGET = "(ledger|x)/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def ledger_write(self, line):
+        """Refused to both members for the generated ledger file, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "generated", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def every_payload(self, form, lists):
+        """Law 7, Law 6, Law 5's --as, the database and Law 1 for both members; for Spud, the checks that apply to him."""
+        home, spud = self.home.path, self.spud_cli
+        for command, needle in (("git push", "Law 7"), ("%s ticket new --title x" % spud, "Law 6"),
+                                ("%s --as spud member log hi" % spud, "Law 6"),
+                                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly")) + lists:
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=form % command, agent_id=agent_id):
+                    self.assertRefused(form % command, needle, agent_id)
+        for command, needle in (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly")):
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, needle, agent_id=None)
+        for command, _needle in lists:
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_zsh_runs_it(self):
+        for line in ("case x in =(git push)) true;; esac", "case =(git push) in x) true;; esac"):
+            self.law_7(line)
+            # both readings take the `=( ... )` for the process substitution it is, as a `<( ... )` hands its command a
+            # file name: bash rejects the line
+            with self.subTest(line=line):
+                self.assertEqual(self.m.mark_zsh_patterns(line), (line.replace("=(", "<("),) * 2)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_spelling_that_runs_its_list(self):
+        for form in CASE_EQUALS_FORMS + CASE_ANGLE_FORMS + CASE_OPTIONAL_FORMS:
+            self.law_7(form % "git push")
+
+    def test_every_payload_in_a_list_parsed_as_commands(self):
+        writes = (("echo x > ledger/tickets/SPD-001.md", "generated"), ("echo x | tee ledger/tickets/SPD-001.md", "generated"))
+        for form in ("case x in =(%s)) true;; esac", "case =(%s) in x) true;; esac", "case x in y| =(%s)) true;; esac",
+                     "case x in y) ;; =(%s)) true;; esac", "case x in (y|<(%s))) true;; esac", "case <(%s) in x) true;; esac"):
+            self.every_payload(form, writes)
+
+    def test_every_payload_in_the_optional_parentheses(self):
+        """No pipe and no redirection reaches a list there, so the writes are by argument."""
+        writes = (("touch ledger/tickets/SPD-001.md", "generated"), ("rm ledger/tickets/SPD-001.md", "generated"))
+        for form in ("case x in ( =(%s) ) true;; esac", "case x in (=(%s)|y) true;; esac",
+                     "case x in ( =(%s) <(true) ) true;; esac"):
+            self.every_payload(form, writes)
+
+    def test_the_optional_parentheses_list_as_zsh_takes_it(self):
+        """The list ends at its first `)` and loses the pattern's `(` and `|`: `gi|t push` runs git push (probed: `( =(tou|ch
+        r90) )` made r90), and `echo x|tee FILE` runs one echo, which writes nothing."""
+        for line in ("case x in ( =(gi|t push) ) true;; esac", "case x in ( =(git (push|)) ) true;; esac",
+                     "case x in (=(g|it p|ush)|y) true;; esac"):
+            self.law_7(line)
+        line = "case x in ( =(echo x|tee ledger/tickets/SPD-001.md) ) true;; esac"
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertSilent(line, agent_id)
+
+    def test_every_body_after_a_substitution(self):
+        for form in CASE_SUBSTITUTION_BODIES:
+            for body in ("( {git push} )", "{( git push )}", "{git push}", "git push"):
+                self.law_7(form % body)
+            line = form % ("tee " + self.TARGET)
+            with self.subTest(line=line):
+                self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(line).redirects])
+            self.ledger_write(line)
+
+    def test_every_enclosing_text(self):
+        for form in ("eval 'case x in =(%s)) true;; esac'", "x=$(case =(%s) in (x) true;; esac)",
+                     "echo `case x in y|=(%s)) true;; esac`", "zsh -f -c 'case x in ( =(%s) ) true;; esac'",
+                     "f() { case x in =(%s)) true;; esac }; f", "if true; then case =(%s) in x) true;; esac; fi",
+                     "case y in y) case x in =(%s)) true;; esac;; esac", "{ case x in (y|<(%s))) true;; esac }",
+                     "for f (a) case x in y|=(%s)) true;; esac", "time case x in =(%s)) true;; esac"):
+            self.law_7(form % "git push")
+
+    def test_the_path_rule_in_the_list(self):
+        for form in ("case x in =(%s)) true;; esac", "case =(%s) in x) true;; esac", "case x in (y|<(%s))) true;; esac",
+                     "case x in ( =(%s) ) true;; esac"):
+            for write in ("touch note.txt", "rm -rf docs"):
+                line = form % write
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")
+                    self.assertSilent(line, AGENT_C)
+                    self.assertRefused(line, "Law 1", agent_id=None)
+            line = form % "touch tests/zzone/k.py"
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_a_substitution_leaves_the_body_its_own_substitutions(self):
+        """The file name a `<( )` hands its command stood among the pattern's words, which the walk discards at the
+        pattern's `)`: it took the first `$( )` of the body there, read before the body's cd, and after a bar the walk ran
+        the pattern's words as a command named by that file name."""
+        body = "cd ledger && echo $(echo x > tickets/SPD-001.md)"
+        for pattern in ("<(true))", ">(true))", "=(true))", "( =(true) )", "(y|<(true))"):
+            self.ledger_write("case x in %s %s;; esac" % (pattern, body))
+        for line in ("case x in y) ;; <(true)|x) true;; esac", "case x in y) ;; >(true)|x) true;; esac",
+                     "case x in y) ;; =(true)|x) true;; esac", "case x in y) ;; ( =(true) |x) true;; esac"):
+            for agent_id in (AGENT_A, AGENT_C, None):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_a_pattern_s_plain_text_runs_nothing(self):
+        """zsh reads these `=(` as pattern text and runs nothing (probed; see the class).  `((y)|=(git push)))` is one
+        too, but the other reading restores a group that opens a pattern's word, and a `(git push)` after the `(y)` it
+        closes is a subshell there, with `=` or without (SPD-181): bash rejects the line."""
+        for line in ("case x in a=(git push)) true;; esac", "case x in (y|=(git push))) true;; esac",
+                     "case x in (=(git push))) true;; esac",
+                     "case x in ((=(git push))) true;; esac", "case x in ( ( =(git push) ) ) true;; esac",
+                     "case x in ( y|=(git push) ) true;; esac", "case x in ( y | =(git push) ) true;; esac",
+                     "case x in (y | =(git push)) true;; esac", "case x in (y|=(git push)) true;; esac",
+                     "case x in y|a=(git push)) true;; esac", "case x in y|(=(git push))) true;; esac",
+                     "case x in y|( =(git push) )) true;; esac", "case x in ( =(git push) )|y) true;; esac",
+                     "case x in ( =(true)|=(git push) ) true;; esac", "case a=(git push) in *) true;; esac",
+                     "case (=(git push)) in *) true;; esac", "case x in (\n=(git push) ) true;; esac"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [])
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_the_substitutions_already_read(self):
+        """`$( )` and backticks were lifted out of every word before the walk, a case's word and patterns included."""
+        for form in ("case x in $(%s)) true;; esac", "case $(%s) in x) true;; esac", "case x in `%s`) true;; esac",
+                     "case ${z:-$(%s)} in *) true;; esac", "case x in (y|$(%s))) true;; esac",
+                     "case x in ${z:-`%s`}) true;; esac"):
+            self.law_7(form % "git push")
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("case x in " + "=(true)) true;; " * 2000 + "=(true)) ( {git push} );; esac",
+                     "case x in " + "y|" * 5000 + "=(git push)) true;; esac",
+                     "case x in " + "=(" * 3000 + "git push" + ")" * 3000 + ") true;; esac",
+                     "case x in (" + "y|<(true)" * 2000 + ")) ( {git push} );; esac",
+                     "case " + "<(true)" * 2000 + " in x) ( {git push} );; esac",
+                     "case x in ( =(git push) " + "|y" * 5000 + " ) true;; esac",
+                     "case x in " + "( =(true) ) true;; " * 2000 + "( =(git push) ) true;; esac",
+                     "case x in ( =(" + "(" * 3000 + "git push" + " " * 3000 + ") ) true;; esac",
+                     "case x in " + "=(" * 3000 + "git push"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-189: the words in which zsh's (e) flag evaluates the value of x, which the line settles, each read as the text zsh
+# runs (EvalFlagTest has the probes): the flag alone, repeated, beside `@`, nested either way, through (P), and in every
+# place a word stands -- an argument, one glued to text, an assignment's value, a command's prefix, a case's word and
+# pattern, a condition, a for list, arithmetic, a here-string.
+EVAL_FLAG_WORDS = (
+    "echo ${(e)x}", 'echo "${(e)x}"', 'echo "e1=${(e)x}"', "echo a${(e)x}b", "echo ${(ee)x}", "echo ${(@e)x}",
+    "echo ${(e)${x}}", "echo ${${(e)x}}", 'echo ${(e)"${x}"}', "n=x; echo ${(Pe)n}", "n=x; echo ${(e)${(P)n}}",
+    "y=${(e)x}", "y=${(e)x} true", ": ${(e)x}", "echo ${(e)x} > /dev/null", "case ${(e)x} in *) true;; esac",
+    "case q in ${(e)x}) true;; esac", "[[ -n ${(e)x} ]]", "for f in ${(e)x}; do true; done", "echo $(( ${(e)x} + 1 ))",
+    "(( ${(e)x} ))", "cat <<< ${(e)x}",
+)
+# ... and the ones whose other flags, modifiers or subscripts change the value before (e) evaluates it: the hook reads
+# the value as it is spelled and refuses a member besides, since the text zsh evaluates may differ (a case flag, a removal
+# that takes a backslash away, a replacement that writes a `$`)
+EVAL_FLAG_CHANGED = (
+    "echo ${(ej:,:)x}", "echo ${(Le)x}", "echo ${(e)x:-z}", "echo ${(e)x[1,40]}", "echo ${(e)~x}", "echo ${(e)^x}",
+    "echo ${(Qe)x}", "echo ${(%e)x}",
+)
+# The value's spellings, `%s` its command.  (e) reads the value as the inside of double quotes -- its quotes are text,
+# a backslash escapes the next character -- and runs every `$( )` and backtick body in it, a default word's and an
+# arithmetic expansion's included, and the value of an (e) expansion it holds.
+EVAL_FLAG_VALUES = (
+    "x='$(%s)'", 'x="\\$(%s)"', "x='`%s`'", 'x="\\`%s\\`"', "x='\"$(%s)\"'", "x=\"'\\$(%s)'\"", "x='\\\\$(%s)'",
+    "x='${zz:-$(%s)}'", "x='$((1+$(%s)))'", "x='$(true\n%s)'", "y='$(%s)'; x='${(e)y}'", "x='$(true)'; x='$(%s)'",
+)
+
+
+class EvalFlagTest(BashHookCase):
+    """SPD-189, filed by SPD-184's engineer: zsh's (e) parameter flag performs parameter expansion, command substitution
+    and arithmetic expansion on the value it expands, so a line that assigns shell text and expands it with (e) runs that
+    text, and the hook read nothing of it.  The ticket's evidence: `x='$(git push)'; echo ${(e)x}` and the same with `case
+    ${(e)x} in *) true;; esac` recorded no finding (Law 7 for members), and a value the line does not spell (`x=$(cat f)`)
+    is the same hole.  Unquoted, the hook did not even see the expansion: shlex ended the word at the flags' `(`, so
+    `echo ${(e)x}` was read as `echo ${`, a subshell running `e`, and a command named `x}`.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line, and GNU bash 3.2.57, which fails every one of them with "bad
+    substitution", each value a `$(touch <file>)`:
+
+    - (e) runs the value's substitutions wherever the expansion stands: an argument (`echo ${(e)x}`, quoted or not, glued
+      to text), a redirection's target, an assignment's value, a command's prefix assignment, a case's word and pattern,
+      `[[ ]]`, a for list, `:`'s argument, a here-string, an arithmetic expansion and an arithmetic command (`$((
+      ${(e)x} + 1 ))`, `(( ${(e)x} ))`), and inside eval, a substitution, backticks, a branch, a group, a function body,
+      a loop, a subshell, a pipeline, `time`, and `zsh -f -c` with x exported (every word of EVAL_FLAG_WORDS and of
+      EVAL_FLAG_CHANGED and each enclosing text of test_every_enclosing_text made its file, and so did each value of
+      EVAL_FLAG_VALUES under `echo "${(e)x}"`, its double-quoted backtick as `x="\\`touch h5\\`"`);
+    - with other flags too -- `(ee)`, `(@e)`, `(Pe)` through a name, `(ej:,:)`, `(Qe)`, `(%e)`, and `(Le)` and `(eL)`,
+      the case flag applied first (`$(TOUCH R9)` made r9) -- and nested, `${(e)${x}}`, `${${(e)x}}`, `${(e)"${x}"}`,
+      `${(e)${(P)n}}`, `${(e)${:-...}}`, `${(e):-...}`, and `${(e)${(e)x}}`, which evaluates twice (`\\$(touch k4)` made
+      k4); with modifiers and subscripts, which change the text first: `${(e)x:-z}`, `${(e)x[1,20]}`, `${(e)~x}`,
+      `${(e)^x}`, and `${(e)x#\\\\}` and `${(e)x/X/\\$}` made a substitution the value did not hold (`\\$(touch r11)` and
+      `X(touch r13)`), while `(l(10)(x)e)` cut the `$` off `$(touch k9)` and ran nothing;
+    - (e) reads the value as the inside of double quotes: `'$(touch re3)'`, `"$(touch re5)"`, `"$(touch q9)` and backticks
+      ran, their quotes printed as text; `\\$(touch re4)` did not run and printed `$(touch re4)`, `\\\\$(touch q2)` ran;
+      a default word's substitution (`${zz:-$(touch q5)}`), one inside arithmetic (`$((1+$(touch q6; echo 1)))`) and each
+      line of a value that holds a newline ran; an (e) expansion in the value ran its own (`x='${(e)y}'`), a plain `$y`
+      there did not (`$(touch re9)` printed); a value that expands itself (`x='${(e)x}'`) never returned;
+    - `(j:e:)` ran nothing: the `e` there is the separator, not a flag; `${(e)#x}` printed the length and `(qe)` the quoted
+      value, running nothing, and `${(P)n}` printed x's value unevaluated; `(foo bar)` failed "error in flags";
+    - a command's prefix assignment does not reach its own words (`x=a; x='$(touch w2)' echo "${(e)x}"` printed a, and a
+      redirection made `aw3f`), while an assignment-only command's later word sees an earlier one (`x=a; x='$(touch w1)'
+      y=${(e)x}` made w1), so the hook reads both values and refuses a member.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans home:**."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertRefused(line, "Law 7", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    def unreadable(self, line):
+        """Both members are refused the value the hook cannot read; Spud reads on."""
+        with self.subTest(line=line):
+            self.assertIn("eval-flag", [kind for kind, _detail in self.analysis(line).findings])
+            self.assertRefused(line, "zsh's (e) flag")
+            self.assertRefused(line, "zsh's (e) flag", AGENT_C)
+            self.assertSilent(line, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_zsh_runs_it(self):
+        for line in ("x='$(git push)'; echo ${(e)x}", "x='$(git push)'; case ${(e)x} in *) true;; esac"):
+            self.law_7(line)
+        self.unreadable("x=$(cat f); echo ${(e)x}")
+        line = "x='$(touch re1)'; echo \"e1=${(e)x}\""
+        with self.subTest(line=line):
+            self.assertRefused(line, "deliverables")
+            self.assertSilent(line, AGENT_C)
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    def test_the_word_stays_whole(self):
+        """shlex ended an unquoted word at the flags' `(`: the flags are read as part of the expansion, in both readings."""
+        line = "echo ${(e)x} a${(Pe)n}b ${(j:,:)x} ${(e)${(P)n}} ${(l(10)(x)e)x} \"${(e)x}\""
+        words = [self.m.deglob(t) for t in self.m.shell_tokens(self.m.mark_zsh_patterns(line)[0])]
+        self.assertEqual(words, ["echo", "${(e)x}", "a${(Pe)n}b", "${(j:,:)x}", "${(e)${(P)n}}", "${(l(10)(x)e)x}", "${(e)x}"])
+        self.assertEqual(self.m.mark_zsh_patterns(line)[0], self.m.mark_zsh_patterns(line)[1])
+        self.assertEqual(self.analysis("echo ${(e)x}").findings, [("eval-flag", "${(e)x}")])
+        self.assertEqual(self.analysis("echo ${(P)n} ${(L)x}").findings, [])
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_word_that_evaluates_a_settled_value(self):
+        for word in EVAL_FLAG_WORDS:
+            self.law_7("x='$(git push)'; " + word)
+
+    def test_every_spelling_of_the_value(self):
+        for value in EVAL_FLAG_VALUES:
+            for word in EVAL_FLAG_WORDS:
+                line = value % "git push" + "; " + word
+                with self.subTest(line=line):
+                    self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            for word in ("echo ${(e)x}", "case ${(e)x} in *) true;; esac", "(( ${(e)x} ))"):
+                self.law_7(value % "git push" + "; " + word)
+
+    def test_a_changed_value_is_read_as_spelled_and_refuses_a_member(self):
+        for word in EVAL_FLAG_CHANGED:
+            self.law_7("x='$(git push)'; " + word)
+            self.unreadable("x='$(date)'; " + word)
+        # a removal that takes the escaping backslash away runs what the value only spells (probed: r11), which the hook
+        # reads as it reads every escaped `$` (test_an_escaped_dollar_is_read_both_ways); a replacement that writes a `$`
+        # (r13) it cannot read
+        self.law_7("x='\\$(git push)'; echo ${(e)x#\\\\}")
+        self.unreadable("x='X(git push)'; echo ${(e)x/X/\\$}")
+
+    def test_every_enclosing_text(self):
+        for form in ("eval 'echo %s'", "echo $(echo %s)", "echo `echo %s`", "if true; then echo %s; fi", "{ echo %s }",
+                     "f() { echo %s; }; f", "for f in a; do echo %s; done", "(echo %s)", "true && echo %s",
+                     "echo %s | cat", "time echo %s"):
+            self.law_7("x='$(git push)'; " + form % "${(e)x}")
+        self.law_7("export x='$(git push)'; zsh -f -c 'echo ${(e)x}'")
+
+    def test_every_payload(self):
+        """Law 7, Law 6, Law 5's --as, the database and Law 1 for both members; for Spud, the checks that apply to him."""
+        home, spud, form = self.home.path, self.spud_cli, 'x="\\$(%s)"; echo ${(e)x}'
+        writes = (("echo x > ledger/tickets/SPD-001.md", "generated"), ("echo x | tee ledger/tickets/SPD-001.md", "generated"),
+                  ("touch ledger/tickets/SPD-001.md", "generated"))
+        for command, needle in (("git push", "Law 7"), ("%s ticket new --title x" % spud, "Law 6"),
+                                ("%s --as spud member log hi" % spud, "Law 6"),
+                                ("%s --as %s member log hi" % (spud, AGENT_B), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly")) + writes:
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(line=form % command, agent_id=agent_id):
+                    self.assertRefused(form % command, needle, agent_id)
+        for command, needle in (("%s --as %s member log hi" % (spud, AGENT_A), "--as"),
+                                ("sqlite3 %s/.spud/ledger.db 'select 1'" % home, "spud sql --readonly")):
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, needle, agent_id=None)
+        for command, _needle in writes:
+            with self.subTest(line=form % command, agent_id="spud"):
+                self.assertRefused(form % command, "Law 1", agent_id=None)
+
+    def test_the_path_rule_in_the_value(self):
+        for word in ("echo ${(e)x}", "case q in ${(e)x}) true;; esac", "y=${(e)x}", "echo \"${(e)${x}}\""):
+            for write in ("touch note.txt", "rm -rf docs"):
+                line = "x='$(%s)'; %s" % (write, word)
+                with self.subTest(line=line):
+                    self.assertRefused(line, "deliverables")
+                    self.assertSilent(line, AGENT_C)
+                    self.assertRefused(line, "Law 1", agent_id=None)
+            line = "x='$(touch tests/zzone/k.py)'; " + word
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_a_value_the_line_does_not_settle_refuses_a_member(self):
+        for line in ("x=$(cat f); echo ${(e)x}", "x=`cat f`; echo ${(e)x}", 'x="$(cat f)"; echo "${(e)x}"',
+                     "echo ${(e)x}", "echo ${(e)HOME}", "x=$y; echo ${(e)x}", "read x; echo ${(e)x}",
+                     "true && x='$(date)'; echo ${(e)x}", "for x in a; do echo ${(e)x}; done",
+                     "x='$(date)'; for f in a; do echo ${(e)x}; done", "x='$(date)'; f() { echo ${(e)x}; }; f",
+                     "x=a; x+=b; echo ${(e)x}", "x=$'\\u0024(date)'; echo ${(e)x}", "x=(a '$(date)'); echo ${(e)x}",
+                     "echo ${(e)$(cat f)}", 'echo ${(e)"$(cat f)"}', "echo ${(e):-$y}", "echo ${(e)1} ${(e)@}",
+                     "n=HOME; echo ${(Pe)n}", "n=$(cat f); x='$(date)'; echo ${(Pe)n}", "x='\\$(date)'; echo ${(e)${(e)x}}",
+                     "x=a; x='$(date)' y=${(e)x}", "x='$(date)'; echo ${x::=b} ${(e)x}", "echo hi > ${(e)x}f",
+                     "x='$(date)'; echo $(( ${(e)x} )) ${(e)x#a}", "x='$(date)'; echo ${(e)#x}", "x='$(date)'; echo ${(qe)x}",
+                     "x='$(date)'; echo ${(e)x", "x='$(date)'; echo \"${(foo bar)x}\""):
+            with self.subTest(line=line):
+                self.assertIn("eval-flag", [kind for kind, _detail in self.analysis(line).findings])
+                self.assertRefused(line, "zsh's (e) flag")
+                self.assertRefused(line, "zsh's (e) flag", AGENT_C)
+        for line in ("x=$(cat f); echo ${(e)x}", "echo ${(e)HOME}", "true && x='$(date)'; echo ${(e)x}",
+                     "x=a; x='$(date)' y=${(e)x}", "n=HOME; echo ${(Pe)n}"):
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertSilent(line, agent_id=None)
+
+    def test_spud_reads_every_value_the_line_spells(self):
+        """A value the line spells but may not hold where it is expanded is read all the same, for Spud's writes: the
+        member's refusal says only that the hook cannot be sure of it."""
+        for line in ("true && x='$(echo x > ledger/tickets/SPD-001.md)'; echo ${(e)x}",
+                     "x='$(echo x > ledger/tickets/SPD-001.md)'; f() { echo ${(e)x}; }; f",
+                     "x=a; x='$(echo x > ledger/tickets/SPD-001.md)' y=${(e)x}",
+                     "x='$(echo x > ledger/tickets/SPD-001.md)'; echo ${(Le)x}"):
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 1", agent_id=None)
+                self.assertRefused(line, "(e) flag")
+
+    def test_an_escaped_dollar_is_read_both_ways(self):
+        """shlex leaves the backslash of `"\\$"` in the word, where the shell takes it off, so `x="\\$(git push)"`, which
+        (e) runs (probed: `x="\\$(touch h4)"` made h4), reaches the hook as `x='\\$(git push)'` does, which (e) does not
+        run (re4): both are read as the first, fail closed, until the masked word holds what the shell passes (proposal
+        301, filed with SPD-189).  The same for a backtick (`x="\\`touch h5\\`"` made h5)."""
+        for value in ("x='\\$(git push)'", 'x="\\$(git push)"', "x='\\`git push\\`'", 'x="\\`git push\\`"'):
+            self.law_7(value + "; echo ${(e)x}")
+
+    def test_what_evaluates_to_nothing_it_runs(self):
+        """Probed (see the class): a plain parameter expansion in the value, a separator that spells `e`, a literal or
+        escaped expansion, no (e) at all."""
+        for line in ("x='$y'; y='$(git push)'; echo ${(e)x}", "x='$(git push)'; echo ${x}",
+                     "x=$(cat f); echo ${(j:e:)x}", "x='$(git push)'; echo '${(e)x}'", "x='$(git push)'; echo \\${(e)x}",
+                     "x=hello; echo ${(e)x}", "x='$HOME/a'; echo \"${(e)x}\"", "x='$(date)'; echo ${(e)x}",
+                     "x='$(git push)'; n=x; echo ${(L)x} ${(P)n}", "x=\"'\"; echo ${(e)x}"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [])
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+                self.assertSilent(line, agent_id=None)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        """A value that expands itself never returns in zsh (probed), and a chain of values each expanding the next one is
+        read to the analysis's depth bound: past it a member is refused, as it is for a value it cannot read."""
+        chain = "; ".join(["y0='$(git push)'"] + ["y%d='${(e)y%d}'" % (k, k - 1) for k in range(1, 40)])
+        for line, finding in (("x='${(e)x}'; echo ${(e)x}", "eval-flag"),
+                              ("x='$(git push)'; echo " + "${(e)x} " * 3000, "git"),
+                              ("x='$(git push)'; echo " + "${(e)" * 3000 + "x" + "}" * 3000, "eval-flag"),
+                              ("x='" + "${(e)x}" * 3000 + "'; echo ${(e)x}", "eval-flag"),
+                              ("x='$(git push)'; y='" + "${(e)x}" * 3000 + "'" + "; echo ${(e)y}" * 50, "git"),
+                              ("x='" + "$(" * 2000 + "git push" + ")" * 2000 + "'; echo ${(e)x}", None),
+                              (chain + "; echo ${(e)y39}", "eval-flag"),
+                              ("echo " + "${(e" * 3000, None),
+                              ("echo " + "${(j:" * 3000, None),
+                              ("echo " + "${(l(" * 3000 + "e)x}", None),
+                              ("echo " + "${(e)x}" * 3000 + " " + "${(j" + ":" * 3000, None)):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                if finding is not None:
+                    self.assertIn(finding, [kind for kind, _detail in a.findings], line[:40])
+
+
+# SPD-190: the file name a `<( list )` hands its command, `%s`, where each reader of hookio.SUBST reads it -- a redirection
+# target, a tee operand and a write by argument; the directory cd, pushd, `cd old new` and env -C move to; find's and
+# xargs's operands; a shell's script, a sourced file and a shell's own startup file; the command word and a wrapper's;
+# git's options, verb and arguments; a spud call's words; an interpreter's program; eval's and a builtin's words.  Each
+# reads it as it reads a `$( list )` in its place: a word the line does not spell.
+PROCSUB_OPERAND_FORMS = (
+    "echo x > %s", "echo x | tee %s", "echo x | tee -a docs/y %s", "cp docs/x %s", "mv %s docs/y", "touch %s", "rm -rf %s",
+    "chmod -R 644 %s", "sed -i s/a/b/ %s", "dd if=docs/x of=%s", "tar -xf %s", "rsync -a docs/ %s",
+    "cd %s", "cd -P %s", "pushd %s", "cd docs %s", "env -C %s touch y",
+    "find %s -delete", "find docs -newer %s -delete", "xargs rm %s", "xargs -a %s rm",
+    "sh %s", "bash %s arg", "source %s", ". %s", "bash --rcfile %s -i", "env sh %s", "xargs sh %s",
+    "%s", "%s arg", "nice %s", "env %s", "exec %s", "command %s",
+    "git %s push", "git -C %s push", "git log %s", "git diff --output %s", "git commit -F %s", "git -c %s push",
+    "bin/spud %s", "bin/spud --as %s member log hi",
+    "python3 %s", "node %s", "perl %s", "awk -f %s docs/x", "sed -f %s docs/x",
+    "eval %s", "export X %s", "x=1 %s", "typeset %s",
+)
+# ... and the lines whose `$( )`, backticks or eval text after a process substitution runs in the directory a cd between
+# them moved to (probed; see the class), each writing the generated ledger file there
+PROCSUB_BEFORE_CD = (
+    "cat <(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true >(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true =(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true <(true) >(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "diff <(true) <(true); cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "for f in <(true); do true; done; cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "select f in <(true); do break; done; cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true <(true) && cd ledger && echo `echo x > tickets/SPD-001.md`",
+    'true <(true) && cd ledger && echo "$(echo x > tickets/SPD-001.md)"',
+    "true <(true) && cd ledger && x=$(echo x > tickets/SPD-001.md)",
+    "true <(true) && cd ledger && echo ${z:-$(echo x > tickets/SPD-001.md)}",
+    "cat <(true) - <<EOF && cd ledger && echo $(echo x > tickets/SPD-001.md)\nbody\nEOF",
+    "eval cat <(true) '; cd ledger && echo $(echo x > tickets/SPD-001.md)'",
+    "echo $(cat <(true); cd ledger; echo $(echo x > tickets/SPD-001.md))",
+)
+# ... and those with a substitution of their own before the cd, which runs where the line started
+PROCSUB_AND_EARLIER = (
+    "true <(true) $(echo q > tests/zzone/q) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "cat <(echo $(echo q > tests/zzone/q)) && cd ledger && echo $(echo x > tickets/SPD-001.md)",
+    "true <(true) `echo q > tests/zzone/q`; cd ledger && echo `echo x > tickets/SPD-001.md`",
+    "diff <(true) <(true) $(echo q > tests/zzone/q); cd ledger && echo $(echo x > tickets/SPD-001.md)",
+)
+
+
+class ProcessSubstitutionFileTest(BashHookCase):
+    """SPD-190, filed by SPD-184's engineer: ShellWalk.pop put hookio.SUBST among a command's words for the file name a
+    `<( list )` hands it (SPD-145), and ShellWalk.consume analyses one lifted `$( )` or backtick body for every SUBST a word
+    holds, so that file name took the first body after it on the line: analysed with the process substitution's command,
+    before any cd between them, while the `$( )` it belonged to found none.  The proposer's evidence, cwd /tmp: `cd /usr &&
+    echo $(echo hi > y)` recorded y in /usr, and `cat <(true) && cd /usr && echo $(echo hi > y)` in /tmp; from the home,
+    `cat <(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)` resolved the target to <home>/tickets/SPD-001.md, not
+    the generated ledger file.  SPD-184 had fixed it in a case's word and pattern alone.  A for or select list, eval's text
+    and a substitution's own body held the same hole.  The file name is now walk.PROCSUB_FILE, SUBST with a private-use
+    mark after it, which every reader of SUBST takes for one and consume pairs with no body.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line, and in GNU bash 3.2.57, each line with a directory d made first and
+    its last `$( )` writing y: `cat <(true) && cd d && echo $(echo hi > y)`, the same after `true >(true)`, `true <(true)
+    >(true)` and zsh's `true =(true)` (in an eval under `[ -n "$ZSH_VERSION" ]`, TMPPREFIX in the probe's directory: bash
+    rejects the line), `for f in <(true); do true; done; cd d && ...`, `select f in <(true); do break; done < /dev/null; cd
+    d && ...`, `eval cat <(true) '; cd d; echo $(echo hi > y)'`, `echo $(cat <(true); cd d; echo $(echo hi > y))`, backticks
+    for both substitutions, a quoted `"$( )"`, `x=$( )`, `${z:-$( )}`, and a here-document on the `<( )`'s command (`cat
+    <(echo proc) - <<EOF && cd d && ...`) each wrote y in d; `diff <(true) <(true) $(echo q > w); cd d && ...`, `cat <(echo
+    $(echo a > z)) && cd d && ...` and `true <(true) $(echo q > q) && cd d && ...` wrote y in d and w, z and q where the
+    line started.  `echo <(true)` printed /dev/fd/11 in zsh and /dev/fd/63 in bash.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans home:**."""
+
+    TAIL = "; cd ledger && echo $(echo x > tickets/SPD-001.md)"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for d in ("ledger/tickets", "docs", "tests/zzone"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def plain(self, value):
+        """A reading with the file name's word spelled as a substitution's."""
+        if isinstance(value, str):
+            return value.replace(self.m.PROCSUB_FILE, self.m.SUBST)
+        if isinstance(value, dict):
+            return {self.plain(k): self.plain(v) for k, v in value.items()}
+        if isinstance(value, (list, tuple, set, frozenset)):
+            return type(value)(self.plain(v) for v in value)
+        return value
+
+    def reading(self, line):
+        """What the analysis reads of a line."""
+        a = self.analysis(line)
+        return self.plain((a.findings, a.kinds, a.redirects, a.git_calls, a.git_writes, a.arg_writes, a.cwds, a.unparseable,
+                           sorted(a.doubt), sorted(a.dashless_loops), sorted(a.functions), sorted(a.hashed)))
+
+    def ledger_target(self, line):
+        """The analysis resolves the ledger file's write in the directory the cd moved to, and nowhere else."""
+        with self.subTest(line=line):
+            found = [(t, c) for t, c in self.analysis(line).redirects if t.endswith("SPD-001.md")]
+            self.assertEqual(found, [("tickets/SPD-001.md", frozenset({str(self.home.path / "ledger")}))])
+
+    def ledger_write(self, line):
+        """Refused to both members for the generated ledger file, and to Spud on Law 1."""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "generated", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_where_the_shell_runs_it(self):
+        for line in ("cd /usr && echo $(echo hi > y)", "cat <(true) && cd /usr && echo $(echo hi > y)"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).redirects, [("y", frozenset({"/usr"}))])
+        line = "cat <(true) && cd ledger && echo $(echo x > tickets/SPD-001.md)"
+        self.ledger_target(line)
+        self.ledger_write(line)
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_substitution_after_a_process_substitution(self):
+        for line in PROCSUB_BEFORE_CD:
+            self.ledger_target(line)
+        for line in PROCSUB_AND_EARLIER:
+            self.ledger_target(line)
+            with self.subTest(line=line):
+                self.assertIn(("tests/zzone/q", frozenset({str(self.home.path)})), self.analysis(line).redirects)
+
+    def test_the_hook_refuses_each_ledger_write(self):
+        for line in PROCSUB_BEFORE_CD + PROCSUB_AND_EARLIER:
+            self.ledger_write(line)
+
+    def test_a_substitution_glued_to_text_keeps_its_body(self):
+        """The file name's mark is no text a line spells after a `$( )` in the word it stands in."""
+        for glued in ("x", "FILE__", "_x_", "'__'"):
+            line = "echo $(echo q > tests/zzone/q)%s && cd ledger && echo $(echo x > tickets/SPD-001.md)" % glued
+            self.ledger_target(line)
+            with self.subTest(line=line):
+                self.assertIn(("tests/zzone/q", frozenset({str(self.home.path)})), self.analysis(line).redirects)
+
+    def test_many_file_names_and_substitutions_pair_up(self):
+        line = "true" + " <(true) $(echo q > tests/zzone/q)" * 200 + self.TAIL
+        self.ledger_target(line)
+        self.assertIn(("tests/zzone/q", frozenset({str(self.home.path)})), self.analysis(line).redirects)
+
+    # -- every reader, as it read the file name -----------------------------------------------------------------------
+    def test_each_reader_takes_the_file_name_as_a_word_the_line_does_not_spell(self):
+        """Read as its `$( )` twin in every place, and so with the ledger write after it (which the twin always read in
+        ledger/)."""
+        for form in PROCSUB_OPERAND_FORMS:
+            for tail in ("", self.TAIL):
+                line = form % "<(true)" + tail
+                with self.subTest(line=line):
+                    self.assertEqual(self.reading(line), self.reading(form % "$(true)" + tail))
+
+    def test_the_hook_decides_each_reader_as_it_did(self):
+        for form in ("sh %s", "source %s", "echo x | tee %s", "echo x > %s", "rm -rf %s", "cd %s && touch docs/x",
+                     "git %s push", "git log %s", "find %s -delete", "xargs rm %s", "bin/spud %s", "%s arg", "python3 %s",
+                     "env -C %s touch y", "diff <(ls tests) %s"):
+            for agent_id in (AGENT_A, None):
+                line = form % "<(true)"
+                with self.subTest(line=line, agent_id=agent_id):
+                    r, twin = self.bash(line, agent_id), self.bash(form % "$(true)", agent_id)
+                    self.assertEqual((r.code, r.decision, self.plain(r.reason)), (twin.code, twin.decision, twin.reason))
+
+    def test_a_case_pattern_keeps_no_file_name(self):
+        """SPD-184's reading stays: a case's word and pattern are no command's (CaseSubstitutionTest), and a `|` there is
+        an alternative (SPD-187, CasePatternAlternativeTest)."""
+        for line in ("case x in y) ;; <(true)|x) true;; esac", "case x in y) ;; =(true)|x) true;; esac"):
+            for agent_id in (AGENT_A, AGENT_C, None):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+        self.ledger_write("case x in <(true)) cd ledger && echo $(echo x > tickets/SPD-001.md);; esac")
+
+
+class CasePatternAlternativeTest(BashHookCase):
+    """SPD-187, filed by SPD-181's engineer: ShellWalk read a `|` in a case pattern as a pipeline operator and analysed the
+    words before it as a command -- for the first pattern the case's word and `in` among them -- so `case $1 in a|b) echo;;
+    esac` was refused to a member as a command word from a variable, and `case x in a) ;; git|b) echo;; esac` recorded a git
+    command.  A newline after `case word in` did the same with the word and `in`.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 -f -o nobareglobqual, zsh 5.9 -f and bash 3.2.57,
+    with `touch` a function that names itself on stderr: `case q in touch|b) echo m1;; esac` and `case q in a) ;; touch|b)
+    echo m2;; esac` ran nothing; `case q in a|$(touch s3))` and ``a|`touch s4` `` ran their substitutions; `case q in a|q)
+    echo m5;; esac | cat; echo after5` printed both; `case q in<newline>  a|b) ... ;;<newline>  *) echo star6 ;;<newline>esac`,
+    `a | q )`, `(a|q)` and `case q<newline>in a|q)` matched in all three shells.
+
+    zsh's brace form, `case word { ... }` (SPD-185), is read as before: the walk stays in a pattern after it, and reads what
+    follows as it did."""
+
+    def setUp(self):
+        super().setUp()
+        self.m = load_spud_module()
+
+    def findings(self, line):
+        return self.m.analyse_command(line, self.m.ShellAnalysis(cwd=str(self.home.path))).findings
+
+    def law_7(self, line):
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.findings(line))
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_lines_record_no_command(self):
+        self.assertNotIn(("var", "$1"), self.findings("case $1 in a|b) echo;; esac"))
+        self.assertEqual([f for f in self.findings("case x in a) ;; git|b) echo;; esac") if f[0] == "git"], [])
+        for line in ("case $1 in a|b) echo;; esac", "case x in a) ;; git|b) echo;; esac"):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(line=line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+
+    def test_no_pattern_word_is_a_command(self):
+        for line in ("case $1 in a|b|c) echo;; esac", "case $1 in a | b ) echo;; esac", "case $1 in (a|b) echo;; esac",
+                     "case \"$1\" in git|push) echo;; esac", "case $1 in a) ;; $2|b) echo;; esac",
+                     "case $1 in a) true;& git|b) echo;; esac", "case $1 in a) true;| git|b) echo;; esac",
+                     "case $1 in\n  a|b) echo ;;\n  git|c) echo ;;\nesac", "case $1 in\n\n  a|b) echo ;;\nesac",
+                     "case $1\nin a|b) echo;; esac", "case $1\n\nin a|git) echo;; esac",
+                     "case x in (x|y)|git) echo;; esac", "case $1 in a|b) echo;; esac; case $2 in c|d) echo;; esac",
+                     "if true; then case $1 in a|b) echo;; esac; fi", "f() { case $1 in a|b) echo;; esac }; f x"):
+            with self.subTest(line=line):
+                found = self.findings(line)
+                self.assertNotIn(("var", "$1"), found)
+                self.assertNotIn(("var", "$2"), found)
+                self.assertEqual([f for f in found if f[0] == "git"], [])
+                self.assertSilent(line)
+
+    # -- what still runs ----------------------------------------------------------------------------------------------
+    def test_a_substitution_in_an_alternative_is_read(self):
+        for line in ("case x in a|$(git push)) echo;; esac", "case x in a|`git push`) echo;; esac",
+                     "case x in $(git push)|a) echo;; esac", "case x in a) ;; b|$(git push)|c) echo;; esac",
+                     "case x in (a|$(git push)) echo;; esac", "case x in a|<(git push)) echo;; esac",
+                     "case x in y) ;; b|=(git push)) true;; esac", "case $(git push) in a|b) echo;; esac",
+                     "case x in\n  a|$(git push)) echo ;;\nesac"):
+            self.law_7(line)
+
+    def test_the_body_and_what_follows_esac_are_read(self):
+        for line in ("case $1 in a|b) git push;; esac", "case $1 in a|b) echo;; c|d) git push;; esac",
+                     "case $1 in (a|b) git push;; esac", "case $1 in a | b ) git push;; esac",
+                     "case $1 in a|b) echo;; esac; git push", "case $1 in a|b) echo;; esac | git push",
+                     "case $1 in a|b) echo;; esac && git push", "case $1 in a|b) echo;; esac\ngit push",
+                     "case $1 in\n  a|b) echo ;;\nesac\ngit push", "echo x | case $1 in a|b) git push;; esac",
+                     "case $1 in a|b) echo;; esac | cat | git push", "{ case $1 in a|b) echo;; esac } | git push",
+                     "case $1 in a|b) case $2 in c|d) echo;; esac;; esac; echo | git push"):
+            self.law_7(line)
+
+    def test_a_case_with_no_pattern_closes_at_its_esac(self):
+        # `case q in esac | echo e1`, `case q in esac; echo e2`, `case q in<newline>esac | echo e3` and `case q<newline>in
+        # esac && echo e4` printed theirs in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2
+        for line in ("case x in esac | git push", "case x in esac; echo in | git push", "case x in\nesac | git push",
+                     "case x\nin esac && echo in | git push", "case x in esac; echo in|git push",
+                     "(case x in esac) | git push", "case $1 in esac; case $2 in a|b) echo;; esac | git push"):
+            self.law_7(line)
+
+    def test_the_brace_form_is_read_as_before(self):
+        # SPD-185 is queued: after `case word { ... }` the walk stays in a pattern, and a `|` there still ends a command
+        for line in ("case x { x) ;; }; echo a | git push", "case x { x|y) ;; }; echo a | git push",
+                     "case x { in) ;; }; echo a | git push", "case <(true) { in|y) ;; }; echo a | git push"):
+            self.law_7(line)
+
+    def test_a_pattern_the_reader_cannot_place_stays_refused(self):
+        # a case pattern's `)` inside a `$( )` ends the substitution for split_substitutions: unread, refused to a member
+        for line in ("x=$(case $1 in a|b) echo;; esac)", "echo $(case x in a|b) echo;; esac)"):
+            with self.subTest(line=line):
+                self.assertEqual(self.bash(line).decision, "deny")
+
+
 class AliasEvalTest(BashHookCase):
     """SPD-059 (Burbank's SPD-054 proposal): `alias NAME=body` stores shell text the hook never read, and `eval NAME` on the
     same line ran it, so a member's VCS write behind an alias reached the hook with no finding (Law 7).  Probed in bash 3.2,
@@ -5161,7 +9313,7 @@ class AliasEvalTest(BashHookCase):
     def test_a_body_or_a_name_the_hook_cannot_read_is_refused(self):
         for cmd in ("alias gp=\"$UNSET git push\"; eval gp", "alias gp=\"$(echo git push)\"; eval gp",
                     "alias gp=\"`echo git push`\"; eval gp", "X=git; alias gp=\"$X push\"; eval gp",
-                    "alias gp=$'git push'; eval gp", "N=gp; alias $N='git push'; eval gp",
+                    "alias gp=$'\\u0067it push'; eval gp", "N=gp; alias $N='git push'; eval gp",
                     "alias ${N}='git push'; eval gp"):
             with self.subTest(cmd):
                 self.refused_for_members(cmd, "cannot resolve")
@@ -5363,12 +9515,13 @@ class SettledStandardInputTest(BashHookCase):
     is passed, and a here-string's word, is now read through the value the line settled (shell/arg_writes.resolved, the
     reading SPD-127 gave every write target), before the command runs, so its own prefix assignments reach none of them.
 
-    The masked words no longer tell `$X` from `"$X"`, and bash splits an unquoted expansion at its blanks where zsh
-    never does, so a command whose settled value holds a blank is read both ways and its text kept where the two agree:
-    `echo $X` prints `git push` in either.  Where they differ -- an echo option the split would make of the value, a run
-    of blanks, a printf format applied to each field -- the text stays unread, as does every value the line does not
-    settle: one assigned in a branch, a loop, a function body or a subshell, one a substitution computes, one `read`
-    or `unset` changes, and one holding a glob character, which bash expands."""
+    bash splits an unquoted expansion at its blanks where zsh never does, and neither splits a quoted one, which the masked
+    words mark since SPD-167, so a command whose settled value holds a blank is read both ways and its text is what either
+    prints: `echo $X` prints `git push` in both, and where they differ -- an echo option the split makes of the value, a
+    run of blanks, a printf format applied to each field -- both texts are read.  A reading the hook cannot spell leaves
+    the text unread, as does every value the line does not settle: one assigned in a branch, a loop, a function body or a
+    subshell, one a substitution computes, one `read` or `unset` changes, and one holding a glob character, which bash
+    expands."""
 
     # Each line feeds a shell one `git push` through a value it settles itself.
     SETTLED = ("X='git push'; echo $X | sh", "X='git push'; echo \"$X\" | sh", "X=push; echo \"git $X\" | sh",
@@ -5384,8 +9537,16 @@ class SettledStandardInputTest(BashHookCase):
                  "(X='git push'); echo $X | sh", "X='git push' | true; echo $X | sh", "X='git push' echo $X | sh",
                  "X='git push'; X=$(date); echo $X | sh", "X='git push'; unset X; echo $X | sh",
                  "X='git p*'; echo $X | sh", "echo \"$CMD\" | sh", "X=push; echo \"git $Y\" | sh")
+    # SPD-167: a value bash's split of an unquoted expansion prints otherwise than zsh does -- each reading is read.
     SPLIT = ("X='-n git push'; echo $X | sh", "X='git  push'; echo $X | sh", "X='git push'; printf '%s\\n' $X | sh",
-             "X='git  push'; bash -s <<< $X")
+             "X='git  push'; bash -s <<< $X", "X='-n git push'; echo $X | xargs -0 sh -c")
+    # ... and a quoted one, which neither shell splits, is one word in both readings.
+    QUOTED = ("X='git push'; printf '%s\\n' \"$X\" | sh", "X='git  push'; printf '%s\\n' \"$X\" | sh",
+              "X='push'; Y='git  '; printf '%s\\n' \"$Y$X\" | sh", "X='git  push'; bash -s <<< \"$X\"",
+              "X='git push'; printf '%s\\n' \"a; $X\" | sh")
+    # One reading the hook cannot spell leaves the text unread, whatever the other prints: zsh passes printf the format
+    # `git %d`, a directive this module does not apply, where bash's `printf git %d` prints `git`.
+    HALF = ("X='git %d'; printf $X | sh", "X='%d git push'; printf $X | sh")
 
     def analysis(self, command):
         m = load_spud_module()
@@ -5411,16 +9572,49 @@ class SettledStandardInputTest(BashHookCase):
                 self.assertRefused(command, SCRIPT_WORDING)
                 self.assertSilent(command, agent_id=None)
 
-    def test_a_value_the_two_shells_print_apart_stays_unread(self):
-        """`$X` and `"$X"` reach the reading alike, so a value bash's split of an unquoted expansion would print
-        otherwise than zsh does is text the hook cannot say, as it was -- and a shell reading it refuses a member (SPD-145)."""
-        for command in self.SPLIT:
+    def test_a_value_the_two_shells_print_apart_is_read_both_ways(self):
+        """SPD-167: SPD-148 read `$X` and `"$X"` alike, so a value bash's split of an unquoted expansion printed otherwise
+        than zsh did was text the hook could not say -- refused a member only as unread input (SPD-145), and `printf '%s\\n'
+        "$X" | sh`, one word in both shells, with it.  The masked words now mark a quoted `$NAME`: a quoted value is read
+        whole, an unquoted one as each shell passes it, and a shell fed what either prints is read on both texts, so the
+        bash-only `X='-n git push'; echo $X | sh` earns the Law 7 refusal `echo 'git push' | sh` earns."""
+        for command in self.SPLIT + self.QUOTED:
+            with self.subTest(command):
+                findings = self.analysis(command).findings
+                self.assertIn("push", [d[0] for k, d in findings if k == "git"])
+                self.assertEqual([d[0] for k, d in findings if k == "script"], [])
+                r = self.assertRefused(command, "Law 7")
+                self.assertNotIn(SCRIPT_WORDING, r.reason)
+                self.assertSilent(command, agent_id=None)
+        # the quoted value is one word: printf applies its format once, where bash's split of `$X` applies it per field
+        self.assertEqual(self.verbs("X='git push'; printf '%s\\n' \"$X\" | sh"), ["push"])
+        self.assertSilent("X='git status'; printf '%s\\n' \"$X\" | sh")
+        self.assertSilent("X='-n git status'; echo $X | sh")
+
+    def test_a_reading_the_hook_cannot_spell_leaves_the_text_unread(self):
+        for command in self.HALF:
             with self.subTest(command):
                 findings = self.analysis(command).findings
                 self.assertEqual([f for f in findings if f[0] != "script"], [])
                 self.assertEqual([d[0] for k, d in findings if k == "script"], ["stdin"])
                 self.assertRefused(command, SCRIPT_WORDING)
                 self.assertSilent(command, agent_id=None)
+
+    def test_the_masked_words_mark_a_quoted_name(self):
+        """Only a `$NAME` inside double quotes carries the mark, and every reader that takes the word whole -- a write
+        target, the command word -- reads it as before."""
+        m = load_spud_module()
+        mark = ""
+        self.assertEqual(m.neutralize_quoted_globs('echo "$X" $Y "a $Z/b" \'$W\''),
+                         'echo "$X%s" $Y "a $Z%s/b" \'$W\'' % (mark, mark))
+        self.assertNotIn(mark, m.neutralize_quoted_globs('echo "$1" "$@" "cost $" "${X:-y}" "${#X}"'))
+        # SPD-141: a plain `"${X}"` is `"$X"`, its braces left plain
+        self.assertEqual(m.neutralize_quoted_globs('echo "${X}" "a ${Y}/b"'), 'echo "${X}%s" "a ${Y}%s/b"' % (mark, mark))
+        self.assertEqual(m.deglob("$X" + mark), "$X")
+        self.assertRefused("X=push; \"$X\"; git \"$X\"", "Law 7")
+        self.assertRefused("S=docs; echo x > \"$S/y.md\"", "deliverables")
+        self.assertSilent("S=tests; echo x > \"$S/y.md\"")
+        self.assertRefused("echo x > \"$HOME/planted\"", "$HOME/planted")  # a reason names the spelling, unmarked
 
     def test_a_spud_call_and_a_write_are_read_through_it_too(self):
         cli = self.spud_cli
@@ -5620,44 +9814,340 @@ class ScriptFileTest(BashHookCase):
                 self.assertSilent(command)
 
 
-INLINE_WORDING = "the hook reads no inline program"
+RUNNER_WORDING = "is a script runner, which runs commands a project file holds"
+
+PACKAGE_JSON = {"name": "x", "scripts": {
+    "pretest": "echo pre", "test": "node --test", "posttest": "echo post", "build": "node build.js", "lint": "eslint .",
+    "prelint": "echo x", "web": "npm run build", "check:functions": "deno check x.ts", "dep": "echo dep"}}
+DENO_JSONC = """{
+  // the tasks deno runs
+  "tasks": {
+    "fmt": "deno fmt",
+    "check": {"command": "deno check x.ts", "dependencies": ["build", "gen",],}, /* trailing commas, as deno allows */
+    "gen": "echo gen",
+  },
+}
+"""
+MAKEFILE = "include mk/common.mk\n\ntest: build\n\tpython3 -m unittest\n\nbuild:\n\techo build\n"
+
+
+class ScriptRunnerTest(BashHookCase):
+    """SPD-168: a member's script runner -- `npm run`, `npm test` and npm's lifecycle verbs, `pnpm`, `yarn`, `bun run`,
+    `node --run`, `deno task`, `make` -- runs commands a project file holds, which main (e49fe91) left silent: a member that
+    could edit package.json could put `git push` in a script and run `npm run x`.
+
+    Eric's call: SPD-145's shape.  A member is refused a runner unless every name it runs -- the one it asks for, the
+    `pre`/`post` scripts and deno dependencies the file defines for it, a verb's lifecycle scripts -- is on its project's
+    allow-list (`spud --as spud project edit <key> --allow-runner <name>`), every file the runner reads its commands or its
+    configuration from lies outside the member's deliverables and the line writes none of them, and the line sets no shell
+    of the runner's own.  Spud keeps every one.
+
+    The home is project spud's checkout, with a package.json, a deno.jsonc and a Makefile at its root (the members'
+    tests/** is theirs to write); AGENT_A and AGENT_B hold home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        home = self.home.path
+        (home / "package.json").write_text(json.dumps(PACKAGE_JSON), encoding="utf-8")
+        (home / "deno.jsonc").write_text(DENO_JSONC, encoding="utf-8")
+        (home / "Makefile").write_text(MAKEFILE, encoding="utf-8")
+        (home / "mk").mkdir()
+        (home / "mk" / "common.mk").write_text("X = 1\n", encoding="utf-8")
+        (home / "tests" / "sub").mkdir(parents=True, exist_ok=True)
+        (home / "tests" / "own.mk").write_text("test:\n\tgit push\n", encoding="utf-8")
+        (home / "other.mk").write_text("include tests/own.mk\n", encoding="utf-8")
+
+    def allow(self, *names):
+        args = ["project", "edit", "spud"]
+        for n in names:
+            args.append("--allow-runner=" + n)
+        return self.home.run(*args, actor="spud")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def plans(self, command):
+        return [plan for kind, detail in self.analysis(command).findings if kind == "runner" for plan in detail[0]]
+
+    # Each runs a name the file defines, and is refused a member until the project allows every name it runs
+    RUNS = {
+        "npm test": ["pretest", "test", "posttest"], "npm run build": ["build"], "npm run-script build": ["build"],
+        "npm run lint": ["prelint", "lint"], "npm tes": ["pretest", "test", "posttest"], "npm t": ["pretest", "test", "posttest"],
+        "npm run check:functions": ["check:functions"], "npm --prefix . run build": ["build"], "npm run build -- --watch": ["build"],
+        "npm run nonesuch": ["nonesuch"], "npm --silent run build": ["build"], "npm run build --if-present": ["build"],
+        "pnpm run build": ["build"], "pnpm build": ["build"], "pnpm test": ["pretest", "test", "posttest"], "pnpm -C . build": ["build"],
+        "yarn build": ["build"], "yarn run build": ["build"], "yarn test": ["pretest", "test", "posttest"],
+        "yarn --cwd . build": ["build"], "bun run build": ["build"], "bun lint": ["prelint", "lint"],
+        "bun run --cwd=. build": ["build"], "node --run build": ["build"], "node --run=build": ["build"],
+        "deno task fmt": ["fmt"], "deno task check": ["check", "build", "gen"], "deno task dep": ["dep"],
+        "deno task --cwd . fmt": ["fmt"], "deno task -c deno.jsonc fmt": ["fmt"],
+        "make test": ["test"], "make build test": ["build", "test"], "make -s -j4 test": ["test"], "make -j 4 test": ["test"],
+        "make -C . test": ["test"], "make --directory=. test": ["test"], "gmake test": ["test"], "make -k -- test": ["test"],
+        "cd tests && npm --prefix .. run build": ["build"], "(cd mk; make -C .. build)": ["build"],
+        "sh -c 'npm run build'": ["build"], "npx npm run build": ["build"], "env CI=1 npm run build": ["build"],
+        "SMOKE_SCOPE=home npm run build": ["build"], "nice make test": ["test"], "true && npm run build | tee /dev/null": ["build"],
+    }
+
+    def test_each_run_is_refused_a_member_until_its_project_allows_every_name_it_runs(self):
+        for command, names in self.RUNS.items():
+            with self.subTest(command):
+                r = self.assertRefused(command, RUNNER_WORDING)
+                self.assertIn("Law 7", r.reason)
+                self.assertIn("runner allow-list", r.reason)
+                self.assertIn(", ".join("`%s`" % n for n in names), r.reason)
+                self.assertSilent(command, agent_id=None)
+        self.allow("pretest", "test", "posttest", "build", "prelint", "lint", "check:functions", "nonesuch", "fmt", "check", "gen", "dep")
+        for command in self.RUNS:
+            with self.subTest(command=command, allowed=True):
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=AGENT_B)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_pre_or_post_script_and_a_dependency_must_be_allowed_too(self):
+        self.allow("test", "lint", "check")
+        for command, missing in (("npm test", "`pretest`, `posttest` are not"), ("npm run lint", "`prelint` is not"),
+                                 ("bun run lint", "`prelint` is not"), ("deno task check", "`build`, `gen` are not")):
+            with self.subTest(command):
+                self.assertIn(missing, self.assertRefused(command, RUNNER_WORDING).reason)
+        self.allow("pretest", "posttest")
+        self.assertSilent("npm test")
+        self.assertSilent("node --run test")  # node runs no pre or post script (node(1): --run)
+
+    def test_the_reason_names_the_run_the_file_and_how_spud_allows_a_name(self):
+        r = self.assertRefused("npm run build", RUNNER_WORDING)
+        for needle in ("Law 7: `npm run build` is a script runner", "package.json's scripts", "Law 6", "Law 5",
+                       "`build` is not on project spud's runner allow-list", "`spud project show spud`",
+                       "`spud --as spud project edit spud --allow-runner <name>`"):
+            self.assertIn(needle, r.reason)
+        self.assertIn("the makefile's recipes", self.assertRefused("make test", RUNNER_WORDING).reason)
+        self.assertIn("deno.json's tasks", self.assertRefused("deno task fmt", RUNNER_WORDING).reason)
+        events = self.denied()
+        self.assertTrue(events and all(RUNNER_WORDING in e["data"]["reason"] for e in events))
+
+    def test_a_verbs_lifecycle_scripts_are_its_names(self):
+        """npm install runs the root package's install scripts, and pack, publish and version theirs, each only where the
+        file defines it: none here, so each runs no name of the project's -- until package.json defines one."""
+        for command in ("npm install", "npm ci", "npm i", "npm pack", "npm version patch", "yarn", "yarn install", "pnpm install",
+                        "bun install", "npm run", "deno task", "npm ls", "npm view x", "yarn why x", "pnpm dlx x", "bun build x.ts"):
+            with self.subTest(command):
+                self.assertSilent(command)
+        data = dict(PACKAGE_JSON, scripts=dict(PACKAGE_JSON["scripts"], prepare="husky", postinstall="node x.js"))
+        (self.home.path / "package.json").write_text(json.dumps(data), encoding="utf-8")
+        for command, missing in (("npm install", "`postinstall`, `prepare` are not"), ("npm ci", "`postinstall`, `prepare`"),
+                                 ("npm pack", "`prepare` is not"), ("yarn", "`postinstall`, `prepare`"),
+                                 ("pnpm add x", "`postinstall`, `prepare`"), ("npm install-test", "`pretest`")):
+            with self.subTest(command):
+                self.assertIn(missing, self.assertRefused(command, RUNNER_WORDING).reason)
+        self.assertSilent("npm install --ignore-scripts")
+        self.assertIn("`build` is not", self.assertRefused("npm run build --ignore-scripts", RUNNER_WORDING).reason)
+        self.allow("build")
+        self.assertSilent("npm run build --ignore-scripts")  # the named script alone, with no hooks
+
+    def test_a_shell_or_configuration_of_the_lines_own_is_refused_even_for_an_allowed_name(self):
+        self.allow("pretest", "test", "posttest", "build")
+        for command, needle in (
+                ("npm run build --script-shell /tmp/x", "`--script-shell` sets the shell"),
+                ("npm run build --script-shell=/tmp/x", "`--script-shell` sets the shell"),
+                ("npm --script-sh=/tmp/x test", "abbreviation"), ("npm --userconfig /tmp/rc test", "configuration file"),
+                ("npm_config_script_shell=/tmp/x npm test", "`npm_config_script_shell` sets a runner's configuration"),
+                ("NPM_CONFIG_SCRIPT_SHELL=/tmp/x npm test", "sets a runner's configuration"),
+                ("env npm_config_script_shell=/tmp/x npm test", "sets a runner's configuration"),
+                ("export npm_config_script_shell=/tmp/x; npm test", "sets a runner's configuration"),
+                ("pnpm --script-shell=/tmp/x build", "sets the shell"), ("pnpm --config.script-shell=/tmp/x build", "configuration file"),
+                ("bun run --shell=system build", "sets the shell"), ("bun -c /tmp/bunfig.toml run build", "configuration file"),
+                ("yarn --use-yarnrc /tmp/rc build", "configuration file"),
+                ("make test SHELL=/tmp/x", "sets a make variable"), ("make -e test", "`-e`"), ("make --eval='x:' test", "`--eval`"),
+                ("make -I /tmp test", "`-I`"), ("make -t test", "`-t`"), ("MAKEFLAGS=-e make test", "`MAKEFLAGS` sets"),
+                ("MAKEFILES=/tmp/x.mk make test", "`MAKEFILES` sets"), ("make --no-such-option test", "does not read"),
+        ):
+            with self.subTest(command):
+                self.assertIn(needle, self.assertRefused(command, RUNNER_WORDING).reason)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_run_the_hook_cannot_settle_is_refused(self):
+        self.allow("pretest", "test", "posttest", "build", "fmt")
+        for command, needle in (
+                ("npm run $X", "does not settle"), ("make $T", "does not settle"), ("npm --prefix $D test", "does not settle"),
+                ("cat list | xargs npm run", "xargs"), ("cat list | xargs make", "xargs"), ("make", "default goal"),
+                ("make -s", "default goal"), ("deno task 'b*'", "every task it matches"),
+                ("npm run build -w x", "other packages"), ("npm run build --workspaces", "other packages"),
+                ("npm -g run build", "global"), ("pnpm -r run build", "other packages"), ("pnpm --filter x build", "other packages"),
+                ("yarn workspace x build", "other packages"), ("bun run --filter x build", "other packages"),
+                ("deno task -r fmt", "other packages"), ("cd $D && npm test", "cannot follow"),
+        ):
+            with self.subTest(command):
+                self.assertIn(needle, self.assertRefused(command, RUNNER_WORDING).reason)
+                self.assertSilent(command, agent_id=None)
+        self.assertSilent("X=build; npm run $X")  # a value the line settles is read (SPD-148)
+
+    def test_a_file_the_member_may_write_is_refused_wherever_the_runner_would_read_it(self):
+        """tests/** is the members' own: a package.json there -- existing or not, since the runner reads the nearest --
+        a makefile named there, or one an include names there, is text the member writes."""
+        self.allow("pretest", "test", "posttest", "build")
+        sub = self.home.path / "tests" / "sub"
+        for command, cwd in (("npm test", sub), ("npm run build", sub), ("deno task fmt", sub), ("make test", sub),
+                             ("npm --prefix tests/sub test", None), ("make -f tests/own.mk test", None),
+                             ("make -f other.mk test", None), ("make -C tests test", None)):
+            with self.subTest(command=command, cwd=cwd):
+                r = self.assertRefused(command, RUNNER_WORDING, cwd=str(cwd) if cwd else None)
+                self.assertIn("a file you may write", r.reason)
+                self.assertSilent(command, agent_id=None, cwd=str(cwd) if cwd else None)
+        # the home's own Makefile includes mk/common.mk, outside the members' globs: read, and allowed
+        self.assertSilent("make test")
+
+    def test_a_file_in_the_temp_roots_or_another_checkout_is_refused(self):
+        self.allow("pretest", "test", "posttest", "build")
+        scratch = Path(tempfile.mkdtemp(prefix="spud-runner-")).resolve()
+        self.addCleanup(shutil.rmtree, scratch, True)
+        (scratch / "package.json").write_text(json.dumps(PACKAGE_JSON), encoding="utf-8")
+        for command in ("npm --prefix %s run build" % scratch, "cd %s && npm test" % scratch):
+            with self.subTest(command):
+                self.assertIn("a file you may write", self.assertRefused(command, RUNNER_WORDING).reason)
+
+    def test_a_line_that_writes_a_file_the_runner_reads_is_refused(self):
+        self.allow("pretest", "test", "posttest", "build")
+        for command, needle in (("echo '{}' > package.json; npm test", "deliverables"),
+                                ("cp /tmp/x .npmrc && npm run build", "deliverables"), ("rm -f Makefile; make test", "deliverables")):
+            with self.subTest(command):
+                self.assertRefused(command, needle)
+        m = load_spud_module()
+        analysis = self.analysis("echo x > /tmp/y; npm test")
+        written = m.written_targets(analysis, m.written_paths(analysis.arg_writes)[0])
+        self.assertTrue(written)
+
+    def test_an_earlier_reason_on_the_line_is_kept(self):
+        self.assertNotIn(RUNNER_WORDING, self.assertRefused("git push; npm test", "Law 7").reason)
+        self.assertNotIn(RUNNER_WORDING, self.assertRefused("npm test; echo x > docs/y.md", "deliverables").reason)
+        self.assertNotIn(RUNNER_WORDING, self.assertRefused("%s ticket new --title x; make test" % self.spud_cli, "Law 6").reason)
+
+    def test_an_unbound_agent_in_a_spud_session_has_no_allow_list(self):
+        self.allow("pretest", "test", "posttest", "build")
+        for command in ("npm test", "make build"):
+            with self.subTest(command):
+                self.assertRefused(command, RUNNER_WORDING, agent_id=AGENT_D)
+                self.assertSilent(command, agent_id=None)
+
+    def test_what_runs_no_project_script_is_unchanged(self):
+        """A package's own binary, a runtime's own subcommand, a file run by an interpreter, and a runner's own listing."""
+        for command in ("npx tsc --noEmit", "npm exec -- tsc", "bunx prettier .", "pnpm dlx create-vite x", "yarn exec 'ls'",
+                        "bun test", "bun build x.ts", "deno run x.ts", "deno test", "deno fmt", "node x.js", "node --test",
+                        "node -r ./r.js x.js --run y", "npm --version", "make --version", "yarn tsc", "pnpm tsc", "bun x.ts",
+                        "npm run", "deno task", "npm ls"):
+            with self.subTest(command):
+                self.assertSilent(command)
+        self.assertEqual(self.plans("bun x.ts")[0][3], (("x.ts", True, False),))  # a script only where the file defines one
+
+    def test_the_analysis_records_every_reading(self):
+        self.assertEqual(self.plans("npm run build"), [("check", "npm", "npm run build", (("build", True, True),), (), ())])
+        self.assertEqual(self.plans("make -C sub -f x.mk a b"),
+                         [("check", "make", "make a b", (("a", False, True), ("b", False, True)), ("sub",), ("x.mk",))])
+        # deno's --cwd: the configuration is read from either directory
+        self.assertEqual([p[4] for p in self.plans("deno task --cwd sub fmt")], [("sub",), ()])
+        self.assertEqual(self.plans("npm ls"), [])
+        self.assertEqual(self.plans("npm run build --script-shell x")[0][0], "refuse")
+
+
+# The wording every refusal of an inline program shares (SPD-175): the rule it holds a member to, which is the spudagent
+# definition's glob rule and no law of Spud's, and then one of three reasons the hook gives.
+INLINE_WORDING = "the deliverable paths your parent planned"
+INLINE_WRITES = "its text writes"
+INLINE_UNSPELLED = "the line does not spell its text"
+INLINE_UNTABLED = "tables no write markers"
 
 
 class InlineProgramTest(BashHookCase):
-    """SPD-150: an interpreter run whose program the line spells rather than reads from a file.
+    """SPD-150, narrowed by SPD-175: an interpreter run whose program the line spells rather than reads from a file.
 
     BADS-140/Jeremy wrote `scripts/web-seed.js`, outside his deliverable globs, with the HEREDOC below, and patched two
     files inside his globs the same way; nothing went through Edit or Write, so the edit hook never saw them, and the
     Bash rule read the line as far as `python3.14` and appended kind `other` (SPD-126's brief left the interpreters out
-    on purpose).  So Law 5's fence stood only where a member used the tools.
+    on purpose).  So the glob fence stood only where a member used the tools.
 
-    Since this ticket a caller the Bash rule holds is refused an interpreter run whose program the line spells: an
-    option that carries it (python's `-c`, node's `-e`/`--eval`/`-p`/`--print` with bun's and deno's spellings, perl's
-    `-e`/`-E`, ruby's `-e`) or standard input, where the line feeds it and the interpreter has no program of its own.
+    SPD-150 refused a member every such run.  The 106 refusals it earned in its first two days held 71 programs that
+    only read and print, 26 find-and-replace edits inside the member's own globs, 6 writes to a temp directory and 3
+    that wrote nothing at all, and none that would have written outside the member's globs.  Since SPD-175 (Eric's
+    call, 2026-09-22) the text the line spells -- an option's value, a here-document, a here-string, text a printer
+    pipes -- is scanned for write markers tabled per interpreter family from its own documentation
+    (shell/program_writes), and only a program whose text shows one is refused.  A program whose text the line does
+    not spell (a pipe from a file or another program, a `<` file, a word the line cannot settle) stays refused: there
+    is nothing to scan.  The scan is a nudge against the plain spellings, not a wall; a program from a file already
+    runs unread.
+
     A program from a file, python's `-m module` and an interpreter left to read a terminal are unchanged, whatever they
-    write -- whether a member may run a script file it wrote itself is SPD-145's question -- and Spud keeps his inline
-    programs, Law 1 binding him where the hook cannot see.
-
-    The refusal is read last of all (bash_rule), so every reason a line has already earned it keeps: a git verb, a
-    database call, a spud call, and each write the path rule refuses, which is how SPD-126's readings of perl's `-i`
-    still answer."""
+    write, and Spud keeps his inline programs.  The refusal is read last of all (bash_rule), so every reason a line has
+    already earned it keeps: a git verb, a database call, a spud call, and each write the path rule refuses."""
 
     HEREDOC = ("python3.14 - <<'PY'\nimport pathlib\np = pathlib.Path('scripts/web-seed.js')\ns = p.read_text()\n"
                "p.write_text(s.replace('a', 'b'))\nPY")
-    # Each line runs a program the line spells: an option carries it, or the interpreter reads it on standard input.
-    SPELLED = (
-        HEREDOC,
+    # SPUD-153/Herschel's here-document, refused by SPD-150: it reads the spudlib-modules map and the real modules and
+    # prints how they differ, and writes nothing.
+    HERSCHEL = (
+        "python3.14 -I -S - <<'EOF'\nimport re\nfrom pathlib import Path\n\n"
+        "skill = Path(\".claude/skills/spudlib-modules/SKILL.md\").read_text(encoding=\"utf-8\")\n"
+        "tree_block = skill.split(\"```\\nbin/\\n\")[1].split(\"```\", 1)[0]\nrows = {}\n"
+        "for line in tree_block.splitlines():\n    m = re.match(r\"\\s+(\\w+)/\\s+(.+)\", line)\n    if m:\n"
+        "        rows[m.group(1)] = [x.strip() for x in m.group(2).split(\"\u00b7\")]\n\n"
+        "for d, listed in rows.items():\n    real = sorted(p.stem for p in Path(\"bin/spudlib\", d).glob(\"*.py\"))\n"
+        "    status = \"OK\" if sorted(listed) == real else \"MISMATCH\"\n"
+        "    print(\"%-10s %-8s listed=%d real=%d\" % (d, status, len(listed), len(real)))\nEOF")
+    # BADS-175/Vern's edit, refused by SPD-150 and still refused: a find-and-replace written back with write_text.
+    VERN = ("python3 - <<'PY'\nimport re, pathlib\np = pathlib.Path('admin/src/lib/actions/run-usage-views.ts')\n"
+            "s = p.read_text()\ns = s.replace(\"message: message(err,\", \"message: refusal(err,\")\n"
+            "p.write_text(s)\nprint(s.count('refusal('))\nPY")
+    # Each line runs a program the line spells, and the text shows no write: allowed since SPD-175.
+    READS_ONLY = (
+        HERSCHEL,
         "python3.14 -c 'import pathlib'", "python3 -c'print(1)'", "python3 -Ic 'print(1)'", "python3 -I -S -c 'print(1)'",
-        "python3 -W ignore -c 'print(1)'", "python3 -c 'print(1)' > /dev/null",
-        "echo 'print(1)' | python3", "echo 'print(1)' | python3 -", "python3 <<< 'print(1)'", "python3 < tests/x.py",
-        "python3 - < tests/x.py", "cat tests/x.py | python3", "python3 /dev/stdin <<< 'print(1)'",
-        "python3 - <<'PY'\nprint(1)\nPY", "env python3 -c 'print(1)'", "cd tests && python3 -c 'print(1)'",
+        "python3 -W ignore -c 'print(1)'", "python3 -c 'print(1)' > /dev/null", "python3.14 -I -S -c \"pass\"",
+        "echo 'print(1)' | python3", "echo 'print(1)' | python3 -", "python3 <<< 'print(1)'",
+        "python3 /dev/stdin <<< 'print(1)'", "python3 - <<'PY'\nprint(1)\nPY", "env python3 -c 'print(1)'",
+        "cd tests && python3 -c 'print(1)'", "python3 -c 'import sys; print(sys.argv)' $UNSET",
+        "python3.14 -c \"import json; print(json.load(open('spud.config.json'))['naming'])\"",
+        "python3 -c 'open(\"x\", encoding=\"utf-8\").read()'", "python3 -c 'open(\"x\", \"rb\").read()'",
+        "python3 -c 'import os; print(os.path.join(\"a\", \"w\"))'", "python3 -c 'print(\"a b\".replace(\"a\", \"b\"))'",
+        "python3 -c 'import re; print(re.compile(\"a\").sub(\"b\", \"a\"))'", "python3 -c 'import ast; ast.literal_eval(\"1\")'",
         "node -e 'console.log(1)'", "node -p 'process.cwd()'", "node --eval 'console.log(1)'", "node --eval='x'",
         "node --print 'x'", "node -pe 'x'", "node --require ./r.js -e 'x'", "nodejs -e 'x'", "bun -e 'x'", "deno -e 'x'",
-        "node - <<'JS'\nconsole.log(1)\nJS", "cat tests/x.js | node", "echo 'console.log(1)' | node",
+        "node - <<'JS'\nconsole.log(1)\nJS", "echo 'console.log(1)' | node",
+        "node -e \"const p=require('./package.json');console.log(JSON.stringify({test:p.scripts.test},null,1))\"",
+        "node -e 'console.log(require(\"fs\").readFileSync(\"x\", \"utf8\"))'", "node -e 'console.log(/a/.exec(\"a\"))'",
+        "node -e 'process.stdout.write(\"x\")'", "node --input-type=module -e 'const m = await import(\"x\"); console.log(m)'",
         "perl -e 'print 1'", "perl -E 'say 1'", "perl -pe 's/a/b/' tests/x.txt", "perl -0pe 'print' tests/x.txt",
-        "perl -ne 'print if /x/' tests/x.txt", "perl -I lib -e 'print 1'", "cat tests/x.pl | perl",
+        "perl -ne 'print if /x/' tests/x.txt", "perl -I lib -e 'print 1'", "perl -e 'print readlink \"x\"'",
+        "perl -e 'open(my $fh, \"<\", \"x\") or die; print <$fh>'",
         "ruby -e 'puts 1'", "ruby -ne 'puts 1'", "ruby -I lib -e 'puts 1'", "echo 'puts 1' | ruby",
+        "ruby -e 'puts File.read(\"x\")'", "ruby -e 'h = {a: 1}; h.delete(:a); p h'",
+    )
+    # ... and each of these spells a program whose text writes, or runs one: refused, as SPD-150 refused them.
+    WRITES = (
+        HEREDOC, VERN,
+        "python3 -c 'import pathlib; pathlib.Path(\"x\").write_text(\"y\")'", "python3 -c 'open(\"x\", \"w\").write(\"y\")'",
+        "python3 -c \"open('x', mode='a')\"", "python3 -c 'import io; io.open(\"x\", \"w\", encoding=\"utf-8\")'",
+        "python3 -c 'import os; os.remove(\"x\")'", "python3 -c 'import shutil; shutil.copy(\"a\", \"b\")'",
+        "python3 -c 'import subprocess; subprocess.run([\"git\", \"push\"])'", "python3 -c 'import os; os.system(\"x\")'",
+        "python3 -c 'exec(\"x\")'", "python3 -c 'from pathlib import Path; Path(\"d\").mkdir()'",
+        "python3 -c 'import pathlib; pathlib.Path(\"a\").replace(\"b\")'", "python3 -c 'from os import remove; remove(1)'",
+        "python3 - <<'PY'\nimport os\nos.makedirs('d')\nPY", "echo 'import os; os.unlink(1)' | python3",
+        "python3 <<< 'import shutil; shutil.rmtree(\"d\")'", "python3 -c 'import os; os.open(\"x\", os.O_WRONLY)'",
+        "node -e 'require(\"fs\").writeFileSync(\"x\", \"y\")'", "node -e 'fs.appendFileSync(\"x\", 1)'",
+        "node -e 'require(\"child_process\").execSync(\"git push\")'", "node -e 'fs.rmSync(\"d\", {recursive: true})'",
+        "node -e 'fs.renameSync(\"a\", \"b\")'", "node -e 'fs.mkdirSync(\"d\")'", "node -e 'fs.openSync(\"x\", \"w\")'",
+        "node -p 'eval(\"1\")'", "bun -e 'Bun.write(\"x\", \"y\")'", "deno eval 'Deno.writeTextFileSync(\"x\", \"y\")'",
+        "deno -e 'Deno.removeSync(\"x\")'", "tsx -e 'fs.copyFileSync(\"a\", \"b\")'",
+        "node - <<'JS'\nrequire('fs').writeFileSync('x', 'y')\nJS", "echo 'fs.unlinkSync(1)' | node",
+        "perl -e 'open(my $fh, \">\", \"x\")'", "perl -e 'open(F, \">x\")'", "perl -e 'open F, \">>\", \"x\"'",
+        "perl -e 'unlink \"x\"'", "perl -e 'rename \"a\", \"b\"'", "perl -e 'mkdir \"d\"'", "perl -e 'system \"git push\"'",
+        "perl -e 'print `git push`'", "perl -0777 -i -pe 's/a/b/' /tmp/x.txt", "perl -pi -e 's/a/b/' /tmp/x.txt",
+        "ruby -e 'File.write(\"x\", \"y\")'", "ruby -e 'File.open(\"x\", \"w\") { |f| f.puts 1 }'",
+        "ruby -e 'require \"fileutils\"; FileUtils.rm_rf(\"d\")'", "ruby -e 'system(\"git push\")'",
+        "ruby -e 'puts `git push`'", "ruby -i -pe 'x' tests/x.txt",
+    )
+    # ... and each of these runs a program whose text the line does not spell: refused, since there is nothing to scan.
+    UNSPELLED = (
+        "python3 < tests/x.py", "python3 - < tests/x.py", "cat tests/x.py | python3", "cat tests/x.js | node",
+        "cat tests/x.pl | perl", "date | python3", "python3 -c \"$CODE\"", "node -e \"$(cat f)\"",
+        "python3 -c \"print('$d')\"", "perl -e 'print 1' $F", "node -e 'x' \"$(cat f)\"",
     )
     # ... and each of these runs a program from a file, a module, or none at all: unchanged, for every caller.
     READS_A_FILE = (
@@ -5666,7 +10156,7 @@ class InlineProgramTest(BashHookCase):
         "python3", "python3 -i", "python3 -", "python3 --version", "python3 -- tests/x.py",
         "python3 --check-hash-based-pycs always tests/x.py", "python3 -X importtime tests/x.py",
         "node scripts/x.js", "node --require ./r.js scripts/x.js", "node", "node --version", "node -c scripts/x.js",
-        "npm test", "npx tsc --noEmit", "deno run scripts/x.ts",
+        "npx tsc --noEmit", "deno run scripts/x.ts",  # `npm test` runs a command package.json holds: ScriptRunnerTest (SPD-168)
         # perl's -i writes, and the two here write in the temp root, which is open to Spud and to a member alike
         "perl tests/x.pl", "perl -i tests/x.pl /tmp/y.txt", "perl -pie s/a/b/ /tmp/x.txt", "perl -v",
         "ruby tests/x.rb", "ruby -I lib tests/x.rb", "ruby -v",
@@ -5686,42 +10176,80 @@ class InlineProgramTest(BashHookCase):
         return [detail for kind, detail in self.analysis(command).findings if kind == "inline"]
 
     def test_the_bads_140_heredoc_is_refused_and_recorded(self):
-        r = self.assertRefused(self.HEREDOC, "Law 1")
-        self.assertIn(INLINE_WORDING, r.reason)
+        r = self.assertRefused(self.HEREDOC, INLINE_WORDING)
+        self.assertIn(INLINE_WRITES, r.reason)
+        self.assertIn("write_text", r.reason)
         self.assertIn("python3.14", r.reason)
         self.assertIn("standard input", r.reason)
         self.assertIn("Edit or Write", r.reason)
+        self.assertIn("spudagent", r.reason)
         events = self.denied()
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["data"]["tool_name"], "Bash")
         self.assertIn(INLINE_WORDING, events[0]["data"]["reason"])
 
-    def test_the_analysis_finds_the_program_the_line_spells(self):
-        for command in self.SPELLED:
+    def test_the_reason_names_no_law(self):
+        """None of Spud's ten laws states a member's glob fence: the spudagent definition does, so the reason names it
+        and no law.  And it no longer offers a program from a file as the way out, which the hook reads no better."""
+        for command in (self.HEREDOC, "cat tests/x.py | python3", "php -r 'echo 1;'"):
             with self.subTest(command):
-                self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
-        for command in self.READS_A_FILE:
+                r = self.assertRefused(command, INLINE_WORDING)
+                self.assertNotIn("Law ", r.reason)
+                self.assertNotIn("tests/suite.py", r.reason)
+                self.assertIn("redirect", r.reason)
+
+    def test_the_analysis_finds_only_the_program_that_writes_or_cannot_be_read(self):
+        for command in self.WRITES:
+            with self.subTest(command):
+                found = self.inline(command)
+                self.assertEqual(len(found), 1, self.analysis(command).findings)
+                self.assertEqual(found[0][2], "writes", found)
+        for command in self.UNSPELLED:
+            with self.subTest(command):
+                found = self.inline(command)
+                self.assertEqual(len(found), 1, self.analysis(command).findings)
+                self.assertEqual(found[0][2], "unspelled", found)
+        for command in self.READS_ONLY + self.READS_A_FILE:
             with self.subTest(command):
                 self.assertEqual(self.inline(command), [])
 
-    def test_the_option_that_carries_the_program_is_the_one_the_reason_names(self):
-        for command, option in (("python3 -c 'print(1)'", "-c"), ("python3 -Ic 'print(1)'", "-c"),
-                                ("node -e 'x'", "-e"), ("node -p 'x'", "-p"), ("node -pe 'x'", "-p"),
-                                ("node --eval 'x'", "--eval"), ("node --eval='x'", "--eval"), ("node --print 'x'", "--print"),
-                                ("perl -e 'print 1'", "-e"), ("perl -E 'say 1'", "-E"), ("perl -pe 's/a/b/' f", "-e"),
-                                ("ruby -e 'puts 1'", "-e")):
+    def test_the_marker_the_reason_names(self):
+        for command, marker in ((self.HEREDOC, "write_text"), (self.VERN, "write_text"),
+                                ("python3 -c 'open(\"x\", \"w\")'", "\"w\""), ("python3 -c 'import os; os.remove(1)'", "os.remove"),
+                                ("node -e 'fs.writeFileSync(1)'", "writeFileSync"), ("perl -e 'unlink 1'", "unlink"),
+                                ("perl -pi -e 's/a/b/' /tmp/x.txt", "-i"), ("ruby -e 'File.write(1)'", "File.write")):
             with self.subTest(command):
-                self.assertEqual(self.inline(command), [(command.split()[0], option)])
-        for command in ("echo 'print(1)' | python3", self.HEREDOC, "cat tests/x.js | node"):
+                self.assertIn(marker, self.inline(command)[0][3])
+                self.assertIn(marker, self.assertRefused(command, INLINE_WRITES).reason)
+
+    def test_the_option_that_carries_the_program_is_the_one_the_reason_names(self):
+        for command, option in (("python3 -c 'open(1, \"w\")'", "-c"), ("python3 -Ic 'open(1, \"w\")'", "-c"),
+                                ("node -e 'fs.rmSync(1)'", "-e"), ("node -p 'fs.rmSync(1)'", "-p"),
+                                ("node -pe 'fs.rmSync(1)'", "-p"), ("node --eval 'fs.rmSync(1)'", "--eval"),
+                                ("node --eval='fs.rmSync(1)'", "--eval"), ("node --print 'fs.rmSync(1)'", "--print"),
+                                ("perl -e 'unlink 1'", "-e"), ("perl -E 'unlink 1'", "-E"), ("perl -pe 'unlink 1' f", "-e"),
+                                ("ruby -e 'system 1'", "-e")):
+            with self.subTest(command):
+                self.assertEqual(self.inline(command)[0][:2], (command.split()[0], option))
+        for command in ("echo 'import os; os.remove(1)' | python3", self.HEREDOC, "cat tests/x.js | node"):
             with self.subTest(command):  # standard input: no option carries it
                 self.assertEqual(self.inline(command)[0][1], None)
 
-    def test_a_member_is_refused_and_spud_keeps_his_inline_programs(self):
-        for command in self.SPELLED:
+    def test_a_member_is_refused_a_writing_or_unreadable_program_and_spud_keeps_his(self):
+        for command in self.WRITES:
             with self.subTest(command):
-                self.assertRefused(command, INLINE_WORDING)
-                self.assertRefused(command, "Law 1")
-                self.assertSilent(command, agent_id=None)  # Law 1 binds Spud where the hook cannot see; his are probes
+                self.assertRefused(command, INLINE_WRITES)
+                self.assertSilent(command, agent_id=None)
+        for command in self.UNSPELLED:
+            with self.subTest(command):
+                self.assertRefused(command, INLINE_UNSPELLED)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_program_that_only_reads_runs_for_everyone(self):
+        for command in self.READS_ONLY:
+            with self.subTest(command):
+                self.assertSilent(command)
+                self.assertSilent(command, agent_id=None)
 
     def test_a_program_from_a_file_a_module_and_a_terminal_are_unchanged(self):
         for command in self.READS_A_FILE:
@@ -5743,7 +10271,8 @@ class InlineProgramTest(BashHookCase):
         self.assertSilent("python3.14 -I -S %s/bin/spud board | head" % self.home.path)
 
     def test_a_refusal_the_line_already_earns_keeps_its_own_reason(self):
-        for command, needle in (("python3 -c 'print(1)' && git commit -m x", "Law 7"),
+        for command, needle in (("python3 -c 'open(1, \"w\")' && git commit -m x", "Law 7"),
+                                ("node -e 'fs.rmSync(1)' > docs/x.md", "deliverables"),
                                 ("node -e 'x' > docs/x.md", "deliverables"),
                                 ("perl -pi.bak -e s/a/b/ bin/spud", "deliverables"),
                                 ("perl -pi -e s/a/b/ ledger/tickets/SPD-001.md", "generated"),
@@ -5754,18 +10283,24 @@ class InlineProgramTest(BashHookCase):
                 self.assertNotIn(INLINE_WORDING, r.reason)
 
     def test_the_input_a_pipeline_and_a_group_give_an_interpreter(self):
-        """The reading is SPD-143's: what the line puts on a command's standard input, whether or not the hook can spell
-        the text -- a file, another program's output and an unreadable printer all feed a program it cannot read."""
+        """The reading is SPD-143's: what the line puts on a command's standard input, and whether the hook can spell
+        the text -- a file, another program's output and an unreadable printer all feed a program it cannot read, while
+        text a printer spells is scanned like a here-document."""
         for command in ("{ python3; }", "(python3)", "python3 3< tests/x.py", "python3 2>&1", "if true; then python3; fi"):
             with self.subTest(command):  # nothing on standard input: the REPL, whatever stands around it
                 self.assertSilent(command)
-        for command in ("echo 'print(1)' | { python3; }", "echo 'print(1)' | (python3)",
-                        "date | python3", "python3 <&3", "echo x | tee /dev/null | python3",
-                        "for f in tests/*.py; do python3 < $f; done"):
+        for command in ("echo 'print(1)' | { python3; }", "echo 'print(1)' | (python3)", "echo x | tee /dev/null | python3"):
+            with self.subTest(command):  # text the line spells, and no write in it
+                self.assertSilent(command)
+        for command in ("echo 'import os; os.remove(1)' | { python3; }", "echo 'import os; os.remove(1)' | (python3)"):
             with self.subTest(command):
-                self.assertRefused(command, INLINE_WORDING)
+                self.assertRefused(command, INLINE_WRITES)
+        for command in ("date | python3", "python3 <&3", "for f in tests/*.py; do python3 < $f; done"):
+            with self.subTest(command):
+                self.assertRefused(command, INLINE_UNSPELLED)
         self.assertSilent("echo 'print(1)' | xargs node")  # xargs reads the input; its command gets none of it
-        self.assertRefused("echo 'print(1)' | xargs node -e", INLINE_WORDING)  # ... but the -e is still an -e
+        self.assertSilent("echo 'print(1)' | xargs node -e")  # ... and the -e's program is the text it appends
+        self.assertRefused("echo 'fs.rmSync(1)' | xargs node -e", INLINE_WRITES)
 
 
 class UntabledInterpreterTest(BashHookCase):
@@ -5791,16 +10326,31 @@ class UntabledInterpreterTest(BashHookCase):
     program on its standard input printed the driver's help and ran nothing, so swift reads standard input only where
     the line names it -- `-`, or `swift repl`.
 
-    The refusal, the reason and what stays unchanged are all SPD-150's: Law 1 through bash_rule.inline_program_reason,
-    read last so an earlier refusal keeps its own wording, a program from a file untouched (SPD-145), and Spud's own
-    inline programs his."""
+    The refusal, the reason and what stays unchanged are all SPD-150's: bash_rule.inline_program_reason, read last so
+    an earlier refusal keeps its own wording, a program from a file untouched (SPD-145), and Spud's own inline programs
+    his.
 
-    # Each line runs a program the line spells, through a shape SPD-150's four rows did not read.
-    SPELLED = (
+    Since SPD-175 a program whose text the line spells is refused only where that text shows a write marker, tabled per
+    family (shell/program_writes).  deno reads node's markers with its own `Deno.` calls, and tsx and ts-node run node,
+    so their programs are scanned as node's.  The other five stay refused whatever their text: osascript's `tell
+    application` reaches every scriptable application's verbs and its JavaScript dialect the whole Cocoa bridge, swift
+    reaches Foundation's, and php, lua and Rscript are not installed here and no member's refusal ran one, so none of
+    them is tabled as soundly as the four families are."""
+
+    # Each line runs a program the line spells through deno's subcommands, tsx or ts-node, and writes nothing.
+    READS_ONLY = (
         "deno eval 'console.log(1)'", "deno eval --ext=ts 'console.log(1)'", "deno eval -- 'console.log(1)'",
         "deno repl --eval 'console.log(1)'", "deno repl --eval='console.log(1)'",
         "deno run - <<'JS'\nconsole.log(1)\nJS", "echo 'console.log(1)' | deno run -",
-        "echo 'console.log(1)' | deno run --allow-read -", "deno run - < scripts/x.ts",
+        "echo 'console.log(1)' | deno run --allow-read -",
+        "tsx -e 'console.log(1)'", "tsx --eval 'x'", "ts-node -p 'x'", "ts-node --eval 'x'", "echo 'x' | ts-node",
+    )
+    # ... and the same shapes where the text writes, or the line does not spell it.
+    WRITES = ("deno eval 'Deno.writeTextFileSync(\"x\", \"y\")'", "deno repl --eval 'Deno.removeSync(1)'",
+              "deno run - <<'JS'\nDeno.mkdirSync('d')\nJS", "tsx -e 'fs.writeFileSync(1)'", "ts-node -p 'fs.rmSync(1)'")
+    UNSPELLED = ("deno run - < scripts/x.ts", "cat scripts/x.ts | ts-node", "cat scripts/x.ts | deno run -")
+    # Each line runs a program the line spells, in a family no write marker is tabled for.
+    SPELLED = (
         "osascript -e 'do shell script \"git push\"'", "osascript -l JavaScript -e 'x'", "osascript -s o -e 'x'",
         "osascript <<'AS'\ndo shell script \"git push\"\nAS", "echo 'display dialog \"x\"' | osascript",
         "osascript - <<'AS'\nbeep\nAS",
@@ -5808,13 +10358,13 @@ class UntabledInterpreterTest(BashHookCase):
         "echo '<?php echo 1;' | php", "php < tests/x.php",
         "lua -e 'print(1)'", "lua -l mod -e 'print(1)'", "lua - <<'L'\nprint(1)\nL", "echo 'print(1)' | lua",
         "Rscript -e 'print(1)'", "Rscript --vanilla -e 'print(1)'", "Rscript -e 'a' -e 'b'",
-        "tsx -e 'console.log(1)'", "tsx --eval 'x'", "ts-node -p 'x'", "ts-node --eval 'x'", "echo 'x' | ts-node",
         "swift -e 'print(1)'", "swift -O -e 'print(1)'", "swift - <<'S'\nprint(1)\nS", "swift - < tests/x.swift",
     )
-    # ... and each of these runs a program from a file, a task, or none at all: unchanged, for every caller.
+    # ... and each of these runs a program from a file or none at all: unchanged, for every caller (`deno task <name>` runs a
+    # task a file holds, ScriptRunnerTest's since SPD-168).
     READS_A_FILE = (
         "deno run scripts/x.ts", "deno run --allow-net scripts/x.ts", "deno test", "deno test scripts/x_test.ts",
-        "deno task dev", "deno check scripts/x.ts", "deno fmt", "deno lint", "deno --version", "deno repl",
+        "deno check scripts/x.ts", "deno fmt", "deno lint", "deno --version", "deno repl",
         "deno repl --eval-file scripts/x.ts", "deno main.ts", "deno install", "deno run --allow-read -",
         "osascript scripts/x.scpt", "osascript -l JavaScript scripts/x.js", "osascript scripts/x.scpt world",
         "php scripts/x.php", "php -f scripts/x.php", "php -l scripts/x.php", "php --version",
@@ -5836,40 +10386,52 @@ class UntabledInterpreterTest(BashHookCase):
     def test_the_analysis_finds_the_program_the_line_spells(self):
         for command in self.SPELLED:
             with self.subTest(command):
-                self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
-        for command in self.READS_A_FILE:
+                found = self.inline(command)
+                self.assertEqual(len(found), 1, self.analysis(command).findings)
+                self.assertEqual(found[0][2], "untabled", found)
+        for command, why in [(c, "writes") for c in self.WRITES] + [(c, "unspelled") for c in self.UNSPELLED]:
+            with self.subTest(command):
+                found = self.inline(command)
+                self.assertEqual(len(found), 1, self.analysis(command).findings)
+                self.assertEqual(found[0][2], why, found)
+        for command in self.READS_A_FILE + self.READS_ONLY:
             with self.subTest(command):
                 self.assertEqual(self.inline(command), [])
 
     def test_a_member_is_refused_and_spud_keeps_his_inline_programs(self):
-        for command in self.SPELLED:
+        for command, needle in ([(c, INLINE_UNTABLED) for c in self.SPELLED] + [(c, INLINE_WRITES) for c in self.WRITES]
+                                + [(c, INLINE_UNSPELLED) for c in self.UNSPELLED]):
             with self.subTest(command):
-                self.assertRefused(command, INLINE_WORDING)
-                self.assertRefused(command, "Law 1")
-                self.assertSilent(command, agent_id=None)  # Law 1 binds Spud where the hook cannot see; his are probes
+                r = self.assertRefused(command, INLINE_WORDING)
+                self.assertIn(needle, r.reason)
+                self.assertNotIn("Law 1", r.reason)
+                self.assertSilent(command, agent_id=None)  # Spud keeps his; his are probes
 
-    def test_a_program_from_a_file_a_task_and_a_terminal_are_unchanged(self):
-        for command in self.READS_A_FILE:
+    def test_a_program_from_a_file_a_task_a_terminal_and_one_that_only_reads_are_unchanged(self):
+        for command in self.READS_A_FILE + self.READS_ONLY:
             with self.subTest(command):
                 self.assertSilent(command)
                 self.assertSilent(command, agent_id=None)
 
     def test_what_the_reason_names_as_carrying_the_program(self):
         """The subcommand for deno's operand form, the option for every other, and None for standard input."""
-        for command, option in (("deno eval 'x'", "eval"), ("deno eval -- 'x'", "eval"),
-                                ("deno repl --eval 'x'", "--eval"), ("deno repl --eval='x'", "--eval"),
-                                ("deno -e 'x'", "-e"), ("osascript -e 'x'", "-e"), ("php -r 'x'", "-r"),
+        for command, option in (("deno eval 'Deno.removeSync(1)'", "eval"), ("deno eval -- 'Deno.removeSync(1)'", "eval"),
+                                ("deno repl --eval 'Deno.removeSync(1)'", "--eval"),
+                                ("deno repl --eval='Deno.removeSync(1)'", "--eval"),
+                                ("deno -e 'Deno.removeSync(1)'", "-e"), ("osascript -e 'x'", "-e"), ("php -r 'x'", "-r"),
                                 ("php -R 'x'", "-R"), ("lua -e 'x'", "-e"), ("Rscript -e 'x'", "-e"),
-                                ("tsx -e 'x'", "-e"), ("ts-node -p 'x'", "-p"), ("swift -e 'x'", "-e")):
+                                ("tsx -e 'fs.rmSync(1)'", "-e"), ("ts-node -p 'fs.rmSync(1)'", "-p"), ("swift -e 'x'", "-e")):
             with self.subTest(command):
-                self.assertEqual(self.inline(command), [(command.split()[0], option)])
+                self.assertEqual(self.inline(command)[0][:2], (command.split()[0], option))
                 self.assertIn("`%s` carries" % option, self.assertRefused(command, INLINE_WORDING).reason)
-        for command in ("deno run - <<'JS'\nx\nJS", "echo x | osascript", "swift - <<'S'\nx\nS", "echo x | lua"):
+        for command in ("deno run - <<'JS'\nDeno.removeSync(1)\nJS", "echo x | osascript", "swift - <<'S'\nx\nS",
+                        "echo x | lua"):
             with self.subTest(command):  # standard input: no option carries it
                 self.assertEqual(self.inline(command)[0][1], None)
+        self.assertIn("`osascript`", self.assertRefused("osascript -e 'beep'", INLINE_UNTABLED).reason)
 
     def test_a_refusal_the_line_already_earns_keeps_its_own_reason(self):
-        for command, needle in (("deno eval 'x' && git commit -m x", "Law 7"),
+        for command, needle in (("deno eval 'Deno.removeSync(1)' && git commit -m x", "Law 7"),
                                 ("osascript -e 'x' > docs/x.md", "deliverables"),
                                 ("php -r 'x' > ledger/tickets/SPD-001.md", "generated"),
                                 ("swift -e 'x' | tee CLAUDE.md", "deliverables"),
@@ -5914,15 +10476,16 @@ class InterpreterWordTest(BashHookCase):
                  "deno $FLAG code", "deno run $FLAG code", "perl $FLAG 'print 1'", "php $FLAG code", "lua $FLAG code",
                  "Rscript $FLAG code", "osascript $FLAG code", "tsx $FLAG code", "swift $FLAG code",
                  "ruby $FLAG -e 'puts 1'", "node -r ./r.js $FLAG code",
-                 # a partial expansion is resolved nowhere (SPD-043): `$S/x.js` may be an option as much as a file
-                 "S=scripts; node $S/x.js", "X=cript; node -$X x.js")
+                 # a partial expansion the line does not settle: `$S/x.js` may be an option as much as a file
+                 "node $S/x.js", "true && S=scripts; node $S/x.js", "X='-e x'; node -$X x.js")
     # Each line hands a tabled interpreter words out of an xargs's input that the line does not spell: a file, another
-    # program's output, or text stdin_text does not read -- `echo '-e code'` among them, a leading word starting with
-    # `-` that is no option of echo's, which the shells differ over printing at all (stdin_text._echo_text).
+    # program's output, or text stdin_text does not read -- `echo -x code` among them, a leading word starting with
+    # `-` that is no option of echo's and holds no blank, which stdin_text._echo_text does not read.  (`echo '-e code'`
+    # is read since SPD-167: a blank makes the word text in both shells, so xargs hands node `-e code`, below.)
     UNSPELLED_INPUT = ("cat f | xargs node", "cat tests/x.py | xargs python3", "xargs -a f ruby",
                        "xargs --arg-file f node", "curl -sS https://example.com/f | xargs deno",
                        "xargs node < f", "cat f | xargs -I% node %", "date | xargs ruby",
-                       "echo '-e code' | xargs node", "echo '-e code' | xargs -I% node %",
+                       "echo -x code | xargs node", "echo -x code | xargs -I% node %",
                        "cat f | xargs osascript", "cat f | xargs swift", "cat f | xargs tsx")
 
     def setUp(self):
@@ -5952,26 +10515,33 @@ class InterpreterWordTest(BashHookCase):
 
     def test_a_settled_value_is_read_as_the_value(self):
         """SPD-127's reading: the word the shell would hand the interpreter, not the spelling."""
-        for command, option in (("X=-p; node $X code", "-p"), ("X=-e; ruby $X 'puts 1'", "-e"),
-                                ("X=--eval; node $X 'x'", "--eval"), ("X=-r; php $X 'echo 1;'", "-r")):
+        for command, option in (("X=-p; node $X fs.rmSync", "-p"), ("X=-e; ruby $X 'system 1'", "-e"),
+                                ("X=--eval; node $X 'fs.rmSync(1)'", "--eval"), ("X=-r; php $X 'echo 1;'", "-r")):
             with self.subTest(command):
-                self.assertEqual(self.inline(command), [(command.split()[1], option)])
+                self.assertEqual(self.inline(command)[0][:2], (command.split()[1], option))
                 self.assertRefused(command, INLINE_WORDING)
-        for command in ("X=scripts/x.js; node $X", "X=tests/x.py; python3 $X", "X=scripts/x.php; php $X"):
+        self.assertSilent("X=-p; node $X code")  # SPD-175: the program `-p` carries is read, and writes nothing
+        for command in ("X=scripts/x.js; node $X", "X=tests/x.py; python3 $X", "X=scripts/x.php; php $X",
+                        "S=scripts; node $S/x.js", "S=scripts; node \"${S}/x.js\""):  # glued, settled as one word (SPD-141)
             with self.subTest(command):  # a settled value naming a file: a program from a file, as it always was
                 self.assertEqual(self.inline(command), [])
                 self.assertSilent(command)
 
     def test_the_option_an_xargs_reads_out_of_its_input(self):
-        for command in ("printf '%s\\n' '-e code' | xargs node", "printf '%s\\n' '-e code' | xargs ruby",
-                        "printf '%s\\n' '-r code' | xargs php", "printf '%s\\n' '--eval code' | xargs node",
-                        "printf '%s\\n' '-e code' | xargs -I% node %", "echo 'eval code' | xargs deno",
-                        "{ printf '%s\\n' '-e code'; } | xargs node", "printf '%s\\n' '-e code' | xargs -0 node",
-                        "xargs node <<< '-e code'", "xargs deno <<< 'eval code'", "xargs osascript <<< '-e beep'"):
+        for command in ("printf '%s\\n' '-e rmSync' | xargs node", "printf '%s\\n' '-e system' | xargs ruby",
+                        "printf '%s\\n' '-r code' | xargs php", "printf '%s\\n' '--eval rmSync' | xargs node",
+                        "printf '%s\\n' '-e rmSync' | xargs -I% node %", "echo 'eval Deno.removeSync' | xargs deno",
+                        "{ printf '%s\\n' '-e rmSync'; } | xargs node", "printf '%s\\n' '-e rmSync' | xargs -0 node",
+                        "xargs node <<< '-e rmSync'", "xargs deno <<< 'eval Deno.removeSync'", "xargs osascript <<< '-e beep'",
+                        "echo '-e rmSync' | xargs node", "echo '-e rmSync' | xargs -I% node %"):
             with self.subTest(command):
                 self.assertEqual(len(self.inline(command)), 1, self.analysis(command).findings)
                 self.assertRefused(command, INLINE_WORDING)
                 self.assertSilent(command, agent_id=None)
+        for command in ("printf '%s\\n' '-e code' | xargs node", "xargs node <<< '-e code'", "echo '-e code' | xargs node"):
+            with self.subTest(command):  # SPD-175: the program the input spells is read, and writes nothing
+                self.assertEqual(self.inline(command), [])
+                self.assertSilent(command)
 
     def test_an_input_the_line_does_not_spell_leaves_the_option_position_unreadable(self):
         for command in self.UNSPELLED_INPUT:
@@ -6021,7 +10591,12 @@ class RuntimeShellTest(BashHookCase):
     `deno task --eval` (deno task --help), `pnpm exec`, `pnpm dlx -c` and the implicit `pnpm CMD` (pnpm.io), and
     `yarn exec` (yarnpkg.com, berry's executePackageShellcode) -- and analyse reads the text with analyse_new_shell and
     the words as a wrapper's command.  A command a file holds (`npm run`, `deno task <name>`, `bun run`, `pnpm run`,
-    `yarn <script>`) is SPD-145's and unchanged."""
+    `yarn <script>`) is a script runner, read by shell/script_runners since SPD-168 (ScriptRunnerTest): here the home holds
+    a package.json that defines no script, so a runner that names none runs nothing of the project's."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "package.json").write_text('{"name": "x"}\n', encoding="utf-8")
 
     # Each runs a git write verb through the subcommand: Law 7 for a member, Spud's own for him.
     WRITES = (
@@ -6051,10 +10626,12 @@ class RuntimeShellTest(BashHookCase):
     )
     # A command a file holds, a package's own binary, or no shell at all: unchanged, for every caller.
     UNCHANGED = (
-        "npm test", "npm run build", "npm install", "npm run-script build", "npx tsc --noEmit", "npm exec", "npm explore x",
-        "deno task dev", "deno task", "bun run build", "bun run scripts/x.ts", "bun exec", "bun install", "bunx prettier .",
-        "pnpm run build", "pnpm install", "pnpm test", "pnpm dlx create-vite x", "yarn build", "yarn install", "yarn exec",
+        "npm test", "npm install", "npx tsc --noEmit", "npm exec", "npm explore x", "npm --version", "npm",
+        "deno task", "bun run build", "bun run scripts/x.ts", "bun exec", "bun install", "bunx prettier .",
+        "pnpm install", "pnpm test", "pnpm dlx create-vite x", "yarn build", "yarn install", "yarn exec",
     )
+    # ... and a runner that names a script is SPD-168's: refused a member whose project allows no name, git or no git
+    NAMES_A_SCRIPT = ("npm run build", "npm run-script build", "pnpm run build", "deno task dev")
 
     def analysis(self, command):
         m = load_spud_module()
@@ -6079,6 +10656,11 @@ class RuntimeShellTest(BashHookCase):
                 self.assertNotIn("git", self.analysis(command).kinds)
                 self.assertSilent(command)
                 self.assertSilent(command, agent_id=None)
+        for command in self.NAMES_A_SCRIPT:
+            with self.subTest(command):
+                self.assertNotIn("git", self.analysis(command).kinds)
+                self.assertRefused(command, RUNNER_WORDING)
+                self.assertSilent(command, agent_id=None)
 
     def test_text_the_hook_cannot_read_is_unknown_as_for_sh_c(self):
         """An unsettled variable or a substitution where the text or the subcommand stands: the command word the hook
@@ -6096,8 +10678,8 @@ class RuntimeShellTest(BashHookCase):
     def test_what_the_text_runs_is_read_as_a_shell_reads_it(self):
         """The text is a shell's, so every other reading reaches into it: an inline program, a write the path rule
         holds, a database call, and a spud call."""
-        self.assertRefused("npx -c \"node -e 'x'\"", INLINE_WORDING)
-        self.assertRefused("bun exec 'python3 -c 1'", INLINE_WORDING)
+        self.assertRefused("npx -c \"node -e 'fs.rmSync(1)'\"", INLINE_WORDING)
+        self.assertRefused("bun exec 'python3 -c \"import os; os.remove(1)\"'", INLINE_WORDING)
         self.assertRefused("bun exec 'echo x > CLAUDE.md'", "deliverables")
         self.assertRefused("pnpm exec -c 'sqlite3 x.db'", "spud sql --readonly")
         self.assertRefused("yarn exec 'git push; ls'", "Law 7")
@@ -6108,8 +10690,8 @@ class RuntimeShellTest(BashHookCase):
         """SPD-152 read `deno task --eval` as deno's `--eval` carrying a program; it is a task's text, read as a shell."""
         self.assertEqual([f for f in self.analysis("deno task --eval 'echo hi'").findings if f[0] == "inline"], [])
         self.assertSilent("deno task --eval 'echo hi'")
-        self.assertRefused("deno eval 'x'", INLINE_WORDING)  # deno's own eval is still a program
-        self.assertRefused("deno task --eval \"deno eval 'x'\"", INLINE_WORDING)
+        self.assertRefused("deno eval 'Deno.removeSync(1)'", INLINE_WORDING)  # deno's own eval is still a program
+        self.assertRefused("deno task --eval \"deno eval 'Deno.removeSync(1)'\"", INLINE_WORDING)
 
 
 # A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
@@ -6243,8 +10825,9 @@ class ShellSnapshotTest(ShellSnapshotCase):
             self.silent_for_everyone(cmd)
         # SPD-150: the alias (python=python3) still shadows the program; the words after it are the member's own, so an
         # inline program behind one is refused exactly as it is spelled out, and stays Spud's.
-        self.refused_for_members("python -c pass", INLINE_WORDING)
-        self.assertSilent("python -c pass", agent_id=None)
+        self.refused_for_members("python -c 'import os; os.remove(1)'", INLINE_WORDING)
+        self.assertSilent("python -c 'import os; os.remove(1)'", agent_id=None)
+        self.silent_for_everyone("python -c pass")  # SPD-175: a program whose text writes nothing runs
 
     def test_a_recursive_alias_terminates(self):
         """`alias ls='ls -G'` and `ll='ls -lh'`: zsh does not expand a name again inside its own expansion."""
@@ -6480,8 +11063,22 @@ class RealShellSnapshotTest(BashHookCase):
             with self.subTest(cmd):
                 r = self.real_bash(cmd)
                 self.assertNotEqual(r.decision, "deny", (cmd, r.reason))
-        # ... and one a member ran all day until SPD-150, refused now whatever this Mac's profile says (InlineProgramTest)
-        self.assertIn(INLINE_WORDING, self.real_bash("python3 -c pass").reason)
+        # ... and one a member ran all day, refused by SPD-150 and allowed again by SPD-175 since its text writes nothing,
+        # while one whose text writes is refused whatever this Mac's profile says (InlineProgramTest)
+        self.assertNotEqual(self.real_bash("python3 -c pass").decision, "deny")
+        self.assertIn(INLINE_WORDING, self.real_bash("python3 -c 'import os; os.remove(1)'").reason)
+
+    def test_a_function_that_hands_its_words_to_git_reads_them(self):
+        """SPD-203: oh-my-zsh defines `__git_prompt_git () { GIT_OPTIONAL_LOCKS=0 command git "$@" }`, which ran a
+        member's push past Law 7 until the body was read with the call's words (FunctionWordsTest)."""
+        name = "__git_prompt_git"
+        if name not in self.table.functions:
+            self.skipTest("this profile defines no %s" % name)
+        r = self.real_bash(name + " push")
+        self.assertEqual(r.decision, "deny", r)
+        self.assertIn("Law 7", r.reason)
+        r = self.real_bash(name + " status")
+        self.assertNotEqual(r.decision, "deny", r.reason)
 
 
 class NamedCoprocTest(BashHookCase):
@@ -8019,7 +12616,7 @@ class FunctionShadowTest(BashHookCase):
         self.assertIn(("function", "sqlite3"), self.finding("sqlite3() { true; }; sqlite3 x.db"))
 
     def test_a_name_the_hook_does_not_dispatch_on_changes_nothing(self):
-        for ok in ("ls() { true; }; ls", "make() { true; }; make all", "cat() { true; }; cat f",
+        for ok in ("ls() { true; }; ls", "cc() { true; }; cc all", "cat() { true; }; cat f",
                    "grep() { true; }; grep x f"):
             with self.subTest(ok):
                 self.silent_for_everyone(ok)
@@ -8154,7 +12751,7 @@ class FunctionShadowTest(BashHookCase):
         # the unread name may be the bypassing wrapper's own, which a function of that name shadows in turn
         self.assertEqual(self.finding("functions[$k]=true; command git status")[-1], ("function", "command"))
         # ... and a name the hook grants nothing for is still silent, as is a call by path
-        for ok in ("functions[$k]=true; ls", "functions[$k]=true; /usr/bin/git status", "functions[$k]=true; make all"):
+        for ok in ("functions[$k]=true; ls", "functions[$k]=true; /usr/bin/git status", "functions[$k]=true; cc all"):
             with self.subTest(ok):
                 self.silent_for_everyone(ok)
 
@@ -8633,6 +13230,168 @@ class WrapperDirectoryTest(BashHookCase):
             for agent_id in (AGENT_A, None):
                 with self.subTest(command=command, agent_id=agent_id):
                     self.assertSilent(command, agent_id, cwd=scratch)
+
+
+class SettledCdTargetTest(BashHookCase):
+    """SPD-147: directories.cd_target returned None for any word holding an expansion, so after `S=<dir>; cd "$S/x"` the
+    hook knew no directory and refused every relative write on the line, Spud's too (SPD-035), while SPD-127 already put
+    that very value in a redirection target, a tee operand, a git write option and a write by argument through
+    arg_writes.resolved.  SPD-126's differential over 945 member commands found a member editing a copy in its own
+    scratchpad refused with "cannot follow".  One reading of a variable holds for the directory a write is relative to as
+    well: a cd, pushd or chdir target, and an `env -C`/`sudo -D` value, are resolved as a write target is, and only a
+    value the line cannot settle (not assigned, doubted, a loop's, holding a blank, a glob or a `~` the expansion does not
+    expand, appended, a substitution) keeps the refusal."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.scratch = str(Path(tempfile.mkdtemp(prefix="spd-147-")).resolve())
+        self.addCleanup(shutil.rmtree, self.scratch, True)
+        (Path(self.scratch) / "perturb" / "collab").mkdir(parents=True)
+        (Path(self.scratch) / "perturb" / "collab" / "index.ts").write_text("a\n", encoding="utf-8")
+        (self.home.path / "ledger" / "tickets").mkdir(parents=True, exist_ok=True)
+
+    def test_the_differentials_line_is_followed(self):
+        line = "set -e\nS=%s\ncd \"$S/perturb/collab\"\nperl -i -pe 's/a/b/' index.ts" % self.scratch
+        self.assertSilent(line, agent_id=None, cwd=self.scratch)
+        # A member's in-place perl program is refused on its own since SPD-175 (its text writes), not for the directory
+        r = self.bash(line, AGENT_A, cwd=self.scratch)
+        self.assertNotIn("cannot follow", r.reason)
+        self.assertIn("runs a program `-e` carries", r.reason)
+        for agent_id in (AGENT_A, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent(line.replace("perl -i -pe 's/a/b/' index.ts", "echo x > index.ts"), agent_id, cwd=self.scratch)
+                self.assertSilent(line.replace("perl -i -pe 's/a/b/' index.ts", "sed -i '' s/a/b/ index.ts"), agent_id, cwd=self.scratch)
+                self.assertSilent(line.replace("perl -i -pe 's/a/b/' index.ts", "perl -pe 's/a/b/' index.ts > out.ts"), agent_id,
+                                  cwd=self.scratch)
+
+    def test_a_settled_directory_is_read_where_it_leads(self):
+        home = self.home.path
+        for cd in ('S=%s; cd "$S/ledger/tickets"', 'S=%s/ledger; cd ${S}/tickets', "S=%s/ledger/tickets; cd $S",
+                   'S=%s/ledger; pushd "$S/tickets"', 'S=%s; cd -P "$S/ledger/tickets"'):
+            cd = cd % home
+            with self.subTest(cd):
+                self.assertRefused(cd + "; echo x > SPD-001.md", "generated", AGENT_C)
+                self.assertRefused(cd + "; perl -i -pe s/a/b/ SPD-001.md", "generated", AGENT_C)
+                self.assertRefused(cd + "; echo x > SPD-001.md", "Law 1", agent_id=None)
+        self.assertRefused('S=%s/ledger/tickets; env -C "$S" touch SPD-001.md' % home, "generated", AGENT_C)
+        # the value in force where the cd runs, not the line's last
+        self.assertRefused('S=%s/ledger/tickets; cd "$S"; S=%s; echo x > SPD-001.md' % (home, self.scratch), "generated", AGENT_C)
+
+    def test_an_unsettled_value_stays_unfollowable(self):
+        s = self.scratch
+        for cd in ('cd "$S/perturb"', 'true && S=%s; cd "$S"' % s, '(S=%s); cd "$S"' % s, 'for S in %s; do :; done; cd "$S"' % s,
+                   'for i in 1; do S=%s; cd "$S"; done' % s, 'S="%s/a b"; cd "$S"' % s, "S='%s/*'; cd $S" % s, "S='~'; cd \"$S\"",
+                   'S=%s; S+=/perturb; cd "$S"' % s, 'S=; cd "$S"', 'cd "$(pwd)"', 'S=%s; cd "$S$T"' % s, "S=-; cd \"$S\""):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(cd=cd, agent_id=agent_id):
+                    self.assertRefused(cd + "; echo x > note.txt", "cannot follow", agent_id, cwd=s)
+        # a wrapper's directory: Spud hears the directory's reason, a member SPD-043's var-word one first
+        self.assertRefused('S=%s; env -C "$S$T" touch f' % s, "cannot follow", agent_id=None, cwd=s)
+        self.assertRefused('S=%s; env -C "$S$T" touch f' % s, WORD_WORDING, cwd=s)
+        self.assertSilent('S=%s; env -C "$S/perturb" touch f' % s, agent_id=None, cwd=s)
+
+
+class GluedByNameWordTest(BashHookCase):
+    """SPD-141: a word the hook reads by name (SPD-043: git's options and the value -c sets, a wrapper's options, a shell's)
+    settled only a word that is an expansion whole, so `git -C $D status` was read with D's value in place while
+    `git --git-dir=$D/.git status` on the same line earned var-word, and `P=cat; git -c core.pager=$P log` was refused
+    although core.pager=cat is inert.  The glued word is now read as SPD-127 reads a write target (arg_writes.resolved):
+    every expansion in it put in place when the line settled its value as one plain word, and the word then read as
+    spelled; a value the line cannot settle (not assigned, doubted, holding a blank or a glob, one of two expansions
+    unsettled) keeps the var-word refusal.  Also (proposal 325): a double-quoted `"${NAME}"` reached the reading with its
+    braces as quoted glob sentinels, so resolved settled `$S`, `"$S"` and `${S}` but not `"${S}"`, in a write target and,
+    after SPD-147, in a cd target; it is now marked as `"$S"` is and settled the same way."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spd-141-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.repo = self.out / "repo"
+        (self.repo / ".git" / "objects").mkdir(parents=True)
+        (self.repo / ".git" / "refs" / "heads").mkdir(parents=True)
+        (self.repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (self.repo / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+        (self.home.path / "ledger" / "tickets").mkdir(parents=True, exist_ok=True)
+
+    def finding(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_the_tickets_probed_lines_are_read_with_the_value_in_place(self):
+        d = self.out
+        for spelled in ("--git-dir=$D/.git", "--git-dir=${D}/.git", '--git-dir="$D/.git"', '--git-dir="${D}/.git"',
+                        '"--git-dir=$D/.git"'):
+            with self.subTest(spelled):
+                self.assertEqual(self.finding("D=%s; git %s status" % (d, spelled)),
+                                 [("git", ("status", None)),
+                                  ("git-repo", ("--git-dir=%s/.git" % d, "%s/.git" % d, frozenset({str(self.home.path)})))])
+        self.assertEqual(self.finding("P=cat; git -c core.pager=$P log"), self.finding("git -c core.pager=cat log"))
+        self.assertEqual(self.finding('P=cat; git -c "core.pager=$P" log'), self.finding("git -c core.pager=cat log"))
+        self.assertEqual(self.finding("P=vim; git -c core.editor=$P log"), self.finding("git -c core.editor=vim log"))
+
+    def test_a_settled_glued_word_is_silent_where_its_value_is(self):
+        home = self.home.path
+        for ok in ("D=%s; git --git-dir=$D/.git status" % home, "D=%s; git --work-tree=${D}/.claude/worktrees/w status" % home,
+                   'D=%s; git --git-dir="${D}/.git" log' % home, "P=cat; git -c core.pager=$P log",
+                   "P=cat; git -c core.pager=\"$P\" log", "K=pager; git -c core.$K=cat log"):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(ok=ok, agent_id=agent_id):
+                    self.assertSilent(ok, agent_id)
+
+    def test_the_value_in_place_earns_its_own_refusal(self):
+        r = self.assertRefused("D=%s; git --git-dir=$D/.git status" % self.repo, "outside", AGENT_C)
+        self.assertIn(str(self.repo), r.reason)
+        self.assertRefused("P=vim; git -c core.pager=$P log", "Law 7", AGENT_C)
+        self.assertRefused("E=vim; git -c core.$E=x log", "Law 7", AGENT_C)
+        self.assertSilent("P=vim; git -c core.pager=$P log", agent_id=None)
+
+    def test_an_unsettled_glued_word_stays_refused(self):
+        s = self.out
+        for cmd in ("git --git-dir=$D/.git status", "true && D=%s; git --git-dir=$D/.git status" % s,
+                    "(D=%s); git --git-dir=$D/.git status" % s, "D=%s; git --git-dir=$D$E/.git status" % s,
+                    "D='%s/a b'; git --git-dir=$D/.git status" % s, "D='%s/*'; git --git-dir=$D/.git status" % s,
+                    "for D in %s; do git --git-dir=$D/.git status; done" % s, "D=%s; D+=/x; git --git-dir=$D/.git status" % s,
+                    "git -c core.pager=$P log", "P='less -R'; git -c core.pager=$P log", "P='c*t'; git -c core.pager=$P log",
+                    "true && P=cat; git -c core.pager=$P log", "git --git-dir=$(pwd)/.git status", "P=cat; git -c core.pager=${P:-x} log",
+                    # bash splits at IFS's characters; a `~` an expansion gives stays literal
+                    "IFS=.; P=cat; git -c core.pager=$P log", "D='~'; git --git-dir=$D/.git status"):
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(cmd=cmd, agent_id=agent_id):
+                    self.assertEqual(self.bash(cmd, agent_id).decision, "deny")
+        # the repository option's own reason comes first, as for `git --git-dir=$D status` (SPD-047); var-word stays found
+        self.assertRefused("D=%s; git --git-dir=$D$E/.git status" % s, "cannot resolve", AGENT_C)
+        self.assertIn(("var-word", "--git-dir=$D$E/.git"), self.finding("D=%s; git --git-dir=$D$E/.git status" % s))
+        self.assertRefused("D=%s; nice -n $D$E git status" % s, WORD_WORDING, AGENT_C)
+        self.assertIn(("var-word", "core.pager=$P"), self.finding("git -c core.pager=$P log"))
+        self.assertIn(("var-word", "core.pager=$P"), self.finding("P='less -R'; git -c core.pager=$P log"))
+
+    def test_a_quoted_braced_name_is_settled_in_a_write_target(self):
+        home, s = self.home.path, self.out
+        for write in ('S=%s/ledger/tickets; echo x > "${S}/SPD-001.md"', 'S=%s/ledger; touch "${S}/tickets/SPD-001.md"',
+                      'S=%s/ledger/tickets; echo x | tee "${S}/SPD-001.md"'):
+            with self.subTest(write):
+                self.assertRefused(write % home, "generated", AGENT_C)
+        for ok in ('S=%s; echo x > "${S}/f"', 'S=%s; touch "${S}/f"', 'S=%s; echo x | tee "${S}"/f'):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(ok=ok, agent_id=agent_id):
+                    self.assertSilent(ok % s, agent_id, cwd=str(s))
+        # unsettled, it keeps the unresolvable-target refusal
+        for bad in ('echo x > "${S}/f"', 'S="%s/a b"; echo x > "${S}/f"' % s, 'true && S=%s; echo x > "${S}/f"' % s):
+            with self.subTest(bad):
+                self.assertRefused(bad, VARIABLE_WORDING, AGENT_A, cwd=str(s))
+
+    def test_a_quoted_braced_name_is_settled_in_a_cd_target(self):
+        home, s = self.home.path, self.out
+        self.assertRefused('S=%s/ledger/tickets; cd "${S}"; echo x > SPD-001.md' % home, "generated", AGENT_C)
+        self.assertRefused('S=%s/ledger; pushd "${S}/tickets"; echo x > SPD-001.md' % home, "generated", AGENT_C)
+        for agent_id in (AGENT_A, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent('S=%s; cd "${S}"; echo x > note.txt' % s, agent_id, cwd=str(s))
+        for bad in ('cd "${S}"; echo x > note.txt', 'S="%s/a b"; cd "${S}"; echo x > note.txt' % s):
+            with self.subTest(bad):
+                self.assertRefused(bad, "cannot follow", AGENT_A, cwd=str(s))
 
 
 class GitVerbProgramOptionTest(BashHookCase):
@@ -9350,7 +14109,7 @@ class DescriptorRedirectTest(BashHookCase):
 
     def test_the_dup_operator_keeps_its_descriptor_and_its_close(self):
         for ok in ("echo x >& 3", "echo x >&3", "echo x 1>&3", "echo x 2>&1", "echo x >&-", "echo x >& -",
-                   "echo x >&2", "make 2>&1", "exec 3>&1", "cd docs && echo x >& 3", "cd docs && echo x >&-"):
+                   "echo x >&2", "cc --version 2>&1", "exec 3>&1", "cd docs && echo x >& 3", "cd docs && echo x >&-"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
@@ -9681,7 +14440,7 @@ class ArgumentWriteTest(BashHookCase):
 
     def test_a_target_the_hook_cannot_resolve_is_refused(self):
         for command in ("cp tests/src.txt $D", "rm \"$F\"", "touch $(date).log", "mkdir -p \"$D\"/x", "sed -i '' s/a/b/ $F",
-                        "for f in a b; do touch tests/$f; done", "ln -s /tmp/x `pwd`/x", "cp -t \"$D\" tests/src.txt",
+                        "for f in $X; do touch tests/$f; done", "ln -s /tmp/x `pwd`/x", "cp -t \"$D\" tests/src.txt",
                         "cp \"$SRC\" tests/out/", "mv \"$SRC\" tests/out/"):  # the name a source takes inside a directory
             with self.subTest(command):
                 self.assertRefused(command, VARIABLE_WORDING)
@@ -10559,18 +15318,22 @@ class SpelledWriteTest(TreeWriteCase):
         self.assertRefused("split -a 3 a.tar out/x", "deliverables", agent_id=AGENT_I)
 
     def test_perl_in_place_and_its_backup(self):
-        # SPD-150: perl's -e and -E are inline programs, refused a member before its files are reached, so the silent
-        # lines here name perl's other program, a file; each of them was silent for the same reason before that ticket.
+        # SPD-150: perl's -e and -E are inline programs, refused a member where their text writes (SPD-175) -- and -i is
+        # a write marker, so an inline -i edit is refused before its files are reached -- so the silent lines with -i here
+        # name perl's other program, a file; each of them was silent for the same reason before that ticket.
         for command in ("perl -pi script.pl bin/spud", "perl -0pi script.pl tests/x.txt", "perl -pi.bak script.pl tests/x.txt",
                         "perl script.pl docs/x.md", "perl -p script.pl docs/x.md", "perl -Ilib script.pl docs/x.md",
-                        "find tests/out -exec perl -pi script.pl {} +"):
+                        "find tests/out -exec perl -pi script.pl {} +",
+                        # a program the line spells whose text writes nothing, which SPD-175 lets run
+                        "perl -pe s/a/b/ docs/x.md", "perl -ne 'print if /x/' docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'"):
             with self.subTest(command):
                 self.assertSilent(command, agent_id=AGENT_A)
-        for command in ("perl -pi -e s/a/b/ bin/spud", "perl -0pi -e s/a/b/ tests/x.txt", "perl -pe s/a/b/ docs/x.md",
-                        "perl -ne 'print if /x/' docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'",
-                        "sleep_ms() { perl -e 'select undef, undef, undef, $ARGV[0]' \"$1\"; }; sleep_ms 20"):  # the differential's
+        # ... and perl reads its switches past -e's program, so a word it reads there that the line does not settle may
+        # be a -i or another -e: the differential's `"$1"`, read in a body the line defines, stays refused
+        for command in ("perl -pi -e s/a/b/ bin/spud", "perl -0pi -e s/a/b/ tests/x.txt",
+                        "sleep_ms() { perl -e 'select undef, undef, undef, $ARGV[0]' \"$1\"; }; sleep_ms 20"):
             with self.subTest(command):
-                self.assertRefused(command, INLINE_WORDING, agent_id=AGENT_A)  # SPD-150, whatever the files it edits
+                self.assertRefused(command, INLINE_WORDING, agent_id=AGENT_A)  # -i, whatever the files it edits
         for command in ("perl -pe s/a/b/ docs/x.md", "perl -e 'select(undef,undef,undef,0.5)'"):  # Spud keeps his
             with self.subTest(command):
                 self.assertSilent(command, agent_id=None)
@@ -10637,7 +15400,7 @@ class SpelledWriteTest(TreeWriteCase):
                                 ("curl -w @fmt https://example.com/x", ANYWHERE_WORDING),
                                 ("curl -o out/f \"$(cat list)\"", ANYWHERE_WORDING),  # may be -o anything
                                 ("wget -e robots=off --no-hsts -P out https://example.com/x", ANYWHERE_WORDING),
-                                ("for n in a b; do curl -o \"$n.html\" https://example.com/$n; done", VARIABLE_WORDING)):
+                                ("for n in a b; do curl -o \"$n.html\" https://example.com/$n; done", "deliverables")):  # a.html (SPD-146)
             with self.subTest(command):
                 self.assertRefused(command, needle, agent_id=AGENT_G)
         self.assertRefused("sort --compress-program='git push' -o out/s a.tar", "Law 7", agent_id=AGENT_G)
@@ -11037,11 +15800,13 @@ class TargetResolutionTest(BashHookCase):
         self.assertEqual([w[1] for w in a.arg_writes], ["$S/f"])
 
     def test_a_later_assignment_a_compound_and_a_loop(self):
-        """A later assignment wins in both shells; an assignment the hook doubts (a compound command's, a loop's own
-        variable) settles nothing, and the raw word keeps the refusal it had."""
+        """A later assignment wins in both shells; an assignment the hook doubts (a compound command's) settles nothing,
+        and the raw word keeps the refusal it had.  A loop's own variable over words the line settles is read once per
+        word (SPD-146), and over words it does not settle stays raw."""
         self.assertEqual(self.targets("S=%s/a; S=%s/b; echo hi > $S.f" % (PROBE, PROBE)), ["%s/b.f" % PROBE])
         self.assertEqual(self.targets("S=%s/a; { S=%s/b; }; echo hi > $S.f" % (PROBE, PROBE)), ["$S.f"])
-        self.assertEqual(self.targets("for S in %s/a; do echo hi > $S.f; done" % PROBE), ["$S.f"])
+        self.assertEqual(self.targets("for S in %s/a; do echo hi > $S.f; done" % PROBE), ["%s/a.f" % PROBE])
+        self.assertEqual(self.targets("for S in $X; do echo hi > $S.f; done"), ["$S.f"])
 
     # -- what the hook answers ---------------------------------------------------------
 
@@ -11077,7 +15842,7 @@ class TargetResolutionTest(BashHookCase):
 
     def test_a_target_the_line_does_not_settle_keeps_its_refusal(self):
         for command in ("echo x > $S/x.md", "printf x | tee $S/x.md", "echo x > $(pwd)/x.md",
-                        "for S in docs tests; do echo x > $S/x.md; done", "S=$OTHER; echo x > $S/x.md"):
+                        "for S in $X docs; do echo x > $S/x.md; done", "S=$OTHER; echo x > $S/x.md"):
             with self.subTest(command):
                 self.assertRefused(command, VARIABLE_WORDING)
                 self.assertRefused(command, VARIABLE_WORDING, agent_id=None)  # Spud too, since SPD-091
@@ -11153,6 +15918,264 @@ class TargetResolutionTest(BashHookCase):
         self.assertRefused("N=docs; %s > $N/log.txt" % log, "deliverables")
 
 
+class LoopWordTargetTest(BashHookCase):
+    """SPD-146: SPD-121 refused every write target holding an expansion the hook cannot settle, and SPD-127 settled only
+    what the line assigns plainly, so a for loop's variable and a name built with a substitution stayed raw and refused,
+    though a loop's words are on the line.  SPD-126's differential over the 945 Bash commands spudagents ran that name
+    dd, sort, curl, mkfifo, mktemp, split, perl, tar, patch or wget found 16 new refusals, 12 of exactly this shape, every
+    one writing into the session's own scratchpad.
+
+    A `for NAME in WORD ...` loop over words the line settles -- literal words, values the line settled, or a glob that
+    matches files now -- gives NAME one value per word, and a write target naming NAME is read once per value, as a glob
+    target is read once per match.  A loop the line cannot settle (`$@`, an unsettled `$x`, a substitution, a word that may
+    start with `-`, a brace list, a glob matching nothing) stays refused.  `$(basename WORD [SUFFIX])` is settled: exactly,
+    where WORD settles; where it does not, as one name inside the directory it is written relative to (the result holds no
+    `/`), while the substitution stands in double quotes after something the word spells, so it is one word and no option.
+    AGENT_A plans home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        home = self.home.path
+        for d in ("tests/out", "tests/glob", "docs"):
+            (home / d).mkdir(parents=True, exist_ok=True)
+        for f in ("tests/glob/g1.txt", "tests/glob/g2.txt", "docs/x.md"):
+            (home / f).write_text("orig\n", encoding="utf-8")
+        self.scratchpad = "/private/tmp/claude-%d/-Users-Someone-Personal-Spud/%s/scratchpad" % (os.getuid(), SESSION)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def writes(self, command):
+        """Every write target the analysis recorded, in order: the redirections' and tee's, then the writes by argument."""
+        a = self.analysis(command)
+        return [t for t, _cwds in a.redirects] + [w[1] for w in a.arg_writes]
+
+    # -- a for loop's words ------------------------------------------------------------
+
+    def test_the_tickets_own_line_reads_each_word(self):
+        self.assertEqual(self.writes("for f in a b; do touch tests/$f; done"), ["tests/a", "tests/b"])
+        self.assertSilent("for f in a b; do touch tests/$f; done")
+
+    def test_every_write_channel_reads_the_loop_once_per_word(self):
+        for command, recorded in (
+            ("for f in a b; do echo x > tests/$f.txt; done", ["tests/a.txt", "tests/b.txt"]),
+            ("for f in a b; do echo x | tee tests/$f; done", ["tests/a", "tests/b"]),
+            ("for f in a b\ndo\n  mkdir -p tests/$f\ndone", ["tests/a", "tests/b"]),
+            ("S=tests; for f in a b; do touch $S/$f; done", ["tests/a", "tests/b"]),
+            ("S=tests/out; for f in $S/x $S/y; do touch $f; done", ["tests/out/x", "tests/out/y"]),
+            ("for a in x y; do for b in 1 2; do touch tests/$a$b; done; done", ["tests/x1", "tests/x2", "tests/y1", "tests/y2"]),
+            ("for f in a b; do curl -sS -o tests/$f.html https://example.com/$f; done", ["tests/a.html", "tests/b.html"]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), recorded)
+                self.assertSilent(command)
+
+    def test_one_value_stands_for_the_name_in_every_word_of_a_command(self):
+        """Each reading is one pass of the body: a source and a destination naming the variable take the same value."""
+        a = self.analysis("for f in a b; do cp tests/$f.in tests/out/$f; done")
+        self.assertEqual([(w[1], w[3]) for w in a.arg_writes], [("tests/out/a", ("tests/a.in",)), ("tests/out/b", ("tests/b.in",))])
+
+    def test_a_glob_list_is_read_once_per_file_it_matches(self):
+        self.assertEqual(self.writes("for f in tests/glob/*.txt; do cp $f $f.bak; done"),
+                         ["tests/glob/g1.txt.bak", "tests/glob/g2.txt.bak"])
+        self.assertSilent("for f in tests/glob/*.txt; do cp $f $f.bak; done")
+        r = self.assertRefused("for f in tests/glob/*.txt; do cp $f docs/; done", "deliverables")
+        self.assertIn("docs/g1.txt", r.reason)
+
+    def test_each_word_is_held_to_the_path_rule(self):
+        r = self.assertRefused("for d in tests docs; do echo x > $d/x.md; done", "deliverables")
+        self.assertIn("docs/x.md", r.reason)
+        self.assertNotIn(VARIABLE_WORDING, r.reason)
+        self.assertRefused("for f in a .git; do mkdir -p tests/$f/hooks; done", GIT_DIR_WORDING)
+        self.assertRefused("for f in a b; do touch docs/$f.md; done", "deliverables")
+
+    def test_a_loop_the_line_does_not_settle_stays_refused(self):
+        for command in ('for f in "$@"; do touch tests/$f; done', "for f in $X; do touch tests/$f; done",
+                        "for f in $(ls); do touch tests/$f; done", "for f in `ls`; do touch tests/$f; done",
+                        "for f; do touch tests/$f; done", "for f in 'a b'; do touch tests/$f; done",
+                        "for f in -rf x; do touch tests/$f; done", "for f in a{1,2}; do touch tests/$f; done",
+                        "for f in tests/none*.txt; do touch $f.x; done", "for f in 'a*'; do touch tests/$f; done",
+                        "for f in ~/x; do touch tests/$f; done", "for a b in 1 2; do touch tests/$a; done",
+                        "while read f; do touch tests/$f; done", "select f in a b; do touch tests/$f; done",
+                        "for f in a b; do read f; touch tests/$f; done", "for f in a b; do f=$X; touch tests/$f; done",
+                        "for f in a b; do unset f; touch tests/$f; done",
+                        "for f in a b; do g() { touch tests/$f; }; g; done",
+                        "for f in a b; do :; done; touch tests/$f",
+                        "for f in a; do for f in b; do :; done; touch tests/$f; done"):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING)
+
+    # -- basename -----------------------------------------------------------------------
+
+    def test_a_basename_of_a_settled_word_is_its_result(self):
+        for command, recorded in (
+            ('touch "tests/$(basename /x/y/z.txt)"', ["tests/z.txt"]),
+            ("touch tests/$(basename /x/y/z.txt)", ["tests/z.txt"]),
+            ('touch "tests/$(basename /x/y/z.txt .txt).md"', ["tests/z.md"]),
+            ('touch "tests/$(basename -- /x/y/z.txt)"', ["tests/z.txt"]),
+            ('touch "tests/$(basename /x/y/)"', ["tests/y"]),
+            ('F=/x/y/z.txt; touch "tests/$(basename "$F")"', ["tests/z.txt"]),
+            ('F=/x/y/z.txt; out=$(basename "$F"); touch "tests/$out"', ["tests/z.txt"]),
+            ('F=/x/y/z.txt; out="$(basename $F)"; touch tests/$out', ["tests/z.txt"]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), recorded)
+                self.assertSilent(command)
+        r = self.assertRefused('touch "docs/$(basename /x/y/z.md)"', "deliverables")
+        self.assertIn("docs/z.md", r.reason)
+
+    def test_a_basename_of_an_unsettled_word_is_one_name_in_its_directory(self):
+        """basename's result holds no `/`: quoted after a spelled prefix it is one entry of that directory, which a glob
+        covering every name there allows and no narrower glob does."""
+        for command in ('touch "tests/$(basename $P)"', 'touch "tests/$(basename "$P" .tar).txt"',
+                        'out=$(basename "$P"); touch "tests/$out"', 'echo x > "tests/out/$(basename $P)"'):
+            with self.subTest(command):
+                self.assertSilent(command)
+        for command in ('touch "docs/$(basename $P)"', 'out=$(basename "$P"); touch "docs/$out"'):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables")
+
+    def test_a_substitution_basename_does_not_settle_stays_refused(self):
+        for command in ("touch tests/$(basename $P)", 'touch "$(basename $P)"', 'out=$(basename "$P"); touch tests/$out',
+                        'out=$(basename "$P"); touch "$out"', 'touch "tests/$(basename -a $P)"', 'touch "tests/$(dirname $P)"',
+                        'touch "tests/$(basename $P | tr a b)"', 'touch "tests/$(basename $(pwd))"', 'touch "tests/$(cat f)"',
+                        'touch "tests/$(basename /)"', "touch \"tests/$(basename '/x/a b')\"",
+                        'basename() { echo ../../docs/x.md; }; touch "tests/$(basename a)"',
+                        'PATH=/tmp/p:$PATH; touch "tests/$(basename $P)"',
+                        'if true; then out=$(basename /x/z); fi; touch "tests/$out"',
+                        'out=$(basename /x/z); read out; touch "tests/$out"', 'out=$(basename /x/z) touch "tests/$out"'):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING)
+
+    def test_an_assigned_basename_is_what_it_printed_where_it_ran(self):
+        """The substitution runs where the assignment does, so a later assignment of its operand changes nothing."""
+        self.assertEqual(self.writes('F=/x/.git; out=$(basename "$F"); F=/x/ok; touch "tests/$out"'), ["tests/.git"])
+        self.assertRefused('F=/x/.git; out=$(basename "$F"); F=/x/ok; touch "tests/$out"', GIT_DIR_WORDING)
+        self.assertEqual(self.writes('out=$(basename /x/z); out=tests/y; touch "$out"'), ["tests/y"])
+
+    # -- an assignment in a loop body (SPD-221) -------------------------------------------
+
+    def test_a_basename_assigned_in_a_loop_body_is_read_once_per_word(self):
+        """SPD-221: `out=$(basename "$f")` straight in a settled for loop's body, certain in every pass, gives `$out` the
+        value it printed for each of the loop's words, read with that word wherever the write names both."""
+        for command, recorded in (
+            ('for f in a b; do out=$(basename "$f"); touch "tests/$out"; done', ["tests/a", "tests/b"]),
+            ("for f in /x/a /y/b; do out=$(basename $f); touch tests/$out; done", ["tests/a", "tests/b"]),
+            ('for f in /x/a.txt /y/b.txt; do out=$(basename "$f" .txt); echo x > "tests/$out.md"; done',
+             ["tests/a.md", "tests/b.md"]),
+            ('for f in tests/glob/*.txt; do out=$(basename "$f" .txt); cp "$f" "tests/out/$out.bak"; done',
+             ["tests/out/g1.bak", "tests/out/g2.bak"]),
+            ('for a in x y; do for b in 1 2; do out=$(basename "/p/$a$b"); touch "tests/$out"; done; done',
+             ["tests/x1", "tests/x2", "tests/y1", "tests/y2"]),
+            ('for f in a b; do out=$(basename "$f")\n  touch "tests/$out"\ndone', ["tests/a", "tests/b"]),
+            ('for f in a b; do out=$(basename "$f") && touch "tests/$out"; done', ["tests/a", "tests/b"]),
+            ('for f in a b; do out=$(basename /x/z); touch "tests/$out$f"; done', ["tests/za", "tests/zb"]),
+            ('for f in /x/a /y/b; do out=$(basename "$f"); o2=$(basename "/q/$out.x"); touch "tests/$o2"; done',
+             ["tests/a.x", "tests/b.x"]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), recorded)
+                self.assertSilent(command)
+
+    def test_a_loop_body_basename_keeps_its_own_word(self):
+        """One pass sets both names: a write naming the loop's word and the basename takes them from the same pass."""
+        a = self.analysis('for f in a b; do out=$(basename "/x/$f.in"); cp tests/$f.in "tests/out/$out"; done')
+        self.assertEqual([(w[1], w[3]) for w in a.arg_writes],
+                         [("tests/out/a.in", ("tests/a.in",)), ("tests/out/b.in", ("tests/b.in",))])
+
+    def test_each_loop_body_basename_is_held_to_the_path_rule(self):
+        r = self.assertRefused('for d in /x/tests /x/docs; do out=$(basename "$d"); echo x > "$out/x.md"; done', "deliverables")
+        self.assertIn("docs/x.md", r.reason)
+        self.assertRefused('for f in /x/a /x/.git; do out=$(basename "$f"); mkdir -p "tests/$out/hooks"; done', GIT_DIR_WORDING)
+        self.assertSilent('for f in a b; do out=$(basename "$P$f"); touch "tests/$out"; done')  # one name in tests/
+        self.assertRefused('for f in a b; do out=$(basename "$P$f"); touch "docs/$out"; done', "deliverables")
+        r = self.assertRefused('for f in tests/a /x/b; do out=$(basename "$f"); touch "$out"; done', "deliverables")
+        self.assertIn("home:a ", r.reason)
+
+    def test_a_loop_body_basename_holds_wherever_its_loop_is_read(self):
+        """The same reading in a function body's loop, a shell's `-c` text, a loop after another that assigned the same
+        name, and a line zsh and bash read apart."""
+        for command, recorded in (
+            ('g() { for f in a b; do out=$(basename "$f"); touch "tests/$out"; done; }', ["tests/a", "tests/b"]),
+            ("""sh -c 'for f in a b; do out=$(basename "$f"); touch "tests/$out"; done'""", ["tests/a", "tests/b"]),
+            ('for f in a; do out=$(basename "$f"); touch "tests/$out"; done; for g in b; do out=$(basename "$g"); touch "tests/$out"; done',
+             ["tests/a", "tests/b"]),
+            ('for f in a b; do out=$(basename "$f"); touch "tests/$out"; done; ls (a|b)', ["tests/a", "tests/b"]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(sorted(set(self.writes(command))), recorded)
+                self.assertSilent(command)
+
+    def test_a_loop_body_basename_that_may_not_hold_stays_refused(self):
+        """Refused wherever the assignment may not have run in this pass, may not persist, or something may have
+        changed the name or the loop's word since: a condition, a pipe, the background, a subshell, a group, a function
+        body, a command's prefix, a later assignment, read, unset, an attribute, another loop over either name, eval,
+        code the hook does not read, and a write before the assignment or after the loop."""
+        for command in (
+            'for f in a b; do if true; then out=$(basename "$f"); fi; touch "tests/$out"; done',
+            'for f in a b; do true && out=$(basename "$f"); touch "tests/$out"; done',
+            'for f in a b; do false || out=$(basename "$f"); touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f") | cat; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f") & touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f") && true & touch "tests/$out"; done',
+            'for f in a b; do (out=$(basename "$f")); touch "tests/$out"; done',
+            'for f in a b; do { out=$(basename "$f"); }; touch "tests/$out"; done',
+            'for f in a b; do g() { out=$(basename "$f"); }; g; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f") true; touch "tests/$out"; done',
+            'for f in a b; do touch "tests/$out"; out=$(basename "$f"); done',
+            'for f in a b; do out=$(basename "$f"); done; touch "tests/$out"',
+            'for f in a b; do out=$(basename "$f"); out=$X; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); out+=x; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); read out; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); unset out; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); declare -n out=X; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); for out in $X; do :; done; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); f=../docs; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); for f in b a; do touch "tests/$f/$out"; done; done',
+            "for f in a b; do out=$(basename \"$f\"); eval 'out=../docs/x'; touch \"tests/$out\"; done",
+            'for f in a b; do out=$(basename "$f"); source ./x.sh; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); touch "tests/$out"; done; echo ${out:=q}',
+            'g() { out=../docs; }; for f in a b; do out=$(basename "$f"); g; touch "tests/$out"; done',
+            'basename() { echo ../../docs/x.md; }; for f in a b; do out=$(basename "$f"); touch "tests/$out"; done',
+            'PATH=/tmp/p:$PATH; for f in a b; do out=$(basename "$f"); touch "tests/$out"; done',
+            'for f in a b; do out=$(basename -a "$f"); touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f" | tr a b); touch "tests/$out"; done',
+            'for f in a b; do out=$(dirname "$f"); touch "tests/$out"; done',
+            'for f in "$@"; do out=$(basename "$f"); touch tests/$out; done',
+            'while read f; do out=$(basename "$f"); touch tests/$out; done',
+            'for f in a b; do out=$(basename "$P"); touch tests/$out; done',
+            'for f in a b; do out=$(basename "$P"); touch "$out"; done',
+            'for f in a b; do coproc out=$(basename "$f"); touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); let out=3; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); x=$(out=zz); : "${out:=q}"; touch "tests/$out"; done',
+            """sh -c 'for f in a b; do out=$(basename "$f")'; touch "tests/$out\"""",
+        ):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING)
+
+    # -- the differential's own lines ---------------------------------------------------
+
+    def test_the_differentials_lines_are_silent_in_the_scratchpad(self):
+        s = self.scratchpad
+        for command, recorded in (
+            ('S=%s; for who in juno hana gil; do curl -sS -b jar.txt -o "$S/$who.html" "https://example.com/u/$who"; done' % s,
+             ["%s/%s.html" % (s, who) for who in ("juno", "hana", "gil")]),
+            ('S=%s; for p in /data/x/a.tar.gz /data/y/b.zip; do curl -sSf -o "$S/$(basename $p)" "https://example.com$p"; done' % s,
+             ["%s/a.tar.gz" % s, "%s/b.zip" % s]),
+            ('S=%s; f=/data/x/c.tar; out=$(basename "$f"); curl -sSfL https://example.com/c -o "$S/$out"' % s, ["%s/c.tar" % s]),
+            # SPD-221: the assignment in the loop's body, which SPD-146 left refused
+            ('S=%s; for f in /data/x/a.tar.gz /data/y/b.zip; do out=$(basename "$f"); curl -sSfL -o "$S/$out" "https://example.com$f"; done' % s,
+             ["%s/a.tar.gz" % s, "%s/b.zip" % s]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), recorded)
+                self.assertSilent(command)
+        self.assertSilent('S=%s; out=$(basename "$F"); curl -sSfL https://example.com/c -o "$S/$out"' % s)
+        self.assertRefused('for who in juno hana; do curl -sS -o "docs/$who.html" https://example.com/u/$who; done',
+                           "deliverables")
+
+
 SETTLED_SNAPSHOT = """\
 # Functions
 keepvar () {
@@ -11190,6 +16213,1135 @@ class ResolvedTargetInShellTextTest(ShellSnapshotCase):
 
     def test_a_target_the_body_does_not_settle_stays_pruned(self):
         self.silent_for_everyone("datavar")
+
+
+UNREADABLE = "the hook cannot read this line"  # SPD-191: the reason a line it cannot tokenize earns, every caller
+UNREAD = "the hook cannot read part of what this line runs"  # SPD-217: text the reader did not read, refused a member
+
+
+class UnreadableLineTest(ShellSnapshotCase):
+    """SPD-191, filed by SPD-188's engineer: bash_refusal returned no reason for a line the hook could not tokenize
+    (analysis.unparseable), so any line shlex cannot split -- a quote that never closes, or a backslash ending it with
+    nothing to escape -- passed every law, for Spud and members alike.  A body the line hands another reading (a `$( )`,
+    eval's words, a `-c` string, a here-document a shell reads) marked the whole analysis the same way, so `git push; eval
+    "echo 'x"` dropped the push the outer words had already earned.  The ticket's evidence, on the SPD-188 tree: `git
+    push<newline>echo 'x` was allowed a member, and `echo x > $(echo ')' >/dev/null; echo ledger/tickets/SPD-001.md)`,
+    which split_substitutions ends at the quoted paren (SPD-194), was allowed Spud under Law 1.
+
+    The rule now: a line any part of which the hook cannot tokenize is refused to every caller -- a bound member, Spud, a
+    plain session and its subagents -- after every refusal the words it did read already earn, with a reason that names the
+    quote (or the backslash), the text from it, where it stands, and how to spell the line.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same, and in GNU bash 3.2.57; and the Bash tool's own shell, read with `ps` from a
+    member's Bash call: `/bin/zsh -c 'source <snapshot> ... && eval '<line>' < /dev/null && pwd -P >| <file>'`:
+
+    - zsh's eval parses the whole text before it runs any of it: `eval 'echo RAN1 > r1<newline>echo '\\''unbalanced'`
+      wrote nothing in zsh (`(eval):2: unmatched '`), and neither did the same line on one row after `;`, the same inside
+      `zsh -f -c "true && eval '...'"` (the Bash tool's shape), `zsh -f -c` of the text itself, or a `$( )` holding the
+      stray quote; bash's eval wrote r1, and `sh -c`, `bash -c` and `bash -c 'eval ...'` of `echo RAN > r<newline>echo
+      "unbalanced` each wrote r before they failed (`unexpected EOF while looking for matching`).  One row with `;` wrote
+      nothing in bash either.  A script read from a here-document or a file ran its first line in both shells: `sh
+      <<'EOF'`, `zsh -f <<'EOF'` (TMPPREFIX in the probe's directory), `bash -s <<< "..."`, `bash s.sh` and `zsh -f s.sh`
+      of `echo RAN > r<newline>echo 'unbalanced` each wrote r.  So an unbalanced quote at the Bash tool's top level runs
+      nothing, while the same text in bash's hands, or read as a script by either shell, runs every complete line before it.
+    - three lines both shells read whole and the hook could not tokenize, each writing in all three: `echo $'\\'' > l/r1`
+      (ANSI-C quoting, whose `\\'` shlex takes for a closing quote), `echo x > $(echo ')' >/dev/null; echo l/r2)`, and
+      `echo RAN3 > l/r3 \\` (a lone backslash at the end of eval's text).
+
+    AGENT_A plans home:tests/** and home:bin/spud; AGENT_C plans home:**."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        target = self.home.path / self.TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("orig\n", encoding="utf-8")
+        (self.home.path / "docs").mkdir(exist_ok=True)
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def unreadable_for_everyone(self, line):
+        """Refused to both members and to Spud, in the words of a line the hook cannot read."""
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, UNREADABLE, agent_id)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_refused(self):
+        push = "git push\necho 'x"
+        self.assertTrue(self.analysis(push).unparseable)
+        self.assertRefused(push, UNREADABLE)  # the push, for a member
+        self.assertRefused(push, UNREADABLE, AGENT_C)
+        ledger = "echo x > $(echo ')' >/dev/null; echo %s)" % self.TARGET
+        self.assertTrue(self.analysis(ledger).unparseable)  # SPD-194 reads the substitution; this ticket refuses the line
+        self.assertRefused(ledger, UNREADABLE, agent_id=None)  # the ledger write, for Spud
+        self.unreadable_for_everyone(push)
+        self.unreadable_for_everyone(ledger)
+
+    def test_lines_both_shells_read_whole_are_refused(self):
+        """The reading gaps the class's probes found, each a write both shells made while the hook read nothing."""
+        for line in ("git push \\", "echo x > %s \\" % self.TARGET):
+            with self.subTest(line=line):
+                self.assertTrue(self.analysis(line).unparseable)
+            self.unreadable_for_everyone(line)
+        # SPD-202 reads `$'\\''` as the shells do (AnsiCQuotingTest): the write is Law 1's for Spud, the push Law 7's
+        self.assertRefused("echo $'\\'' > %s" % self.TARGET, "Law 1", agent_id=None)
+        self.assertRefused("git push; echo $'\\''", "Law 7")
+
+    # -- text another reading takes -----------------------------------------------------------------------------------
+    def test_text_the_line_hands_another_reading_is_held_the_same(self):
+        """A shell runs the complete lines before an unbalanced one (probed): bash in `sh -c` and `bash -c` text and its
+        eval, either shell in a script it reads from a here-document or a here-string.  zsh's eval and `zsh -c` run none of
+        it, and the line is refused all the same: the hook cannot tell a stray quote from one of its own reading gaps."""
+        for line in ('sh -c "git push\necho \'x"', 'bash -c "echo x > %s\necho \'x"' % self.TARGET, "zsh -c \"echo 'x\"",
+                     "sh <<'EOF'\ngit push\necho 'x\nEOF", "bash -s <<< \"git push\necho 'x\"", 'eval "git push\necho \'x"',
+                     "x=$(echo 'x)", "echo `echo 'x`", "echo \"$(git push\necho 'x)\"", "echo $(eval \"echo 'x\")"):
+            with self.subTest(line=line):
+                self.assertTrue(self.analysis(line).unparseable)
+            self.unreadable_for_everyone(line)
+
+    def test_a_refusal_the_read_words_earn_keeps_its_reason(self):
+        """A body the hook cannot read no longer takes the outer words' refusals with it: the one they earn stands, and a
+        line that earns none is refused as one the hook cannot read."""
+        for line in ('git push; eval "echo \'x"', "git push; sh -c \"echo 'x\"", "git push $(echo 'x)"):
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertRefused(line, "Law 7")
+                self.assertRefused(line, "Law 7", AGENT_C)
+                self.assertRefused(line, UNREADABLE, agent_id=None)  # Spud is never refused git
+        line = "echo x > %s; eval \"echo 'x\"" % self.TARGET
+        self.assertRefused(line, "Law 1", agent_id=None)
+        self.assertRefused(line, "generated", AGENT_C)
+        self.assertRefused("echo x > docs/x.md; eval \"echo 'x\"", "deliverables")
+
+    # -- the reason ---------------------------------------------------------------------------------------------------
+    def test_the_reason_names_what_stops_the_reading_and_where(self):
+        reason = self.assertRefused("echo ok; echo 'unbalanced", UNREADABLE).reason
+        self.assertIn("the `'` that opens `'unbalanced` never closes", reason)
+        self.assertIn("'\\''", reason)  # ... and how to spell an apostrophe in single quotes
+        reason = self.assertRefused("echo \"it's", UNREADABLE).reason
+        self.assertIn("the `\"` that opens `\"it's` never closes", reason)
+        reason = self.assertRefused("echo x \\", UNREADABLE).reason
+        self.assertIn("the backslash that ends `echo x \\` has nothing to escape", reason)
+        reason = self.assertRefused("echo 'x" + "y" * 200, UNREADABLE).reason
+        self.assertIn("the `'` that opens `'x%s...` never closes" % ("y" * 38), reason)  # a long text is cut
+        reason = self.assertRefused("echo 'a\n\tb", UNREADABLE).reason
+        self.assertIn("the `'` that opens `'a b` never closes", reason)  # its blanks and newlines read as one space
+        reason = self.assertRefused("echo $(echo 'x)", UNREADABLE).reason
+        self.assertIn("the `'` that opens `'x` never closes in text the line hands another reading", reason)
+        reason = self.assertRefused("echo x > 'a*b", UNREADABLE).reason
+        self.assertIn("`'a*b`", reason)  # the text as the line spells it, the hook's own marks taken off
+        reason = self.assertRefused("echo 'a $(b) c", UNREADABLE).reason
+        self.assertIn("`'a $(b) c`", reason)
+
+    def test_an_alias_expansion_reads_the_words_after_it_with_their_quotes(self):
+        """The words after an alias of the shell's were read again after its body without their quotes, so `gc -m
+        "don't"` (the snapshot's `git commit --verbose`) read as unparseable: a member's commit passed before this ticket,
+        and was refused to every caller, Spud included, as a line the hook cannot read.  SPD-201 reads each word as the shell
+        passes it (AliasWordsTest): the commit is Law 7's for a member and nothing for Spud.  Text the shell itself holds
+        that the hook cannot read -- here a function whose `$$'\\''` zsh and bash quote apart (AnsiCQuotingTest; its
+        `$'it\\'s'` read as an open quote before SPD-202) -- still earns the reason, which says the text is the shell's."""
+        line = "gc -m \"don't\""
+        self.assertIn("git commit", self.refused_for_members(line, "Law 7").reason)
+        self.assertSilent(line, agent_id=None)
+        self.write_snapshot("snapshot-zsh-1700000000003-dddddd.sh", "ansi () {\n\techo $$'\\''\n}\n")
+        r = self.refused_for_members("ansi", UNREADABLE)
+        self.assertIn("in the text an alias or function of your shell runs", r.reason)
+        self.assertRefused("ansi", UNREADABLE, agent_id=None)
+
+    # -- what stays as it was -----------------------------------------------------------------------------------------
+    def test_a_line_the_hook_reads_is_answered_as_before(self):
+        """An apostrophe the line quotes, escapes or holds in a comment or a here-document body is no stray quote."""
+        for line in ("echo \"it's\"", "echo 'it'\\''s'", "echo it\\'s", "# it's a note\necho x", "cat <<'EOF'\nit's\nEOF",
+                     "x=\"$(cat <<'EOF'\nit's\nEOF\n)\"", "echo \"$(echo \"it's\")\"", "echo \"a\\\"b\"", "echo x \\\n  y",
+                     "sh -c \"echo it\\'s\"", "eval \"echo 'it'\"", "echo \"it's\" > /dev/null"):
+            with self.subTest(line=line):
+                self.assertFalse(self.analysis(line).unparseable)
+                self.assertSilent(line)
+                self.assertSilent(line, agent_id=None)
+
+    def test_a_spud_call_the_hook_cannot_read_is_no_longer_silent(self):
+        """The allow was never given (all_spud holds no unreadable line), but the call stood silent and the harness's
+        rules decided it; it is refused now, and a readable one keeps its allow."""
+        self.assertAllowed("%s --as %s member log \"it's done\"" % (self.spud_cli, AGENT_A))
+        self.assertAllowed("%s --as spud board" % self.spud_cli, agent_id=None)
+        self.assertRefused("%s --as %s member log \"it's done" % (self.spud_cli, AGENT_A), UNREADABLE)
+        self.assertRefused("%s --as spud board 'x" % self.spud_cli, UNREADABLE, agent_id=None)
+
+
+def single_quoted(text):
+    """The text as one single-quoted shell word, an apostrophe in it spelled '\\''."""
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+class AliasWordsTest(ShellSnapshotCase):
+    """SPD-201, filed by SPD-191's engineer: read_shell_name read an alias of the Bash tool's shell as its body followed by
+    the words the line spelled after it, joined again after their quotes were taken off, so a quoted word read as other
+    words.  `gc -m "don't"` (the snapshot's `git commit --verbose`) read as a line the hook cannot tokenize: a member's
+    commit passed before SPD-191, and the line was refused to every caller after it, Spud included.  A quoted word holding
+    blanks, an operator, a newline, a `$( )` or backticks read as more words or more commands than the shell runs: `ll "x;
+    git push"` was Law 7's, `ll "x; echo hi > tests/kept.txt"` refused Spud under Law 1 for a write no shell makes, and `md
+    "tests/a b"` wrote `b`.  The line aliases eval expands (SPD-059, SPD-105) joined their words the same way.
+
+    The rule now: each word after the name reaches the body's reading as the shell passes it (prepare.requoted), its
+    quoted characters still quoted and what the line left active -- a glob, a `$NAME`, a substitution -- still active, so
+    the reading behind an alias is the reading of the same words spelled after its body.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, and in GNU bash 3.2.57 with `shopt -s expand_aliases`, which printed the same: with `alias show='printf
+    "<%s>\\n"'` defined on a line before, `show "a b" 'c;d' "don't" '$(touch r1)' 'x`touch r2`' '#h' '' "e<newline>f" 'g >
+    r3' "h\\\\i" x\\ y` printed each word whole on a row of its own (`<a b>`, `<c;d>`, `<don't>`, `<$(touch r1)>`,
+    `<x`touch r2`>`, `<#h>`, `<>`, `<e<newline>f>`, `<g > r3>`, `<h\\i>`, `<x y>`) and wrote none of r1, r2 and r3; `alias
+    chain='show '; chain show 'j;touch r4'` passed `j;touch r4` as one word; and `alias show2='printf "[%s]\\n"'; eval
+    'show2 "a b" "c;touch r5" "don'\\''t" "" "#k" '\\''$(touch r6)'\\'''` printed `[a b]`, `[c;touch r5]`, `[don't]`, `[]`,
+    `[#k]` and `[$(touch r6)]` and wrote nothing.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    # Words a line may spell after an alias, each read as the same words spelled after the alias's body
+    WORDS = ("\"don't\"", "'a b'", "'a;b'", "\"a > b\"", "'a\nb'", "'$(x)'", "'`x`'", "'#h' 'a b'", "''", "\"h\\\\i\"",
+             "x\\ y", "'*'", "'$HOME/x'", "\"$HOME/x\"", "$HOME/x", "$'a b'", "\"a'b\\\"c\"", "'{a,b}'", "\\#x 'a b'",
+             "'a\tb'", "'a\rb'", "$(echo x)", "\"$(echo 'x y')\"", "\\; git\\ push", "a*b", "tests/{a,b}", "(a|b)/x",
+             "x(a|b)", "<1-3>/x", "$((1+2))", "<(echo x) y", "\"${(e)X}\"")
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "tests" / "kept.txt").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def reading(self, command):
+        """What the analysis of this line reads that a refusal rests on: whether it could tokenize it, the findings that are
+        more than "the hook cannot read a word" (which the text an alias runs does not keep), and the files it writes."""
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            a = self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+        return (a.unparseable, [f for f in a.findings if f[0] not in self.m.SHELL_TEXT_TOLERATED],
+                [(e[0], e[1]) for e in a.arg_writes], [r[0] for r in a.redirects], [(g[0], g[1]) for g in a.git_writes])
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_a_commit(self):
+        for line in ("gc -m \"don't\"", "gc -m 'it'\\''s'", "gc -m it\\'s", "gp origin \"don't\"", "_ gc -m \"don't\""):
+            with self.subTest(line=line):
+                self.assertIsNone(self.reading(line)[0])
+                self.assertIn("git ", self.refused_for_members(line, "Law 7").reason)
+                self.assertSilent(line, agent_id=None)
+        self.assertEqual(self.reading("gc -m \"don't\"")[1], [("git", ("commit", "commit"))])
+
+    def test_a_quoted_word_with_an_operator_stays_one_word(self):
+        """`;`, `&&`, `|`, `>`, a newline, `$( )` and backticks inside quotes, and an escaped `;`, are characters of the
+        word, which `ls` is handed; before, each ran a command or opened a file of its own."""
+        for line in ("ll \"x; git push\"", "ll 'x && git push'", "ll 'x | git push'", "ll \"x\ngit push\"", "ll '$(git push)'",
+                     "ll 'x`git push`'", "ll \\; git\\ push", "ll \"x; echo hi > note.txt\"", "ll 'x > note.txt'",
+                     "ll \"x; echo hi > tests/kept.txt\"", "gp origin 'x; echo hi > tests/kept.txt'"):
+            with self.subTest(line=line):
+                if line.startswith("gp"):
+                    self.refused_for_members(line, "Law 7")
+                    self.assertSilent(line, agent_id=None)
+                else:
+                    self.silent_for_everyone(line)
+        self.assertEqual((self.home.path / "tests" / "kept.txt").read_text(encoding="utf-8"), "orig\n")
+
+    def test_a_quoted_word_with_blanks_stays_one_word(self):
+        for line in ("md \"tests/a b\"", "md 'tests/a b'", "md tests/a\\ b", "md 'tests/a\tb'", "_ md \"tests/a b\""):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A)
+                self.assertSilent(line, AGENT_B)
+                self.assertRefused(line, "Law 1", agent_id=None)  # a member's deliverable
+        self.assertEqual(self.reading("md \"tests/a b\"")[2], [("mkdir", "tests/a b")])
+        self.refused_for_members("md \"tests/a b\" b", "deliverables")  # a word of its own is still one
+
+    # -- every word reads as it does after the body spelled out ---------------------------------------------------------
+    def test_the_words_read_as_they_do_after_the_body_spelled_out(self):
+        for alias, body in (("md", "mkdir -p"), ("gc -m", "git commit --verbose -m"), ("_ md", "sudo mkdir -p")):
+            for words in self.WORDS:
+                with self.subTest(alias=alias, words=words):
+                    self.assertEqual(self.reading("%s %s" % (alias, words)), self.reading("%s %s" % (body, words)))
+
+    def test_a_line_alias_eval_expands_reads_its_words_the_same_way(self):
+        """SPD-059's alias table, read where eval parses its words again: the words after the name are the eval text's
+        own, which the shell parses after the body with their quotes, as the probe's `show2` shows."""
+        for words in self.WORDS:
+            with self.subTest(words=words):
+                aliased = "alias mk='mkdir -p'; eval %s" % single_quoted("mk " + words)
+                spelled = "alias mk='mkdir -p'; eval %s" % single_quoted("mkdir -p " + words)
+                self.assertEqual(self.reading(aliased), self.reading(spelled))
+        line = "alias gp='git push'; eval %s" % single_quoted("gp origin \"don't\"")
+        self.assertIsNone(self.reading(line)[0])
+        self.refused_for_members(line, "Law 7")
+        self.assertSilent(line, agent_id=None)
+        for words in ("\"x; git push\"", "'x > note.txt'", "\"x\ngit push\""):
+            with self.subTest(words=words):
+                self.silent_for_everyone("alias e=echo; eval %s" % single_quoted("e " + words))
+        line = "alias mk='mkdir -p'; eval %s" % single_quoted("mk \"tests/a b\"")
+        self.assertSilent(line, AGENT_A)
+        self.assertRefused(line, "Law 1", agent_id=None)
+
+
+class AnsiCQuotingTest(ShellSnapshotCase):
+    """SPD-202, filed by SPD-191's engineer: shlex read ANSI-C quoting, `$'...'`, as plain single quotes, so an escaped
+    apostrophe inside one ended the quote for the hook and not for the shells.  `echo $'\\'' ; git push ; echo \\'` read
+    as one echo of one quoted word -- kinds ['other'], no finding, not unparseable -- while both shells ran the push, and
+    SPD-191's refusal of a line the hook cannot tokenize never reached it, since the misreading stays balanced.  A here-document
+    delimiter spelled that way (`<<$'EOF'`) read as `$EOF`, so the body ran to the end of the text and every line after the
+    real `EOF` was read as body.
+
+    The rule now (prepare.ansi_c_quotes, after the here-documents are taken out): a backslash escapes the next character
+    inside `$'...'`, and the string is read as its value where the shells decode it alike, a single-quoted literal: a
+    command word, a git verb, a write target, eval's and `sh -c`'s text, an alias body, a value zsh's (e) evaluates.  A
+    string holding an escape the shells decode apart keeps the old reading, an expansion the hook cannot resolve, now with its
+    quote read where the shells end it; one that never closes, and a `$$` a quote follows, which zsh and bash quote apart,
+    make the line one the hook cannot read.  A here-document delimiter is decoded the same way, and one the hook cannot know
+    (an escape read apart, bash's `$"..."`, `$$'...'`) gets no body: the lines after it are read as commands.
+
+    Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same, and in GNU bash 3.2.57(1)-release; LANG=C:
+
+    - eval of `echo $'\\'' ; echo RAN > l/r1 ; echo \\'` printed an apostrophe twice and wrote l/r1 in all three.
+    - Both shells decode \\a \\b \\e \\E \\f \\n \\r \\t \\v \\\\ \\' \\" \\?, one to three octal digits (`\\101` A, `\\0101`
+      a backspace then 1, `\\18` \\001 then 8) and one or two hex digits (`\\x41g` Ag, `\\x414` A4) alike (od -c of each value).
+      They part on the rest: `\\u0041` and `\\U...` (zsh A, bash 3.2 the text itself), `\\cA` (zsh cA, bash \\001), an
+      unknown escape (`\\z`: zsh z, bash \\z), a bare `\\x` (zsh NUL, bash \\x), a backslash-newline (zsh drops the
+      backslash, bash keeps it), and NUL (`a\\0b`: zsh keeps a NUL b, bash ends the value at a).  A value past 0x7f
+      (`\\xff`) is one byte, which a command line held as text cannot spell, and the hook leaves it undecoded too.
+    - The value is literal: `echo $'\\x24(touch s1)' $'\\x60touch s2\\x60'` printed both texts and made neither file,
+      `echo $'g*' $'{a,b}' $'~'` printed them as spelled, `echo x > $'f\\x2eo'` wrote f.o and `echo y > $'\\x24HOME'` a
+      file named $HOME; `$'\\x65cho' hi` ran echo, `eval $'echo a;echo b'` ran both, `sh -c $'echo RAN > l/shc\\necho two'`
+      wrote l/shc, `echo x > $'l/a\\x2eb'` wrote l/a.b, `( trap $'echo RAN > l/trap' EXIT; true )` wrote l/trap, and zsh's
+      `x=$'\\x24(touch l/e1)'; echo ${(e)x}` made l/e1 while `echo "$y"` of the same value printed it.
+    - Where it is ANSI-C quoting: not inside double quotes (`"$'a'"` printed $'a', and `echo "$'\\''" > l/dq ; echo RAN >
+      l/dq2` wrote both), not after an escaped `$` (`\\$'a'` printed $a), not in a here-document body (`$'a\\tb'` printed as
+      is), but inside a `$( )` in double quotes (`"$(printf '%s' $'a\\tb')"` held a tab) and in an unquoted `${u:-$'a\\tb'}`.
+      The escaped apostrophe ends nothing in any of them: `echo ${u:-$'\\''} ; echo RAN > l/b1 ; echo \\'`, the same line in
+      backticks and in `x=$( )`, wrote in all three, and so did `echo ${u:-$'\\''} '<<EOF'`, a line `echo RAN > l/hb` and
+      `EOF`, where no here-document opens.
+      After `$$` the shells part: zsh reads `$$'...'` as the pid then ANSI-C quoting and bash as the pid then single quotes,
+      so `echo $$'\\'' > /dev/null ; echo RAN > l/z ; echo '\\''` wrote l/z in zsh alone, as did `$$$$'...'` and `x$$'...'`;
+      `$$$'...'` wrote in all three, and `${$}'...'` and `"$$"'...'` in none.
+    - An unclosed one runs nothing: eval of `echo RAN > u1; echo $'a\\' ; echo RAN > u2` wrote neither file anywhere.
+    - A here-document delimiter: `<<$'EOF'`, `<<$'E\\x4fF'`, `<<x$'y'"z"` and `<<$'E\\'F'` ended at EOF, EOF, xyz and E'F in
+      both shells, `<<-$'EOF'` at a tab and EOF, and `<<\\$'E'` at $E; `<<$'A\\nB'` never ended.  They part on `<<$"EOF"` (zsh at $EOF, bash at EOF) and
+      `<<$$'E'` (zsh at $E, bash at $$E).
+    - `$"..."`: bash translates it (`$"a b"` printed a b), zsh reads `$` then double quotes (`$a b`); inside it both read
+      double-quote rules (`$"a\\"b"`).  The hook keeps reading it as text it does not decode.
+
+    AGENT_A plans home:tests/** and home:bin/spud, AGENT_C home:**, and the home is the cwd."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        target = self.home.path / self.TARGET
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def law_7(self, line):
+        """Law 7 for both members, and nothing for Spud, who is never refused git."""
+        for agent_id in (AGENT_A, AGENT_C):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "Law 7", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertSilent(line, agent_id=None)
+
+    def unresolved(self, line):
+        """A member refused a word the hook does not decode; Spud reads on."""
+        for agent_id in (AGENT_A, AGENT_C):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, "cannot resolve", agent_id)
+        with self.subTest(line=line, agent_id="spud"):
+            self.assertSilent(line, agent_id=None)
+
+    def unreadable(self, line):
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, UNREADABLE, agent_id)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence(self):
+        push = "echo $'\\'' ; git push ; echo \\'"
+        a = self.analysis(push)
+        self.assertIsNone(a.unparseable)
+        self.assertIn(("git", ("push", "push")), a.findings)
+        self.law_7(push)
+        ledger = "echo $'\\'' ; echo x > %s ; echo \\'" % self.TARGET
+        self.assertRefused(ledger, "Law 1", agent_id=None)
+        self.assertRefused(ledger, "generated", AGENT_C)
+        self.assertRefused("echo $'\\'' ; echo x > note.txt ; echo \\'", "deliverables")
+        self.assertRefused("echo $'\\'' > %s" % self.TARGET, "Law 1", agent_id=None)  # SPD-191 refused it as unreadable
+
+    def test_an_escaped_apostrophe_ends_no_ansi_c_string_wherever_it_stands(self):
+        evidence = "echo $'\\'' ; git push ; echo \\'"
+        for line in ("x=$'\\'' ; git push ; y=\\'", "echo $'it\\'s' ; git push", "echo $'\\\\\\'' ; git push ; echo \\'",
+                     "echo a$'\\''b ; git push ; echo \\'", "echo $'\\'' $'\\'' ; git push", "git push; echo $'\\''",
+                     "eval " + single_quoted(evidence), "sh -c " + single_quoted(evidence), "bash -c " + single_quoted(evidence),
+                     "x=$(%s)" % evidence, "echo \"$(%s)\"" % evidence, "echo `%s`" % evidence,
+                     "sh <<'EOF'\n%s\nEOF" % evidence, "# it's a note\n" + evidence, "cat <<EOF\nit's\nEOF\n" + evidence,
+                     "echo ${u:-$'\\''} ; git push ; echo \\'", "echo $'\\u00e9\\'' ; git push ; echo \\'",
+                     "echo $$$'\\'' ; git push ; echo \\'", "echo ${u:-$'\\''} '<<EOF'\ngit push\nEOF"):
+            with self.subTest(line=line):
+                self.assertIsNone(self.analysis(line).unparseable)
+            self.law_7(line)
+        # an unquoted `${ }`'s ANSI-C string ends where the shells end it before a here-document operator too
+        for agent_id in (AGENT_A, AGENT_C, None):
+            self.assertSilent("echo ${u:-$'\\''} ; cat <<EOF\ngit push\nEOF", agent_id)
+
+    # -- a value both shells decode alike is read as that value ---------------------------------------------------------
+    def test_a_decoded_command_word_is_the_command_it_spells(self):
+        for line in ("$'git' push", "$'\\x67it' push", "$'\\147it' push", "g$'i't push", "git $'push'", "git $'\\x70ush'",
+                     "$'\\x67\\x69\\x74' $'\\x70\\x75\\x73\\x68'", "eval $'git push'", "eval $'echo a\\ngit push'",
+                     "sh -c $'echo a\\ngit push'", "trap $'git push' EXIT", "alias gp=$'git push'; eval gp",
+                     "x=$'git'; $x push", "env $'git' push", "$'\\x67it' $'--no-pager' push"):
+            with self.subTest(line=line):
+                self.law_7(line)
+
+    def test_a_decoded_write_target_is_the_file_it_names(self):
+        for target in ("$'ledger/tickets/SPD-001.md'", "$'ledger\\x2ftickets/SPD-001.md'", "$'\\x6cedger/tickets/SPD-001.md'",
+                       "ledger/tickets/$'SPD-001\\x2emd'", "$'\\154edger'/tickets/SPD-001.md"):
+            for line in ("echo x > %s" % target, "echo x | tee %s" % target, "cp /dev/null %s" % target):
+                with self.subTest(line=line):
+                    self.assertRefused(line, "Law 1", agent_id=None)
+                    self.assertRefused(line, "generated", AGENT_C)
+        self.assertRefused("echo x > $'no\\x74e.txt'", "deliverables")
+        self.assertSilent("echo x > $'tests/\\x6b.py'")
+        # a value zsh's (e) evaluates
+        self.assertRefused("x=$'\\x24(touch note.txt)'; echo ${(e)x}", "deliverables")
+        self.assertSilent("x=$'\\x24(touch tests/k.py)'; echo ${(e)x}")
+
+    def test_a_decoded_value_is_literal(self):
+        """A `$`, a backtick, `;`, a newline or a glob character the value holds is a character of the word."""
+        for line in ("echo $'\\x24(git push)'", "echo $'\\x60git push\\x60'", "echo $'a\\x3b git push'", "echo $'a\\ngit push'",
+                     "echo $'*' $'{a,b}' $'~'", "echo $'a\\'b' \"it's\"", "printf $'%s\\n' x", "echo $'\\x27' ; echo ok",
+                     "echo $'a\\tb' > /dev/null", "echo $'\\x24HOME'", "x=$'\\x24(git push)'; echo \"$x\""):
+            with self.subTest(line=line):
+                self.assertIsNone(self.analysis(line).unparseable)
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+        self.assertAllowed("%s --as %s member log $'it\\'s done\\n'" % (self.spud_cli, AGENT_A))
+        # a target holding a literal `$` reads as the same target single-quoted, whoever writes it
+        for agent_id in (AGENT_A, AGENT_C, None):
+            with self.subTest(agent_id=agent_id):
+                decoded, spelled = self.bash("echo y > $'\\x24HOME'", agent_id), self.bash("echo y > '$HOME'", agent_id)
+                self.assertEqual((decoded.decision, decoded.reason), (spelled.decision, spelled.reason))
+
+    # -- a value the shells decode apart stays unresolved ---------------------------------------------------------------
+    def test_an_escape_the_shells_read_apart_is_not_decoded(self):
+        for word in ("$'\\u0067it'", "$'\\U00000067it'", "$'\\cGit'", "$'\\git'", "$'g\\x'", "$'g\\0it'", "$'g\\x00it'",
+                     "$'\\xe9'", "$'\\351'", "$'g\\\nit'", "$'\\400git'"):
+            with self.subTest(word=word):
+                self.unresolved("%s push" % word)
+                self.unresolved("git %s" % word)
+                self.assertRefused("echo x > %s" % word, "cannot resolve", agent_id=None)
+        self.assertRefused("x=$'\\u0024(date)'; echo ${(e)x}", "zsh's (e) flag")
+
+    def test_an_ansi_c_string_that_never_closes_is_unreadable(self):
+        line = "echo $'it\\'s ; git push"
+        self.assertEqual(self.analysis(line).unparseable[0], "$'")
+        self.unreadable(line)
+        self.assertIn("the `$'` that opens `$'it\\'s ; git push` never closes", self.assertRefused(line, UNREADABLE).reason)
+        self.unreadable("echo x > $'%s" % self.TARGET)
+
+    def test_a_double_dollar_before_a_quote_is_unreadable(self):
+        """zsh reads `$$'...'` as the pid then ANSI-C quoting and bash as the pid then single quotes: where the two end the
+        quote apart, one of them runs what the other reads as text.  The words bash's reading finds are read on, so a push
+        that only bash runs is Law 7's for a member, and one that only zsh runs is refused as a line the hook cannot read."""
+        for line in ("echo $$'\\'' > /dev/null ; git push ; echo '\\'", "echo $$'\\' ; git push ; echo '\\'",
+                     "echo x$$'\\'' ; git push ; echo '\\'", "echo $$$$'\\'' ; git push ; echo '\\'"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).unparseable[0], "$$'")
+            if line.startswith("echo $$'\\' "):  # bash pushes
+                self.refused_for_members(line, "Law 7")
+                self.assertRefused(line, UNREADABLE, agent_id=None)
+            else:  # zsh pushes
+                self.unreadable(line)
+        reason = self.assertRefused("echo $$'\\'' > /dev/null ; git push ; echo '\\'", UNREADABLE).reason
+        self.assertIn("`$$'\\''", reason)
+        self.assertIn("${$}", reason)  # ... and how to spell the pid before a quote
+        # a quote after `$$` that holds no backslash ends at the same place in both, and so does `${$}`'s and `"$$"`'s
+        self.law_7("echo $$'x' ; git push")
+        for line in ("echo ${$}'\\'' > /dev/null ; git push ; echo '\\'", "echo \"$$\"'\\'' > /dev/null ; git push ; echo '\\'"):
+            with self.subTest(line=line):
+                self.assertIsNone(self.analysis(line).unparseable)
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+
+    # -- a here-document delimiter --------------------------------------------------------------------------------------
+    def test_a_here_document_delimiter_is_decoded(self):
+        for line in ("cat <<$'EOF'\nbody\nEOF\ngit push", "cat <<$'E\\x4fF'\nbody\nEOF\ngit push",
+                     "cat <<x$'y'\"z\"\nbody\nxyz\ngit push", "cat <<$'E\\'F'\nbody\nE'F\ngit push",
+                     "sh <<$'EOF'\ngit push\nEOF", "cat <<-$'EOF'\n\tbody\n\tEOF\ngit push"):
+            with self.subTest(line=line):
+                self.assertIsNone(self.analysis(line).unparseable)
+            self.law_7(line)
+        for line in ("cat <<$'EOF'\ngit push\nEOF", "cat <<\\$'E'\nbody\ngit push\n$E", "cat <<$'EOF'\nit's\nEOF"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+
+    def test_a_delimiter_the_hook_cannot_know_reads_no_body(self):
+        """Where the shells end the body apart, or the hook does not decode its delimiter, every line after the operator is
+        read as the commands it may be."""
+        for line in ("cat <<$'\\u0045OF'\nbody\nEOF\ngit push", "cat <<$\"EOF\"\nbody\nEOF\ngit push\n$EOF",
+                     "sh <<$'\\cE'\ngit push\n\\cE", "cat <<$$'E'\nbody\n$E\ngit push\n$$E"):
+            with self.subTest(line=line):
+                self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+                self.assertEqual(self.analysis(line).kinds.count("git"), 1)
+        for line in ("cat <<$'\\u0045OF'\nbody\nEOF\ngit push", "cat <<$\"EOF\"\nbody\nEOF\ngit push\n$EOF",
+                     "sh <<$'\\cE'\ngit push\n\\cE"):
+            self.law_7(line)
+        # zsh ends this one at a line `$E`, whose command word refuses a member before the push does
+        self.refused_for_members("cat <<$$'E'\nbody\n$E\ngit push\n$$E", "cannot resolve")
+
+    # -- what stays as it was -------------------------------------------------------------------------------------------
+    def test_a_locale_string_stays_text_the_hook_does_not_decode(self):
+        for line in ("$\"git\" push", "git $\"push\""):
+            self.unresolved(line)
+        self.assertRefused("echo x > $\"notes.txt\"", "cannot resolve", agent_id=None)
+        self.law_7("echo $\"it's\" ; git push")
+        self.law_7("echo $\"a\\\"b\" ; git push")
+
+    def test_no_ansi_c_quoting_inside_double_quotes_or_after_an_escaped_dollar(self):
+        self.law_7("echo \"$'\\''\" ; git push ; echo \"'\"")
+        self.law_7("echo \\$'a' ; git push")
+        for line in ("echo \"it's $'x'\"", "echo \"$'\\''\" > /dev/null"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertSilent(line, agent_id)
+
+    def test_an_alias_of_the_shell_in_ansi_c_quoting(self):
+        """zsh prints an alias whose body holds a newline in ANSI-C quoting (`alias -L` printed `alias nl=$'echo a\\necho
+        b'`, probed), and the snapshot keeps that spelling: the body is its value, two commands, not `echo anecho b`.  A
+        body holding an escape the hook does not decode is one it cannot read (zsh printed a carriage return as `\\C-M`)."""
+        self.write_snapshot("snapshot-zsh-1700000000004-eeeeee.sh",
+                            "alias -- nlp=$'echo a\\ngit push'\nalias -- crp=$'git push\\C-M'\n")
+        self.refused_for_members("nlp", "Law 7")
+        self.assertIn("crp", self.refused_for_members("crp", "alias your shell already defines").reason)
+
+
+# SPD-203: functions of the shell's that hand their call's words on, one per shape of reference to them.  `gitfn` is this
+# Mac's oh-my-zsh `__git_prompt_git`, and `ccgrep` the shape of Claude Code's own grep shadow on this Mac, whose loop over
+# the words and case patterns earn findings of the body's own that the prune drops.
+FUNCTION_WORDS_SNAPSHOT = """\
+gitfn () {
+\tGIT_OPTIONAL_LOCKS=0 command git "$@"
+}
+gitone () {
+\tgit $1
+}
+gitdq () {
+\tgit "$1" "${2}"
+}
+gitstar () {
+\tgit "$*"
+}
+gitplus () {
+\tgit ${1+"$@"}
+}
+gitdefault () {
+\tgit "${1:-status}"
+}
+gitlast () {
+\tgit ${@:$#}
+}
+gitsub () {
+\techo "$(git "$@")"
+}
+gitsh () {
+\tsh -c 'git "$@"' _ "$@"
+}
+gitshift () {
+\tshift
+\tcommand git "$@"
+}
+gitvar () {
+\tlocal verb=$1
+\tshift
+\tgit $verb "$@"
+}
+gitloop () {
+\tfor a
+\tdo
+\t\tgit $a
+\tdone
+}
+gitmod () {
+\tgit $1:t
+}
+gitten () {
+\tgit $10
+}
+mk () {
+\tmkdir -p "$@"
+}
+selfcall () {
+\tgit "$@"
+\tselfcall "$@"
+}
+grow () {
+\tgrow x "$@"
+\tgrow y "$@"
+}
+function ccgrep {
+  local _cc_a
+  for _cc_a in ${1+"$@"}; do
+    case "$_cc_a" in -*-filter*|-*-config*|---*|-@*|-[Zz]*|-[!-]*[Zz]*|--null) command grep ${1+"$@"}; return ;; esac
+  done
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  ARGV0=ugrep "$_cc_bin" -G --hidden ${1+"$@"}
+}
+"""
+
+
+class FunctionWordsTest(ShellSnapshotCase):
+    """SPD-203, filed by SPD-201's engineer: analyse_shell_text dropped every finding that says only "the hook cannot read
+    this word" from the text a function or an alias of the shell's runs, whatever made it -- the member's own words
+    included.  A function receives its call's words as its positional parameters, so this Mac's oh-my-zsh
+    `__git_prompt_git () { GIT_OPTIONAL_LOCKS=0 command git "$@" }` pushes for `__git_prompt_git push`; the hook read the
+    body as it stands, `git "$@"`, recorded only ('git', ('$@', None)), which Law 7 does not refuse (git_not_allowed leaves
+    an unresolvable verb to the expansion's own finding), and dropped the expansion's finding: `gitfn push` and `gitfn
+    commit -m x` passed a member.  After an alias the member's words are the line's own: `_ $(echo git) push` (`_='sudo
+    '`) recorded no finding at all, where `sudo $(echo git) push` records ('var', '$(...)').
+
+    The rule now (shell/positional, analyse.analyse_shell_text):
+
+    - a function's body is read with the call's words set where it reads its parameters, each quoted again as the line
+      spelled it, so `gitfn push` reads as `git push` and `gitfn status` as `git status`;
+    - where the substitution cannot follow the words (`shift`, `set`, a loop with no list, a function defined in the body,
+      zsh's modifiers and subscripts, `$10`), the body is read as it stands and, for a call with words, keeps every
+      finding it earns, as does a reference left in a string another reading takes (`sh -c '... "$@"' _ "$@"`);
+    - a finding that spells a word of the member's the hook cannot read (a substitution, a `$NAME`, a glob) is kept
+      in the text an alias or a function runs, as a write target the member supplied already was.
+
+    What the shells do with each reference is probed in shell/positional's docstring.  AGENT_A and AGENT_B plan
+    home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000005-ffffff.sh", FUNCTION_WORDS_SNAPSHOT)
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def reading(self, command):
+        """What a refusal rests on (AliasWordsTest.reading): whether the line tokenized, the findings past "the hook
+        cannot read a word", and the files it writes."""
+        a = self.analysis(command)
+        return (a.unparseable, [f for f in a.findings if f[0] not in self.m.SHELL_TEXT_TOLERATED],
+                [(e[0], e[1]) for e in a.arg_writes], [r[0] for r in a.redirects], [(g[0], g[1]) for g in a.git_writes])
+
+    def spud_silent(self, *lines):
+        """Law 7 and the expansion findings bind members alone: Spud reads on."""
+        for line in lines:
+            with self.subTest(line=line, agent_id="spud"):
+                self.assertSilent(line, agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence(self):
+        for line, verb in (("gitfn push", "git push"), ("gitfn commit -m x", "git commit"), ("gitfn push origin main", "git push")):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, "Law 7")
+                self.assertIn(verb, r.reason)
+                self.assertIn("`gitfn` as a shell function", r.reason)
+        self.assertIn(("git", ("push", "push")), self.analysis("gitfn push").findings)
+        self.refused_for_members("_ $(echo git) push", "comes from a variable or a substitution")
+        self.silent_for_everyone("gitfn status")
+        self.silent_for_everyone("gitfn log --oneline -5")
+        self.spud_silent("gitfn push", "gitfn commit -m x", "_ $(echo git) push")
+
+    # -- each reference the substitution reads ------------------------------------------------------------------------
+    def test_each_reference_reads_the_call_s_words(self):
+        for line in ("gitone push", "gitdq push", "gitdq push status", "gitstar push", "gitplus push", "gitdefault push",
+                     "gitlast status push", "gitsub push", "gitfn \"push\"", "gitfn 'push'", "gitfn --no-pager push",
+                     "gitfn push \"don't\"", "gitdq \"push\""):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "Law 7")
+        for line in ("gitone status", "gitdq status", "gitdq status push", "gitstar status", "gitplus", "gitplus status",
+                     "gitdefault", "gitdefault log", "gitlast push status", "gitsub status", "gitfn", "gitfn \"don't\" status"):
+            with self.subTest(line=line):
+                self.assertNotIn(("git", ("push", "push")), self.analysis(line).findings)
+        for line in ("gitone status", "gitdq status push", "gitstar status", "gitplus", "gitdefault", "gitlast push status",
+                     "gitsub status", "gitfn"):
+            self.silent_for_everyone(line)
+        self.spud_silent("gitone push", "gitstar push", "gitplus push", "gitdefault push", "gitlast status push", "gitsub push")
+
+    def test_the_substitution_s_text(self):
+        """The text shell/positional makes of a body for a call's words (masked words, as the line's reading gives them),
+        each as the shells read the reference (probed in shell/positional's docstring); False where it cannot follow."""
+        sub = self.m.substituted
+        words = ["x", "", "y"]
+        for body, expected in (("git \"$@\"", "git x '' y"), ("git $@", "git x y"), ("git \"$*\"", "git x\\ \\ y"),
+                               ("git \"[$1]\"", "git \"[\"x\"]\""), ("git \"$2\"", "git ''"), ("git $#", "git 3"),
+                               ("git ${1+\"$@\"}", "git x '' y"), ("git ${@:$#}", "git y"), ("git \"${@:2}\"", "git '' y"),
+                               ("git \"${@:2:1}\"", "git ''"), ("echo '$1' \"$1\"", "echo '$1' x"),
+                               ("echo \"$(git \"$@\")\"", "echo \"$(git x '' y)\""), ("# $1 x\ngit $1", "# $1 x\ngit x"),
+                               ("git \"a $@ b\"", "git \"a \"x '' y\" b\""), ("git ${@:$#} ${0} $$", "git y ${0} $$"),
+                               ("(( $# > 1 )) && git $3", "(( 3 > 1 )) && git y"), ("echo $(( $# + 1 ))", "echo $(( 3 + 1 ))"),
+                               ("echo ${X:-a} $X", "echo ${X:-a} $X")):
+            with self.subTest(body=body):
+                self.assertEqual(sub(body, words), (expected, True))
+        for body, call, expected in (("git ${1+\"$@\"}", [], "git "), ("git \"${1:-status}\"", [], "git \"status\""),
+                                     ("git \"${1:-status}\"", ["push"], "git push"), ("git ${@:-.}", [], "git ."),
+                                     ("git \"${@:-.}\"", ["a", "b"], "git a b"), ("git \"$@\"", ["*"], "git *"),
+                                     ("git \"$1\"", ["a b"], "git a\\ b"), ("git ${2:+z} ${2-w}", ["a"], "git  w")):
+            with self.subTest(body=body, call=call):
+                self.assertEqual(sub(body, call), (expected, True))
+        for body, call in (("git $1", ["a b"]), ("git x$@", ["", "b"]), ("git x\"$@\"", ["*"]), ("git $1:t", ["a"]),
+                           ("git $10", ["a"]), ("git $@[1]", ["a"]), ("git $#x", ["a"]), ("shift; git \"$@\"", ["a"]),
+                           ("set -- q; git \"$@\"", ["a"]), ("for a; do git $a; done", ["a"]), ("getopts ab o", ["a"]),
+                           ("f () { git \"$@\"; }", ["a"]), ("git ${@:0}", ["a"]), ("git ${@:-.}", [""]),
+                           ("git ${(q)1}", ["a"]), ("git ${#1}", ["a"]), ("git ${x:-$1}", ["a"]), ("echo `echo $1`", ["a"]),
+                           ("cat <<E\n$1\nE", ["a"]), ("echo $(( $1 + 1 ))", ["a"]), ("git $argv", ["a"])):
+            with self.subTest(body=body, call=call):
+                self.assertEqual(sub(body, call), (body, False))
+
+    def test_the_words_read_as_they_do_spelled_after_the_body(self):
+        """`mk () { mkdir -p "$@" }` with each word AliasWordsTest reads after an alias: the reading of `mk <words>` is the
+        reading of `mkdir -p <words>`, quotes, globs, expansions and substitutions as the line spelled them."""
+        for words in AliasWordsTest.WORDS:
+            with self.subTest(words=words):
+                self.assertEqual(self.reading("mk " + words), self.reading("mkdir -p " + words))
+        for line in ("mk tests/a", "mk \"tests/a b\"", "mk tests/a tests/b"):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A)
+                self.assertSilent(line, AGENT_B)
+        self.refused_for_members("mk note", "deliverables")
+        self.refused_for_members("mk $HOME/planted", "spell the path out")
+
+    def test_a_function_named_twice_reads_each_call(self):
+        """Each call is read with its own words: the body was read once per name per line, which let the second call
+        of `gitfn status; gitfn push` go unread."""
+        for line in ("gitfn status; gitfn push", "gitfn push; gitfn status", "gitfn status && gitfn commit -m x",
+                     "gitone status | gitone push"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "Law 7")
+        self.silent_for_everyone("gitfn status; gitfn log")
+        self.assertEqual(self.analysis("gitfn status; gitfn push").shell_expanded,
+                         [("gitfn", "a shell function"), ("gitfn", "a shell function")])
+
+    def test_one_name_s_readings_have_a_bound(self):
+        """Past READINGS_PER_NAME calls of one name with other words, the body is read once more as it stands, and the
+        member's words keep what it earns: refused on doubt, never read short.  A body that calls itself -- with the same
+        words, or with more each time -- ends."""
+        cap = self.m.READINGS_PER_NAME
+        reads = "; ".join("gitfn log -%d" % k for k in range(1, cap + 1))
+        self.silent_for_everyone(reads)
+        self.refused_for_members(reads + "; gitfn push", "cannot resolve")
+        self.refused_for_members(reads + "; gitfn log -%d" % (cap + 1), "cannot resolve")
+        self.spud_silent(reads + "; gitfn push")
+        for line in ("selfcall push", "grow push", "grow status"):
+            with self.subTest(line=line):
+                self.assertLessEqual(len(self.analysis(line).shell_expanded), cap + 2)
+        self.refused_for_members("selfcall push", "Law 7")
+
+    # -- where the substitution cannot follow the words ---------------------------------------------------------------
+    def test_a_body_the_substitution_cannot_follow_keeps_its_findings(self):
+        """`shift`, a loop with no list, a variable the body fills from a word it then shifts past, zsh's `:t` and `$10`:
+        the body is read as it stands, and for a call with words every finding it earns stands, so the member is
+        refused on doubt -- a readable verb too -- and spells the command out."""
+        for line in ("gitshift x push", "gitshift x status", "gitvar push", "gitvar status", "gitloop push", "gitmod d/push",
+                     "gitten 1 2 3 4 5 6 7 8 9 push"):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, "cannot resolve")
+                self.assertIn("as a shell function", r.reason)
+        self.spud_silent("gitshift x push", "gitvar push", "gitloop push", "gitmod d/push")
+        # with no words there is nothing of the member's for the body to read, and it reads as it did before
+        for line in ("gitshift", "gitvar", "gitloop", "gitmod"):
+            self.silent_for_everyone(line)
+
+    def test_a_reference_another_reading_takes_is_kept(self):
+        """`sh -c 'git "$@"' _ "$@"` hands the words to a shell whose string the substitution does not reach (a single-quoted
+        string is its reading's, not the body's): the reference the string reads is kept for a call with words."""
+        self.refused_for_members("gitsh push", "cannot resolve")
+        self.refused_for_members("gitsh status", "cannot resolve")
+        self.spud_silent("gitsh push")
+        self.silent_for_everyone("gitsh")
+
+    # -- the member's own words the hook cannot read ------------------------------------------------------------------
+    def test_a_word_of_the_member_s_the_hook_cannot_read_keeps_its_finding(self):
+        for line in ("gitfn $(echo push)", "gitfn $X", "gitfn \"$X\"", "gitone $X", "gitfn `echo push`", "gitplus $X",
+                     "g $(echo push)", "g $X", "g \"$X\"", "_ $X push", "_ \"$(echo git)\" push", "_ g$X push"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "cannot resolve")
+        self.spud_silent("gitfn $(echo push)", "g $X", "_ $X push", "_ $(echo git) push")
+        # a value the line settles is read as the word it is
+        self.refused_for_members("X=push; gitfn $X", "Law 7")
+        self.silent_for_everyone("X=status; gitfn $X")
+
+    def test_what_the_body_itself_cannot_read_stays_dropped(self):
+        """The harness's shadows walk the words and dispatch through `"$_cc_bin"`: the findings of the body's own text stay
+        dropped whatever the member's words are, a glob, an expansion or a substitution among them."""
+        for line in ("ccgrep -rn x .", "ccgrep x *", "ccgrep x $(echo f)", "ccgrep $X f", "ccgrep -e 'a b' f", "ccgrep",
+                     "shadowed x *", "shadowed $(echo x)", "grep -rn x .", "grep x *", "grep x $HOME", "_ ls $X", "ll $X",
+                     "_ echo $(echo git) push", "gitfn status $X"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
+
+
+class ReaderFailsClosedTest(ShellSnapshotCase):
+    """SPD-217, Eric's call of 2026-09-23: the one fail-closed rule that replaces the per-form hole tickets.  Where the
+    reader cannot read what the shell will run -- text dropped past a bound, an unlifted placeholder, a value a shell
+    evaluates as code in a form the reader does not model, or a shell in a substitution fed input the line does not spell
+    -- it refuses the member and names the form with a readable respelling, instead of modelling the form or letting the
+    text pass.  SPD-191 set the precedent for a line the hook cannot tokenize (UnreadableLineTest); this extends it to
+    text the reader reads but does not finish.  Spud is allowed, as under every Law 7 fence: the fence keeps a
+    cooperative spudagent in its lane, not an author composing shell to defeat it, and the laws bind Spud where the hook
+    cannot see.
+
+    Each case below is a folded ticket, its origin named, each refused a member (Law 7's `git push` a witness), silent
+    for Spud, with the plain shape a member types still allowed.  Where the shell's behaviour is load-bearing it was
+    probed through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual, zsh -f and bash 3.2.57.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; the home is the cwd."""
+
+    VCS = "git push"  # the write verb a member hides in text the hook does not read
+    LEDGER = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "tests").mkdir(exist_ok=True)
+        (self.home.path / "docs").mkdir(exist_ok=True)
+        target = self.home.path / self.LEDGER
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("orig\n", encoding="utf-8")
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def refused_unread(self, line):
+        """A member is refused the line as text the hook did not read; Spud reads on."""
+        with self.subTest(line=line):
+            r = self.refused_for_members(line, UNREAD)
+            self.assertSilent(line, agent_id=None)
+            return r
+
+    def hides_the_push(self, line):
+        """The line hides a git write in text the hook does not read: a member refused as unread, Spud silent."""
+        with self.subTest(line=line):
+            self.refused_for_members(line, UNREAD)
+            self.assertSilent(line, agent_id=None)
+
+    # -- SPD-195: a substitution nested past the depth bound is refused, never dropped --------------------------------
+    def test_195_a_substitution_past_the_depth_bound_is_refused(self):
+        """analyse_command returned at depth > 6 with nothing recorded (proposal by SPUD-189/Joanna): a command seven
+        substitutions or seven evals deep earned no finding, a Law 7 bypass needing no other trick.  The bound stays but
+        fails closed."""
+        deep = self.VCS
+        for _ in range(7):
+            deep = "echo $(%s)" % deep
+        self.assertEqual(self.analysis(deep).findings and [k for k, _ in self.analysis(deep).findings if k == "unread"], ["unread"])
+        self.hides_the_push(deep)
+        evals = "git push"
+        for _ in range(7):
+            evals = "eval %s" % single_quoted(evals)
+        self.hides_the_push(evals)
+        # six levels deep the push is still read as the verb it is
+        six = self.VCS
+        for _ in range(6):
+            six = "echo $(%s)" % six
+        self.refused_for_members(six, "Law 7")
+
+    # -- SPD-103: a `${ }` nested past the bound is refused at once, never read to the bottom -------------------------
+    def test_103_a_brace_expansion_past_the_bound_is_refused_in_bounded_time(self):
+        """analyse_command read a run of nested `${` in bounded but growing time (proposal by SPUD-102/Burbank: 40,000
+        nested `${` took 7.7 s), three quarters of the pathological test's budget.  Past the bound the line is refused a
+        member at once, the reader reading no further; Spud reads on."""
+        cap = self.m.BRACE_DEPTH
+        deep = "x"
+        for _ in range(cap + 2):
+            deep = "${%s}" % deep
+        r = self.refused_for_members("echo " + deep, UNREAD)
+        self.assertIn("${ }", r.reason)
+        self.assertSilent("echo " + deep, agent_id=None)
+        start = datetime.now()
+        self.assertRefused("echo x > " + "${" * 40000, UNREAD)  # a run of openings, refused before it is all read
+        self.assertLess((datetime.now() - start).total_seconds(), 2)
+
+    def test_103_shallow_brace_nesting_reads_as_before(self):
+        for line in ("echo ${x:-${y:-${z}}}", "echo ${x}${y}${z}", "echo '${${${'", "echo \"${x:-${y}}\""):
+            self.silent_for_everyone(line)
+
+    def test_195_a_shallow_line_reads_as_before(self):
+        for line in ("echo $(echo hi)", "echo $(echo $(echo hi))", "x=$(git status)", "echo $(git log --oneline -5)"):
+            self.silent_for_everyone(line)
+
+    # -- SPD-177: a cd in the short body of an arithmetic-condition if/while/until is uncertain ------------------------
+    def test_177_a_cd_after_an_arithmetic_condition_leaves_either_directory(self):
+        """(proposal by SPUD-173/Steve) zsh runs the short body of an if, while or until whose condition ends in
+        `(( ... ))` only when the condition holds, but the walk ended a condition only at `]]`, so a `cd` after the `))`
+        was read as certain and a write after it checked in the cd's target alone, past the generated ledger file it
+        would truly write.  Probed in zsh 5.9 -f and -f -o nobareglobqual: `if (( 0 )) cd o; echo new > l/t` wrote where
+        the line began.  Not the fail-closed finding but the directory certainty: seen in either directory, the rendered
+        ledger file the write would make in the original directory is refused, as it is after the `[[ ]]` spelling.  A
+        wide member (home:**) is the witness: `o/ledger/...` is a file it may write, `ledger/...` the rendered file."""
+        (self.home.path / "o").mkdir(exist_ok=True)
+        # an if: either directory, so the rendered ledger file the write makes in the original one is refused, as after `[[ ]]`
+        for cond in ("if (( 0 )) cd o", "if (( 0 )) { cd o }", "if [[ -z x ]] cd o"):
+            self.assertRefused("%s; echo x > %s" % (cond, self.LEDGER), "generated", AGENT_C)
+        # a while or until: the cd is in a loop body and may repeat, so the directory after it is unknown and the write refused
+        for cond in ("n=0; while (( n++ < 0 )) cd o", "n=1; until (( n-- > 0 )) cd o"):
+            r = self.assertRefused("%s; echo x > %s" % (cond, self.LEDGER), "the hook cannot follow", AGENT_C)
+            self.assertIn("relative cd in a loop", r.reason)
+
+    def test_177_an_unconditional_cd_still_moves_the_directory(self):
+        """A cd certain to run still moves the shell: a write after it is checked in the new directory alone, so the same
+        rendered path under the cd's target (`o/ledger/...`, no rendered file) is a file a wide member may write."""
+        (self.home.path / "o").mkdir(exist_ok=True)
+        self.assertSilent("cd o; echo x > %s" % self.LEDGER, AGENT_C)  # o/ledger/... is no rendered file
+        self.assertSilent("(( 1 )); echo x > o/note.txt", AGENT_C)  # a standalone arithmetic command opens no condition
+
+    # -- SPD-213: a shell in a substitution in a pipeline element reads the pipe (bash's reading) ---------------------
+    def test_213_a_shell_in_a_substitution_in_a_pipeline_element_reads_the_pipe(self):
+        """(proposal by SPUD-210/Marvin) bash expands a pipeline element's words in the subshell the pipe feeds it, so a
+        `$(sh)` there reads the pipe's input; zsh reads the input of the list around it.  SPD-210 read only zsh's, so a
+        shell in a substitution fed a pipe ran unread.  Probed 2026-09-23: `printf 'touch q1\\n' | echo $(sh) > /dev/null`
+        made q1 in bash 3.2.57 and nothing in zsh 5.9."""
+        for line in ("printf 'git push\\n' | echo $(sh) > /dev/null", "printf 'git push\\n' | echo `sh` > /dev/null"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "Law 7")  # bash's $(sh) runs the spelled pipe: the push is read
+                self.assertSilent(line, agent_id=None)
+        for line in ("cat x.sh | echo $(sh) > /dev/null", "curl -s http://x | echo $(sh) > /dev/null"):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, SCRIPT_WORDING)  # the pipe is another program's output: unspelled
+                self.assertIn("standard input that the line does not spell", r.reason)
+                self.assertSilent(line, agent_id=None)
+
+    def test_213_a_pipe_with_no_shell_or_a_shell_with_no_pipe_reads_as_before(self):
+        self.silent_for_everyone("printf 'git status\\n' | echo $(sh) > /dev/null")  # bash reads a read verb: silent
+        self.silent_for_everyone("echo $(sh) > /dev/null")  # no pipe: the substitution's shell reads the terminal, nothing
+        self.silent_for_everyone("printf 'git push\\n' | cat")  # no shell in a substitution reads the pipe
+
+    # -- SPD-215: a snapshot alias or function is read with the standard input its call is given ----------------------
+    def test_215_a_snapshot_alias_or_function_reads_the_calls_standard_input(self):
+        """(proposal by SPUD-212/Bender) analyse.read_shell_name read an alias's or a snapshot function's body with no
+        standard input, so with a profile alias to a shell or an interpreter, or a function whose body runs one, a
+        member's `xs < x.sh` or `pyx < x.py` ran a file's program, past SPD-145 and SPD-150.  SPD-212 covered a function
+        the line itself defines; the snapshot side is the same shape through analyse_shell_text.  Probed on the SPD-212
+        tree with a scratch snapshot."""
+        self.write_snapshot("snapshot-zsh-1700000000009-999999.sh", "alias xs='sh'\nalias pyx='python3'\nshfn () {\n\tsh\n}\n")
+        for line in ("xs < x.sh", "shfn < x.sh"):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, SCRIPT_WORDING)
+                self.assertIn("standard input that the line does not spell", r.reason)
+                self.assertSilent(line, agent_id=None)
+        self.refused_for_members("pyx < x.py", INLINE_WORDING)  # python reads a file's program on standard input
+        self.assertSilent("pyx < x.py", agent_id=None)
+        # a here-string or here-document the line spells is read as the alias's or the function's program
+        for line in ("xs <<< 'git push'", "shfn <<< 'git push'", "xs <<'EOF'\ngit push\nEOF"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "Law 7")
+                self.assertSilent(line, agent_id=None)
+
+    def test_215_a_snapshot_alias_with_no_input_reads_as_before(self):
+        self.write_snapshot("snapshot-zsh-1700000000009-999999.sh", "alias xs='sh'\nshfn () {\n\tsh\n}\n")
+        for line in ("xs -c 'git status'", "shfn"):  # a -c string is read; a function with no call input reads nothing
+            self.silent_for_everyone(line)
+
+    # -- SPD-199: a placeholder the line did not lift is refused, never paired with another body ----------------------
+    def test_199_a_substitution_placeholder_the_member_typed_is_refused(self):
+        """(proposal by SPUD-190/Kyla) ShellWalk.consume pairs the hook's own substitution placeholder in a word with the
+        next lifted `$( )` body, whoever wrote it, so a member typing the placeholder text steals a real substitution's
+        body and its write is resolved in the wrong directory.  Refused a member where the theft could happen; Spud reads
+        on."""
+        subst = self.m.SUBST
+        line = "echo %s && echo $(echo hi)" % subst  # the typed placeholder would steal the real (here benign) body
+        r = self.refused_for_members(line, UNREAD)
+        self.assertIn("marker the hook uses", r.reason)
+        self.assertSilent(line, agent_id=None)
+        # the ticket's evidence: a write whose directory the theft corrupts is refused unread before the write is read
+        self.refused_for_members("echo %s && cd o && echo $(echo hi > y)" % subst, UNREAD)
+
+    def test_199_a_private_use_marker_the_member_typed_is_refused(self):
+        """A private-use character the reader uses for a lifted substitution or an operand it cannot spell -- typed or
+        pasted on the line -- corrupts the reading, so the line is refused a member."""
+        for marker in (self.m.PROCSUB_MARK, self.m.FIND_PATH, self.m.INPUT_OPERAND):
+            with self.subTest(marker=repr(marker)):
+                self.refused_for_members("echo a%sb" % marker, UNREAD)
+                self.assertSilent("echo a%sb" % marker, agent_id=None)
+
+    def test_199_the_placeholder_text_where_nothing_mispairs_reads_as_before(self):
+        """A member may name the placeholder text where no lifted body mispairs with it -- grepping the tool's own
+        source for it, say -- and an ordinary line with a real substitution is untouched."""
+        for line in ("grep %s bin" % self.m.SUBST, "echo %s" % self.m.SUBST, "echo $(echo hi)", "x=$(git status)"):
+            self.silent_for_everyone(line)
+
+    # -- SPD-196: an escaped $( ) or backtick a -c string or eval unescapes and runs is refused ----------------------
+    def test_196_an_escaped_substitution_a_reparse_runs_is_refused(self):
+        """(proposal by SPUD-189/Joanna) shlex leaves the backslash of a double-quoted `\\$` or backtick in the word,
+        where the shell removes it, so a `-c` string or eval text holding `\\$( )` or `` \\` `` ran the substitution the
+        hook read as escaped and lifted no body.  Probed 2026-09-23 (shell_probe, zsh 5.9 -f, -f -o nobareglobqual, bash
+        3.2.57): `sh -c "echo \\$(touch h1)"`, `eval "echo \\$(touch h2)"` and `eval "\\`touch h3\\`"` each made their
+        file, while the single-quoted `sh -c 'echo \\$(touch x)'` was a syntax error and made none."""
+        for line in ('sh -c "echo \\$(git push)"', 'bash -c "echo \\$(git push)"', 'eval "echo \\$(git push)"',
+                     'eval "echo \\`git push\\`"', 'sh -c "true; echo \\$(git push)"'):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, UNREAD)
+                self.assertIn("unescapes and runs", r.reason)
+                self.assertSilent(line, agent_id=None)
+
+    def test_196_an_unescaped_or_quoted_substitution_reads_as_before(self):
+        """An unescaped `$( )` runs at the outer level and is read there (Law 7); `\\$NAME` is no substitution; a `\\$(`
+        the shell keeps single-quoted is a literal the shell does not run."""
+        self.refused_for_members('sh -c "echo $(git push)"', "Law 7")  # runs at the outer double quotes
+        for line in ('sh -c "echo \\$HOME"', 'eval "echo \\$HOME"', 'eval "echo hi"', "sh -c 'echo hi'"):
+            self.silent_for_everyone(line)
+
+    # -- SPD-198: a process substitution in a for/foreach list or an array value is refused --------------------------
+    def test_198_a_process_substitution_in_a_for_or_array_list_is_refused(self):
+        """(proposal by SPUD-190/Kyla) ShellWalk joins the tokens of a for/foreach `( ... )` list and of `name=( ... )`
+        into one word without walking them, so a `<( )`, `>( )` or `=( )` there was never analysed and a member ran a
+        command in it unread.  Probed 2026-09-23 (shell_probe, zsh 5.9 -f, -f -o nobareglobqual): each made its file."""
+        for line in ("for f ( <(git push) ) true", "foreach f (<(git push)) true; end", "x=(<(git push))",
+                     "x=(a >(git push) b)", "for f (=(git push)) true", "x=(=(git push))"):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, UNREAD)
+                self.assertIn("process substitution", r.reason)
+                self.assertSilent(line, agent_id=None)
+        self.refused_for_members("for f in <(git push); do true; done", "Law 7")  # the `in <( )` form is read as commands
+
+    def test_198_a_plain_for_or_array_list_reads_as_before(self):
+        for line in ("for f ( a b ) true", "x=(a b c)", "foreach f (a b) true; end", "x=()", "x=(a=b c=d)"):
+            self.silent_for_everyone(line)
+
+    # -- SPD-211: bash expands an unquoted here-doc's substitutions with the command's prefix assignments -------------
+    def test_211_a_here_doc_substitution_reads_the_commands_prefix(self):
+        """(proposal by SPUD-208/Oliver) bash 3.2 expands an unquoted here-document's substitutions with the command's own
+        prefix assignments, where zsh reads the value the line holds before the command (SPD-192), so `x=push cat <<EOF`
+        with body `$(git $x)` runs git push in bash while the hook read git status.  Probed 2026-09-23 (shell_probe, zsh
+        5.9 -f, -f -o nobareglobqual, bash 3.2.57): the body's `$x` was the prefix value in bash, the outer one in zsh,
+        the redirection target inside a substitution excepted."""
+        for line in ("x=status; x=push cat <<EOF > /dev/null\n$(git $x)\nEOF",
+                     "x=push cat <<EOF > /dev/null\n$(git $x)\nEOF",
+                     "x=push cat <<EOF > /dev/null\n`git $x`\nEOF"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "Law 7")  # bash's reading is git push
+                self.assertSilent(line, agent_id=None)
+        # a prefix value the hook cannot resolve leaves the substitution's verb unresolved: refused a member either way
+        r = self.refused_for_members("x=$(echo push) cat <<EOF > /dev/null\n$(git $x)\nEOF", "spell the")
+        self.assertSilent("x=$(echo push) cat <<EOF > /dev/null\n$(git $x)\nEOF", agent_id=None)
+
+    def test_211_a_quoted_delimiter_or_no_prefix_reads_as_before(self):
+        for line in ("x=status cat <<'EOF' > /dev/null\n$(git $x)\nEOF",  # quoted delimiter: the body is not expanded
+                     "cat <<EOF > /dev/null\n$(git status)\nEOF",  # no prefix, a read verb
+                     "x=push cat <<EOF > /dev/null\n$(git status)\nEOF"):  # the prefix does not reach a spelled verb
+            self.silent_for_everyone(line)
+
+    # -- SPD-197: the other places a shell evaluates a value as code are refused by name ------------------------------
+    def test_197_a_value_evaluated_as_code_is_refused(self):
+        """(proposal by SPUD-189/Joanna) five more ways a value the line assigns runs as code, each read by nothing:
+        zsh `${(P)n}` evaluates the subscript of the name n holds; `${~x}` under GLOB_SUBST globs a value, running a glob
+        qualifier's code; `${(%%)x}`, `print -P` run the substitutions in a value under promptsubst; PS1/PROMPT/PS4 are
+        expanded (PS4 per traced command under set -x); bash arithmetic evaluates a variable whose value holds a
+        subscript.  Probed 2026-09-23 (shell_probe, zsh 5.9 -f, -f -o nobareglobqual, bash 3.2.57): each ran the value's
+        substitution.  Refused a member by name, none modelled; Spud reads on."""
+        push = "$(git push)"
+        for line in ("n='x[%s]'; echo ${(P)n}" % push,
+                     "x='f*(e:\"git push\":)'; echo ${~x}",
+                     "setopt promptsubst; x='%s'; echo ${(%%%%)x}" % push,
+                     "setopt promptsubst; x='%s'; print -P $x" % push,
+                     "PS4='%s'; set -x; echo hi" % push,
+                     "x='a[%s]'; [[ $x -eq 0 ]]" % push,
+                     "x='a[%s]'; echo $(( x + 1 ))" % push):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, UNREAD)
+                self.assertIn("evaluates as code", r.reason)
+                self.assertSilent(line, agent_id=None)
+
+    def test_197_a_plain_value_or_expansion_reads_as_before(self):
+        """A value with no code, and a plain expansion, are not refused."""
+        for line in ("n=HOME; echo ${(P)n}", "x='*.txt'; echo ${~x}", "PS1='\\u@\\h'; echo hi",
+                     "x=2; echo $(( x + 1 ))", "x='a b'; echo ${(%%%%)x}", "echo ${x:-default}"):
+            self.silent_for_everyone(line)
+
+    # -- SPD-194: a $( ) whose end the reader cannot settle is refused, not guessed --------------------------------
+    def test_194_a_substitution_whose_end_is_unsettleable_is_refused(self):
+        """(proposal by SPUD-188/Linus) prepare.split_substitutions ends a `$( )` at the first parenthesis that balances,
+        counting a quoted `)`, a `case` pattern's `)` and a `)` in a here-document body alike, so text past the early end
+        was read as the outer line.  A quoted `)` leaves an unbalanced quote (SPD-191, UnreadableLineTest); a `case`
+        pattern or a here-document body inside the `$( )` is refused unread.  Probed 2026-09-23 (shell_probe)."""
+        # the `)` the naive extent ends at is a case pattern's or in a here-document body: refused unread
+        for line in ("echo $(case a in a) true;; esac)", "echo $(cat <<EOF\na)b\nEOF\ntrue)"):
+            with self.subTest(line=line):
+                r = self.refused_for_members(line, UNREAD)
+                self.assertIn("closing `)`", r.reason)
+                self.assertSilent(line, agent_id=None)
+        # a member is refused whether the mis-parse leaves the hidden command read (Law 7) or unread; Spud reads on
+        for line in ("echo $(case a in a) git push;; esac)", "x=$(case a in a) git push;; esac)"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "")  # refused for any reason (Law 7 or unread)
+                self.assertSilent(line, agent_id=None)
+        # a quoted `)` inside is a line the hook cannot tokenize (SPD-191), refused to every caller
+        self.assertRefused("echo $(echo ')' && git push)", UNREADABLE, agent_id=None)
+
+    def test_194_a_plain_substitution_reads_as_before(self):
+        for line in ("echo $(echo hi)", "x=$(git status)", "echo $(grep -rn case .)", "echo $(echo '(a)')",
+                     "echo $(echo 'esac case')"):
+            self.silent_for_everyone(line)
+
+    # -- SPD-205: a finding on a variable the member's words fill inside a function's text is kept -------------------
+    def test_205_a_finding_on_a_member_filled_variable_is_kept(self):
+        """(proposal by SPUD-203/Locutus) SPD-203 kept a tolerated finding that spells a member word the hook cannot
+        read, but a variable the member's words fill on the way -- a for-loop over `$@`, or one the line assigned before
+        the function's text -- was still pruned as the body's own, so a profile function of these shapes carried a git
+        write past Law 7.  A dropped finding is never a pass: the finding is kept and refuses the member on doubt (a read
+        verb too, since the hook cannot resolve the loop variable).  None is a git write this Mac's profile defines."""
+        self.write_snapshot("snapshot-zsh-1700000000009-999999.sh",
+            "loopgit () {\n\tfor a in \"$@\"; do git $a; done\n}\nglobalgit () {\n\tgit $GITVERB\n}\n")
+        for line in ("loopgit push", "loopgit status", "GITVERB=$(echo push); globalgit", "loopgit commit -m x"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "cannot resolve")  # the member-filled variable is refused on doubt
+                self.assertSilent(line, agent_id=None)
+
+    def test_205_a_body_s_own_variable_stays_pruned(self):
+        """A variable the body itself fills, not from the member's words, is still the body's own and stays dropped, so a
+        member is not refused a profile function it did not fill: a loop over a literal list, a call with no words."""
+        self.write_snapshot("snapshot-zsh-1700000000009-999999.sh",
+            "ownloop () {\n\tfor a in one two; do git $a; done\n}\nglobalgit () {\n\tgit $GITVERB\n}\n")
+        for line in ("ownloop", "globalgit"):  # no member words fill the loop, and no line assigns GITVERB
+            self.silent_for_everyone(line)
+
+    # -- SPD-193: a line of many conditional relative cds is read in bounded time, its writes refused ---------------
+    def test_193_many_conditional_cds_bound_the_directory_set(self):
+        """(proposal by SPUD-188/Linus) analyse_command's time doubled with each `cd dirK && ...` step, since the
+        directories the shell may be in grow as 2^n -- the original, dirK/, and every relative combination of the cds
+        that may not have run -- so a short multi-line command took seconds to minutes in PreToolUse.  The directory set
+        is capped; past it the shell's directory is unknown and a relative write target after it is refused, which a
+        member spells around with an absolute path.  Measured 2026-09-23: N=26 steps took 91 s before, 0.01 s after."""
+        line = "(\n" + "".join("cd dir%d\necho x > out%d.txt\n" % (k, k) for k in range(16)) + ")"
+        # a wide member witnesses the bound: the early writes land in directories it may write, the ones past the cap in
+        # a directory the hook can no longer follow, and are refused
+        r = self.assertRefused(line, "cannot follow", AGENT_C)
+        self.assertIn("use an absolute path", r.reason)
+
+    def test_193_a_few_cds_still_resolve(self):
+        """A handful of uncertain cds stays under the cap, so a write is still checked in every directory it may open,
+        the one the line began in among them (the cd may fail, its target not existing)."""
+        self.assertRefused("cd o\necho x > %s" % self.LEDGER, "generated", AGENT_C)  # seen where the line began
+
+    @wall_clock
+    def test_193_bounded_on_pathological_conditional_cds(self):
+        m = load_spud_module()
+        line = "(\n" + "".join("cd d%d && echo s > o%d.txt && grep -rn x src | head -5\n" % (k, k) for k in range(40)) + ")"
+        started = time.monotonic()
+        m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
+        self.assertLess(time.monotonic() - started, 2)
 
 
 # =============================================================================
@@ -12259,6 +18411,13 @@ class StopSessionTest(HookCase):
         self.home.json("member", "finish", m["ref"], "--status", "failed", "--outcome", "Never spawned.", actor="spud")
         self.assertSilent(self.stop_in(SESSION))
 
+    def test_the_never_spawned_hold_names_the_effort_variant_to_spawn(self):
+        # SPD-222: the way out it prints is a spawn the check would allow, so a member planned at an effort is named by its variant
+        m = self.plan(name="Kestrel", persona="engineer", model="opus", effort="medium")
+        reason = self.stop_in(SESSION).json["reason"]
+        self.assertIn("subagent_type `spudagent-medium`, model `opus`, description `SPUD-001/Kestrel (01, engineer)`", reason)
+        self.home.json("member", "finish", m["ref"], "--status", "failed", "--outcome", "Never spawned.", actor="spud")
+
     def test_a_planned_row_with_no_known_session_holds_any_session_after_ten_minutes(self):
         self.in_session(None)
         m = self.plan(name="Kestrel")
@@ -12370,7 +18529,7 @@ class StopSessionTest(HookCase):
 
     def reserve(self, m, tool_use_id, session=SESSION, caller=None):
         """PreToolUse(Agent) allows m's spawn in session, which reserves the row; nothing binds it."""
-        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=m["model"], subagent_type=m["agent_type"], agent_id=caller,
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=m["model"], subagent_type=spawn_type(m), agent_id=caller,
                                                           tool_use_id=tool_use_id, session=session))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
 
@@ -12605,7 +18764,7 @@ class SqlTest(SpudTestCase):
             proc = self.home.run("sql", "--readonly", stmt, check=False)
             self.assertEqual(proc.returncode, EXIT_ERROR, stmt)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM name_pool WHERE name = 'X'"), 0)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 7)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), 9)
 
     def test_one_statement_no_flag_no_actor_needed(self):
         proc = self.home.run("sql", "SELECT 1", check=False)

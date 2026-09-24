@@ -4,7 +4,7 @@ for a member whose file carries no spawned time, and the import events."""
 import json
 import unittest
 
-from helpers import SpudTestCase
+from helpers import EXIT_ERROR, SpudTestCase
 
 TICKET = """---
 id: SPD-001
@@ -158,6 +158,29 @@ class SyntheticImportTest(SpudTestCase):
         self.assertNotEqual(proc.returncode, 0)
         self.assertIn("CHECK", proc.stderr)
         self.assertIsNone(self.home.scalar("SELECT id FROM tickets WHERE key = 'SPD-003'"))
+
+    def test_a_members_effort_round_trips_and_one_outside_the_levels_is_refused(self):
+        # SPD-222: the note carries effort after model when the row has one; an import reads it back
+        from helpers import normalize_markdown
+
+        root = self.write_tree()
+        opus = MEMBER.replace("persona: scout\nmodel: haiku\n", "persona: engineer\nmodel: opus\neffort: high\n").replace("(01, scout)", "(01, engineer)")
+        (root / "ledger" / "teams" / "SPUD-001" / "Russet.md").write_text(opus, encoding="utf-8")
+        self.home.json("import", root)
+        self.assertEqual(self.home.json("member", "show", "SPUD-001/Russet")["member"]["effort"], "high")
+        out = self.home.path / "out"
+        self.home.json("render", "--out", out)
+        self.assertEqual(normalize_markdown((out / "ledger" / "teams" / "SPUD-001" / "Russet.md").read_text(encoding="utf-8")),
+                         normalize_markdown(opus))
+        bad = self.home.path / "corpus-bad"
+        (bad / "ledger" / "tickets").mkdir(parents=True)
+        (bad / "ledger" / "teams" / "SPUD-002").mkdir(parents=True)
+        (bad / "ledger" / "tickets" / "SPD-002.md").write_text(TICKET.replace("SPD-001", "SPD-002").replace("SPUD-001", "SPUD-002"), encoding="utf-8")
+        (bad / "ledger" / "teams" / "SPUD-002" / "Russet.md").write_text(
+            opus.replace("SPD-001", "SPD-002").replace("effort: high", "effort: extreme"), encoding="utf-8")
+        proc = self.home.run("import", bad, check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("effort 'extreme' is not one of low, medium, high, xhigh, max", proc.stderr)
 
     def test_a_note_rendered_before_0006_imports_its_origin_as_owner(self):
         # SPD-160: an export from before migration 0006_owner_origin says origin eric; it lands as owner and renders so

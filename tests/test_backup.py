@@ -12,6 +12,7 @@ this Mac's LaunchAgents or launchctl.
 """
 
 import contextlib
+import importlib
 import io
 import json
 import os
@@ -20,6 +21,7 @@ import re
 import sqlite3
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta
@@ -98,7 +100,7 @@ class DailyBackupTest(BackupCase):
         self.assertRegex(path.name, r"^ledger-\d{8}T\d{6}-daily\.db$")
         self.assertEqual(out, {"ok": True, "path": str(path), "written": True, "pruned": [], "kept": 1})
         self.assertEqual(self.listing(), [path.name])  # the check leaves no -wal, -shm or -journal beside the copy
-        self.assertEqual(user_version(path), 7)  # schema v7 since SPD-145
+        self.assertEqual(user_version(path), 9)  # schema v9 since SPD-222
         code, again, proc = self.backup_daily()
         text = self.home.run("backup", "--daily", actor="spud").stdout
         if datetime.now().strftime("%Y%m%d") != path.name[7:15]:
@@ -201,7 +203,7 @@ class DailyBackupTest(BackupCase):
         for path in outside + live:
             self.assertTrue(path.is_file(), path)
         self.assertEqual(con.execute("SELECT count(*) FROM projects").fetchone()[0], 1)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 7)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), 9)
 
     def test_plain_backup_writes_a_manual_copy_and_prunes_nothing(self):
         seeds = earlier_days(20)
@@ -592,6 +594,146 @@ class HelpTest(unittest.TestCase):
         for verb in ("show", "install"):
             self.assertIn("--at HH:MM", home.run("schedule", verb, "--help").stdout)
         self.assertIn("schedule", home.run("--help").stdout)
+
+
+class MachineGuardTest(LaunchdMixin, SpudTestCase):
+    """SPD-101: the tool's own fence around this Mac's LaunchAgents.  A write that reaches the default LaunchAgents
+    directory or the real launchctl is made for the machine's own home alone -- the one ~/.config/spud/home names -- run
+    by the tool that home runs.  "The default" is faked here by pointing HOME at a scratch directory and unsetting
+    SPUD_LAUNCH_AGENTS_DIR, so ~/Library/LaunchAgents and ~/.config/spud/home both resolve under the scratch; launchctl
+    stays LaunchdMixin's recording fake throughout, and the real directory is never read or written."""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_launchd()
+        self.machine = self.scratch / "machine-home"
+        self.machine.mkdir()
+        self.default_agents = self.machine / "Library" / "LaunchAgents"
+        self.pointer = self.machine / ".config" / "spud" / "home"
+        self.home.env["HOME"] = str(self.machine)
+        self.home.env.pop("SPUD_LAUNCH_AGENTS_DIR")
+        self.assertNotEqual(os.path.realpath(self.machine), os.path.realpath(os.path.expanduser("~")))
+
+    def point(self, target):
+        self.pointer.parent.mkdir(parents=True, exist_ok=True)
+        self.pointer.write_text("%s\n" % target, encoding="utf-8")
+
+    def refused(self, *args):
+        proc = self.home.run("--json", "schedule", *args, actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_OWNERSHIP, proc)
+        out = json.loads(proc.stdout)
+        self.assertIn("this Mac's own", out["error"])
+        self.assertEqual(out["reach"], ["the LaunchAgents directory %s" % os.path.realpath(self.default_agents)])
+        self.assertEqual(self.calls(), [])  # refused before launchctl ran at all
+        return out
+
+    def calls(self):
+        path = self.state / "calls.jsonl"
+        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()] if path.exists() else []
+
+    def test_a_scratch_home_is_refused_install_into_the_default_directory(self):
+        """What hook_timing.py's scratch home did on 2026-09-22, refused: no pointer names it, and it runs as SPUD_TOOL_DIR."""
+        out = self.refused("install")
+        self.assertEqual(out["refused"], "installing the LaunchAgents")
+        self.assertEqual(out["problems"], ["%s names no home" % self.pointer, "SPUD_TOOL_DIR sets the tool to %s" % self.home.path])
+        self.assertFalse(self.default_agents.exists())
+
+    def test_a_pointer_naming_another_home_is_refused(self):
+        self.point("/Users/Nobody/SpudHome")
+        out = self.refused("install")
+        self.assertIn("the home is %s, and %s names /Users/Nobody/SpudHome" % (self.home.path, self.pointer), out["problems"])
+        self.assertFalse(self.default_agents.exists())
+
+    def test_the_machines_home_run_as_another_tool_is_refused(self):
+        """The pointer names this home, but SPUD_TOOL_DIR sets the tool: the plists would name a launcher the home does not run."""
+        self.point(self.home.path)
+        self.assertEqual(self.refused("install")["problems"], ["SPUD_TOOL_DIR sets the tool to %s" % self.home.path])
+
+    def test_uninstall_is_refused_and_leaves_the_machines_plists(self):
+        self.default_agents.mkdir(parents=True)
+        for label in (LABEL, RENDER_LABEL):
+            (self.default_agents / (label + ".plist")).write_text("the machine's own\n", encoding="utf-8")
+        self.refused("uninstall")
+        for label in (LABEL, RENDER_LABEL):
+            self.assertEqual((self.default_agents / (label + ".plist")).read_text(encoding="utf-8"), "the machine's own\n")
+
+    def test_show_still_answers(self):
+        """show writes nothing and runs only `launchctl print`: no guard."""
+        proc = self.home.run("--json", "schedule", "show", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_OK, proc)
+        self.assertEqual(json.loads(proc.stdout)["path"], str(self.default_agents / (LABEL + ".plist")))
+
+    def test_with_both_moved_nothing_is_asked(self):
+        """The suite's own shape: a scratch directory and a launchctl of its own reach nothing of the machine's."""
+        self.home.env["SPUD_LAUNCH_AGENTS_DIR"] = str(self.agents)
+        proc = self.home.run("--json", "schedule", "install", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_OK, proc)
+        self.assertTrue((self.agents / (LABEL + ".plist")).is_file())
+        self.assertFalse(self.default_agents.exists())
+
+
+class MachineRuleTest(unittest.TestCase):
+    """The rule itself, in process: commands/schedule.machine_home_problems, with every path it reads under a scratch HOME."""
+
+    def setUp(self):
+        load_spud_module()
+        self.schedule = importlib.import_module("spudlib.commands.schedule")
+        self.homeconf = importlib.import_module("spudlib.core.homeconf")
+        scratch = tempfile.TemporaryDirectory(prefix="spud-machine-rule-")
+        self.addCleanup(scratch.cleanup)
+        self.root = Path(scratch.name).resolve()
+        self.home = self.root / "home"
+        self.home.mkdir()
+        self.fake_launchctl = self.root / "launchctl"
+        self.fake_launchctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        env = {k: v for k, v in os.environ.items() if k not in ("SPUD_LAUNCH_AGENTS_DIR", "SPUD_TOOL_DIR")}
+        env.update(HOME=str(self.root), SPUD_LAUNCHCTL=str(self.fake_launchctl))
+        patcher = mock.patch.dict(os.environ, env, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        pointer = self.root / ".config" / "spud" / "home"
+        pointer.parent.mkdir(parents=True)
+        pointer.write_text(str(self.home) + "\n", encoding="utf-8")
+        self.ctx = self.homeconf.Ctx(self.home, "test", False, tool=self.root / "tool")
+
+    def problems(self, kind="main"):
+        with mock.patch("spudlib.core.homeconf.tool_checkout_kind", return_value=kind):
+            return self.schedule.machine_home_problems(self.ctx)
+
+    def test_the_machines_home_run_by_its_main_checkout_passes(self):
+        """`spud --as spud schedule install` from the real home, and init on a new machine once step 5 wrote the pointer."""
+        self.assertEqual(self.schedule.machine_reach(), ["the LaunchAgents directory %s" % os.path.realpath(self.root / "Library" / "LaunchAgents")])
+        self.assertEqual(self.problems("main"), [])
+        self.assertEqual(self.problems("none"), [])  # a copied tree with no git: deliberate, and allowed
+
+    def test_a_linked_worktree_is_refused(self):
+        self.assertEqual(self.problems("worktree"), ["the running bin/spud is in a linked worktree, %s" % (self.root / "tool")])
+
+    def test_the_real_launchctl_is_guarded_whichever_directory_the_plist_is_in(self):
+        """SPUD_LAUNCH_AGENTS_DIR moves the plist, never the gui/<uid> job a bootout removes.  "Real" is faked by patching
+        REAL_LAUNCHCTL to this test's own program, so nothing here can run /bin/launchctl."""
+        os.environ["SPUD_LAUNCH_AGENTS_DIR"] = str(self.root / "agents")
+        self.assertEqual(self.schedule.machine_reach(), [])
+        with mock.patch("spudlib.commands.schedule.REAL_LAUNCHCTL", str(self.fake_launchctl)):
+            self.assertEqual(len(self.schedule.machine_reach()), 1)
+            self.assertIn("launchctl", self.schedule.machine_reach()[0])
+            self.assertEqual(self.problems(), [])
+            self.ctx = self.homeconf.Ctx(self.root / "elsewhere", "test", False, tool=self.root / "tool")
+            self.assertEqual(len(self.problems()), 1)
+            with self.assertRaises(Exception) as caught:
+                with mock.patch("spudlib.core.homeconf.tool_checkout_kind", return_value="main"):
+                    self.schedule.install_agents(self.ctx, (3, 0))
+            self.assertEqual(caught.exception.code, EXIT_OWNERSHIP)
+        self.assertFalse((self.root / "agents").exists())
+
+    def test_the_pointer_is_the_machines_not_spud_config_dirs(self):
+        """A scratch SPUD_CONFIG_DIR naming the scratch home -- what `spud init` writes under a probe's env -- is no pass."""
+        other = self.root / "config"
+        other.mkdir()
+        (other / "home").write_text(str(self.root / "elsewhere") + "\n", encoding="utf-8")
+        os.environ["SPUD_CONFIG_DIR"] = str(other)
+        self.ctx = self.homeconf.Ctx(self.root / "elsewhere", "test", False, tool=self.root / "tool")
+        self.assertEqual(self.problems(), ["the home is %s, and %s names %s" % (self.root / "elsewhere", self.root / ".config" / "spud" / "home", self.home)])
 
 
 class GitignoreTest(unittest.TestCase):

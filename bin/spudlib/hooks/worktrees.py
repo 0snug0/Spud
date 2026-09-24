@@ -113,7 +113,7 @@ def home_row(ctx):
     that walks project rows treats the home as one more checkout, the one whose generated roots and Spud's own paths apply."""
     return {"id": 0, "key": kernel.HOME_KEY, "name": kernel.HOME_KEY, "root_path": str(ctx.home), "remote": None, "ticket_prefix": None,
             "team_prefix": None, "created_at": None, "default_branch": None, "landing": None, "sessions": "always", "installed": None,
-            "archived_at": None, "scripts": "[]"}
+            "archived_at": None, "scripts": "[]", "runners": "[]"}
 
 
 def is_home(project):

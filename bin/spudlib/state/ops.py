@@ -1,4 +1,9 @@
-"""state/ops: Domain operations: ticket numbers, transitions, names, deliverables, planning, member status changes, and the prose checks and proposal brief the commands share."""
+"""state/ops: Domain operations: ticket numbers, transitions, names, deliverables, planning, member status changes, and the prose checks and proposal brief the commands share.
+
+Past 250 lines and kept whole (SPD-222): the effort rules -- check_agent_type, planned_effort, escalation_target -- are
+planning's own, read inside plan_member's transaction, and `member edit` reuses planned_effort for the same decision.
+Taking them into a module of their own would put one more module on the hook path, where state/ops already sits, for a
+seam no hook uses."""
 
 import json
 import re
@@ -142,14 +147,79 @@ def normalize_deliverables(globs):
     return [normalize_deliverable(g) for g in (globs or [])]
 
 
+VARIANT_AS_TYPE = ("%s is the spawn type of a spudagent planned at an effort, not an agent type to plan: plan it as a"
+                   " spudagent with --effort %s, and the spawn check holds its Agent call to %s")
+NO_EFFORT = "%s takes no effort, so --effort %s is not recorded; it is spawned as subagent_type spudagent, which sets none"
+CONTRACTOR_EFFORT = "a contractor's effort is its own definition's, so --effort %s is not recorded"
+BELOW_FLOOR = ("an escalation runs at the effort of the member it re-plans or higher, never lower: %s ran at %s, and"
+               " --effort %s is lower")
+
+
+def check_agent_type(agent_type):
+    """Refuse an --agent-type naming an effort variant (SPD-222): the row's agent type is `spudagent` and its effort is
+    a column, from which kernel.spawn_type makes `spudagent-<effort>`; a variant as the agent type would record no effort
+    and spawn at one nobody chose."""
+    if agent_type in kernel.SPUDAGENT_VARIANTS:
+        level = agent_type[len(kernel.SPUDAGENT) + 1:]
+        raise kernel.SpudError(kernel.EXIT_ERROR, VARIANT_AS_TYPE % (agent_type, level, agent_type))
+
+
+def planned_effort(ctx, persona, model, agent_type, effort=None, kept=None, floor=None):
+    """(the effort a member is planned at, a note when an --effort given is not recorded) (SPD-222).
+
+    None for a contractor, whose own definition sets its effort, and on a model that takes none (haiku): whatever
+    --effort says, and the note says so.  Otherwise the --effort given; else `kept`, the level the row already has (a
+    `member edit --model` keeps it); else the floor's; else the persona's `effort` in spud.config.json; else
+    kernel.DEFAULT_EFFORT.  `floor` is (the handle, the effort) of the member an escalation re-plans, whose level this
+    one may not go below -- and whose level is also its default (escalation_target says why)."""
+    if agent_type != kernel.SPUDAGENT:
+        return None, (CONTRACTOR_EFFORT % effort if effort else None)
+    if model not in kernel.EFFORT_MODELS:
+        return None, (NO_EFFORT % (model, effort) if effort else None)
+    ref, least = floor if floor else (None, None)
+    level = effort or kept or least or ctx.persona_effort(persona) or kernel.DEFAULT_EFFORT
+    if least in kernel.EFFORTS and kernel.EFFORTS.index(level) < kernel.EFFORTS.index(least):
+        raise kernel.SpudError(kernel.EXIT_ERROR, BELOW_FLOOR % (ref, least, level))
+    return level, None
+
+
+def escalation_target(con, ref, ticket, parent_id, model):
+    """The member `member new --escalates <ref>` re-plans (SPD-222), checked inside the plan's transaction: on the same
+    ticket under the same parent, returned failed or blocked, run on the first model of kernel.ESCALATION and re-planned on
+    the second, and escalated by no other member yet -- once, never twice.
+
+    Its effort is the re-plan's floor and, when --effort names none, its default: the same level, not one higher.  The
+    escalation changes one thing, the model, so that when the re-plan succeeds the ledger says what fixed it; raising
+    the effort as well would confound the two and compound the cost of the more expensive model.  A parent that judges
+    the failure one of effort too passes a higher --effort; a lower one is refused (planned_effort)."""
+    target = lookup.get_member(con, ref)
+    handle = lookup.member_ref(con, target["id"])
+    low, high = kernel.ESCALATION
+    if target["ticket_id"] != ticket["id"]:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s is not on %s; an escalation is planned on the ticket of the member it re-plans" % (handle, ticket["key"]))
+    if target["parent_id"] != parent_id:
+        raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "%s is %s's child; its own parent re-plans it" % (handle, lookup.member_ref(con, target["parent_id"]) or "Spud"))
+    if target["status"] not in ("failed", "blocked"):
+        raise kernel.SpudError(kernel.EXIT_TRANSITION, "%s is %s; only a member that returned failed or blocked is escalated" % (handle, target["status"]))
+    if target["model"] != low or model != high:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "the one escalation is %s to %s: %s ran on %s and this plan names %s" % (low, high, handle, target["model"], model))
+    again = con.execute("SELECT id FROM members WHERE escalates_id = ?", (target["id"],)).fetchone()
+    if again is not None:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s was escalated once already, by %s; a %s failure is not retried" % (handle, lookup.member_ref(con, again["id"]), high))
+    return target
+
+
 def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_reason=None, agent_type=None, brief="", deliverables=None, session_id=None,
-                binder=None):
+                binder=None, escalates=None, effort=None):
     """member new: the four limit checks, the lineage and the name draw, all inside
     one BEGIN IMMEDIATE, reading the ticket and the parent inside it too.  session_id is
     the Claude Code session planning it, None outside one.  `binder` is the
     command's commands/worktreebind.Binder, prepared before this call: its decision runs
     last, inside the transaction, so a plan refused for its worktree writes nothing and a
-    binding is written only with the member it binds for."""
+    binding is written only with the member it binds for.  `escalates` names the failed
+    opus member this plan re-runs on fable (escalation_target), and fills the tier reason
+    when none is given.  `effort` is --effort, settled by planned_effort.  Returns (the
+    row, planned_effort's note or None)."""
     limits = ctx.limits
     deliverables = normalize_deliverables(deliverables)
     if persona not in ctx.personas():
@@ -158,13 +228,16 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
         raise kernel.SpudError(kernel.EXIT_ERROR, "persona %r is not in the schema's list (%s)" % (persona, ", ".join(kernel.PERSONAS)))
     if model not in kernel.MODELS:
         raise kernel.SpudError(kernel.EXIT_ERROR, "model must be one of %s" % ", ".join(kernel.MODELS))
+    check_agent_type(agent_type)
+    if effort is not None and effort not in kernel.EFFORTS:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "effort must be one of %s" % ", ".join(kernel.EFFORTS))
     if persona == "contractor":
         if not agent_type:
             raise kernel.SpudError(kernel.EXIT_ERROR, "a contractor needs --agent-type (the native agent type it runs as)")
     else:
-        agent_type = agent_type or "spudagent"
+        agent_type = agent_type or kernel.SPUDAGENT
         default_tier = ctx.persona_tier(persona)
-        if default_tier and model != default_tier and not tier_reason:
+        if default_tier and model != default_tier and not tier_reason and not escalates:
             raise kernel.SpudError(kernel.EXIT_ERROR, "%s defaults to %s; model %s needs --tier-reason" % (persona, default_tier, model))
     if not (brief or "").strip():
         raise kernel.SpudError(kernel.EXIT_ERROR, "no brief, no spudagent (Law 2): member new needs --brief (a non-empty brief; @file and @- are accepted)")
@@ -203,23 +276,32 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
         pad = ctx.id_pad()
         lineage = ((parent["lineage"] + ".") if parent else "") + str(ever + 1).zfill(pad)
         chosen = draw_name(con, ticket["id"], name)
+        target = escalation_target(con, escalates, ticket, parent_id, model) if escalates else None
+        if target is not None and not tier_reason:
+            tier_reason = "escalation after %s %s" % (lookup.member_ref(con, target["id"]), target["status"])
+        floor = (lookup.member_ref(con, target["id"]), target["effort"]) if target is not None else None
+        effort, note = planned_effort(ctx, persona, model, agent_type, effort=effort, floor=floor)
         if binder is not None:
             binder.decide(con, at, actor, ticket, deliverables)
         cur = con.execute(
-            "INSERT INTO members (ticket_id, lineage, depth, parent_id, name, persona, agent_type, model, tier_reason,"
-            " status, brief, deliverables, planned_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)",
-            (ticket["id"], lineage, depth, parent_id, chosen, persona, agent_type, model, tier_reason, brief,
-             json.dumps(list(deliverables or [])), at, session_id),
+            "INSERT INTO members (ticket_id, lineage, depth, parent_id, name, persona, agent_type, model, effort, tier_reason,"
+            " escalates_id, status, brief, deliverables, planned_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)",
+            (ticket["id"], lineage, depth, parent_id, chosen, persona, agent_type, model, effort, tier_reason,
+             target["id"] if target is not None else None, brief, json.dumps(list(deliverables or [])), at, session_id),
         )
         member_id = cur.lastrowid
         if parent is None:
             con.execute("UPDATE tickets SET lead_id = ?, updated_at = ? WHERE id = ? AND lead_id IS NULL", (member_id, at, ticket["id"]))
         data = {"lineage": lineage, "name": chosen, "persona": persona, "model": model, "agent_type": agent_type}
+        if effort:
+            data["effort"] = effort
+        if target is not None:
+            data["escalates"] = lookup.member_ref(con, target["id"])
         if session_id:
             data["session_id"] = session_id
         ledgerdb.write_event(con, at, actor.label, "member.planned", "planned %s (%s, %s, %s)" % (chosen, lineage, persona, model),
                     ticket_id=ticket["id"], member_id=member_id, data=data)
-    return lookup.get_member_by_id(con, member_id)
+    return lookup.get_member_by_id(con, member_id), note
 
 
 def create_ticket_for_proposal(con, at, actor, proposal, title, priority):

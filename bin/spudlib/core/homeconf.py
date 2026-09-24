@@ -103,6 +103,13 @@ class Ctx:
             return personas[persona].get("tier")
         return None
 
+    def persona_effort(self, persona):
+        """The effort a persona's member is planned at when `member new` names none (SPD-222), or None: a persona whose
+        spec names no `effort` (scout, on haiku, which takes none) or names one that is not a level."""
+        spec = self.config.get("personas", {}).get(persona)
+        effort = spec.get("effort") if isinstance(spec, dict) else None
+        return effort if effort in kernel.EFFORTS else None
+
     def personas(self):
         return list(self.config.get("personas", {}).keys()) + ["contractor"]
 
@@ -136,6 +143,8 @@ def config_problems(config):
     for persona, spec in config.get("personas", {}).items():
         if not isinstance(spec, dict) or spec.get("tier") not in kernel.MODELS:
             problems.append("personas.%s.tier is not one of %s" % (persona, ", ".join(kernel.MODELS)))
+        elif "effort" in spec and spec["effort"] not in kernel.EFFORTS:  # absent is allowed: kernel.DEFAULT_EFFORT then
+            problems.append("personas.%s.effort is not one of %s" % (persona, ", ".join(kernel.EFFORTS)))
     for key in ("tickets", "teams"):
         prefix = config.get(key, {}).get("prefix")
         if not isinstance(prefix, str) or not re.fullmatch(r"[A-Z][A-Z0-9]*", prefix):

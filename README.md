@@ -51,8 +51,9 @@ interactively — see `.claude/skills/spud-init/SKILL.md`.
 - `bin/spudlib/` — the package: the CLI parser and commands, the ledger schema and migrations, the
   hook implementations, and the code that renders the database into the Obsidian vault.
 - `share/` — everything the tool ships into a home it builds or updates: the starting config, the
-  generated `CLAUDE.md` and vault scaffolding, the Claude Code skills, and the sub-agent definition,
-  each a template filled in with values specific to the home being built.
+  generated `CLAUDE.md` and vault scaffolding, the Claude Code skills, and the sub-agent definition
+  (installed as a base and one variant per effort level, so each sub-agent runs at the effort it was
+  planned at), each a template filled in with values specific to the home being built.
 - `tests/` — the test suite (`suite.py`, run in parallel against scratch homes) and a set of
   standalone probes for timing, hook behavior and other properties the suite doesn't cover.
 - `.claude/skills/` — this repository's own Claude Code skills: `spud-init` (the interactive walk

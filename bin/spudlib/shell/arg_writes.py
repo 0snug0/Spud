@@ -33,8 +33,8 @@ here is long; the length is the grammar's, one short function per shape."""
 import os
 import re
 
-from . import bash_rule, expansions, globbing, prepare, redirect_globs, syntax, tree_walk
-from ..hooks import hookio
+from . import bash_rule, expansions, globbing, loop_bindings, prepare, redirect_globs, syntax, tree_walk
+from ..hooks import hookio, pathrule
 
 
 # chmod's own options (the man page's synopsis: -fhv, -R with -H/-L/-P, and the ACL forms -E, -C, -N, -i, -I): a word
@@ -68,8 +68,9 @@ MODE_TREE_OPTIONS = ("-R", "--recursive")
 # patterns a walk honours or None, whether a source spelled with a trailing `/` lands as its contents).
 RECURSIVE = "recursive"
 # A `$NAME` or `${NAME}` anywhere in a word, which `resolved` puts the line's own value in place of.  A `$` the quoting marked
-# literal is followed by that marker, never by a name, so it never matches.
-_EXPANSION_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})")
+# literal is followed by that marker, never by a name, so it never matches.  The third group is the _QUOTED_NAME after a
+# name that stood in double quotes (SPD-167), taken with the name so a value put in place leaves none behind.
+_EXPANSION_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})(" + syntax._QUOTED_NAME + ")?")
 
 
 def long_name(name, longs):
@@ -135,9 +136,11 @@ def read_writes(cmd, base, words, a):
         entries = mode_writes(base, args)
     else:
         entries = operand_writes(base, shape, args, hidden)
-    for word, sources, how, suffix, kind in entries:
-        a.arg_writes.append((cmd, resolved(word, a), a.cwds, tuple(resolved(s, a) for s in sources), how,
-                             resolved(suffix, a) if suffix else suffix, kind))
+    named = [w for word, sources, _, suffix, _ in entries for w in (word, *sources, suffix) if w]
+    for _ in loop_bindings.per_reading(named, a):  # once per reading of a loop's word or a basename (SPD-146)
+        for word, sources, how, suffix, kind in entries:
+            a.arg_writes.append((cmd, resolved(word, a), a.cwds, tuple(resolved(s, a) for s in sources), how,
+                                 resolved(suffix, a) if suffix else suffix, kind))
 
 
 def resolved(word, a, blanks=None):
@@ -145,7 +148,8 @@ def resolved(word, a, blanks=None):
     one plain word it spells: a value the line settled (not doubted, not a loop's or a function body's, not one the shells
     set themselves), holding no blank (bash would split it), no glob character (bash expands an unquoted expansion's) and
     nothing left to expand.  `blanks`, for a reader that splits the words itself (shell/stdin_text, SPD-148): a value
-    holding a blank is put in place too, passed through this function first.  A member writes into its scratchpad through a variable it set on the line
+    holding a blank is put in place too, passed through this function first with whether the expansion stood in double
+    quotes (syntax._QUOTED_NAME, SPD-167), which bash splits no more than zsh does.  A member writes into its scratchpad through a variable it set on the line
     (`S=<scratchpad>; mkdir -p $S/base`) far too often for the raw word to be the reading here; everything else stays as
     spelled and earns the unresolvable-target refusal a redirection's spelling earns.
 
@@ -157,11 +161,20 @@ def resolved(word, a, blanks=None):
     Every write target the hook checks is read this way -- a file a command names as an operand, a redirection
     target, a tee operand and the file a git call's own option or environment names -- each resolved where the analysis
     records it, which is the point of the walk that holds the value the shell would use there."""
+    binding = a.binding
+    if binding is not None and hookio.SUBST in word:
+        word = loop_bindings.with_basenames(word, binding)  # a basename the reading settled (SPD-146)
     if not word or "$" not in word or hookio.SUBST in word or "`" in word:
         return word
 
     def one(m):
         name = m.group(1) or m.group(2)
+        bound = binding.get(name) if binding is not None else None
+        if bound is not None:  # a loop's word or a basename, in the reading a write channel resolves under (SPD-146)
+            value, exact = bound
+            if not exact and (m.group(3) is None or m.start() == 0):
+                return m.group(0)  # one name the shell may split, glob or read as an option: not settled
+            return value if blanks is None else blanks(value, m.group(3) is not None)
         value = a.vars.get(name)
         if value is None or name in a.doubt or name in a.sticky or a.all_doubt or name in syntax.DYNAMIC_VARIABLES:
             return m.group(0)
@@ -169,7 +182,7 @@ def resolved(word, a, blanks=None):
                 or syntax._ARRAY_VALUE in value \
                 or syntax.GLOB_RE.search(prepare.deglob(value)):  # deglob: a glob character the assignment's own quoting marked literal counts too
             return m.group(0)
-        return value if blanks is None else blanks(value)
+        return value if blanks is None else blanks(value, m.group(3) is not None)
 
     return _EXPANSION_RE.sub(one, word)
 
@@ -418,6 +431,8 @@ def destination(word, cwds, how):
     cannot resolve or follow is left to the redirection's reading of it, which refuses it."""
     if how == "into":
         return [word], False
+    if pathrule.NAME_CHAR in word:
+        return [word], True  # one name basename printed (SPD-146): the file itself, or a directory it lands in
     if unresolved(word):
         return [], True
     if bash_rule.target_has_active_glob(word):

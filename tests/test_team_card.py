@@ -422,7 +422,7 @@ class UsageKeysTest(TeamCardCase):
     def test_pompadours_frontmatter(self):
         self.assertEqual(
             frontmatter(self.member_note("Pompadour")),
-            ['id: "01"', "name: Pompadour", "persona: engineer", "model: opus", 'parent: "[[Spud]]"', 'ticket: "[[SPD-001]]"', "project: spud",
+            ['id: "01"', "name: Pompadour", "persona: engineer", "model: opus", "effort: high", 'parent: "[[Spud]]"', 'ticket: "[[SPD-001]]"', "project: spud",
              "status: done", "spawned: 2026-09-12T20:01", "finished: 2026-09-12T20:41", "duration_ms: 2127776", "tool_uses: 105",
              "tokens_out: 160812", "tokens_in: 2888805", "tokens_cached: 44345065", "tags: [spudagent]"],
         )
@@ -504,6 +504,18 @@ class UsageKeysTest(TeamCardCase):
                     self.assertIn("the hooks record it", proc.stderr, key)
                 self.assertEqual(self.home.scalar("SELECT %s FROM members WHERE id = ?" % column, self.m["id"]), before, key)
                 self.home.json("render", "--discard", path, actor="spud")
+
+    def test_import_file_refuses_an_edited_effort(self):  # SPD-222: member new sets it, member edit --model resets it
+        self.home.json("render")
+        path = self.home.path / "ledger" / "teams" / "SPUD-001" / "Pompadour.md"
+        text = path.read_text(encoding="utf-8")
+        self.assertEqual(text.count("\neffort: high\n"), 1)
+        path.write_text(text.replace("\neffort: high\n", "\neffort: max\n"), encoding="utf-8")
+        proc = self.home.run("import", "--file", path, actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("effort is not editable by hand", proc.stderr)
+        self.assertNotIn("has no column", proc.stderr)
+        self.assertEqual(self.home.scalar("SELECT effort FROM members WHERE id = ?", self.m["id"]), "high")
 
     def test_import_file_still_refuses_an_unknown_member_property(self):
         self.home.json("render")

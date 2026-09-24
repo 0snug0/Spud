@@ -126,9 +126,10 @@ def skill_markdown(ctx):
 
 
 def spudagent_shaped(tool_input):
-    """A spawn the PreToolUse(Agent) check is for in any session: subagent_type spudagent, or a member description."""
+    """A spawn the PreToolUse(Agent) check is for in any session: subagent_type spudagent or one of its effort variants
+    (kernel.SPUDAGENT_TYPES, enumerated: `spudagent-anything` is not one), or a member description."""
     description = tool_input.get("description") if isinstance(tool_input.get("description"), str) else ""
-    return tool_input.get("subagent_type") == "spudagent" or hookio.DESCRIPTION.match(description) is not None
+    return tool_input.get("subagent_type") in kernel.SPUDAGENT_TYPES or hookio.DESCRIPTION.match(description) is not None
 
 
 def pending_spawn(con, session_id):

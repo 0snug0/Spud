@@ -24,6 +24,32 @@ MEMBER_STATUSES = ("planned", "active", "done", "blocked", "failed")
 MODELS = ("fable", "opus", "sonnet", "haiku")
 PERSONAS = ("researcher", "architect", "reviewer", "engineer", "designer", "writer", "scout", "contractor")
 ALIVE = ("planned", "active")
+# Effort (SPD-222).  The levels Claude Code takes, lowest first, and the models that take one: haiku takes none, so a
+# haiku member's effort is NULL; so is a contractor's, whose own definition sets it.  Effort is chosen per member at
+# planning, the way its model is: the Agent tool takes a model and no effort, but an agent definition's frontmatter
+# `effort:` beats the spawning session's level (tests/probes/subagent_effort.py showed it on 2.1.280), so each level has
+# a definition of its own, `spudagent-<level>`, rendered by projects/agentdef from the one shipped `spudagent`, which
+# sets none and so runs at the spawning session's level.  DEFAULT_EFFORT is the level a member is planned at when
+# neither `--effort` nor its persona's `effort` in spud.config.json names one.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+DEFAULT_EFFORT = "high"
+EFFORT_MODELS = ("fable", "opus", "sonnet")
+SPUDAGENT = "spudagent"
+# Every agent type a spudagent is spawned as, enumerated rather than matched by prefix, so that a hook testing for one
+# accepts exactly the definitions projects/agentdef installs and nothing else that happens to start with the word.
+SPUDAGENT_VARIANTS = tuple("%s-%s" % (SPUDAGENT, level) for level in EFFORTS)
+SPUDAGENT_TYPES = (SPUDAGENT,) + SPUDAGENT_VARIANTS
+# The one escalation (SPD-222): a member that returned failed or blocked on this model is re-planned once on that one.
+ESCALATION = ("opus", "fable")
+
+
+def spawn_type(agent_type, effort):
+    """The `subagent_type` a member is spawned as: `spudagent-<effort>` for a spudagent planned at an effort, the planned
+    agent type itself otherwise -- `spudagent` for one with none (haiku, or a row from before effort was recorded), a
+    contractor's own type.  The spawn check holds the Agent call to it as it holds the call to the planned model."""
+    if agent_type == SPUDAGENT and effort in EFFORTS:
+        return "%s-%s" % (SPUDAGENT, effort)
+    return agent_type
 
 # The reserved key of Spud's home in a deliverable glob (home:<glob>) and in the path rule.  The home is not a
 # project and never a projects row; project 1, `spud`, is the tool repository.
