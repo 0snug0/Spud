@@ -2,9 +2,10 @@
 
   python3.14 -I -S tests/probes/subagent_effort.py SCENARIO [--model haiku] [--opus-model ID] [--claude PATH] [--root DIR]
 
-Builds a scratch directory (no git, no ledger) holding two project-scope agent definitions, written as files the way
-`~/.claude/agents/spudagent.md` is: `probe-plain`, whose frontmatter sets no effort (today's spudagent), and `probe-high`,
-whose frontmatter says `effort: high`.  The main session (`--model`, default haiku) is told to call the Agent tool once per
+Builds a scratch directory (no git, no ledger) holding project-scope agent definitions, written as files the way
+`~/.claude/agents/spudagent.md` is: `probe-plain`, whose frontmatter sets no effort (the spudagent before SPD-222), and
+`probe-high`, whose frontmatter says `effort: high` -- or, for the `variants` scenario, the base `spudagent` and its five
+effort variants.  The main session (`--model`, default haiku) is told to call the Agent tool once per
 row of the scenario, in the foreground, each child asked for one word.  Claude Code stamps every assistant entry of a
 transcript with the effort it ran that turn at (`effort`, `perTurnEffort`; seen in 2.1.276), so the probe reads each
 child's transcript under ~/.claude/projects/<cwd>/<session>/subagents/ and prints its agent type, the model it asked for
@@ -19,6 +20,12 @@ Scenarios:
                on sonnet.  What an Opus 5.5 child runs at when nothing sets one: its own default (medium) or the
                session's?  Run it with `--model sonnet` too: a session model that supports effort (default high), as
                Fable does, against haiku, which supports none.
+  variants     the definitions `project install` writes since SPD-222 made effort a per-member choice: `spudagent`, the
+               base, and `spudagent-low` ... `spudagent-max`, rendered by the program's own projects/agentdef.variant_markdown
+               from a base whose frontmatter is share/agents/spudagent.md's (its body swapped for the probe's one line, so
+               a child does not start the ledger protocol); the session's effort `low` by settings.  spudagent-high and
+               spudagent-max on opus, spudagent-medium on sonnet, the base on opus, spudagent-high on haiku, each by
+               subagent_type: does each variant run at its own level, whatever the session's, and the base at the session's?
 
 `--claude` names the Claude Code binary (default `claude` on PATH).  Which model the `opus` alias reaches depends on it:
 2.1.276 resolves it to Opus 5 (claude-opus-5) and answers a request for Opus 5.5 with "API Error: 400 Claude Code 2.1.276
@@ -35,6 +42,8 @@ effort" (Haiku 4.5 is not listed).  Run one scenario at a time; each costs a few
 
 import argparse
 import glob
+import importlib.machinery
+import importlib.util
 import json
 import os
 import shutil
@@ -42,7 +51,11 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 
+sys.dont_write_bytecode = True  # the variants scenario loads the program, which must leave no bytecode in the checkout
+
+REPO = Path(__file__).resolve().parents[2]
 CHILD_PROMPT = "Reply with the single word OK and nothing else."
 AGENT_BODY = "You are a probe subagent. Do exactly what the prompt says and nothing more."
 AGENTS = {"probe-plain": None, "probe-high": "high"}
@@ -50,7 +63,30 @@ SCENARIOS = {
     "frontmatter": {"effortLevel": "low", "spawns": [("probe-plain", "haiku"), ("probe-plain", "sonnet"), ("probe-plain", "opus"),
                                                      ("probe-high", "haiku"), ("probe-high", "sonnet"), ("probe-high", "opus")]},
     "unset": {"effortLevel": None, "spawns": [("probe-plain", "opus"), ("probe-high", "opus"), ("probe-plain", "sonnet")]},
+    "variants": {"effortLevel": "low", "agents": "variants",
+                 "spawns": [("spudagent-high", "opus"), ("spudagent-max", "opus"), ("spudagent-medium", "sonnet"),
+                            ("spudagent", "opus"), ("spudagent-high", "haiku")]},
 }
+
+
+def load_program():
+    """bin/spud_ledger.py, loaded the way tests/helpers.load_spud_module loads it: its names are the package's."""
+    loader = importlib.machinery.SourceFileLoader("spud_ledger", str(REPO / "bin" / "spud_ledger.py"))
+    module = importlib.util.module_from_spec(importlib.util.spec_from_loader("spud_ledger", loader))
+    loader.exec_module(module)
+    return module
+
+
+def variant_files():
+    """{agent type: text} of the base and its five effort variants as projects/agentdef renders them (SPD-222), from
+    share/agents/spudagent.md's own frontmatter with the probe's one-line body."""
+    spud = load_program()
+    shipped = (REPO / "share" / "agents" / "spudagent.md").read_text(encoding="utf-8")
+    end = shipped.index("\n---\n", 4) + len("\n---\n")
+    base = shipped[:end] + "\n" + AGENT_BODY + "\n"
+    files = {spud.SPUDAGENT: base}
+    files.update((name, spud.variant_markdown(base, level)) for name, level in zip(spud.SPUDAGENT_VARIANTS, spud.EFFORTS))
+    return files
 DROPPED = ("CLAUDECODE", "CLAUDE_CODE_SESSION_ID", "CLAUDE_PROJECT_DIR", "CLAUDE_CODE_ENTRYPOINT", "CLAUDE_CODE_EFFORT_LEVEL",
            "CLAUDE_CODE_SUBAGENT_MODEL", "ANTHROPIC_DEFAULT_OPUS_MODEL")
 
@@ -117,9 +153,10 @@ def main(argv=None):
     root = os.path.join(base, "subagent-effort-%s-%s-%s" % (args.scenario, args.model, time.strftime("%Y%m%dT%H%M%S")))
     session_dir = os.path.join(root, "session")
     os.makedirs(os.path.join(session_dir, ".claude", "agents"))
-    for name, effort in AGENTS.items():
+    files = variant_files() if scenario.get("agents") == "variants" else {name: agent_file(name, effort) for name, effort in AGENTS.items()}
+    for name, text in files.items():
         with open(os.path.join(session_dir, ".claude", "agents", name + ".md"), "w", encoding="utf-8") as f:
-            f.write(agent_file(name, effort))
+            f.write(text)
     settings = {} if scenario["effortLevel"] is None else {"effortLevel": scenario["effortLevel"]}
     settings_path = os.path.join(root, "settings.json")
     with open(settings_path, "w", encoding="utf-8") as f:

@@ -131,7 +131,7 @@ def planned_clause(con, rows):
             fail = "`spud --as spud member finish %s --status failed --outcome '<why>' [--next '<what happens next>']`" % ref
             items.append(stop_item(r, "planned " + kernel.fm_minute(r["planned_at"])))
             steps.append("spawn %s now (the Agent tool with subagent_type `%s`, model `%s`, description `%s (%s, %s)`) or record it with %s"
-                         % (ref, r["agent_type"], r["model"], ref, r["lineage"], r["persona"], fail))
+                         % (ref, kernel.spawn_type(r["agent_type"], r["effort"]), r["model"], ref, r["lineage"], r["persona"], fail))
         else:
             fail = "`spud --as spud member finish %s --status failed --outcome '<why>'`" % ref
             parent = lookup.member_ref(con, r["parent_id"])

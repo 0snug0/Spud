@@ -250,9 +250,12 @@ class ShippedPathsTest(unittest.TestCase):
         `project install` writes, so the template this repository used to keep there was the definition every spudagent
         working a ticket in this checkout actually read -- an unrendered `{{launcher}}` and all.  A file full of {{marks}}
         was never a usable agent definition; it only shadowed the one that was.  It lives under share/ now, and nothing
-        here puts one back: this guard is the whole defect, in one line."""
-        shadow = REPO / load_spud_module().PROJECT_SCOPE_REL
-        self.assertFalse(shadow.exists(), "%s is back and shadows the installed definition (SPW-004)" % shadow)
+        here puts one back: this guard is the whole defect, in one line.  SPD-222 made it six definitions, the base and one
+        per effort level, and a project-scope copy of any of them would shadow its installed copy the same way."""
+        spud = load_spud_module()
+        for name in spud.SPUDAGENT_TYPES:
+            shadow = spud.project_scope_agent(REPO, name)
+            self.assertFalse(shadow.exists(), "%s is back and shadows the installed definition (SPW-004)" % shadow)
         # And this repository's CLAUDE.md, which named that path twice: the source is share/agents/spudagent.md, and the
         # only .claude/agents/spudagent.md left in the prose is the installed user-scope copy `project sync` refreshes.
         claude_md = (REPO / "CLAUDE.md").read_text(encoding="utf-8")

@@ -123,26 +123,32 @@
   "personas": {
     "researcher": {
       "tier": "opus",
+      "effort": "high",
       "role": "investigates, compares options with evidence, writes spikes"
     },
     "architect": {
       "tier": "opus",
+      "effort": "high",
       "role": "designs structures and schemas, reviews plans"
     },
     "reviewer": {
       "tier": "opus",
+      "effort": "high",
       "role": "checks another spudagent's output against its brief"
     },
     "engineer": {
       "tier": "opus",
+      "effort": "high",
       "role": "implements code and config"
     },
     "designer": {
       "tier": "opus",
+      "effort": "high",
       "role": "UI, UX, layouts, visual specs"
     },
     "writer": {
       "tier": "sonnet",
+      "effort": "medium",
       "role": "docs, reports, prose"
     },
     "scout": {

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
 
-from helpers import EXIT_ERROR, EXIT_USAGE, PROGRAM, SPUD, SpudTestCase, load_spud_module, real_config, wall_clock
+from helpers import EXIT_ERROR, EXIT_USAGE, PROGRAM, SPUD, SpudTestCase, load_spud_module, real_config, spawn_type, wall_clock
 from helpers import git as scratch_git
 
 
@@ -257,9 +257,9 @@ class HookCase(SpudTestCase):
     def spawn(self, m, agent_id, caller=None, tool_use_id=None, model=None, session=SESSION):
         """PreToolUse(Agent) allow followed by the background PostToolUse binding, all in session."""
         tool_use_id = tool_use_id or ("toolu_" + agent_id)
-        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=model or m["model"], subagent_type=m["agent_type"], agent_id=caller, tool_use_id=tool_use_id, session=session))
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=model or m["model"], subagent_type=spawn_type(m), agent_id=caller, tool_use_id=tool_use_id, session=session))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
-        st = self.home.hook("SubagentStart", self.sub_start(agent_id, m["agent_type"], session=session))
+        st = self.home.hook("SubagentStart", self.sub_start(agent_id, spawn_type(m), session=session))
         self.assertEqual(st.code, 0, st)
         post = self.home.hook("PostToolUse", self.post_agent_launched(tool_use_id, agent_id, self.description(m), caller=caller, session=session))
         self.assertEqual(post.code, 0, post)
@@ -273,18 +273,18 @@ class HookCase(SpudTestCase):
         reversed with order="completion-first"."""
         tool_use_id = "toolu_" + agent_id
         description = self.description(m)
-        pre = self.home.hook("PreToolUse", self.pre_agent(description, model=m["model"], subagent_type=m["agent_type"], tool_use_id=tool_use_id, run_in_background=False))
+        pre = self.home.hook("PreToolUse", self.pre_agent(description, model=m["model"], subagent_type=spawn_type(m), tool_use_id=tool_use_id, run_in_background=False))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
-        self.assertEqual(self.home.hook("SubagentStart", self.sub_start(agent_id, m["agent_type"])).code, 0)
+        self.assertEqual(self.home.hook("SubagentStart", self.sub_start(agent_id, spawn_type(m))).code, 0)
         transcript = self.write_transcript(agent_id, self.two_requests() if entries is None else entries)
         transcript.with_name("agent-%s.meta.json" % agent_id).write_text(json.dumps({
-            "agentType": m["agent_type"], "description": description, "toolUseId": tool_use_id, "spawnDepth": 1,
+            "agentType": spawn_type(m), "description": description, "toolUseId": tool_use_id, "spawnDepth": 1,
             "requestShape": "foreground", "requestNonInteractive": False, "model": m["model"]}), encoding="utf-8")
         first_call = self.pre_bash("ls", agent_id=agent_id)
         first_call["transcript_path"] = str(self.home.path / "transcripts" / ("%s.jsonl" % SESSION))
         self.assertEqual(self.home.hook("PreToolUse", first_call).code, 0)
         self.home.json("member", "result", "Built it.", actor=agent_id)
-        events = [("SubagentStop", self.sub_stop(agent_id, agent_type=m["agent_type"], transcript=str(transcript))),
+        events = [("SubagentStop", self.sub_stop(agent_id, agent_type=spawn_type(m), transcript=str(transcript))),
                   ("PostToolUse", self.post_agent_completed(tool_use_id, agent_id, description))]
         for event, payload in (events if order == "stop-first" else events[::-1]):
             r = self.home.hook(event, payload)
@@ -410,6 +410,56 @@ class PreAgentTest(HookCase):
         r = self.home.hook("PreToolUse", self.pre_agent(desc, model="sonnet", subagent_type="claude-code-guide"))
         self.assertEqual(r.decision, "allow", r)
 
+    def test_a_member_planned_at_an_effort_spawns_as_that_effort_s_definition(self):
+        """SPD-222: the Agent tool takes no effort, so the effort rides on the definition, `spudagent-<effort>`, and the check
+        holds the call to the planned one as it holds the model: any other definition would run the member at a level
+        nobody planned, the base at the spawning session's own."""
+        m = self.plan(persona="engineer", model="opus", effort="xhigh")
+        desc = self.description(m)
+        for n, (asked, needle) in enumerate((("spudagent", "not spudagent"), ("spudagent-high", "not spudagent-high"),
+                                              ("spudagent-XHIGH", "not spudagent-XHIGH"), (None, "not None"))):
+            r = self.home.hook("PreToolUse", self.pre_agent(desc, model="opus", subagent_type=asked, tool_use_id="toolu_e%d" % n))
+            self.assertEqual(r.decision, "deny", (asked, r))
+            self.assertIn("Law 3: %s is planned at xhigh effort, so it is spawned as subagent_type spudagent-xhigh, %s" % (m["ref"], needle), r.reason)
+            self.assertIn("`spud member edit --effort`", r.reason)
+        r = self.home.hook("PreToolUse", self.pre_agent(desc, model="opus", subagent_type="spudagent-xhigh", tool_use_id="toolu_eok"))
+        self.assertEqual(r.decision, "allow", r)
+        row = self.home.rows("SELECT * FROM spawn_requests WHERE tool_use_id = 'toolu_eok'")[0]
+        self.assertEqual((row["subagent_type"], row["decision"]), ("spudagent-xhigh", "allow"))
+
+    def test_a_member_at_no_effort_spawns_as_the_base_definition(self):
+        scout = self.plan(persona="scout", model="haiku")
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(scout), subagent_type="spudagent-high", tool_use_id="toolu_h1"))
+        self.assertEqual(r.decision, "deny")
+        self.assertIn("Law 3: %s is planned at no effort (haiku takes none), so it is spawned as subagent_type spudagent, the base"
+                      " definition, not spudagent-high" % scout["ref"], r.reason)
+        # A row planned before migration 0009 recorded no effort: it ran at the session's level, and still spawns as the base.
+        old = self.plan(persona="engineer", model="opus")
+        con = self.home.connect()
+        con.execute("UPDATE members SET effort = NULL WHERE id = ?", (old["id"],))
+        con.commit()
+        con.close()
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(old), model="opus", subagent_type="spudagent-high", tool_use_id="toolu_h2"))
+        self.assertEqual(r.decision, "deny")
+        self.assertIn("planned at no effort (it was planned before effort was recorded)", r.reason)
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(old), model="opus", subagent_type="spudagent", tool_use_id="toolu_h3"))
+        self.assertEqual(r.decision, "allow", r)
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(scout), subagent_type="spudagent", tool_use_id="toolu_h4"))
+        self.assertEqual(r.decision, "allow", r)
+
+    def test_a_variant_spawn_is_named_and_bound_at_subagent_start(self):
+        """SubagentStart names a background spawn waiting to bind by the agent type the harness reports, which for a member
+        planned at an effort is the variant its spawn named -- the exact type, never a prefix of it."""
+        m = self.plan(persona="engineer", model="opus")
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model="opus", subagent_type="spudagent-high", tool_use_id="toolu_v1"))
+        self.assertEqual(r.decision, "allow", r)
+        other = self.home.hook("SubagentStart", self.sub_start(AGENT_B, "spudagent"))
+        self.assertNotIn(m["name"], other.context or "")  # the base is another definition: it names no waiting variant
+        start = self.home.hook("SubagentStart", self.sub_start(AGENT_A, "spudagent-high"))
+        self.assertIn("You are %s (01, engineer)" % m["ref"], start.context)
+        self.assertEqual(self.home.hook("PostToolUse", self.post_agent_launched("toolu_v1", AGENT_A, self.description(m))).code, 0)
+        self.assertEqual(self.home.json("member", "show", m["ref"])["member"]["agent_id"], AGENT_A)
+
     def test_brief_must_be_non_empty(self):
         m = self.plan()
         con = self.home.connect()
@@ -445,7 +495,7 @@ class PreAgentTest(HookCase):
         self.assertEqual(row["member_id"], child["id"])
         # and a lead may not spawn Spud's members
         second = self.plan(persona="engineer", model="opus")
-        r = self.home.hook("PreToolUse", self.pre_agent(self.description(second), model="opus", agent_id=AGENT_A))
+        r = self.home.hook("PreToolUse", self.pre_agent(self.description(second), model="opus", subagent_type=spawn_type(second), agent_id=AGENT_A))
         self.assertEqual(r.decision, "deny")
         self.assertIn("parent", r.reason)
 
@@ -18259,6 +18309,13 @@ class StopSessionTest(HookCase):
         self.home.json("member", "finish", m["ref"], "--status", "failed", "--outcome", "Never spawned.", actor="spud")
         self.assertSilent(self.stop_in(SESSION))
 
+    def test_the_never_spawned_hold_names_the_effort_variant_to_spawn(self):
+        # SPD-222: the way out it prints is a spawn the check would allow, so a member planned at an effort is named by its variant
+        m = self.plan(name="Kestrel", persona="engineer", model="opus", effort="medium")
+        reason = self.stop_in(SESSION).json["reason"]
+        self.assertIn("subagent_type `spudagent-medium`, model `opus`, description `SPUD-001/Kestrel (01, engineer)`", reason)
+        self.home.json("member", "finish", m["ref"], "--status", "failed", "--outcome", "Never spawned.", actor="spud")
+
     def test_a_planned_row_with_no_known_session_holds_any_session_after_ten_minutes(self):
         self.in_session(None)
         m = self.plan(name="Kestrel")
@@ -18370,7 +18427,7 @@ class StopSessionTest(HookCase):
 
     def reserve(self, m, tool_use_id, session=SESSION, caller=None):
         """PreToolUse(Agent) allows m's spawn in session, which reserves the row; nothing binds it."""
-        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=m["model"], subagent_type=m["agent_type"], agent_id=caller,
+        pre = self.home.hook("PreToolUse", self.pre_agent(self.description(m), model=m["model"], subagent_type=spawn_type(m), agent_id=caller,
                                                           tool_use_id=tool_use_id, session=session))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
 

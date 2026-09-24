@@ -164,7 +164,8 @@ def accept_member_edit(ctx, con, at, m, ticket, base, doc, rel):
         if key == "model":
             refuse(rel, "model is not editable by hand; use `spud member edit --model` with `--tier-reason`")
         if key == "effort":
-            refuse(rel, "effort is not editable by hand; `spud member new` sets it from the model, and `member edit --model` resets it")
+            refuse(rel, "effort is not editable by hand; `spud member new --effort` sets it, and `member edit --effort` changes it while"
+                        " the member is planned")
         if key in ("spawned", "finished"):
             refuse(rel, "%s is not editable by hand; timestamps come from the clock" % key)
         if key in ("id", "name", "parent", "ticket", "project", "persona", "agent_type", "tags"):

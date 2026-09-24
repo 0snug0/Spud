@@ -481,9 +481,10 @@ ALTER TABLE projects ADD COLUMN runners TEXT NOT NULL DEFAULT '[]'
   CHECK (CASE WHEN json_valid(runners) THEN json_type(runners) = 'array' ELSE 0 END);  -- script, task and target names
 """
 
-# Opus first, fable once (SPD-222): two columns on members.  `effort` is the level a member was planned to run at -- what
-# share/agents/spudagent.md's frontmatter sets for a model that takes one, NULL for haiku, a contractor, and every row
-# planned before this migration, whose effort was the spawning session's and was never recorded.  `escalates_id` is the
+# Opus first, fable once (SPD-222): two columns on members.  `effort` is the level a member was planned to run at --
+# chosen at planning as its model is (`member new --effort`, else its persona's), and spawned as the definition that sets
+# it, `spudagent-<effort>`; NULL for haiku, a contractor, and every row planned before this migration, whose effort was
+# the spawning session's and was never recorded, all three spawned as the base `spudagent` or their own type.  `escalates_id` is the
 # member a fable re-plan escalates: an opus member that returned failed, or blocked for want of capability, re-planned once
 # by `member new --escalates`.  Plain ADD COLUMNs; v_fleet names effort, so the two views are dropped first and
 # VIEWS_AND_TRIGGERS re-creates them after.
