@@ -222,7 +222,7 @@ _NAME_CHAR_RE = lazy.LazyPattern(r"[A-Za-z0-9_]")
 _BARE_NAME_TAIL_RE = lazy.LazyPattern(r"\$[A-Za-z_][A-Za-z0-9_]*\Z")
 _IFS_BLANKS_RE = lazy.LazyPattern(r"[ \t\n]+")
 # Builtins that assign a shell variable named by an argument (`read X`, `printf -v X`, `getopts o X`, `unset X`, zsh's
-# `print -v X`, `vared X`, `zparseopts -A X`, `set -A X` ...), each read by its own grammar (assignment_words.builtin_names)
+# `print -v X`, `vared X`, `zparseopts -A X`, `set -A X` ...), each read by its own grammar (assigning_builtins.builtin_names)
 # and every name it assigns recorded as the line's assignment of a value the hook does not know (expansions.
 # read_assigning_builtin, SPD-254); `let` assigns by arithmetic (SPD-225).  `trap`, `source` and `.` run code the hook does
 # not read, so after them no variable is certain.

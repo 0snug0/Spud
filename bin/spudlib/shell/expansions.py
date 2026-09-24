@@ -2,7 +2,7 @@
 
 import functools
 
-from . import analyse, arg_writes, assignment_words, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
+from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
 from ..hooks import hookio, snapshots
 
 
@@ -85,12 +85,12 @@ def settled_text(a, name):
 
 def read_arithmetic(a, text, doubtful=False):
     """Record what an arithmetic expression, spelled as the shells read it, assigns (SPD-225): each name with the literal
-    assignment_words.arithmetic_names reads for it where the evaluation surely runs and persists -- not `doubtful` (a
-    command's prefix, a here-document's body, a `[[ ]]` operand, a subscript), not after an option that may change how
+    arithmetic_assignments.arithmetic_names reads for it where the evaluation surely runs and persists -- not `doubtful`
+    (a command's prefix, a here-document's body, a `[[ ]]` operand, a subscript), not after an option that may change how
     the shells read a number (a.arith_opaque), and not a name with the integer or float attribute (a.typed), whose value
     the shells format their own way (`typeset -i 16 X; X=255` printed 16#FF in zsh) -- else a value the hook does not
     know.  A name the hook cannot read refuses a member unread (SPD-217)."""
-    record_arithmetic(a, assignment_words.arithmetic_names(text, functools.partial(settled_text, a), doubtful), text)
+    record_arithmetic(a, arithmetic_assignments.arithmetic_names(text, functools.partial(settled_text, a), doubtful), text)
 
 
 def record_arithmetic(a, found, shown, doubtful=False):
@@ -123,7 +123,7 @@ def read_word_arithmetic(words, a, bodies=()):
     if expanding:
         prefix, targets = _word_roles(words)
         for k in [k for k in expanding if k not in prefix] + [k for k in expanding if k in prefix]:
-            found = assignment_words.word_arithmetic(words[k], settle)
+            found = arithmetic_assignments.word_arithmetic(words[k], settle)
             record_arithmetic(a, found, words[k], doubtful=k in prefix or k in targets)
     if "[[" in words:
         for k, w in enumerate(words):
@@ -132,7 +132,7 @@ def read_word_arithmetic(words, a, bodies=()):
                     read_arithmetic(a, prepare.deglob(operand), doubtful=True)
     for body in bodies:
         if "$" in body:
-            record_arithmetic(a, assignment_words.word_arithmetic(body, settle, raw=True), body, doubtful=True)
+            record_arithmetic(a, arithmetic_assignments.word_arithmetic(body, settle, raw=True), body, doubtful=True)
 
 
 def _word_roles(words):
@@ -156,7 +156,7 @@ def read_assigning_builtin(words, a, effect):
     """Record what an assigning builtin assigns (SPD-254; syntax.ASSIGNING_COMMANDS), read by its own grammar: `let`'s
     words as arithmetic (SPD-225), zsh's `integer`, `float` and `private` as declarations -- the first two giving the
     integer or float attribute, so what they and later assignments give the name is arithmetic -- and every other
-    builtin's name operands as assignment_words.builtin_names reads them, each assigned a value the hook does not know.
+    builtin's name operands as assigning_builtins.builtin_names reads them, each assigned a value the hook does not know.
     A name the line settles is the name it spells (`N=X; read $N` reads X); one the hook cannot read refuses a member
     unread (SPD-217), and so does code the builtin is handed to run.  `effect`: where the builtin runs -- in the shell, in
     either (`command read`: zsh's external, bash's builtin) or in a fork, where what it assigns may not reach the line.
@@ -172,7 +172,7 @@ def read_assigning_builtin(words, a, effect):
     elif cmd in ("integer", "float", "private"):
         _read_zsh_declaration(words, a)
     else:
-        names, subscripts, unreadable, evaluated = assignment_words.builtin_names(words, functools.partial(settled_text, a))
+        names, subscripts, unreadable, evaluated = assigning_builtins.builtin_names(words, functools.partial(settled_text, a))
         if evaluated is not None:
             unread.record_unread(a, "evaluated", "`%s` %s" % (cmd, unread.unread_shown(evaluated)))
         if unreadable is not None:
