@@ -58,7 +58,8 @@ READS_RE = lazy.LazyPattern(r"\b(?:for|select|foreach)\s+(?!in\b)[A-Za-z_]\w*+(?
 # `set`, a function defined inside the body (whose own call's they are there), and a here-document.
 MOVES_RE = lazy.LazyPattern(r"(?:^|[\s;&|({!])(?:shift|set)(?=[\s;&|)}]|\Z)"
                       r"|\bfunction\s|(?:^|[\s;&|({])[^\s;&|(){}<>'\"=$`]*\(\s*\)|<<(?!<)")
-# The most bodies of one function name a line reads with the words set, one per call's words (analyse.read_shell_name):
+# The most bodies of one function name a line reads with the words set, one per call's words and the state it starts in
+# (analyse.read_shell_name, SPD-252):
 # a body that calls functions with words of its own reads each of those once per words, so a profile could multiply the
 # readings through every level of the analysis's depth.  Past it the body is read once more as it stands.  The same
 # bound holds the walks an analysis makes to read the bodies of the functions a line defines on their calls' inputs

@@ -647,6 +647,11 @@ class ShellAnalysis:
         self.unparseable = None
         self.loop_depth = 0  # inside a loop or a function body, where a relative cd may repeat
         self.cd_uncertain = False  # the last directory change may not happen (a target that does not exist now)
+        # how many times the reading has changed the directory of the shell it reads -- a cd, pushd or popd, a sourced
+        # file, a function body's move given again, text dropped past the depth bound -- which expansions.analyse_trap
+        # compares across a trap's action, to know whether the action moves the line where it runs inside it (SPD-252);
+        # `moving_traps`, the action texts whose reading moved it, for a reading of one that analyse_isolated skips
+        self.dir_moves, self.moving_traps = 0, set()
         self.isolated_done = set()  # (command, depth, starting state) of every body analysed in its own process
         # `doubt`, the variables whose value in `vars` the shell may not hold when a later word reads it (an assignment that
         # may not run or does not persist, or a builtin that assigns it); `sticky`, those no later assignment settles (a function
@@ -660,6 +665,11 @@ class ShellAnalysis:
         # an option builtin (setopt, unsetopt, emulate, `set -o`), which may change how arithmetic reads a number (zsh's
         # FORCE_FLOAT turned `(( X = 5 ))` into 5.000000000e+00, probed), so no arithmetic literal is taken after it.
         self.typed, self.arith_opaque = set(), False
+        # SPD-252: `cdable`, the line (or a function body it called, whose options stay set) ran an option builtin --
+        # setopt, unsetopt, emulate, `set -o`, bash's shopt -- which may turn on zsh's CDABLE_VARS or bash's cdable_vars, so
+        # a later cd into a relative name that is no directory may go where a variable of that name points
+        # (directories.directory_change reads it as a directory it cannot follow)
+        self.cdable = False
         # `aliases`, what `alias NAME=body` defined on the line, name -> the body's text, None for one the hook
         # cannot read and for one `unalias` cleared; `alias_scope`, how many `eval` re-analyses deep the reading is, the only
         # place on one line where a name the line aliased is expanded (a shell expands an alias when it parses the text);
@@ -672,12 +682,16 @@ class ShellAnalysis:
         # `shell_expanded`, (the name, what the shell runs for it) per expansion on this line, in order, so a reason can
         # say what the word it names actually was; `expanding`, the alias names whose expansion is in flight, which zsh
         # does not expand again inside their own body (`alias ls='ls -G'` terminates); `bodies_read`, each function name ->
-        # the (text, call's words) its body was read as on this line, once each however often the line names it with those
-        # words; `shell_reading`, how deep inside such text the reading is, so the outermost of them prunes once, against
-        # the member's own words; `shell_words`, those words, while the outermost reading is under way; `shell_kept`, the
-        # indices of the findings a function's body earned that the member's words reach where the hook cannot follow them
-        # (SPD-203), which that prune keeps.
+        # the (text, call's words, (standard input, starting state)) its body was read as on this line, once each however
+        # often the line calls it so (analyse.read_shell_name); `shell_reading`, how deep inside such text the reading is,
+        # so the outermost of them prunes once, against the member's own words; `shell_words`, those words, while the
+        # outermost reading is under way; `shell_kept`, the indices of the findings a function's body earned that the
+        # member's words reach where the hook cannot follow them (SPD-203), which that prune keeps.
         self.shell_expanded, self.expanding, self.bodies_read = [], [], {}
+        # `body_dirs`, (a function name, one of its bodies_read) -> the directories that reading left the line's shell in
+        # (SPD-252), which a call reading exactly the same again is given; while the reading is under way, a mark that
+        # analyse.read_shell_name reads for a call inside it.
+        self.body_dirs = {}
         self.shell_reading, self.shell_words, self.shell_kept = 0, [], set()
         # The command names a `hash` line put in the shell's own command table, so a later bare call of one of them
         # runs the file the line chose whatever PATH holds.  Never cleared: a `hash` in a branch, a subshell or a loop body
@@ -753,6 +767,17 @@ class ShellAnalysis:
         in line_members for a later reading (SPD-246)."""
         self.member_vars.update(names)
         self.line_members.update(self.reaching(names))
+
+    def reading_state(self):
+        """The state a reading of text starts from that decides what it finds, beside the text and its standard input: the
+        directories the shell may be in, the loop and function depth a relative cd repeats in, the line's variables with
+        their doubt, the aliases' scope, what shell/loop_bindings settled (SPD-146, SPD-221), and whether an option
+        builtin ran (arith_opaque, cdable).  analyse.analyse_isolated reads a body in its own process once per such state,
+        and analyse.read_shell_name a function's body once per call from one (SPD-252); a field that changes what a
+        reading finds belongs here."""
+        return (self.cwds, self.loop_depth, tuple(sorted(self.vars.items())), frozenset(self.doubt), frozenset(self.sticky),
+                self.all_doubt, self.alias_scope, tuple(sorted(self.loop_words.items())), tuple(sorted(self.derived.items())),
+                self.func_depth, tuple(sorted(self.loop_derived.items())), self.arith_opaque, self.cdable)
 
 
 def loop_name(word, first=False):

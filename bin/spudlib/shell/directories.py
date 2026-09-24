@@ -339,4 +339,9 @@ def directory_change(words, a, effect):
     # put -- so the hook keeps the old directory beside the new one rather than assume the cd ran.
     if new is not None and not all(os.path.isdir(d) and os.access(d, os.X_OK) for d in new):
         a.cd_uncertain = True
+        if a.cdable and any(not prepare.deglob(w).startswith(("/", "~")) for w in words[1:] if not w.startswith("-")):
+            # CDABLE_VARS (cdable_vars) may be on: a relative name that is no directory is a variable's, or a named
+            # directory's, whose value the hook does not read here (probed: `cd dest` went to $dest in zsh 5.9 and bash 3.2)
+            new = None
     a.cwds = settle(effect, a.cwds, new)
+    a.dir_moves += 1

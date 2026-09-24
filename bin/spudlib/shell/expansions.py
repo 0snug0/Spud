@@ -402,7 +402,7 @@ def shell_aliased(words, a):
 def shell_function(name, a):
     """The shell text a function the shell already defines runs for this command word, or None; an alias of the same name
     is expanded first, as the shell does it (shell_aliased runs before this).  analyse.read_shell_name reads it once per
-    call's words, so a body that calls itself with them reads it no further."""
+    call's words and starting state, so a body that calls itself with them from where it started reads it no further."""
     found = snapshots.shell_table(a.home)
     return found.body(name) if name in found.functions else None
 
@@ -602,17 +602,57 @@ def analyse_trap(words, a, depth):
     EXIT action's `pwd` is the last directory of the line), so it is read with the directories unknown, as a sourced file
     is, and a relative redirection or tee inside it refuses a member.  The line's own directories and variables are
     restored afterwards: defining a trap changes nothing on the line, and the action's assignments run later, where
-    the expansion check's `a.all_doubt` after `trap` already doubts every variable."""
-    cwds, variables = a.cwds, dict(a.vars)
+    the expansion check's `a.all_doubt` after `trap` already doubts every variable.
+
+    Unless the action runs inside the line (trap_runs_in_line) and changes the directory of the shell it runs in -- a cd,
+    a sourced file, a function's move, text the reading drops, whatever ShellAnalysis.dir_moves counts, a cd in a
+    substitution of the action's among them, read on the safe side -- which leaves the line's directory unknown from the
+    trap on, since the action may run before any later command (SPD-252).  An action that moves nothing leaves it."""
+    cwds, variables, moved = a.cwds, dict(a.vars), False
     for k in trap_action_indices(words):
+        text = prepare.deglob(words[k])
         a.cwds = None
-        calls = len(a.git_calls)
-        analyse.analyse_isolated(a, prepare.deglob(words[k]), depth + 1)
+        calls, moves = len(a.git_calls), a.dir_moves
+        analyse.analyse_isolated(a, text, depth + 1)
+        if a.dir_moves != moves:
+            a.moving_traps.add(text)  # read once per starting state (analyse_isolated): a later reading of it knows too
+        moved = moved or text in a.moving_traps
         # The action's git calls are not scope-checked.  The hook reads the action with the directories unknown
         # because it runs later, not because the line lost them, and `trap 'git status' EXIT` names no repository, so the
         # unresolvable-directory refusal would fall on every trap that mentions git.  Its own findings still stand.
         del a.git_calls[calls:]
         a.cwds, a.vars = cwds, dict(variables)
+    if moved and trap_runs_in_line(words, a):
+        a.cwds = None
+        a.dir_moves += 1
+
+
+# The traps whose action the shell reading the line runs before the line is over (SPD-252), probed in zsh 5.9 -f -o
+# nobareglobqual and -f and bash 3.2.57 (tests/test_hooks_writes.py MovedBetweenCommandsTest): DEBUG before each
+# command, ERR and zsh's ZERR after a failing one, bash's RETURN when the function that set it returns -- and EXIT or 0
+# set inside a function, which zsh runs as that function returns.  EXIT at the line's own level runs after the line,
+# and a signal the line does not raise never.  Read as either shell names them: bash took `debug`, zsh `SIGDEBUG`.
+LINE_TRAPS = frozenset({"DEBUG", "ERR", "ZERR", "RETURN"})
+FUNCTION_TRAPS = frozenset({"EXIT", "0"})
+
+
+def trap_runs_in_line(words, a):
+    """Whether a `trap` line may set an action its own shell runs before the line is over: a signal word, read
+    case-folded with any SIG prefix taken off, in LINE_TRAPS, or in FUNCTION_TRAPS inside a function body (the line's own,
+    or one the shell holds), or a signal word the hook does not read (an expansion, a glob).  The action words
+    (trap_action_indices) and options are not signals."""
+    actions = trap_action_indices(words)
+    in_function = a.func_depth > 0 or a.body_locals is not None
+    for k, word in enumerate(words[1:], 1):
+        if k in actions or word.startswith("-"):
+            continue
+        if expansion_word(word) or globbing.active_glob_word(word):
+            return True
+        name = prepare.deglob(word).upper()
+        name = name[3:] if name.startswith("SIG") else name
+        if name in LINE_TRAPS or (in_function and name in FUNCTION_TRAPS):
+            return True
+    return False
 
 
 def python_read_index(words, a, start=1):

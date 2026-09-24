@@ -416,6 +416,18 @@ class RealShellSnapshotTest(BashHookCase):
         r = self.real_bash(name + " status")
         self.assertNotEqual(r.decision, "deny", r.reason)
 
+    def test_252_this_profile_s_takedir_and_mkcd_move_the_line(self):
+        """SPD-252's evidence on this Mac's own profile (FunctionDirectoryTest holds the same definitions): a relative
+        write after `takedir <dir>` or `mkcd <dir>` is read where `mkdir -p <dir> && cd <dir>` on the line leaves it."""
+        names = [n for n in ("takedir", "mkcd") if n in self.table.functions]
+        if not names:
+            self.skipTest("this profile defines neither takedir nor mkcd")
+        m, home, away = load_spud_module(), str(self.home.path), str(self.home.path / "away")
+        for name in names:
+            with self.subTest(name=name), mock.patch.dict(os.environ, self.env, clear=True):
+                a = m.analyse_command("%s %s; echo hi > f" % (name, away), m.ShellAnalysis(cwd=home, home=home))
+                self.assertEqual([c for t, c in a.redirects if t == "f"], [frozenset([home, away])])
+
 
 SETTLED_SNAPSHOT = """\
 # Functions
@@ -2101,6 +2113,268 @@ class MemberFilledValueTest(ShellSnapshotCase):
         for line in ("echo push | readstdin", "readstdin <<< push", "readstdin < f", "readstdin push"):
             self.refused_not_spud(line, "cannot resolve")
         self.silent_for_everyone("readstdin")
+
+
+# Profile functions that move the shell's directory (SPD-252): this Mac's mkcd, take and takedir with take's helpers as
+# its snapshot prints them (snapshot-zsh-1790235321145-pm4nbj.sh), then functions of the test's own making -- an
+# unconditional cd, a subshell body as zsh's `typeset -f` prints `subcd () ( cd "$1" )` (probed), pushd and popd, a cd
+# through another function, a cd into a variable the line does not settle, a body that calls itself before its cd -- and
+# ones that write or run git relative to where they are called.
+DIRECTORY_FUNCTIONS = """\
+# Functions
+mkcd () {
+\tmkdir -p $@ && cd ${@:$#}
+}
+take () {
+\tif [[ $1 =~ ^(https?|ftp).*\\.(tar\\.(gz|bz2|xz)|tgz)$ ]]
+\tthen
+\t\ttakeurl "$1"
+\telif [[ $1 =~ ^(https?|ftp).*\\.(zip)$ ]]
+\tthen
+\t\ttakezip "$1"
+\telif [[ $1 =~ ^([A-Za-z0-9]\\+@|https?|git|ssh|ftps?|rsync).*\\.git/?$ ]]
+\tthen
+\t\ttakegit "$1"
+\telse
+\t\ttakedir "$@"
+\tfi
+}
+takedir () {
+\tmkdir -p $@ && cd ${@:$#}
+}
+takegit () {
+\tgit clone "$1"
+\tcd "$(basename ${1%%.git})"
+}
+takeurl () {
+\tlocal data thedir
+\tdata="$(mktemp)"
+\tcurl -L "$1" > "$data"
+\ttar xf "$data"
+\tthedir="$(tar tf "$data" | head -n 1)"
+\trm "$data"
+\tcd "$thedir"
+}
+takezip () {
+\tlocal data thedir
+\tdata="$(mktemp)"
+\tcurl -L "$1" > "$data"
+\tunzip "$data" -d "./"
+\tthedir="$(unzip -l "$data" | awk 'NR==4 {print $4}' | sed 's/\\/.*//')"
+\trm "$data"
+\tcd "$thedir"
+}
+gocd () {
+\tcd "$1"
+}
+subcd () {
+\t(
+\t\tcd "$1"
+\t)
+}
+pushit () {
+\tpushd "$1" > /dev/null
+}
+popit () {
+\tpopd > /dev/null
+}
+nestcd () {
+\tgocd "$1"
+}
+projcd () {
+\tcd "$PROJECT_DIR"
+}
+spin () {
+\tspin
+\tcd sub
+}
+noteit () {
+\techo hi > note.txt
+}
+vgit () {
+\tgit $V
+}
+leavecd () {
+\ttrap "cd $1" EXIT
+}
+cdable () {
+\tsetopt cdablevars
+}
+# Aliases
+alias -- cdtests='cd tests'
+"""
+
+
+class FunctionDirectoryTest(ShellSnapshotCase):
+    """SPD-252 (proposal by SPUD-246/Oliver): analyse_shell_text read a function body the shell holds through
+    analyse.isolated, which put the directories back after it, but a function runs in the line's shell and its cd stays:
+    after this Mac's `takedir <dir>` (mkcd and take alike) a relative write lands in <dir> while the hook read it where the
+    line stood before the call, so a write outside a member's deliverables could pass (Law 5) and one inside be refused.
+
+    The rule now: what a called body does to the shell's directory that outlasts it -- a cd, pushd or popd, one a function
+    it calls makes -- reaches the rest of the line as the same cd on the line would, and what does not (a subshell body, a
+    call in a substitution, in a pipeline element before the last, in the background, behind coproc) does not.  A body
+    that leaves the directory where the hook cannot follow it -- a cd into a variable the line does not settle, popd, take's
+    url branches, a body that calls itself before its cd -- leaves the rest of the line's relative writes refused, as that cd
+    on the line leaves them.  A body is read once per call's words, standard input and the state the call starts in, the
+    directories and the line's variables among it, and a call that reads the same again is given the directories the
+    reading left: `noteit; cd ..; noteit` writes a second note.txt, and `V=status; vgit; V=push; vgit` pushes.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and
+    -f, and GNU bash 3.2.57, alike unless named: after `takedir x1`, `mkcd a` (a existing), `mkcd p q`, `take x2/y`,
+    `gocd b`, a pushd in a body and a cd through a second function, `pwd` printed the new directory; after a popd in a
+    body, the one the pushd before it left; after `mkcd b; mkcd b`, b/b; after a subshell body's cd, `$(gocd b)`, `gocd b |
+    cat`, `(gocd b)`, `gocd b &` and `gocd nonexistent`, the directory before the call; after `true | gocd b`, b in both
+    zsh readings and the directory before in bash.  zsh's `typeset -f` prints `subcd () ( cd "$1" )` with its subshell
+    inside braces.  The Bash tool's own shell (zsh 5.9, the line run by `eval` in `zsh -c` after sourcing the snapshot)
+    sets AUTO_CD, AUTO_PUSHD and PUSHD_MINUS from the profile, but AUTO_CD applies only to a shell reading its commands on
+    standard input: `cd /usr; share; pwd` there printed "command not found: share" and /usr, so a bare directory name moves
+    nothing; AUTO_PUSHD and PUSHD_MINUS change only the stack a popd or a `cd -N` reads, which the hook never follows.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        path = self.write_snapshot("snapshot-zsh-1700000000027-252252.sh", DIRECTORY_FUNCTIONS)
+        newest = path.stat().st_mtime + 60  # newer than SHELL_SNAPSHOT, whose `take` and `noteit` this one replaces
+        os.utime(path, (newest, newest))
+        self.m = load_spud_module()
+        self.tests = self.home.path / "tests"
+        (self.tests / "sub").mkdir(parents=True, exist_ok=True)
+        self.away = str(self.home.path / "away")  # a directory no member plans, which does not exist
+
+    def analysis(self, command, cwd=None):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=cwd or str(self.home.path), home=str(self.home.path)))
+
+    def written_in(self, command, target, cwd=None):
+        """The directories each redirection of `target` on the line may open in, in order."""
+        return [c for t, c in self.analysis(command, cwd).redirects if t == target]
+
+    # -- the ticket's evidence ------------------------------------------------------------------------------------------
+    def test_the_tickets_evidence(self):
+        """`takedir <dir>; echo hi > f` records f where `mkdir -p <dir> && cd <dir>; echo hi > f` does: in <dir>, and where
+        the line stood, since the hook does not know the directory will exist."""
+        home = str(self.home.path)
+        for name in ("takedir", "mkcd"):
+            with self.subTest(name=name):
+                line = "%s %s; echo hi > f" % (name, self.away)
+                self.assertEqual(self.written_in(line, "f"), [frozenset([home, self.away])])
+                self.assertEqual(self.written_in(line, "f"), self.written_in("mkdir -p %s && cd %s; echo hi > f" % (self.away, self.away), "f"))
+        self.assertEqual(self.written_in("mkcd p %s; echo hi > f" % self.away, "f"), [frozenset([home, self.away])])  # its last word
+        self.assertEqual(self.written_in("gocd tests; echo hi > f", "f"), [frozenset([str(self.tests)])])
+        # a call reads as its body in a group: the hook does not read which of the body's commands its status is, so a
+        # write after `takedir d &&` is read in both directories, as after `{ mkdir -p d && cd d; } &&`
+        self.assertEqual(self.written_in("takedir tests/sub && echo hi > f; echo hi > f", "f"),
+                         self.written_in("{ mkdir -p tests/sub && cd tests/sub; } && echo hi > f; echo hi > f", "f"))
+
+    def test_a_write_the_function_moved_out_of_the_deliverables_is_refused(self):
+        """From tests/, which the members plan, the line's note.txt lands in the home once the function has moved there."""
+        cwd = str(self.tests)
+        for line in ("gocd %s; echo hi > note.txt", "nestcd %s; echo hi > note.txt", "pushit %s; echo hi > note.txt",
+                     "gocd %s && echo hi > note.txt", "true | gocd %s; echo hi > note.txt", "time gocd %s; echo hi > note.txt",
+                     "X=1 gocd %s; echo hi > note.txt", "{ gocd %s; }; echo hi > note.txt", "gocd %s; cp f note.txt",
+                     "if true; then gocd %s; fi; echo hi > note.txt", "eval gocd %s; echo hi > note.txt"):
+            line = line % self.home.path
+            with self.subTest(line=line):
+                self.refused_for_members(line, "note.txt", cwd)
+
+    def test_a_write_the_function_moved_into_the_deliverables_is_allowed(self):
+        """From the home, where note.txt is nobody's, the line writes it in tests/ once the function has moved there; and
+        from tests/, takedir's own directory and the one it may not reach are both a member's."""
+        for line in ("gocd tests; echo hi > note.txt", "nestcd tests; echo hi > note.txt", "pushit tests; echo hi > note.txt",
+                     "gocd tests && echo hi > note.txt", "gocd tests; gocd sub; echo hi > note.txt"):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A)
+                self.assertSilent(line, AGENT_B)
+                self.assertRefused(line, "Law 1", agent_id=None)
+        for line in ("takedir sub; echo hi > note.txt", "mkcd sub; echo hi > note.txt", "takedir sub && echo hi > note.txt"):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A, str(self.tests))
+
+    def test_what_does_not_outlast_the_call_stays_where_it_was(self):
+        """A subshell body, and a call in a substitution, a pipeline element before the last, a subshell, the background
+        or a coproc, leaves the line where it was."""
+        cwd = str(self.tests)
+        for line in ("subcd %s; echo hi > note.txt", "echo $(gocd %s); echo hi > note.txt", "gocd %s | cat; echo hi > note.txt",
+                     "(gocd %s); echo hi > note.txt", "gocd %s & echo hi > note.txt", "coproc gocd %s; echo hi > note.txt",
+                     "echo hi > note.txt; gocd %s"):
+            line = line % self.home.path
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A, cwd)
+                self.assertSilent(line, AGENT_B, cwd)
+
+    def test_the_prefix_decides_whether_the_move_reaches_the_line(self):
+        """A function or an alias moves the shell the command runs in: coproc's fork leaves the line where it was, zsh's
+        nocorrect moves it and bash finds no nocorrect (either directory), `time` and a prefix assignment move it.  Probed
+        in zsh 5.9 -f -o nobareglobqual and -f, and bash 3.2.57, through `eval`: after `coproc gocd b` and `coproc cdb`
+        (`alias cdb='cd b'`) `pwd` printed the directory before; after `nocorrect gocd b` b in zsh, the directory before in
+        bash; after `time gocd b` and `X=1 gocd b` b.  A line's own alias read inside eval is held to the same rule."""
+        for line in ("coproc gocd tests; echo hi > note.txt", "coproc cdtests; echo hi > note.txt",
+                     "nocorrect gocd tests; echo hi > note.txt", "nocorrect cdtests; echo hi > note.txt",
+                     "alias c='cd tests'; eval coproc c; echo hi > note.txt"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "note.txt")
+        for line in ("time gocd tests; echo hi > note.txt", "cdtests; echo hi > note.txt", "time cdtests; echo hi > note.txt",
+                     "alias c='cd tests'; eval c; echo hi > note.txt"):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A)
+
+    def test_a_directory_the_body_leaves_unknown_fails_closed(self):
+        """A cd into a variable the line does not settle, a popd, take (its url branches cd into what an archive holds, and
+        the hook reads every branch), a body that calls itself before its cd, an EXIT trap set in the body whose action
+        cds (zsh runs it as the function returns), and a CDABLE_VARS the body set for a later cd into a name that is no
+        directory (tests/test_hooks_writes.py MovedBetweenCommandsTest has both probes): the rest of the line's relative
+        writes are refused for everyone, as after `cd "$PROJECT_DIR"` on the line; an absolute one, and one before the
+        call, read as they did."""
+        for line in ("projcd; echo hi > note.txt", "popit; echo hi > tests/note.txt", "spin; echo hi > tests/note.txt",
+                     "takeurl https://h/x.tgz; echo hi > tests/x", "leavecd /tmp; echo hi > tests/note.txt",
+                     "cdable; D=/tmp; cd D; echo hi > tests/note.txt"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "cannot follow")
+                self.assertRefused(line, "cannot follow", agent_id=None)
+        self.refused_for_members("take tests/x; echo hi > tests/note.txt", "Law 7")  # take's takegit branch clones first
+        self.assertRefused("take tests/x; echo hi > tests/note.txt", "cannot follow", agent_id=None)
+        for line in ('cd "$PROJECT_DIR"; echo hi > f', "projcd; echo hi > f", "take tests/x; echo hi > f", "spin; echo hi > f"):
+            with self.subTest(line=line):
+                self.assertEqual(self.written_in(line, "f"), [None])
+        self.assertSilent("projcd; echo hi > %s/tests/note.txt" % self.home.path, AGENT_A)
+        self.assertSilent("echo hi > tests/note.txt; projcd", AGENT_A)
+        self.assertSilent("PROJECT_DIR=%s; projcd; echo hi > note.txt" % self.tests, AGENT_A)  # a value the line settled
+
+    # -- a call is read from the state it starts in -----------------------------------------------------------------------
+    def test_a_call_from_another_directory_is_read_again(self):
+        """The body's cd compounds, and its own relative write lands where each call runs."""
+        tests, sub = str(self.tests), str(self.tests / "sub")
+        self.assertEqual(self.written_in("mkcd sub; mkcd sub; echo hi > f", "f", tests),
+                         [frozenset([tests, sub, os.path.join(sub, "sub")])])
+        self.refused_for_members("noteit; cd ..; noteit", "note.txt", tests)
+        self.refused_for_members("noteit; gocd ..; noteit", "note.txt", tests)
+        self.assertSilent("noteit; cd sub; noteit", AGENT_A, tests)
+
+    def test_a_call_read_before_moves_the_line_again(self):
+        """A second call that reads exactly as the first -- after a subshell put the directory back, or in the line's
+        second reading -- still leaves the shell where the first reading did."""
+        cwd = str(self.tests)
+        for line in ("(gocd %s); gocd %s; echo hi > note.txt", "(gocd %s) & gocd %s; echo hi > note.txt",
+                     "echo $(gocd %s); gocd %s; echo hi > note.txt"):
+            line = line % (self.home.path, self.home.path)
+            with self.subTest(line=line):
+                self.refused_for_members(line, "note.txt", cwd)
+        # a compound command's own input has the line walked twice (SPD-210), the second walk from the line's start
+        for line in ("{ gocd tests; } < /dev/null; echo hi > note.txt", "gocd tests; { echo x; } < /dev/null; echo hi > note.txt"):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A)
+
+    def test_a_call_after_the_line_changed_a_variable_is_read_again(self):
+        """A body reads the line's variables where it runs: the second vgit runs git push."""
+        for line in ("V=status; vgit; V=push; vgit", "V=status; vgit; V=$(echo push); vgit"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "")
+                self.assertSilent(line, agent_id=None)
+        self.silent_for_everyone("V=status; vgit; vgit")
 
 
 if __name__ == "__main__":

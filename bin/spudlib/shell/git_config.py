@@ -14,7 +14,8 @@ GIT_SCOPE_REASON = (
 GIT_SCOPE_UNRESOLVED_REASON = (
     "Law 7: this git call runs in a directory the hook cannot follow (a cd into a variable the line does not settle, `cd"
     " -`, popd, a directory stack entry or ~name, an option or a CDPATH it cannot read, a relative cd in a loop, a sourced"
-    " file), so it cannot read the config in force at the local and worktree scopes of the repository git would read there -- the keys that name a"
+    " file, a cd a DEBUG, ERR or RETURN trap makes, one into a name after setopt or shopt, text nested past the hook's depth"
+    " -- on the line, or in a shell function it calls), so it cannot read the config in force at the local and worktree scopes of the repository git would read there -- the keys that name a"
     " program git runs under a verb Law 7's table allows. The hook fails closed: run git from an absolute path inside the"
     " session's own checkout; Spud commits, after the outcome is recorded")
 GIT_SCOPE_UNREADABLE_REASON = (
