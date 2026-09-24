@@ -23,6 +23,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+import types
 from pathlib import Path
 from unittest import mock
 
@@ -129,6 +130,136 @@ def run_main(env, argv, stdin=None, cwd=None):
             traceback.print_exc(file=err)
             code = 1
     return code, out.getvalue(), err.getvalue()
+
+
+# -- the leak guard (SPD-231; past the Bash and edit hooks, SPD-241) ----------------------------------------------------
+#
+# run_main answers as a process only while nothing a run changes outlives it but what fresh_process empties.  program_tables
+# reads every table the program holds; tables_changed imports the whole program anew (fresh_program), reads the tables,
+# runs a sample, reads them again and names what changed.  A guard asserts that nothing changed outside LEAK_ALLOWED:
+# InProcessParityTest over the Bash and edit hooks' sample, test_hookcase.InProcessLeakTest over every other hook event's
+# and the CLI commands the in-process test classes call.  A table a later change adds on any of those paths fails the
+# guard until fresh_process (and helpers.forget_process_caches) empties it, or PURE_TABLES says why no later run can read
+# it differently.
+
+LEAK_ALLOWED = frozenset(HOOK_CACHES) | frozenset(HOOK_MEMOS) | frozenset(PURE_TABLES)
+
+
+def table_shape(value, depth=0):
+    """What a table holds, down to the objects in it: a container's contents as they are now, a scalar by its value, a
+    functools cache by its size, an object by its identity and, while depth allows (four levels), what its __dict__ holds.
+    An object with no __dict__ (a __slots__ class) is kept by identity only, so a memo inside one is not seen."""
+    if isinstance(value, (str, bytes, int, float, bool, type(None))):
+        return value
+    if hasattr(value, "cache_info"):
+        return ("lru_cache", value.cache_info().currsize)
+    if isinstance(value, importlib.import_module("spudlib.core.lazy").LazyPattern):  # binds its methods at first use
+        return ("LazyPattern", value._args)
+    if depth >= 4:
+        return ("object", id(value))
+    if isinstance(value, dict):
+        return ("dict", tuple((k, table_shape(v, depth + 1)) for k, v in value.items()))
+    if isinstance(value, (list, tuple)):
+        return (type(value).__name__, tuple(table_shape(v, depth + 1) for v in value))
+    if isinstance(value, (set, frozenset)):
+        return (type(value).__name__, frozenset(value))
+    if isinstance(value, bytearray):
+        return ("bytearray", bytes(value))
+    if isinstance(value, (types.ModuleType, type)) or not hasattr(value, "__dict__"):
+        return ("object", id(value))
+    return ("object", id(value), table_shape(dict(vars(value)), depth + 1))
+
+
+def function_tables(fn):
+    """What a function holds between calls: its defaults, closure cells and attributes (a decorator's __wrapped__ aside,
+    which is the function itself)."""
+    cells = []
+    for cell in fn.__closure__ or ():
+        try:
+            cells.append(cell.cell_contents)
+        except ValueError:  # a cell not filled yet
+            cells.append("<empty>")
+    own = {k: v for k, v in vars(fn).items() if k != "__wrapped__"}
+    return {"__defaults__": fn.__defaults__, "__kwdefaults__": fn.__kwdefaults__, "__closure__": tuple(cells), "__dict__": own}
+
+
+def own_tables(prefix, value, module):
+    """(key, what it holds) for a name `prefix` a module holds: a function or class of the module's own is walked for the
+    tables it keeps (a class's attributes, its methods' defaults, cells and attributes), a functools cache and any other
+    value that is no callable is a table itself."""
+    if isinstance(value, types.ModuleType):
+        return
+    fn = value.__func__ if isinstance(value, (staticmethod, classmethod)) else value
+    if isinstance(fn, types.FunctionType):
+        if fn.__module__ == module:
+            for key, held in function_tables(fn).items():
+                yield "%s.%s" % (prefix, key), held
+        return
+    if isinstance(value, type):
+        if value.__module__ == module:
+            for attr, member in vars(value).items():
+                if not (attr.startswith("__") and attr.endswith("__")) and not isinstance(member, type):
+                    yield from own_tables("%s.%s" % (prefix, attr), member, module)
+        return
+    if isinstance(value, property) or (callable(value) and not hasattr(value, "cache_info")):
+        return
+    yield prefix, value
+
+
+def program_tables():
+    """{(module, key): table_shape} over every table the program holds: each spudlib module this process has loaded and the
+    entry, bin/spud_ledger.py (ENTRY), by the names they hold (own_tables).  spudlib.core.lazy is left out: it rebinds its
+    own imports and holds no state."""
+    modules = [(name, module) for name, module in list(sys.modules.items())
+               if name.startswith("spudlib.") and name != "spudlib.core.lazy"] + [(ENTRY.__name__, ENTRY)]
+    held = {}
+    for name, module in modules:
+        for attr, value in list(vars(module).items()):
+            if not attr.startswith("__"):
+                for key, table in own_tables(attr, value, name):
+                    held[(name, key)] = table_shape(table)
+    return held
+
+
+def program_modules():
+    """The names of spudlib and every module of it this process has loaded."""
+    return [name for name in sys.modules if name == "spudlib" or name.startswith("spudlib.")]
+
+
+@contextlib.contextmanager
+def fresh_program():
+    """The program imported anew for the block, every module of it, as a process that has run nothing holds it; the
+    modules this process had before are put back after, untouched by what the block ran.  Every import inside the block,
+    run_main's and a mock.patch target's alike, gets the new modules, so a patch that must reach the run starts inside."""
+    held = {name: sys.modules.pop(name) for name in program_modules()}
+    try:
+        root = Path(ENTRY.__file__).resolve().parent / "spudlib"
+        for directory, subdirs, files in os.walk(root):  # ENTRY.owners' order, which the guarded cycle in shell/ imports in
+            subdirs[:] = sorted(d for d in subdirs if d.isidentifier() and not d.startswith("__"))
+            for f in sorted(files):
+                if f.endswith(".py"):
+                    rel = os.path.relpath(os.path.join(directory, f[:-3]), root)
+                    importlib.import_module("spudlib." + rel.replace(os.sep, "."))
+        yield
+    finally:
+        for name in program_modules():
+            del sys.modules[name]
+        sys.modules.update(held)
+
+
+def tables_changed(run, prepare=None):
+    """The keys of program_tables that a call of `run` changes, run against the program freshly imported (fresh_program):
+    every table starts as the import left it, whatever this process ran before -- an earlier test's run of the same
+    sample would otherwise have filled a memo already, under the same keys, and the run would change nothing the walk
+    could see -- and no module a run imports for the first time can hide a table it fills.  `prepare`, when given, is
+    called on the new program before the first reading (test_hookcase plants a table with it)."""
+    with fresh_program():
+        if prepare is not None:
+            prepare()
+        before = program_tables()
+        run()
+        after = program_tables()
+    return {key for key in before.keys() | after.keys() if before.get(key, "absent") != after.get(key, "absent")}
 
 
 class InProcessHome(Home):

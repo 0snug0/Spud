@@ -8,13 +8,12 @@ import os
 import shutil
 import sys
 import tempfile
-import types
 import unittest
 from pathlib import Path
 
 from helpers import PROGRAM, SPUD
-from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, HOOK_CACHES, HOOK_MEMOS, INLINE_WORDING, PURE_TABLES, SCRIPT_WORDING, BashHookCase
-from hookcase import case_insensitive_fs, fresh_process, plant_git_dir, spellings
+from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, HOOK_CACHES, INLINE_WORDING, LEAK_ALLOWED, SCRIPT_WORDING, STATE, BashHookCase
+from hookcase import case_insensitive_fs, plant_git_dir, spellings, tables_changed
 
 
 class PreBashTest(BashHookCase):
@@ -931,89 +930,27 @@ class InProcessParityTest(BashHookCase):
         self.assertGreater(alike, len(forms) * len(payloads) // 2, "too few forms read as their payload to prove anything")
 
     def test_no_table_on_the_hook_path_outlives_a_run_but_the_ones_fresh_process_empties(self):
-        """Every table of spudlib that an in-process run changes is a cache fresh_process empties (HOOK_CACHES, HOOK_MEMOS)
-        or one that holds nothing a later run could read differently (PURE_TABLES): anything else would carry one test's run
-        into the next, which a hook process never does.  A table is what a module holds by name, and what a module's own
-        functions and classes hold: a function's default arguments, its closure cells and its attributes, a class's
-        attributes and its methods' defaults, cells and attributes, and a functools cache anywhere among them; each is
-        followed into the containers and the objects' __dict__ it holds, four levels down.  An object with no __dict__
-        (a __slots__ class) is kept by identity only, so a memo inside one is not seen."""
-        self.bash("git push")  # every module the Bash hook imports is loaded now
-        lazy = importlib.import_module("spudlib.core.lazy")
+        """Every table of the program that an in-process run of the Bash and edit hooks changes is a cache fresh_process
+        empties (HOOK_CACHES, HOOK_MEMOS) or one that holds nothing a later run could read differently (PURE_TABLES):
+        anything else would carry one test's run into the next, which a hook process never does.  A table is what a module
+        holds by name, and what a module's own functions and classes hold: a function's default arguments, its closure
+        cells and its attributes, a class's attributes and its methods' defaults, cells and attributes, and a functools
+        cache anywhere among them; each is followed into the containers and the objects' __dict__ it holds, four levels
+        down (hookcase.program_tables).  The samples run against the program imported anew (hookcase.fresh_program), so a
+        memo this class's other tests filled under the same keys cannot hide.  test_hookcase.InProcessLeakTest runs the
+        same walk over every other hook event and the CLI commands the in-process test classes call (SPD-241)."""
+        home = self.home.path
 
-        def shape(value, depth=0):
-            """What a table holds, down to the objects in it: a container's contents as they are now, a scalar by its value,
-            a functools cache by its size, an object by its identity and, while depth allows, what its __dict__ holds."""
-            if isinstance(value, (str, bytes, int, float, bool, type(None))):
-                return value
-            if hasattr(value, "cache_info"):
-                return ("lru_cache", value.cache_info().currsize)
-            if isinstance(value, lazy.LazyPattern):  # binds the compiled pattern's methods at first use: its source's alone
-                return ("LazyPattern", value._args)
-            if depth >= 4:
-                return ("object", id(value))
-            if isinstance(value, dict):
-                return ("dict", tuple((k, shape(v, depth + 1)) for k, v in value.items()))
-            if isinstance(value, (list, tuple)):
-                return (type(value).__name__, tuple(shape(v, depth + 1) for v in value))
-            if isinstance(value, (set, frozenset)):
-                return (type(value).__name__, frozenset(value))
-            if isinstance(value, (type(sys), type)) or not hasattr(value, "__dict__"):
-                return ("object", id(value))
-            return ("object", id(value), shape(dict(vars(value)), depth + 1))
+        def samples():
+            for command, caller, cwd, _, _ in self.bash_samples():
+                self.bash(command, caller, cwd)
+            for path, caller, tool in ((home / "docs" / "x.md", AGENT_A, "Write"), (home / "tests" / "x.py", AGENT_A, "Edit"),
+                                       (home / "ledger" / "tickets" / "SPD-001.md", None, "Write"),
+                                       (home / STATE / "ledger.db", AGENT_A, "NotebookEdit")):
+                self.decide(self.pre_edit(path, agent_id=caller, tool=tool))
 
-        def function_tables(fn):
-            """What a function holds between calls: its defaults, closure cells and attributes (a decorator's __wrapped__
-            aside, which is the function itself)."""
-            cells = []
-            for cell in fn.__closure__ or ():
-                try:
-                    cells.append(cell.cell_contents)
-                except ValueError:  # a cell not filled yet
-                    cells.append("<empty>")
-            own = {k: v for k, v in vars(fn).items() if k != "__wrapped__"}
-            return {"__defaults__": fn.__defaults__, "__kwdefaults__": fn.__kwdefaults__, "__closure__": tuple(cells), "__dict__": own}
-
-        def own_tables(prefix, value, module):
-            """(key, what it holds) for a name `prefix` a module holds: a function or class of the module's own is walked
-            for the tables it keeps, a functools cache and any other value that is no callable is a table itself."""
-            if isinstance(value, type(sys)):
-                return
-            fn = value.__func__ if isinstance(value, (staticmethod, classmethod)) else value
-            if isinstance(fn, types.FunctionType):
-                if fn.__module__ == module:
-                    for key, held in function_tables(fn).items():
-                        yield "%s.%s" % (prefix, key), held
-                return
-            if isinstance(value, type):
-                if value.__module__ == module:
-                    for attr, member in vars(value).items():
-                        if not (attr.startswith("__") and attr.endswith("__")) and not isinstance(member, type):
-                            yield from own_tables("%s.%s" % (prefix, attr), member, module)
-                return
-            if isinstance(value, property) or (callable(value) and not hasattr(value, "cache_info")):
-                return
-            yield prefix, value
-
-        def tables():
-            held = {}
-            for name, module in list(sys.modules.items()):
-                if not name.startswith("spudlib.") or name == "spudlib.core.lazy":  # lazy rebinds its own imports: no state
-                    continue
-                for attr, value in vars(module).items():
-                    if not attr.startswith("__"):
-                        for key, table in own_tables(attr, value, name):
-                            held[(name, key)] = shape(table)
-            return held
-
-        fresh_process()
-        before = tables()
-        for command, caller, cwd, _, _ in self.bash_samples():
-            self.bash(command, caller, cwd)
-        after = tables()
-        changed = {key for key in set(before) | set(after) if before.get(key, "absent") != after.get(key, "absent")}
-        allowed = set(HOOK_CACHES) | set(HOOK_MEMOS) | set(PURE_TABLES)
-        self.assertEqual(changed - allowed, set())
+        changed = tables_changed(samples)
+        self.assertEqual(changed - LEAK_ALLOWED, set())
         self.assertTrue(changed & set(HOOK_CACHES), "the samples fill no cache, so this guard proves nothing")
 
 
