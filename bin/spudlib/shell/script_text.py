@@ -52,9 +52,21 @@ awk, BSD sed, xargs and find): `echo "'BEGIN{system(\\"touch o\\")}'" | xargs aw
 `P=$(cat p); awk "$P"`, `awk -f -`, `sed -n -f -` and `-f /dev/stdin` ran what they were fed, and BSD find replaced a
 `{}` inside awk's program.  It is the "script-word" finding, which bash_rule reads for a member last of all, as an
 interpreter's unreadable option position (shell/interpreter_words): a write the same input makes keeps its own reason
-(SPD-248's `xargs sed -n < l`, whose input may be -i).  A -f file the line names is read whatever words xargs appends
-after it, though one more `-f` among them would be read by awk as an option (probed: `echo '-f e.awk' | xargs awk -f
-c.awk` ran e.awk; a `--` after the file ends awk's options).
+(SPD-248's `xargs sed -n < l`, whose input may be -i).  Text Claude Code's shell snapshot holds -- a profile function's
+body, an alias's -- drops a script word that is its own variables or substitutions (`awk "$1"`, `awk "$prog"`), as it
+drops a var-word, and keeps one the member fills: the call's words, a variable the line assigned (shell/held_text,
+SPD-265).  Input the command reads -- xargs's, find's {}, standard input as the -f file -- is recorded apart
+("script-input"), since it is the caller's wherever the text stands, and is kept there too.
+
+A -f file the line names is read whatever operands follow it.  Where what xargs appends, or puts where -I or -J says,
+stands where awk still reads its options after a -f, it may be one more `-f other.awk`, a program the hook never reads:
+that is recorded too ("script-option", SPD-266), and bash_rule names the `--` that ends awk's options.  Probed (zsh 5.9
+-f -o nobareglobqual and -f, bash 3.2.57, this awk): `echo '-f e.awk' | xargs awk -f c.awk`, `echo '-fe.awk' | xargs
+-I{} awk -f c.awk {}` and `echo '-f e.awk' | xargs -J% awk -f c.awk %` ran e.awk; after a `--`, or after an operand, awk
+took the input as a file it could not open.  sed's getopt reads one more -f or -e there the same way (`echo '-f e.sed' |
+xargs sed -n -f c.sed` wrote the file e.sed names), and SPD-248 already refuses that input, which may be -i.  A word
+the line fills and does not settle, standing there (`P=$(cat l); awk -f c.awk "$P" f`), stays in the class left unread
+above for every caller: the -f file is read, and the word is not.
 
 One module for both, past 250 lines (the package's look-again point) and past 500: the two grammars are scanned apart, in
 two runs of short functions the `sed_` and `awk_` prefixes keep apart, but everything around them is one reading with one
@@ -244,11 +256,18 @@ def stdin_file(word):
     return text in STDIN_FILES or text.startswith("/dev/fd/")
 
 
-def script_word(cmd, word, a):
-    """Record a script word the line does not settle (unsettled, stdin_file) as ("script-word", (the command word, the word
-    as the line spells it)), which bash_rule refuses a member last of all (module docstring)."""
+def script_word(cmd, word, a, kind=None):
+    """Record a script word the line does not settle (unsettled, stdin_file), which bash_rule refuses a member last of all
+    (module docstring), as (kind, "<the command word> <the word as the line spells it>"): one string, which
+    held_text's prune reads as it reads a var-word's.  "script-word" for a word that is expansions of variables or
+    substitutions, which text the shell holds may spell of its own (syntax.SHELL_TEXT_TOLERATED, SPD-265); "script-input"
+    for input the command reads -- what xargs appends or puts where -I or -J says, find's {}, standard input as the -f file
+    (`kind`) -- which is its caller's wherever that text stands; "script-option" (`kind`, SPD-266) for what xargs appends
+    where awk still reads its options."""
     shown = syntax.shown_operands(prepare.deglob(word)).replace(hookio.SUBST, "$(...)")
-    a.findings.append(("script-word", (cmd, shown)))
+    if kind is None:
+        kind = "script-input" if syntax.unknown_operand(word) else "script-word"
+    a.findings.append((kind, "%s %s" % (cmd, shown)))
 
 
 def sed_fragments(cmd, args, a):
@@ -263,7 +282,10 @@ def sed_fragments(cmd, args, a):
     scripts = [(name in ("-f", "--file"), value) for name, value, _ in options
                if value is not None and name in ("-e", "--expression", "-f", "--file")]
     for from_file, value in scripts:
-        if unsettled(value, a) or (from_file and stdin_file(value)):
+        if from_file and stdin_file(value):
+            script_word(cmd, value, a, "script-input")
+            return []
+        if unsettled(value, a):
             script_word(cmd, value, a)
             return []
     if not scripts and operands and unsettled(operands[0], a):
@@ -290,7 +312,8 @@ def awk_fragments(cmd, args, a):
     first letter after a dash is the option (main.c), `--` ends them, and an unknown one is ignored.  A word the line
     cannot settle where an option may stand leaves the hook unable to say which operand is the program, and it reads
     none of them (module docstring); -f files are read whatever follows them, the words xargs appends among them.  A
-    program word the line does not settle at all is recorded (script_word), and the program is read no further."""
+    program word the line does not settle at all is recorded (script_word), and the program is read no further; so is
+    what xargs puts where awk still reads its options after a -f, which may be one more -f (SPD-266)."""
     files, hidden, i = [], False, 0
     while i < len(args):
         word = args[i]
@@ -299,6 +322,8 @@ def awk_fragments(cmd, args, a):
             i += 1
             break
         if not text.startswith("-") or len(text) == 1:
+            if files and text.startswith(syntax.INPUT_OPERAND):
+                script_word(cmd, word, a, "script-option")
             hidden = hidden or spelled_writes.operand_hidden(word, a)
             break
         hidden = hidden or spelled_writes.option_hidden(word, a)
@@ -312,7 +337,10 @@ def awk_fragments(cmd, args, a):
         i += 1
     given = []
     for value in files:
-        if unsettled(value, a) or stdin_file(value):
+        if stdin_file(value):
+            script_word(cmd, value, a, "script-input")
+            return []
+        if unsettled(value, a):
             script_word(cmd, value, a)
             return []
         fragment = script_file(value, a)

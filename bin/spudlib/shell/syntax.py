@@ -199,8 +199,11 @@ UNSET = object()
 # pkill and rg each dispatch through `"$_cc_bin"`, so reading those as refusals would refuse every `grep` a member runs.
 # Everything the hook *can* read there -- a git verb, a program git runs, a database call, a spud call, a file the text
 # names and writes -- is the finding it would be on the line, and so is one the member's own words there earn: a word
-# after the alias's name, or a call's words in a function's body (held_text.analyse_shell_text, SPD-203).
-SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias", "eval-flag"})
+# after the alias's name, or a call's words in a function's body (held_text.analyse_shell_text, SPD-203).  An awk program
+# or sed script that is the text's own variables or substitutions ("script-word", SPD-265: `awk "$1"`, `awk "$prog"`) is
+# one of these; one that is the command's input (xargs's, find's {}, standard input: "script-input", "script-option") is
+# its caller's wherever the text stands, and is not.
+SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias", "eval-flag", "script-word"})
 # A positional parameter, which is how a function receives the words the member wrote (`mkdir -p $@` in a body is
 # the member's own path).  A write target holding one is never pruned from text the shell holds, whatever else is: `$@`,
 # `$*`, `$0`..`$9` and every braced form of them (`${@}`, `${@:2}`, `${@:$#}`, `${1:-x}`, `${#@}`, `${1+"$@"}`).  `$HOME`
