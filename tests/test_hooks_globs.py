@@ -513,13 +513,14 @@ class ArithmeticCommandTest(BashHookCase):
         self.assertEqual(m.deglob(other), line)
         self.assertRefused(line, "generated", AGENT_C)  # the pattern's target is still expanded and checked
 
-    def test_an_arithmetic_assignment_is_no_longer_recorded(self):
-        """The other half of marking the whole region: `(( x=1 ))` used to reach analyse_words as the word `x=1` and record
-        x in the analysis's variables, and now reaches it behind the arithmetic sentinel that keeps the region inert.  This
-        is the half that fails closed -- a later `$x` refuses a member where it used to resolve to 1 -- and an arithmetic
-        value is a number, never a command word or a path."""
-        self.assertEqual(self.analysis("(( x=1 ))").vars, {})
-        self.assertRefused("(( x=1 )); $x", "the command word $x")
+    def test_an_arithmetic_assignment_is_read_as_the_lines_assignment(self):
+        """The other half of marking the whole region: `(( x=1 ))` reaches analyse_words behind the arithmetic sentinel that
+        keeps the region inert, never as the word `x=1`.  SPD-088 left x unrecorded there, so a later `$x` refused a member;
+        SPD-225 reads the assignment itself and records the literal result, so `(( x=1 )); $x` reads as `x=1; $x` does.  An
+        arithmetic value is a number, never a command word the hook grants anything for, nor a path."""
+        self.assertEqual(self.analysis("(( x=1 ))").vars, {"x": "1"})
+        self.assertEqual(self.analysis("(( x=1 )); $x").vars, self.analysis("x=1; $x").vars)
+        self.assertSilent("(( x=1 )); $x")  # read as the ordinary assignment below
         self.assertSilent("x=1; $x")  # an ordinary assignment is read as it always was
 
 
