@@ -184,6 +184,7 @@ QUIET_TARGETS = ("/dev/null", "/dev/stdout", "/dev/stderr")
 # `touch push; git p?sh` still names `git push`, `git -C /tmp commit` the verb, and `PATH=<dir> git status; git push` the
 # push.  All of them refuse; the entry decides only which reason a line of several commands answers with.
 FINDING_LAST = {"git-verb": 1, "git-repo": 1, "path": 1, "hashed": 1, "function": 1, "env-function": 1, "var-word": 2, "var-doubt": 2,
+                "git-input": 2,  # a word xargs hands git where it reads an option or its verb (SPD-230), after the spelled words'
                 "shell-alias": 2,  # an alias of the shell's whose body the hook cannot read, after the words as spelled
                 "eval-flag": 2,  # a value zsh's (e) flag evaluates that the hook cannot read, after what it read of it
                 "unread": 2}  # text the reader did not read (SPD-217), after every refusal the words it did read earn

@@ -103,7 +103,8 @@ def git_repo_targets(words, variables):
     any config, and a repeated -C is relative to the previous one), the values of --git-dir and --work-tree (spaced and `=`
     forms) resolved against that chain wherever they stand on the line, and GIT_DIR, GIT_WORK_TREE and GIT_COMMON_DIR in force.
     Each names a repository whose .git/config the hook cannot read.  A path is absolute, or relative to the directory
-    the shell is in."""
+    the shell is in; a word that starts with `~` is the shell's expansion (chdir_join), and a `~` after an option's `=`
+    reaches git as spelled, a path relative like any other (SPD-227)."""
     base, options = None, []
     i = 1
     while i < len(words):
@@ -111,14 +112,14 @@ def git_repo_targets(words, variables):
         if w == "-C":
             value = words[i + 1] if i + 1 < len(words) else None
             if value:
-                base = value if os.path.isabs(value) or base is None else os.path.join(base, value)
+                base = chdir_join(base, value)
             i += 2
             continue
         key, sep, attached = w.partition("=")
         if key in git_programs.GIT_REPO_OPTIONS:
             value = attached if sep else (words[i + 1] if i + 1 < len(words) else None)
             if value:
-                options.append((w if sep else "%s %s" % (key, value), value))
+                options.append((w if sep else "%s %s" % (key, value), "./" + value if sep and value.startswith("~") else value))
             i += 1 if sep else 2
             continue
         if w in syntax.GIT_GLOBAL_VALUE_FLAGS:
@@ -133,7 +134,7 @@ def git_repo_targets(words, variables):
             options.append(("%s=%s" % (name, variables[name]), variables[name]))
     targets = [] if base is None else [("-C %s" % base, base)]
     for spelled, value in options:
-        targets.append((spelled, value if os.path.isabs(value) or base is None else os.path.join(base, value)))
+        targets.append((spelled, chdir_join(base, value)))
     return targets
 
 
@@ -152,10 +153,25 @@ def git_target_kind(spelled):
     return GIT_TARGET_KINDS.get(spelled.split("=", 1)[0].split(" ", 1)[0], "worktree")
 
 
+def anchored(path):
+    """True when a path word names its place whatever directory git runs in: absolute, or starting with `~`, which the
+    shell expands (the house reading of a leading tilde, as tree_writes and runner_files read one)."""
+    return os.path.isabs(path) or path.startswith("~")
+
+
+def chdir_join(base, value):
+    """`value` read from `base`, the directory the -C chain has reached (None: the one git starts in), as git reads a
+    relative -C and every relative path it is given after it; an anchored value starts again (SPD-227: `-C docs -C ~/x`
+    is the home's x, not docs/~/x)."""
+    return value if base is None or anchored(value) else os.path.join(base, value)
+
+
 def git_write_option_targets(words):
-    """Every file or directory a git call's own options name for git to write, as (the spelling a reason names
-    it by, the path word as the line spells it): the diff option syntax.GIT_FILE_OPTIONS on any verb, this verb's entry
-    in syntax.GIT_VERB_FILE_OPTIONS, and the positional forms of syntax.GIT_VERB_FILE_POSITIONALS.
+    """Every file a git call's own options and positional words name for git to write, as (the spelling a reason names
+    it by, the path, None or the -C base a work-tree-top path is read from): the diff option syntax.GIT_FILE_OPTIONS on
+    any verb, this verb's entry in syntax.GIT_VERB_FILE_OPTIONS, the positional forms of
+    syntax.GIT_VERB_FILE_POSITIONALS and mailsplit's older one, each read in the shape and from the base
+    syntax.GIT_FILE_FORMS gives it (placed_paths).
 
     Read in every spelling git takes: spaced, `=`-attached, a short option with its value attached or clustered, and any
     `--`-prefix of a long option, git's parse-options resolving an unambiguous one.  A verb GIT_WRITE_VERBS refuses whole
@@ -166,7 +182,10 @@ def git_write_option_targets(words):
     verb, args = git_verb(words)
     if verb is None or verb in syntax.GIT_WRITE_VERBS:
         return []
+    base, _ = git_chdir_and_config(words, ())
     longs, shorts = git_file_options(verb)
+    if verb == "config" and git_refused(verb, args) is None:
+        longs, shorts = syntax.GIT_FILE_OPTIONS, ""  # a read form: its --file names the file git reads, not one it writes
     out, i = [], 0
     while i < len(args):
         w = args[i]
@@ -180,9 +199,164 @@ def git_write_option_targets(words):
         if spaced:
             value = args[i + 1] if i + 1 < len(args) else None
         if value:
-            out.append(("%s %s" % (verb, "%s %s" % (w, value) if spaced else w), value))
+            shown = "%s %s" % (verb, "%s %s" % (w, value) if spaced else w)
+            for shape, where in file_option_forms(verb, w, shorts):
+                out += placed_paths(shown, value, shape, where, base, not spaced)
         i += 2 if spaced else 1
-    return out + git_write_positional_targets(verb, args)
+    shape, where = syntax.GIT_FILE_FORMS.get((verb, ""), ("file", "cwd"))
+    for shown, value in git_write_positional_targets(verb, args):
+        out += placed_paths(shown, value, shape, where, base, False)
+    for shown, value in mailsplit_directory(verb, args):
+        out += placed_paths(shown, value, "dir", "cwd", base, False)
+    return list(dict.fromkeys(out))
+
+
+def file_option_forms(verb, word, shorts):
+    """The (shape, base) of each option a word file_option_spelling matched may be, from syntax.GIT_FILE_FORMS: an exact
+    long option alone, else every one a `--` prefix names -- among the verb's own only where its own options take a prefix
+    and it has no diff options (bugreport, diagnose: `--output` is -o there, probed as `--out=D` by SPD-093) -- or the
+    short letter the cluster holds."""
+    key = word.partition("=")[0]
+    if key.startswith("--"):
+        own = tuple(syntax.GIT_VERB_FILE_OPTIONS.get(verb, ((), ""))[0])
+        longs = own if syntax.GIT_VERB_CWD_WRITES.get(verb, (False,))[0] else own + syntax.GIT_FILE_OPTIONS
+        names = [o for o in longs if o == key] or [o for o in longs if o.startswith(key)] or [key]
+    else:
+        names = [next((c for c in word[1:] if c in shorts), "")]
+    return list(dict.fromkeys(syntax.GIT_FILE_FORMS.get((verb, name), ("file", "cwd")) for name in names))
+
+
+PICK = pathrule.NAME_CHAR + pathrule.NAME_MORE  # a name git picks, of any length, in one path component
+
+
+def shaped_paths(value, shape):
+    """The paths git writes through a value of this shape (syntax.GIT_FILE_FORMS), a name git picks read as PICK."""
+    if shape == "dir":
+        return [os.path.join(value, PICK)]
+    if shape == "tree":
+        return [os.path.join(value, *(PICK,) * depth) for depth in (1, 2, 3)]
+    if shape == "base":
+        return [value + "-" + PICK]
+    if shape == "prefix":
+        return [value + PICK, value + PICK + "/" + PICK]
+    if shape == "idx" and value.endswith(".idx"):
+        return [value, value[: -len("idx")] + "rev"]
+    return [value]
+
+
+def placed_paths(shown, value, shape, where, base, attached):
+    """(shown, path, top) for each path a value of this shape and base names: a "cwd" path joined onto the -C base,
+    top None; a "top" path left as it is, with the -C base ("" for none) that top_readings reads it from.  A value
+    attached to its option keeps a leading `~` as spelled, since no shell expands one inside a word, and git reads it
+    relative like any other (probed: `-o~/t.tar` and `--output=~/u.tar` wrote ./~/t.tar and ./~/u.tar)."""
+    if attached and value.startswith("~"):
+        value = "./" + value
+    paths = shaped_paths(value, shape)
+    if where == "top":
+        return [(shown, p, base or "") for p in paths]
+    return [(shown, chdir_join(base, p), None) for p in paths]
+
+
+def mailsplit_directory(verb, args):
+    """(shown, the directory) where `git mailsplit` writes in its older form, with no -o: its last word, of one or two
+    (SPD-228).  Read as mailsplit's own parser reads its words (git 2.54.0, probed): options end at the first word not
+    starting with `-`, or after `--`, and an -o among them (only ever attached, `-o<dir>`: a spaced -o died "unknown
+    option") makes every later word a mailbox; with none, one word is the directory and the mailbox comes on standard
+    input, two are the mailbox and the directory, and any other count prints usage.  An -o after the first word is a
+    word like any other (`mailsplit box -oo4` wrote into ./-oo4), which the option scan still reads as -o too."""
+    if verb != "mailsplit":
+        return []
+    i = 0
+    while i < len(args) and args[i].startswith("-"):
+        i += 1
+        if args[i - 1] == "--":
+            break
+        if args[i - 1].startswith("-o") and len(args[i - 1]) > 2:
+            return []
+    words = args[i:]
+    return [("mailsplit %s" % " ".join(words), words[-1])] if len(words) in (1, 2) else []
+
+
+def work_tree_top(directory):
+    """The top of the work tree git discovers from `directory`: the nearest directory, itself or an ancestor, holding a
+    .git (a directory, or a gitfile), read in its physical spelling, as git's own getcwd reads it; None where there is
+    none (git then runs in no repository, and a verb that needs one writes nothing)."""
+    d = os.path.realpath(directory)
+    while True:
+        if os.path.lexists(os.path.join(d, ".git")):
+            return d
+        parent = os.path.dirname(d)
+        if parent == d:
+            return None
+        d = parent
+
+
+def top_readings(path, top, work_trees, cwds):
+    """Every path a value git reads from the top of the work tree may land at (syntax.GIT_FILE_FORMS' "top"): in the
+    directory git runs in -- relative to the -C base `top`, as the line reads any path -- and, from each directory the
+    shell may be in, at the top of the work tree git discovers from there, and at each --work-tree or GIT_WORK_TREE the
+    line names (`work_trees`), since which of them git takes turns on its discovery and on config the hook does not read.
+    A path that is anchored, or that the hook cannot resolve, and every path when the hook cannot follow the directory
+    the shell is in, is read as the one path it spells, whose own refusal follows."""
+    here = chdir_join(top or None, path)
+    if anchored(path) or spud_calls.unresolvable_word(path) or spud_calls.unresolvable_word(top) or cwds is None:
+        return [here]
+    out = [here]
+    for cwd in sorted(cwds):
+        found = work_tree_top(os.path.join(cwd, os.path.expanduser(top)))
+        if found is not None:
+            out.append(os.path.join(found, path))
+    out += [os.path.join(w, path) for w in work_trees if not spud_calls.unresolvable_word(w)]
+    return list(dict.fromkeys(out))
+
+
+def git_unspelled_word(words):
+    """The first word of a git call holding an operand the line does not spell where git reads its verb or an option, or
+    None (SPD-230).  What xargs reads from its input (syntax.INPUT_OPERAND, appended by the caller where xargs appends it)
+    may be any option before the first `--` -- a file git writes, a program it runs, config, another repository -- and,
+    in the verb's place, any verb; so may a word that starts with it, or with a `-` and no `=` before it (`-{input}`,
+    `--{input}`), while one whose option the line has settled (`--author={input}`) or that a spaced file option takes as
+    its path (`-o {input}`, the write channel's) is read as it stands.  A verb syntax.GIT_OPERAND_VERBS reads by operand
+    holds such an operand anywhere, after `--` too; find's `{}` is a path under starting points the line spells, read as
+    one except in the verb's place.  The values of git's own global value flags are their own readers' (-C, -c,
+    --git-dir ...)."""
+    i = 1
+    while i < len(words):
+        w = words[i]
+        if input_option(w):
+            return w
+        if w in syntax.GIT_GLOBAL_VALUE_FLAGS:
+            i += 2
+            continue
+        if not w.startswith("-"):
+            break
+        i += 1
+    else:
+        return None
+    verb, args = words[i], words[i + 1 :]
+    if syntax.unknown_operand(verb):
+        return verb
+    if verb in syntax.GIT_OPERAND_VERBS:
+        return next((w for w in args if syntax.unknown_operand(w)), None)
+    longs, shorts = git_file_options(verb)
+    k = 0
+    while k < len(args):
+        w = args[k]
+        if w == "--":
+            return None
+        if input_option(w):
+            return w
+        k += 2 if (file_option_spelling(w, longs, shorts) or (None, False))[1] else 1
+    return None
+
+
+def input_option(word):
+    """True when a word holds what xargs reads from its input where git may read it as an option: nothing but a `-`
+    run with no `=` stands before it (`{input}`, `-{input}`, `--{input}`, `-o{input}`)."""
+    if syntax.INPUT_OPERAND not in word:
+        return False
+    head = prepare.deglob(word[: word.index(syntax.INPUT_OPERAND)])
+    return not head or (head.startswith("-") and "=" not in head)
 
 
 def git_file_options(verb):
@@ -209,14 +383,15 @@ def file_option_spelling(word, longs, shorts):
 
 
 def literal_head(word):
-    """The text a masked word starts with before anything the shell expands in it: up to its first glob character,
-    parameter expansion or substitution."""
+    """The text a masked word starts with before anything the shell expands in it, or xargs puts there: up to its first
+    glob character, parameter expansion, substitution or syntax.INPUT_OPERAND (SPD-230)."""
     ends = [len(word)]
     for m in (syntax.GLOB_RE.search(word), syntax._EXPANDING_DOLLAR_RE.search(word)):
         if m:
             ends.append(m.start())
-    if hookio.SUBST in word:
-        ends.append(word.index(hookio.SUBST))
+    for mark in (hookio.SUBST, syntax.INPUT_OPERAND):
+        if mark in word:
+            ends.append(word.index(mark))
     return prepare.deglob(word[: min(ends)])
 
 
@@ -258,22 +433,24 @@ def git_write_positional_targets(verb, args):
     return [("%s %s" % (" ".join(x for x in (verb, subcommand) if x), p), p) for p in positionals[:count]]
 
 
-def git_write_env_targets(variables):
-    """Every file or directory a git call writes because of a variable in force on the line, as (the spelling a
-    reason names it by, the path word): a GIT_TRACE* sibling whose value is a path git appends to -- an absolute one, or
-    a `~` the shell expanded before git saw it, a descriptor, an off value and a relative one writing nothing -- or whose
-    value the hook cannot read, which fails closed, and GIT_INDEX_FILE and GIT_OBJECT_DIRECTORY, whose value is a path
-    whatever its shape.  `variables` holds each value as the shell passes it to git, a `$NAME` the line settled
-    resolved, so the shape that decides here is the one git sees.  A fixed order so the reason is deterministic."""
+def git_write_env_targets(variables, base=None):
+    """Every file a git call writes because of a variable in force on the line, as git_write_option_targets gives
+    them: a GIT_TRACE* sibling whose value is a path git appends to -- an absolute one, or a `~` the shell expanded before
+    git saw it, a descriptor, an off value and a relative one writing nothing -- or whose value the hook cannot read,
+    which fails closed, and GIT_INDEX_FILE and GIT_OBJECT_DIRECTORY, whose value is a path whatever its shape, read in the
+    shape and from the base syntax.GIT_WRITE_PATH_ENV_VARS gives it, from the -C `base`.  `variables` holds each value as
+    the shell passes it to git, a `$NAME` the line settled resolved, so the shape that decides here is the one git sees.
+    A fixed order so the reason is deterministic."""
     out = []
     for name in sorted(variables):
         value = variables[name]
         if not value:
             continue
         if name in syntax.GIT_WRITE_PATH_ENV_VARS:
-            out.append(("%s=%s" % (name, value), value))
+            shape, where = syntax.GIT_WRITE_PATH_ENV_VARS[name]
+            out += placed_paths("%s=%s" % (name, value), value, shape, where, base, False)
         elif name.startswith(syntax.GIT_TRACE_VAR_PREFIX) and (value.startswith(("/", "~")) or spud_calls.unresolvable_word(value)):
-            out.append(("%s=%s" % (name, value), value))
+            out.append(("%s=%s" % (name, value), value, None))
     return out
 
 
@@ -365,6 +542,7 @@ def cwd_write_scan(args, entry):
                 stdout = stdout and kind != "stdout"
                 directory = None if kind == "dir" else directory
                 continue
+            attached = value is not None
             if value is None and kind not in ("flag", "stdout"):
                 value = args[i] if i < len(args) else None
                 i += 1
@@ -372,7 +550,7 @@ def cwd_write_scan(args, entry):
             if kind == "stdout":
                 stdout = True
             elif kind == "dir" and value is not None:
-                directory = value
+                directory = "./" + value if attached and value.startswith("~") else value  # as placed_paths reads one
             elif kind == "suffix" and value is not None:
                 suffixes.append(value)
     sent, taker, k = stdout, False, 0
@@ -400,7 +578,7 @@ def git_chdir_and_config(words, keys):
         if w == "-C":
             named = words[i + 1] if i + 1 < len(words) else None
             if named:  # `-C ''` leaves the directory as it is
-                base = named if os.path.isabs(named) or base is None else os.path.join(base, named)
+                base = chdir_join(base, named)
             i += 2
             continue
         operand = None
@@ -441,8 +619,9 @@ def strftime_shape(value):
 
 def cwd_write_target(what, base, place, name):
     """(the spelling a reason names a default-form write by, the path word): `name` in the directory `place`, relative
-    to -C's; an absolute directory drops -C's, as git's does."""
-    path = os.path.join(*[x for x in (base, place, name) if x])
+    to -C's; an anchored directory drops -C's, as git's does (chdir_join)."""
+    where = chdir_join(base, place) if place else base
+    path = os.path.join(where, name) if where else name
     shown = path if os.path.isabs(path) or path.startswith(("./", "~")) else "./" + path
     return "%s, into %s" % (what, shown), path
 
@@ -486,10 +665,13 @@ def git_cwd_write_targets(words):
 
 
 def git_write_targets(words, variables):
-    """Every file or directory a git call writes beside the repository it reads: what its options name, the file
-    a default form writes into the directory git runs in, then what the environment in force names.  Each is checked
-    with the path rule in bash_reason, like a redirection target."""
-    return git_write_option_targets(words) + git_cwd_write_targets(words) + git_write_env_targets(variables)
+    """Every file a git call writes beside the repository it reads, as (the spelling a reason names it by, the path, None
+    or the -C base top_readings reads a work-tree-top path from): what its options and positional words name, the file a
+    default form writes into the directory git runs in, then what the environment in force names.  Each is checked with
+    the path rule in bash_reason, like a redirection target."""
+    base, _ = git_chdir_and_config(words, ())
+    cwd_writes = [(shown, path, None) for shown, path in git_cwd_write_targets(words)]
+    return list(dict.fromkeys(git_write_option_targets(words) + cwd_writes + git_write_env_targets(variables, base)))
 
 
 def flag_list_refused(verb, args, read_flags, value_flags):

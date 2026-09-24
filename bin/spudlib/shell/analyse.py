@@ -398,34 +398,47 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         if not read_points(expansions.git_read_point):
             return
         a.kinds.append("git")
-        alias = git_programs.git_line_defines_alias(words) or git_programs.git_env_defines_alias(a.vars)
+        # every reading below takes the words an xargs appends as well (SPD-230): its input may be git's verb, an option,
+        # a file mailinfo or mailsplit writes, or an operand branch, tag or config reads
+        git_words = words + unspelled
+        alias = git_programs.git_line_defines_alias(git_words) or git_programs.git_env_defines_alias(a.vars)
         if alias is not None:  # a defined alias/include or GIT_CONFIG_* injection: the verb the hook reads is not what runs
             a.findings.append(("git-config", alias))
         else:
-            program = git_programs.git_line_names_program(words) or git_programs.git_env_names_program(a.vars) or git_programs.git_verb_names_program(words)
+            program = (git_programs.git_line_names_program(git_words) or git_programs.git_env_names_program(a.vars)
+                       or git_programs.git_verb_names_program(git_words))
             if program is not None:  # config, environment or a verb option names a program git runs under an allowed verb
                 a.findings.append(("git-program", program))
             else:
-                verb, args = git_verbs.git_verb(words)
+                verb, args = git_verbs.git_verb(git_words)
                 refused = git_verbs.git_refused(verb, args)
                 unknown = None if refused else git_verbs.git_unknown_verb(verb, a.home)
                 if unknown is not None:  # not one of git's own commands: an alias or an external git-<verb>
                     a.findings.append(("git-verb", unknown))
                 else:  # one of git's own: Law 7's table first, then its allowlist, which refuses every other name
                     a.findings.append(("git", (verb, refused or git_verbs.git_not_allowed(verb))))
-        targets = git_verbs.git_repo_targets(words, a.vars)
+        if git_verbs.git_unspelled_word(git_words) is not None:
+            # a word xargs reads from its input where git reads its verb or an option, or find's {} as the verb: refused
+            # a member after every reason the spelled words earn (spud_calls.FINDING_LAST)
+            a.findings.append(("git-input", syntax.shown_operands(prepare.deglob(" ".join(git_words)))))
+        targets = git_verbs.git_repo_targets(git_words, a.vars)
         for spelled, target in targets:
             # another repository, whose .git/config the hook cannot read: resolved against the checkouts in bash_reason
             a.findings.append(("git-repo", (spelled, target, a.cwds)))
         # ... and the repository this call does read, whose local and worktree scopes bash_reason holds to the allowlist
         a.git_calls.append((tuple(targets), a.cwds))
+        work_trees = [target for spelled, target in targets if git_verbs.git_target_kind(spelled) == "worktree"]
         # git is handed the value, not the spelling, so a `$NAME` the line settled is resolved in the option that
         # names the file and in the variable whose value decides whether git writes a file at all (a GIT_TRACE* sibling
         # traces to a path only when its value is absolute; a descriptor or a relative one writes nothing).
-        for spelled, target in git_verbs.git_write_targets(words, {n: arg_writes.resolved(v, a) for n, v in a.vars.items()}):
+        for spelled, target, top in git_verbs.git_write_targets(git_words, {n: arg_writes.resolved(v, a) for n, v in a.vars.items()}):
             # A file the call writes through one of its own options or the environment, held to the path rule
-            # in bash_reason like a redirection target, for every caller
-            a.git_writes.append((spelled, arg_writes.resolved(target, a), a.cwds))
+            # in bash_reason like a redirection target, for every caller; one git reads from the work tree's top
+            # at each place that may be (SPD-227)
+            target = arg_writes.resolved(target, a)
+            paths = [target] if top is None else git_verbs.top_readings(target, arg_writes.resolved(top, a),
+                                                                        [arg_writes.resolved(w, a) for w in work_trees], a.cwds)
+            a.git_writes.extend((spelled, path, a.cwds) for path in paths)
     elif base in syntax.SHELLS:
         if not read_points(lambda ws, start: expansions.option_point(expansions.shell_read_index(ws, start))):
             return

@@ -41,9 +41,11 @@ REDIRECT_MESSAGES = {
 GIT_WRITE_MESSAGES = {
     "into": ("a file this git call writes (%s): %s. A git option or a GIT_TRACE* variable can name a file git creates or"
              " appends to anywhere -- `--output`, archive and format-patch `-o`, `bundle create`, GIT_TRACE2_EVENT and"
-             " their kin -- under a verb Law 7's table allows, and format-patch, bugreport and diagnose with no -o write"
-             " files of git's own naming into the directory git runs in, which a glob covers only when it covers every"
-             " file directly there (name a directory with -o, or use --stdout); each goes through the path rule as a"
+             " their kin -- under a verb Law 7's table allows; a directory an option names (format-patch, bugreport,"
+             " diagnose and mailsplit `-o`, mailsplit's last word) holds files of git's own naming, and format-patch,"
+             " bugreport and diagnose with no -o write such files into the directory git runs in, which a glob covers"
+             " only when it covers every file directly there (name a directory with -o, or use --stdout); a relative"
+             " path is read where git reads it, from the directory -C leaves it in; each goes through the path rule as a"
              " redirection does"),
     "variable": ("the file this git call writes (%s) holds a variable or substitution the hook cannot resolve, so it cannot"
                  " tell where git would write; spell the path out"),
@@ -103,6 +105,20 @@ VAR_WORD_REASON = ("the word %s holds a parameter expansion, arithmetic or a sub
                    " line does not spell at all, where the command is read by name (a wrapper's options, git's options, verb and the"
                    " arguments it checks, a shell's or an interpreter's options and program, a spud call's words, the options of a command"
                    " that writes by argument); spell the words out")
+
+
+# The reason for a git call an xargs extends with words the line does not spell, where git reads its verb or an option
+# (git_verbs.git_unspelled_word, SPD-230); a member alone, as every Law 7 fence.  The respelling is the `--` that makes
+# every word xargs adds a path, in each call it makes however it splits its input.
+GIT_INPUT_REASON = (
+    "Law 7: the git call `%s` takes words the line does not spell -- what xargs reads from its input, after the words the"
+    " line spells or where -I or -J puts it, or the path find hands its command as {} -- where git reads its verb or an"
+    " option, so the hook cannot tell what git runs or writes: the verb itself, a file it writes (`-o`, `--output`,"
+    " format-patch's `--no-stdout`), a program it runs (`--upload-pack`, grep's `-O`), config (`-c`) or another"
+    " repository (`-C`); a name or a subcommand of branch, tag, config, stash, worktree, remote or reflog writes wherever"
+    " it stands. Spell the verb, then end git's own words with `--` so every word xargs adds is a path (`xargs git log"
+    " --`), give git the revisions on its standard input where it reads them there (`git log --stdin`, `git cat-file"
+    " --batch`), or spell the words out; Spud commits, after the outcome is recorded")
 
 
 # The reason for an (e) expansion whose text the hook cannot read (shell/reevaluation, SPD-189).
@@ -453,6 +469,8 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
             return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
         elif kind == "var-word":
             return VAR_WORD_REASON % detail, analysis
+        elif kind == "git-input":
+            return GIT_INPUT_REASON % detail, analysis
         elif kind == "eval-flag":
             return EVAL_FLAG_REASON % detail, analysis
         elif kind == "unread":

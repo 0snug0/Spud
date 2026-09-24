@@ -743,6 +743,9 @@ class XargsInputTest(TreeWriteCase):
                 self.assertSilent(command, agent_id=AGENT_G)
         self.assertRefused("xargs git push < list", "Law 7", agent_id=AGENT_G)
         self.assertRefused("xargs -J % % x < list", "command word", agent_id=AGENT_G)  # the program is the input
+        # SPD-230: git reads what xargs appends as options until a `--` the line spells (test_hooks_git.GitXargsTest)
+        self.assertRefused("xargs git archive HEAD < list", "end git's own words with `--`", agent_id=AGENT_G)
+        self.assertSilent("xargs git archive HEAD -- < list", agent_id=AGENT_G)
 
     def test_what_xargs_hands_a_tree_writer_may_move_where_it_writes(self):
         """An input word may be an option: `-C /elsewhere` to tar, `-d /elsewhere` to unzip, `--output-dir` to curl."""

@@ -581,13 +581,15 @@ class GitConfigFileTest(BashHookCase):
                     "git config --rename-section a b", "git config --remove-section a", "git config --edit",
                     "git config -e", "git config --global --edit", "git config --local core.pager less",
                     "git config set core.pager x", "git config unset core.pager", "git config edit",
-                    "git config rename-section a b", "git config remove-section a", "git config --file f core.pager x",
+                    "git config rename-section a b", "git config remove-section a", "git config --file .claude/f core.pager x",
                     "git config set --all core.pager x"):
             with self.subTest(cmd):
                 for agent_id in (AGENT_A, AGENT_C):
                     r = self.assertRefused(cmd, "Law 7", agent_id=agent_id)
                     self.assertIn("git config", r.reason)
                 self.assertSilent(cmd, agent_id=None)
+        # SPD-227: the file a write form's --file names is one git writes, held to Law 1 for Spud (.claude/ is his own)
+        self.assertRefused("git config --file f core.pager x", "Law 1", agent_id=None)
 
     def test_the_reading_forms_of_git_config_stay_silent(self):
         for cmd in ("git config --get core.pager", "git config --get-all a.b", "git config --get-regexp a",
@@ -1508,9 +1510,11 @@ class GitFileWriteTest(BashHookCase):
                 continue  # a verb with no entry: its words are read only where spelled with a leading `-` (below)
             command = line.format(opt="$OPT")
             self.refused_to_members(command)
-            # format-patch, bugreport and diagnose with no -o write where they run (SPD-093), which Law 1 lets Spud do
-            # only among his own paths, and an unsettled $OPT may not be their -o
-            cwd = str(self.home.path / ".claude" / "patches") if line.split()[1] in ("format-patch", "bugreport", "diagnose") else None
+            # format-patch, bugreport and diagnose with no -o write where they run (SPD-093), and mailsplit with none writes
+            # into its last word (SPD-228), which Law 1 lets Spud do only among his own paths; an unsettled $OPT may
+            # not be their -o
+            cwd = (str(self.home.path / ".claude" / "patches")
+                   if line.split()[1] in ("format-patch", "bugreport", "diagnose", "mailsplit") else None)
             with self.subTest(command=command, agent_id="spud"):
                 self.assertSilent(command, agent_id=None, cwd=cwd)
             settled = "OPT=%s; %s" % ("%s=%s" % (long, note) if long else "-%s%s" % (short, note), command)
@@ -1818,8 +1822,8 @@ class GitCwdWriteTest(BashHookCase):
                          [("diagnose's default form, into ./docs/" + PICKED, "docs/" + PICKED, cwds),
                           ("diagnose's suffix x/y, into ./docs/git-diagnostics-x/y.zip", "docs/git-diagnostics-x/y.zip", cwds)])
         for writes_nothing in ("git format-patch --stdout -1", "git bugreport -h", "git diagnose -o tests/out"):
-            with self.subTest(writes_nothing):
-                self.assertEqual([w for w in self.analysis(writes_nothing).git_writes if PICKED in w[1]], [])
+            with self.subTest(writes_nothing):  # nothing here: -o's own directory is GitDirectoryOptionTest's (SPD-227)
+                self.assertEqual([w for w in self.analysis(writes_nothing).git_writes if "default form" in w[0]], [])
 
     def test_the_verbs_the_survey_read(self):
         """Every verb of GIT_MEMBER_VERBS read against its man page for "current (working) directory" and "temporary
@@ -1846,6 +1850,349 @@ class GitCwdWriteTest(BashHookCase):
                 self.assertGreater(len(listed), 2, usage)
                 ours = {(long, short, kind not in ("flag", "stdout")) for long, short, kind in entry[1]}
                 self.assertEqual(ours, listed)
+
+
+AGENT_DIRS = "b8c9d0e1f2a3b4c5d"  # SPD-227: a member holding out/**, tests/* and patches/*.patch
+
+
+class GitDirectoryOptionTest(BashHookCase):
+    """SPD-227: what a git option names is read as git reads it, on two counts SPD-049's reading missed.
+
+    The base: git runs every relative path it is given from the directory the composed -C chain names, so `git -C docs
+    format-patch -o tests/out -1` wrote docs/tests/out/0001-*.patch while the hook read ./tests/out.  The shape: a
+    directory option names the directory git writes files of its own naming into, so `cd tests/out && git format-patch
+    -o . -1` passed a member holding tests/* (`.` is tests/out, which tests/* matches) while git wrote
+    tests/out/0001-*.patch, and `-o out` was refused to a member holding out/** although every file lands under it.
+
+    Probed on git 2.54.0 (Apple Git-157) in a scratch repository in the scratchpad, from its top, under `-C sub`, from
+    sub, under `-C sub -C ..` and under `--git-dir=<repo>/.git -C sub`: archive -o, format-patch -o and --output, diff
+    --output, bugreport -o, diagnose -o, mailsplit -o, mailinfo's two files, bundle create, index-pack -o and
+    credential-store --file each wrote under the directory -C (or cd) left git in.  format-patch, bugreport and diagnose
+    -o a/b/c made a/b/c and wrote 0001-second.patch, git-bugreport-<date>.txt and git-diagnostics-<date>.zip directly in
+    it; mailsplit -oD wrote D/0001 and D/0002 into a D that must exist.  `index-pack -o o1.idx` wrote o1.idx and o1.rev;
+    `repack --filter-to=zz/pk` wrote zz/pk-<hash>.idx/.pack/.rev and `--expire-to=xx/pk` the same with .mtimes, as
+    `pack-objects o1pack` wrote o1pack-<hash>.*: a pack base name, not the directory the man page calls it;
+    `commit-graph write --object-dir D` wrote D/info/commit-graph and `multi-pack-index --object-dir=D write`
+    D/pack/multi-pack-index; `checkout-index -a --prefix=o1/` wrote o1/f and o1/sub/g and `--prefix=o1-` o1-f and
+    o1-sub/g.  `-o~/t.tar` and `--output=~/u.tar` reached git as spelled and wrote ./~/t.tar and ./~/u.tar: no shell
+    expands a tilde inside a word (tests/probes/shell_probe.py: zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57 printed
+    `-o~/x` and `--output=~/x`, and `-o ~/x` as $HOME/x).
+
+    AGENT_A plans tests/** and bin/spud, AGENT_C home:**, AGENT_DIRS out/**, tests/* and patches/*.patch; the home is
+    no repository here, so the options git reads from the work tree's top are GitTopRelativeTest's."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.dirs = self.spawn(self.plan(actor=self.lead["ref"], persona="engineer", model="opus",
+                                         deliverable=["home:out/**", "home:tests/*", "home:patches/*.patch"]), AGENT_DIRS, caller=AGENT_A)
+        for d in ("docs/superpowers/specs", "tests/out", "out", "patches", ".claude/patches", "ledger/tickets"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+
+    def analysis(self, command, cwd=None):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=cwd or str(self.home.path), home=str(self.home.path)))
+
+    # -- the -C base ---------------------------------------------------------------------
+
+    def test_minus_C_is_the_base_of_a_relative_option_target(self):
+        home = self.home.path
+        for refused, where in (("git -C docs format-patch -o tests/out -1", "docs/tests/out/?*"),  # the ticket's line
+                               ("git -C docs archive -o tests/a.tar HEAD", "docs/tests/a.tar"),
+                               ("git -C docs diff --output=tests/d.txt", "docs/tests/d.txt"),
+                               ("git -C docs mailinfo tests/m tests/p", "docs/tests/m"),
+                               ("git -C docs bugreport -o tests/out", "docs/tests/out/?*"),
+                               ("git -C docs mailsplit -otests/out box", "docs/tests/out/?*"),
+                               ("git -C tests -C ../docs archive -o a.tar HEAD", "docs/a.tar"),
+                               ("cd tests && git -C ../docs diagnose -o out", "docs/out/?*")):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_A)
+                self.assertIn(where, r.reason)
+                self.assertIn("this git call writes", r.reason)
+        for ok in ("git -C tests format-patch -o out -1", "git -C docs format-patch -o ../tests/out -1",
+                   "git -C docs archive -o %s/tests/a.tar HEAD" % home, "git -C tests diff --output=d.txt",
+                   "git -C tests mailinfo m p", "cd docs && git -C ../tests archive -o a.tar HEAD",
+                   "git -C docs -C ../tests bugreport -o out"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+        # Spud's own paths under -C: .claude/patches is his, the home's root and ledger/ are not
+        self.assertSilent("git -C .claude/patches archive -o a.tar HEAD", agent_id=None)
+        self.assertRefused("git -C ledger archive -o tickets/SPD-002.md HEAD", "Law 1", agent_id=None)
+
+    def test_a_tilde_is_the_home_only_where_the_shell_expands_it(self):
+        """A word that starts with `~` is expanded by the shell (the house reading of a leading tilde), so a -C naming one
+        starts the chain again rather than joining the one before it; a `~` inside a word reaches git as spelled."""
+        cwds = frozenset([str(self.home.path)])
+        a = self.analysis("git -C docs -C ~/x format-patch -1")
+        self.assertEqual(a.git_writes, [("format-patch's default form, into ~/x/" + PICKED, "~/x/" + PICKED, cwds)])
+        self.assertEqual(a.git_calls, [((("-C ~/x", "~/x"),), cwds)])
+        self.assertEqual(self.analysis("git -C docs --git-dir ~/x status").git_calls,
+                         [((("-C docs", "docs"), ("--git-dir ~/x", "~/x")), cwds)])
+        self.assertEqual(self.analysis("git -C docs --git-dir=~/x status").git_calls,
+                         [((("-C docs", "docs"), ("--git-dir=~/x", "docs/./~/x")), cwds)])
+        self.assertEqual(self.analysis("git -C docs archive -o ~/t.tar HEAD").git_writes, [("archive -o ~/t.tar", "~/t.tar", cwds)])
+        for attached, spelled in (("-o~/t.tar", "archive -o~/t.tar"), ("--output=~/t.tar", "archive --output=~/t.tar")):
+            with self.subTest(attached):
+                self.assertEqual(self.analysis("git archive %s HEAD" % attached).git_writes, [(spelled, "./~/t.tar", cwds)])
+                self.assertEqual(self.analysis("git -C docs archive %s HEAD" % attached).git_writes, [(spelled, "docs/./~/t.tar", cwds)])
+                self.assertSilent("git archive %s HEAD" % attached, AGENT_C)  # ./~ is in the home, which AGENT_C holds whole
+                self.assertSilent("cd tests && git archive %s HEAD" % attached, AGENT_A)
+        self.assertRefused("git -C tests -C ~/x format-patch -1", "", AGENT_C)  # the home directory, outside every project
+
+    # -- a directory option holds the files git names -------------------------------------
+
+    def test_a_directory_option_is_read_as_the_files_git_writes_in_it(self):
+        for ok in ("git format-patch -o out -1", "git format-patch -oout -3", "git format-patch --output-directory=out -1",
+                   "git format-patch --output-directory out -1", "git format-patch -o out/a/b -1", "git format-patch -o tests -1",
+                   "git bugreport -o out", "git bugreport --output-directory out", "git bugreport --out=out", "git diagnose -o out",
+                   "git diagnose --output-directory=out/x", "git mailsplit -oout box", "cd out && git format-patch -o . -1"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_DIRS)
+        for refused, where in (("cd tests/out && git format-patch -o . -1", "tests/out/?*"),  # the ticket's line
+                               ("git format-patch -o tests/out -1", "tests/out/?*"), ("git bugreport -o tests/out", "tests/out/?*"),
+                               ("git diagnose -o tests/out", "tests/out/?*"), ("git mailsplit -otests/out box", "tests/out/?*"),
+                               ("git format-patch -o patches -1", "patches/?*"), ("git format-patch -o docs -1", "docs/?*")):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_DIRS)
+                self.assertIn(where, r.reason)
+        for ok in ("git format-patch -o tests/out -1", "cd tests/out && git format-patch -o . -1", "git mailsplit -otests/out box"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+
+    def test_the_channel_records_the_files_the_directory_holds(self):
+        cwds = frozenset([str(self.home.path)])
+        self.assertEqual(self.analysis("git format-patch -o out -1").git_writes, [("format-patch -o out", "out/" + PICKED, cwds)])
+        self.assertEqual(self.analysis("git mailsplit -oout box").git_writes, [("mailsplit -oout", "out/" + PICKED, cwds)])
+        self.assertIn(("bugreport -o out", "out/" + PICKED, cwds), self.analysis("git bugreport -o out -s x").git_writes)
+        self.assertEqual(self.analysis("git archive -o out/a.tar HEAD").git_writes, [("archive -o out/a.tar", "out/a.tar", cwds)])
+        self.assertEqual(self.analysis("git format-patch --output=out/all.patch -1").git_writes,
+                         [("format-patch --output=out/all.patch", "out/all.patch", cwds)])
+        self.assertEqual(self.analysis("git format-patch -o '' -1").git_writes,  # here: the default form's reading
+                         [("format-patch's default form, into ./" + PICKED, PICKED, cwds)])
+
+    def test_the_forms_of_spuds_own_verbs(self):
+        """Law 7 refuses a member these verbs whole; the files Spud's own call writes are read in their own shapes: a
+        pack base name, a tree under an object directory, a prefix before every path of the index, an index and its
+        reverse index.  Each line flips an answer SPD-049's reading of one file gave."""
+        for refused in ("git repack -a -d --filter-to=ledger/Home.md", "git repack --cruft -d --expire-to=ledger/Home.md",
+                        "git pack-objects ledger/Home.md --revs", "git commit-graph write --object-dir ledger/Home.md",
+                        "git multi-pack-index --object-dir=ledger/Home.md write", "git checkout-index -a --prefix=ledger/Home.md",
+                        "git index-pack -o ledger/Home.idx p.pack"):
+            with self.subTest(refused):
+                self.assertRefused(refused, "Law 1", agent_id=None)
+                self.assertRefused(refused, "Law 7", AGENT_C)
+        for ok in ("git commit-graph write --object-dir .claude", "git multi-pack-index --object-dir=.claude write",
+                   "git checkout-index -a --prefix=.claude/", "git repack -a -d --filter-to=.claude/pk", "git pack-objects .claude/pk"):
+            with self.subTest(ok):
+                self.assertSilent(ok, agent_id=None)
+        cwds = frozenset([str(self.home.path)])
+        self.assertEqual(self.analysis("git index-pack -o out/p.idx p.pack").git_writes,
+                         [("index-pack -o out/p.idx", "out/p.idx", cwds), ("index-pack -o out/p.idx", "out/p.rev", cwds)])
+        self.assertEqual(self.analysis("git pack-objects out/pk").git_writes, [("pack-objects out/pk", "out/pk-" + PICKED, cwds)])
+        self.assertEqual(self.analysis("git commit-graph write --object-dir o").git_writes,
+                         [("commit-graph --object-dir o", p, cwds) for p in
+                          ("o/" + PICKED, "o/%s/%s" % (PICKED, PICKED), "o/%s/%s/%s" % (PICKED, PICKED, PICKED))])
+
+
+    def test_config_files_file_in_a_write_form(self):
+        """`git config --file` writes its file in a write form and reads it in a read form (probed on git 2.54.0: `-f c1
+        a.b c`, `--file=c2`, `config set --file c3`, `-fc4` and `--fil=c8` wrote, `-f c5 --get a.b` did not, and `-C sub`
+        wrote sub/c6).  Law 7 refuses a member every write form of config, so the file is Spud's to be held to Law 1."""
+        for refused in ("git config -f ledger/tickets/SPD-002.md a.b c", "git config --file=ledger/tickets/SPD-002.md a.b c",
+                        "git config set --file ledger/tickets/SPD-002.md a.b c", "git config -fledger/tickets/SPD-002.md a.b c",
+                        "git -C ledger config -f tickets/SPD-002.md a.b c", "git config --fil=ledger/tickets/SPD-002.md a.b c"):
+            with self.subTest(refused):
+                self.assertRefused(refused, "Law 1", agent_id=None)
+                self.assertRefused(refused, "Law 7", AGENT_C)
+        for ok in ("git config -f ledger/tickets/SPD-002.md --get a.b", "git config --file=.claude/x a.b c",
+                   "git config -f .gitmodules --get-regexp path", "git config get --file ledger/tickets/SPD-002.md a.b"):
+            with self.subTest(ok):
+                self.assertSilent(ok, agent_id=None)
+        self.assertSilent("git config -f .gitmodules --get-regexp path", AGENT_A)
+
+
+class GitTopRelativeTest(BashHookCase):
+    """SPD-227's adjacent gap: from a subdirectory of the work tree git chdirs to its top before it reads some values,
+    and those it does not rebase on the directory it started in, so they land at the top however the line reached the
+    subdirectory.  Probed on git 2.54.0 (Apple Git-157) in a scratch repository in the scratchpad: from sub, sub/deep and
+    under -C sub, `fast-export --export-marks=m` (a verb Law 7 lets a member run) wrote <top>/m, as `read-tree
+    --index-output`, `pack-objects <base>`, `repack --filter-to`, `checkout-index --prefix` and `--object-dir` did and a
+    relative GIT_INDEX_FILE did; `--work-tree=..` from sub wrote at the work tree, `--work-tree=sub` from the top wrote in
+    the directory git ran in, and `--git-dir=../.git` from sub, or a run inside .git, wrote in the directory git ran in
+    (no work tree to go to).  So such a value is read in the directory git runs in and at the top of the work tree git
+    finds from there (the nearest directory holding a .git), and at a --work-tree the line names.
+
+    The home is a repository here (a planted .git), as a checkout is; AGENT_A plans tests/** and bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        plant_git_dir(self.home.path / ".git")
+        for d in ("tests/out", ".claude", "ledger/tickets"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+
+    def analysis(self, command, cwd=None):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=cwd or str(self.home.path), home=str(self.home.path)))
+
+    def test_fast_exports_marks_land_at_the_top(self):
+        for refused, where in (("cd tests && git fast-export --export-marks=m HEAD", "home:m "),
+                               ("git -C tests fast-export --export-marks=m HEAD", "home:m "),
+                               ("cd tests/out && git fast-export --export-marks m HEAD", "home:m "),
+                               ("git --work-tree=tests fast-export --export-marks=m HEAD", "home:m "),
+                               ("cd tests && GIT_INDEX_FILE=idx git status", "home:idx "),
+                               ("git -C tests/out -c core.quotepath=off fast-export --export-marks=out/m HEAD", "home:out/m "),
+                               ("cd tests && GIT_OBJECT_DIRECTORY=objects git status", "home:objects/?* ")):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_A)
+                self.assertIn(where, r.reason)
+        for ok in ("git fast-export --export-marks=tests/m HEAD", "cd tests && git fast-export --export-marks=tests/m HEAD",
+                   "git -C tests fast-export --export-marks=%s/tests/m HEAD" % self.home.path,
+                   "GIT_INDEX_FILE=tests/idx git status", "GIT_OBJECT_DIRECTORY=tests/objects git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+
+    def test_the_channel_reads_both_places(self):
+        top = os.path.realpath(str(self.home.path))
+        cwds = frozenset([str(self.home.path)])
+        self.assertEqual(self.analysis("git -C tests fast-export --export-marks=m HEAD").git_writes,
+                         [("fast-export --export-marks=m", "tests/m", cwds), ("fast-export --export-marks=m", top + "/m", cwds)])
+        self.assertEqual(self.analysis("git --work-tree=tests read-tree --index-output=i HEAD").git_writes,
+                         [("read-tree --index-output=i", p, cwds) for p in ("i", top + "/i", "tests/i")])
+        self.assertEqual(self.analysis("git fast-export --export-marks=/tmp/m HEAD").git_writes,
+                         [("fast-export --export-marks=/tmp/m", "/tmp/m", cwds)])
+
+    def test_spud_is_held_to_law_1_at_the_top(self):
+        self.assertRefused("cd .claude && git read-tree --index-output=idx HEAD", "Law 1", agent_id=None)
+        self.assertRefused("cd .claude && git checkout-index -a --prefix=x/", "Law 1", agent_id=None)
+        self.assertSilent("cd .claude && git read-tree --index-output=.claude/idx HEAD", agent_id=None)
+        self.assertSilent("git read-tree --index-output=.claude/idx HEAD", agent_id=None)
+
+
+class GitMailsplitTest(BashHookCase):
+    """SPD-228: with no -o, `git mailsplit` writes into its last word, the older form GIT_VERB_FILE_OPTIONS never read.
+    Probed on git 2.54.0 (Apple Git-157) in the scratchpad: `mailsplit box o2` wrote o2/0001 and o2/0002, and so did
+    `mailsplit o3` with the mailbox on standard input -- one word is the directory, not a mailbox (an empty input wrote
+    nothing, which is what the ticket saw); `mailsplit -- box o5` and `-b -d3 box o6` (o6/001) the same; options end at the
+    first word that is not one, so `mailsplit box -oo4` wrote into ./-oo4; with -o the words are mailboxes (`-oo1 box o2`
+    read o2 as one); three words and none printed usage (129); a spaced `-o o1` died "unknown option: -o"; and every
+    form needs the directory to exist ("unable to create 'missing/0001'").  Under `-C sub`, `-om1 <box>` and `../../box
+    m2` wrote sub/m1/0001 and sub/m2/0001, and `mailsplit m3` run from sub wrote sub/m3/0001: the directory is read
+    where every other relative path git is given is.  AGENT_A plans tests/** and bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        for d in ("tests/out", "docs", "ledger/tickets"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def test_the_older_form_writes_into_its_last_word(self):
+        for refused in ("git mailsplit box docs", "git mailsplit docs < box", "cat box | git mailsplit docs",
+                        "git mailsplit -b -d3 box docs", "git mailsplit -- box docs", "git mailsplit --keep-cr box docs",
+                        "git -C docs mailsplit box out", "cd docs && git mailsplit box out", "git mailsplit box -odocs"):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_A)
+                self.assertIn("home:docs/out/?*" if refused.endswith(" out") else "home:docs/?*", r.reason)
+        for ok in ("git mailsplit box tests/out", "git mailsplit tests/out < box", "git mailsplit -otests/out box docs",
+                   "git mailsplit -otests/out", "git mailsplit box docs tests/out", "git mailsplit", "cd tests && git mailsplit box out"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+        self.assertRefused("git mailsplit box ledger/tickets", "Law 1", agent_id=None)
+
+    def test_the_channel_records_the_directory(self):
+        cwds = frozenset([str(self.home.path)])
+        self.assertEqual(self.analysis("git mailsplit box out2").git_writes, [("mailsplit box out2", "out2/" + PICKED, cwds)])
+        self.assertEqual(self.analysis("git mailsplit out2").git_writes, [("mailsplit out2", "out2/" + PICKED, cwds)])
+        self.assertEqual(self.analysis("git mailsplit box -oo4").git_writes,
+                         [("mailsplit -oo4", "o4/" + PICKED, cwds), ("mailsplit box -oo4", "-oo4/" + PICKED, cwds)])
+        for nothing in ("git mailsplit", "git mailsplit a b c", "git mailsplit -oout a b"):
+            with self.subTest(nothing):
+                self.assertEqual([w for w in self.analysis(nothing).git_writes if not w[1].startswith("out/")], [])
+
+
+GIT_INPUT_WORDING = "end git's own words with `--`"  # SPD-230: a git call whose words xargs extends
+
+
+class GitXargsTest(BashHookCase):
+    """SPD-230: xargs hands git words the line does not spell -- appended after the spelled ones, or where -I or -J puts
+    them -- and the git reading read only the spelled ones: `cat list | xargs git archive HEAD` wrote whatever -o the list
+    held, `xargs git format-patch --stdout -1` wrote into the directory under a --no-stdout from the list, and `echo push |
+    xargs git` pushed past Law 7 (its verb was None).  git takes such a word as its verb or an option wherever it stands
+    before `--`, so a member is refused the call unless the line ends git's words with `--` (every word xargs adds is then
+    a path, however xargs splits its input: the `--` is in each call), and a word git takes as a file -- mailinfo's,
+    mailsplit's last, a spaced -o's value -- is a write the line does not spell.  The subcommand verbs read by their
+    operands (branch, tag, config, stash, worktree, remote, reflog) are refused whatever `--` does, since a name or a
+    subcommand after it still writes.  find's {} is a path under its starting points and stays one, except as the verb.
+    Spud is not refused (Law 7 is his to keep), but the default form an input may reset is still read for him (Law 1)."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        for d in ("tests/out", ".claude/patches", "push"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+        (self.home.path / "list").write_text("a\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def refused_to_members(self, command, needle=GIT_INPUT_WORDING):
+        for agent_id in (AGENT_A, AGENT_C):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+
+    def test_a_word_xargs_adds_where_git_reads_an_option_or_its_verb_is_refused(self):
+        for command in ("xargs git archive HEAD < list", "cat list | xargs git archive HEAD", "xargs git format-patch --stdout -1 < list",
+                        "echo push | xargs git", "xargs git < list", "xargs git log < list", "xargs -0 git grep foo < list",
+                        "xargs git fetch < list", "xargs -n1 git log --oneline < list", "xargs -I% git log -1 % < list",
+                        "xargs -J % git log % -1 < list", "xargs -I% git % status < list", "xargs -I% git log -o % -1 < list",
+                        "xargs git -C tests log < list", "xargs git branch --list < list", "xargs git remote < list",
+                        "xargs git reflog < list"):
+            self.refused_to_members(command)
+        # `--` makes nothing a path for these, whose operand writes: Law 7's own reading of the verb comes first
+        for command in ("xargs git branch -- < list", "xargs git config -- < list", "xargs git tag < list"):
+            self.refused_to_members(command, "Law 7")
+        r = self.assertRefused("xargs git archive HEAD < list", GIT_INPUT_WORDING)
+        self.assertIn("git archive HEAD {input}", r.reason)
+        self.refused_to_members("find push -maxdepth 0 -exec git {} \\;", "")  # the verb is a path find found
+
+    def test_a_line_that_ends_gits_words_is_read_as_before(self):
+        for ok in ("xargs git log -- < list", "xargs git archive HEAD -- < list", "xargs git format-patch --stdout -1 -- < list",
+                   "xargs -I% git log -1 -- % < list", "xargs -I% git log --author=% -1 < list", "xargs git grep -l foo -- < list",
+                   "find . -name '*.py' -exec git log -1 {} \\;", "xargs -n1 git log --oneline -- < list"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+
+    def test_a_file_git_writes_from_the_input_is_the_inputs(self):
+        for command in ("xargs -I% git archive -o % HEAD < list", "xargs -J % git archive -o % HEAD < list",
+                        "xargs git mailinfo -- < list", "xargs git mailsplit -- < list", "xargs -I% git mailinfo % tests/p < list"):
+            with self.subTest(command):
+                self.assertRefused(command, "xargs reads from its input", AGENT_A)
+
+    def test_law_7s_own_reason_comes_first(self):
+        for command, verb in (("xargs git push < list", "git push"), ("xargs git add < list", "git add"),
+                              ("xargs git stash < list", "git stash")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "Law 7", AGENT_A)
+                self.assertIn(verb, r.reason)
+
+    def test_spuds_answers(self):
+        for ok in ("xargs git log < list", "xargs git archive HEAD < list", "xargs git push < list", "echo push | xargs git",
+                   "xargs git format-patch --stdout -1 -- < list"):
+            with self.subTest(ok):
+                self.assertSilent(ok, agent_id=None)
+        # an input word may be --no-stdout, which sends the patches into the directory git runs in: Law 1 there
+        self.assertRefused("xargs git format-patch --stdout -1 < list", "Law 1", agent_id=None)
+        self.assertSilent("cd .claude/patches && xargs git format-patch --stdout -1 < list", agent_id=None)
+
+    def test_the_analysis(self):
+        a = self.analysis("xargs git archive HEAD < list")
+        self.assertIn("git-input", [f[0] for f in a.findings])
+        self.assertEqual(a.git_writes, [])
+        self.assertNotIn("git-input", [f[0] for f in self.analysis("xargs git archive HEAD -- < list").findings])
+        self.assertNotIn("git-input", [f[0] for f in self.analysis("git archive HEAD").findings])
 
 
 # The verbs `git --list-cmds=main` gives on this machine that a member may run, as SPD-087's sweep read them: every name
@@ -1956,8 +2303,10 @@ class GitVerbAllowlistTest(BashHookCase):
                    "git show-index", "git verify-pack -v p.idx", "git verify-commit HEAD", "git fmt-merge-msg",
                    "git pack-redundant --all", "git ls-tree HEAD", "git diff-files", "git diff-index HEAD",
                    "git name-rev --all", "git merge-base a b", "git cat-file -p HEAD", "git var -l",
-                   # --stdout: with no -o format-patch writes where it runs, which GitCwdWriteTest reads (SPD-093)
-                   "git format-patch --stdout -1", "git archive HEAD", "git mailsplit mbox", "git fast-export HEAD"):
+                   # --stdout: with no -o format-patch writes where it runs, which GitCwdWriteTest reads (SPD-093); and
+                   # `git mailsplit mbox` writes into ./mbox/, its one word the directory (SPD-228, GitMailsplitTest)
+                   "git format-patch --stdout -1", "git archive HEAD", "git mailsplit -o/tmp/spd-228 mbox",
+                   "git fast-export HEAD"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
