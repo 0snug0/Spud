@@ -28,27 +28,27 @@ which the walk reads fail closed.
 One scanner whose frames share the characters they stop at, kept whole past the ~250-line mark for that reason (the
 spudlib-modules size rule)."""
 
-import re
-
 from . import prepare, syntax, zsh
+from ..core import lazy
+from ..hooks import snapshots
 
 _READINGS = 32  # how often one line asks mark_zsh_patterns what an open `(` is: the pathological line reads on
 # What mark_zsh_patterns writes for a newline zsh reads inside a word: a glob group's (_zsh_group), and an arithmetic
 # command's or a case pattern's group's (_ARITH_MARKS, _PATTERN_MARKS).
 _WORD_NEWLINES = (syntax._ZSH_SENTINELS["\n"], syntax._ARITH_SENTINELS["\n"])
-_COMMAND_RE = re.compile(r"[\\'\"`$<>=()#\n]")  # the characters a command list's scan stops at
-_QUOTED_RE = re.compile(r"[\\\"`$]")  # in double quotes
-_BRACED_RE = re.compile(r"[\\'\"`${}]")  # in a `${ }`
-_ARITH_RE = re.compile(r"[\\$()\[\]]")  # in an arithmetic expansion
-_BACKTICK_RE = re.compile(r"[\\`]")
-_ANSI_RE = re.compile(r"[\\']")  # in `$'...'`
-_RECEIVED_RE = re.compile(r"[\\`$]")  # in an unquoted body (received_body)
+_COMMAND_RE = lazy.LazyPattern(r"[\\'\"`$<>=()#\n]")  # the characters a command list's scan stops at
+_QUOTED_RE = lazy.LazyPattern(r"[\\\"`$]")  # in double quotes
+_BRACED_RE = lazy.LazyPattern(r"[\\'\"`${}]")  # in a `${ }`
+_ARITH_RE = lazy.LazyPattern(r"[\\$()\[\]]")  # in an arithmetic expansion
+_BACKTICK_RE = lazy.LazyPattern(r"[\\`]")
+_ANSI_RE = lazy.LazyPattern(r"[\\']")  # in `$'...'`
+_RECEIVED_RE = lazy.LazyPattern(r"[\\`$]")  # in an unquoted body (received_body)
 # An unbraced parameter expansion (received_body): a name, zsh's `$#NAME`, `$+NAME`, `$=NAME`, `$~NAME` and `$^NAME`,
 # or a special parameter
-_PARAMETER_RE = re.compile(r"\$(?:[#+=~^]?[A-Za-z_][A-Za-z0-9_]*|[0-9@*?$!#-])")
+_PARAMETER_RE = lazy.LazyPattern(r"\$(?:[#+=~^]?[A-Za-z_][A-Za-z0-9_]*|[0-9@*?$!#-])")
 _WORD_START = " \t\n;&|()<>"  # before a `#` that opens a comment (newlines_as_separators reads the same)
 _DELIMITER_END = " \t\n;&|<>()"
-_CASE_RE = re.compile(r"(?<![\w-])case(?![\w-])")
+_CASE_RE = lazy.LazyPattern(r"(?<![\w-])case(?![\w-])")
 _COMMAND, _QUOTED, _BRACED, _ARITH = range(4)
 
 
@@ -387,7 +387,7 @@ class _Scan:
         nothing else, as both shells read it (probed: `E"O"F`, `'EOF'` and `\\EOF` are EOF, `<<$Z` ends at a line `$Z`).
         An ANSI-C string is its value (SPD-202, probed: `<<$'EOF'`, `<<$'E\\x4fF'`, `<<x$'y'"z"` and `<<$'E\\'F'` ended
         at EOF, EOF, xyz and E'F in both shells).  The delimiter is None where the hook cannot know it: a string whose
-        escapes the shells decode apart (prepare.ansi_c_value), bash's `$"..."`, which zsh reads as `$` then double quotes
+        escapes the shells decode apart (snapshots.ansi_c_value), bash's `$"..."`, which zsh reads as `$` then double quotes
         (`<<$"EOF"` ended at EOF in bash and at $EOF in zsh), and `$$'...'` (`<<$$'E'`: $$E in bash, $E in zsh)."""
         text, n = self.text, self.n
         word, quoted, known = [], False, True
@@ -395,7 +395,7 @@ class _Scan:
             c = text[k]
             if c == "$" and text.startswith("$'", k):
                 end = prepare.ansi_c_end(text, k + 2)
-                value = prepare.ansi_c_value(text[k + 2 : end]) if end < n else None
+                value = snapshots.ansi_c_value(text[k + 2 : end]) if end < n else None
                 known = known and value is not None
                 word.append(value or "")
                 quoted, k = True, end + 1

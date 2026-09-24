@@ -14,17 +14,23 @@ argument left the interpreters out on purpose, as shell/spelled_writes says, so 
 used the tools.
 
 The rule this module decides: for a caller the Bash rule holds (a member), an interpreter run whose program the line
-spells rather than reads from a file is refused, because the hook reads no such program and cannot tell what it writes.
-Spelled means an option that carries the program -- python's `-c`, node's (bun's, deno's) `-e`/`--eval`/`-p`/`--print`,
-perl's `-e`/`-E`, ruby's `-e` -- or standard input, where the line feeds it and the interpreter has no program of its
-own (`python3.14 - <<'PY'`, `echo ... | node`, `python3 < x.py`, `cat x | perl`).  A third shape is a subcommand
-whose own operand is the program (`deno eval <code>`).
+spells rather than reads from a file is refused where that program's text visibly writes (SPD-175).  Spelled means an
+option that carries the program -- python's `-c`, node's (bun's, deno's) `-e`/`--eval`/`-p`/`--print`, perl's
+`-e`/`-E`, ruby's `-e` -- or standard input, where the line feeds it and the interpreter has no program of its own
+(`python3.14 - <<'PY'`, `echo ... | node`, `python3 < x.py`, `cat x | perl`).  A third shape is a subcommand whose own
+operand is the program (`deno eval <code>`).  SPD-150 refused every such run, because the hook read none of them; since
+SPD-175 the text the line spells -- the option's value and every later option that carries more, or each shell's
+reading of what stands on standard input -- is scanned for the write markers shell/program_writes tables per family,
+and perl's and ruby's `-i` among the options is one.  A marker found: refused.  None: the program runs.  Text the line
+does not spell (a pipe from a file or a program, a `<` file, a word the line cannot settle, including one perl or ruby
+reads as a switch past the program) stays refused, since there is nothing to scan, and so does every program of a
+family no marker is tabled for (osascript, php, lua, Rscript, swift: the `markers` column below).
 
 What stays exactly as it was: a program from a file (`python3.14 -I -S tests/suite.py`, the spud launcher,
 `node scripts/build-web.js`), python's `-m module`, and an interpreter left to read a terminal, which runs no program of
 the line's (`python3` on its own, the REPL).  Whether a member may run a script file it wrote itself is an open question,
-which nothing here touches.  Spud keeps his inline programs: the hook cannot read those either, but Law 1
-binds him where it cannot see, and his are investigation rather than a way past a fence.
+which nothing here touches.  Spud keeps his inline programs: the hook cannot read those either, but his laws bind him
+where it cannot see, and his are investigation rather than a way past a fence.
 
 The table below is each interpreter's own option grammar, from its manual: python(1) and `python3.14 --help`, node(1)
 with bun's and deno's spellings of its two, perlrun, and ruby(1).  perl's switches are read in shell/spelled_writes too,
@@ -58,13 +64,15 @@ What stays open, none of it this module's to close:
 Past 250 lines (the package's look-again point): it is one body of data read as one -- a row per family, each row its
 manual's and its comment the citation -- with the single grammar that walks a run's words against it, which
 spelled_program reads for a verdict and interpreter_words.read_index for indices, so the two can never disagree about
-where an option ends and a program begins.  The seam that was real came out: the words such a run is read with, one
+where an option ends and a program begins; since SPD-175 the same walk, taken again past each value, also says which
+words are the program's text, which is why that reading lives here and only the families' write markers, a body of
+data with no grammar in it, went to shell/program_writes.  The seam that was real came out: the words such a run is read with, one
 the line cannot settle and one an xargs appends, is shell/interpreter_words, with its own name and its own users.
 """
 
 import re
 
-from . import prepare, stdin_text, syntax
+from . import prepare, program_writes, stdin_text, syntax
 
 RUBY_RE = re.compile(r"^ruby(?:\d+(?:\.\d+)*)?$")  # ruby, ruby3.4: versioned names as syntax.PERL_RE takes perl's
 
@@ -94,24 +102,35 @@ class Interpreter:
     its own, which is python's shape and not every family's (`Rscript` alone prints its usage).
     `whole_options`: whether its short options are whole words rather than getopt clusters, and so every word is read
     for one (a compiler driver: `swift -e`, beside seven hundred `-name value` options no cluster reading would
-    survive)."""
+    survive).
+
+    For the text of the program itself (SPD-175):
+    `markers`: the family shell/program_writes scans the program's text with, or None for a family no write marker is
+    tabled for, whose every spelled program stays refused.
+    `code_ends`: whether the option that carries the program ends the options, so the words after its value are the
+    program's arguments and never more of its text (python's `-c`); elsewhere a later option may carry more text
+    (`perl -e a -e b`) and every one is read.
+    `inplace`: the short letters that edit the files the run names in place (perl's and ruby's `-i`), a write marker
+    wherever they stand among the options."""
 
     __slots__ = ("code", "code_long", "value", "attached", "digits", "value_long", "module",
-                 "subcommands", "stdin_program", "whole_options")
+                 "subcommands", "stdin_program", "whole_options", "markers", "code_ends", "inplace")
 
     def __init__(self, code="", code_long=(), value="", attached="", digits="", value_long=(), module="",
-                 subcommands=None, stdin_program=True, whole_options=False):
+                 subcommands=None, stdin_program=True, whole_options=False, markers=None, code_ends=False, inplace=""):
         self.code, self.code_long, self.value = code, code_long, value
         self.attached, self.digits, self.value_long, self.module = attached, digits, value_long, module
         self.subcommands, self.stdin_program, self.whole_options = subcommands or {}, stdin_program, whole_options
+        self.markers, self.code_ends, self.inplace = markers, code_ends, inplace
 
 
 # python(1): -c takes the rest of its word or the next one and ends the options, -m a module, -W, -X and -Q a value; every
 # other switch is a flag, and --check-hash-based-pycs is the one long option whose value is the next word.
-PYTHON = Interpreter(code="c", value="WXQ", value_long=("--check-hash-based-pycs",), module="m")
+PYTHON = Interpreter(code="c", value="WXQ", value_long=("--check-hash-based-pycs",), module="m", markers="python",
+                     code_ends=True)
 # node(1): -e/--eval and -p/--print carry the program (`node -pe 'x'` clusters them), -r/--require a module to load
 # first.  bun and deno spell the same two, and node's -c is --check, a flag, which is why it is no code letter here.
-JS = Interpreter(code="ep", code_long=("--eval", "--print"), value="r", value_long=("--require",))
+JS = Interpreter(code="ep", code_long=("--eval", "--print"), value="r", value_long=("--require",), markers="js")
 # deno's own help: its program comes after a subcommand, and `deno eval <code>` carries none of node's letters at all
 # (`deno completions zsh`: `*::code_arg -- Code to evaluate`).  `deno repl --eval <code>`/`--eval=<code>` evaluates code
 # when the REPL starts (`deno repl --help`) and the REPL itself reads what it is given; `deno run -` reads the program on
@@ -121,12 +140,13 @@ JS = Interpreter(code="ep", code_long=("--eval", "--print"), value="r", value_lo
 # node's own letters stay on the row: `deno -e 'x'` was refused from the first and stays refused.
 DENO = Interpreter(code="ep", code_long=("--eval", "--print"), value="r", value_long=("--require",),
                    subcommands={"eval": "code", "repl": "stdin", "run": "file", "serve": "file", "watch": "file",
-                                "task": "shell", "test": "file", "bench": "file", "check": "file", "compile": "file"})
+                                "task": "shell", "test": "file", "bench": "file", "check": "file", "compile": "file"},
+                   markers="js")
 # perlrun: -e and -E carry the program, -I a directory, -C, -D, -F, -M, -m, -V, -x and -i the rest of their own word
 # (-d only before a `:` or `=`, read below), -0 and -l an optional number the cluster goes on after.
-PERL = Interpreter(code="eE", value="I", attached="CDFMVimx", digits="0l")
+PERL = Interpreter(code="eE", value="I", attached="CDFMVimx", digits="0l", markers="perl", inplace="i")
 # ruby(1): -e carries the program, -C, -E, -F, -I and -r take a value, -0, -K, -T, -W, -i and -x the rest of their word.
-RUBY = Interpreter(code="e", value="CEFIr", attached="Kix", digits="0TW")
+RUBY = Interpreter(code="e", value="CEFIr", attached="Kix", digits="0TW", markers="ruby", inplace="i")
 # osascript(1): `osascript [-l language] [-i] [-s flags] [-e statement | programfile] [argument ...]`.  -e enters one line
 # of a script and more than one builds it up, -l and -s take a value, -i is a flag; with no -e and no programfile the
 # script is "passed in using standard input", and `-` names that input where arguments follow it.  An AppleScript runs
@@ -180,17 +200,25 @@ def interpreter(base):
 
 
 def read_inline(cmd, base, words, a, fed):
-    """Record what an interpreter run spells as its own program (module docstring), which bash_rule turns into Law 1's
-    refusal for a member: (the command word as spelled, the option that carries the program, or None where the
-    interpreter reads it on standard input).
+    """Record an interpreter run whose program the line spells (module docstring) where a member is refused it, which
+    bash_rule turns into the refusal: (the command word as spelled, the option that carries the program or None where
+    the interpreter reads it on standard input, why, the write marker or None).  Why is "writes" for text that shows a
+    write marker (shell/program_writes, SPD-175), "unspelled" for text the line does not spell, and "untabled" for a
+    family no marker is tabled for.  A program whose spelled text shows no marker records nothing, and runs.
 
     `fed` is whether the line puts anything on that standard input at all (shell/stdin_text.input_fed), which is not
     whether the hook can say what it is: `cat x | node` and `python3 < f` feed a program the hook cannot read, while
-    `python3` on its own is the REPL and runs none.  A command outside the table, a program from a file and a module
-    record nothing."""
-    how, option = spelled_program(base, words)
-    if how == "option" or (how == "stdin" and fed):
-        a.findings.append(("inline", (prepare.deglob(cmd), option if how == "option" else None)))
+    `python3` on its own is the REPL and runs none.  What stands there is a.stdin, the text the line spells or None
+    (stdin_text.command_input).  A command outside the table, a program from a file and a module record nothing."""
+    kind = interpreter(base)
+    if kind is None:
+        return
+    how, option, at, seen = _reach(kind, words)
+    if how != "option" and not (how == "stdin" and fed):
+        return
+    why, marker = _verdict(kind, words, how, option, at, seen, a)
+    if why is not None:
+        a.findings.append(("inline", (prepare.deglob(cmd), option if how == "option" else None, why, marker)))
 
 
 def spelled_program(base, words):
@@ -204,12 +232,113 @@ def spelled_program(base, words):
     kind = interpreter(base)
     if kind is None:
         return None, None
-    for _i, role, spelled in read_words(kind, words):
-        if role in ("option", "stdin"):
-            return role, spelled
+    how, option, _at, _seen = _reach(kind, words)
+    return how, option
+
+
+def _reach(kind, words):
+    """spelled_program's walk, with where it ended: (how, the option, the index of the word that carries the program --
+    the option's own word, or the subcommand's operand -- or None, and the indices of every word the walk read by
+    name on the way).  how is None for a program from a file or a module, which the hook reads no more of than it ever
+    did."""
+    last, seen = None, []
+    for i, role, spelled in read_words(kind, words):
+        if role == "option":
+            return role, spelled, (i if i is not None else last), seen
+        if role == "stdin":
+            return role, spelled, None, seen
         if role in ("program", "module"):
-            return None, None  # a program from a file, which the hook reads no more of than it ever did
+            return None, None, None, seen + [i]
+        last = i
+        seen.append(i)
+    return None, None, None, seen
+
+
+def _verdict(kind, words, how, option, at, seen, a):
+    """(why a member is refused this run, the marker) or (None, None) where the text the line spells shows no write.
+
+    The text: for an option, the word that carries the program and its value, and -- where that option does not end
+    the options (code_ends) -- every later option that carries more, the walk read again past each value; for standard
+    input, each shell's reading of what the line puts there (stdin_text.each_reading).  A word the walk reads by name
+    that may stand for an option the line does not spell earns "unspelled", as the text itself does."""
+    if kind.markers is None:
+        return "untabled", None
+    if how == "stdin":
+        texts = None if stdin_text.unspelled(a.stdin) else stdin_text.each_reading(a.stdin)
+    else:
+        texts, more = _option_texts(kind, words, option, at, a)
+        seen = seen + more
+    for i in seen:
+        if i is not None and _inplace(prepare.deglob(words[i]), kind):
+            return "writes", "-" + kind.inplace
+    if texts is None:
+        return "unspelled", None
+    for text in texts:
+        marker = program_writes.first_write(kind.markers, text)
+        if marker is not None:
+            return "writes", marker
     return None, None
+
+
+def _option_texts(kind, words, option, at, a):
+    """(the program's text as one reading, or None where a word of it is one the line does not spell; the indices of the
+    words the walks after the first read by name).  `option` and `at` are where the first walk stopped."""
+    texts, seen = [], []
+    while True:
+        operand = not option.startswith("-")  # a subcommand's operand is the program (`deno eval <code>`)
+        attached = operand or _attached(prepare.deglob(words[at]), option, kind)
+        taken = words[at:at + (1 if attached else 2)]
+        texts.extend(stdin_text.word_text(w, a) for w in taken)
+        after = at + len(taken)
+        if operand or kind.code_ends:
+            break
+        rest = [words[0]] + words[after:]
+        how, option, j, more = _reach(kind, rest)
+        seen.extend(after + k - 1 for k in more if k is not None)
+        if any(k is not None and not _readable(rest[k], a) for k in more):
+            return None, seen
+        if how != "option":
+            break
+        at = after + j - 1
+    return (None if None in texts else ["\n".join(texts)]), seen
+
+
+def _attached(word, option, kind):
+    """Whether the option in this word carries its value in the word itself (`-c'x'`, `-ecode`, `--eval=x`), rather
+    than in the next one.  A rest of the cluster made only of code letters is more options, as node reads `-pe`: -p
+    and -e, the program in the next word."""
+    if word.startswith("--") or kind.whole_options:
+        return "=" in word
+    rest = word[word.find(option[1:], 1) + 1:]
+    return bool(rest) and not all(c in kind.code for c in rest)
+
+
+def _readable(word, a):
+    """Whether a word the walk reads by name is one it can read: text the line spells, or a word whose every expansion
+    starts with the character the line spells at its front -- a letter, a digit or a path's -- and so is never an option
+    (`tests/*.txt`, `~/x`, `docs/$NAME`)."""
+    if stdin_text.word_text(word, a) is not None:
+        return True
+    text = prepare.deglob(word)
+    return bool(text) and (text[0].isalnum() or text[0] in "./~+,:@%")
+
+
+def _inplace(word, kind):
+    """Whether this option word, as the family's getopt reads it, holds a letter that edits files in place (-i)."""
+    if not kind.inplace or not word.startswith("-") or word.startswith("--"):
+        return False
+    k = 1
+    while k < len(word):
+        c = word[k]
+        if c in kind.inplace:
+            return True
+        if c in kind.code or c in kind.module or c in kind.attached or c in kind.value:
+            return False
+        k += 1
+        if c in kind.digits:
+            while k < len(word) and word[k].isdigit():
+                k += 1
+    return False
 
 
 def read_words(kind, words):

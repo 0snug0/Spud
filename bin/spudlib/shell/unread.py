@@ -11,11 +11,12 @@ per-form messages live in bash_rule with the other refusals; this module is only
 import re
 
 from . import prepare, syntax
+from ..core import lazy
 from ..hooks import hookio
 
 # A here-document operator and its delimiter word (`<<EOF`, `<< 'EOF'`, `<<-"EOF"`), for finding an unterminated one in a
 # `$( )` body the naive extent may have cut short (SPD-194); a quoted delimiter's quotes do not change its name.
-_HEREDOC_OP_RE = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+_HEREDOC_OP_RE = lazy.LazyPattern(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
 
 SHOWN = 60  # the most of the offending text a finding carries, before bash_rule cuts it further for the reason
 # The reader's private-use alphabet: the quoted/zsh/arithmetic/operator sentinels, the operand markers, PROCSUB_MARK and

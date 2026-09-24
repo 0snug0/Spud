@@ -7,7 +7,46 @@ import re
 
 from . import hookio
 from ..core import homeconf
-from ..shell import prepare
+
+
+# The escapes zsh 5.9 and bash 3.2 both decode inside `$'...'`, each to the one character it names, beside a code of one to
+# three octal digits or of `x` and one or two hex digits (ansi_c_value).  Probed through tests/probes/shell_probe.py
+# (AnsiCQuotingTest has what each printed): they part on every other escape -- `\u` and `\U`, which bash 3.2 keeps as
+# text, `\c`, an unknown letter, whose backslash zsh drops and bash keeps, a bare `\x`, a backslash-newline -- and on NUL.
+# The decoder lives here, beside unquote_word, rather than in shell/prepare, whose ANSI-C pass (ansi_c_quotes) and
+# shell/heredocs read it too: every module that loads this one -- commands/doctor, and so every `spud` command -- would
+# otherwise load the shell package for it (SPD-216).
+_ANSI_C_ESCAPES = {"a": "\a", "b": "\b", "e": "\x1b", "E": "\x1b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v",
+                   "\\": "\\", "'": "'", '"': '"', "?": "?"}
+_ANSI_C_CODE_RE = re.compile(r"([0-7]{1,3})|x([0-9A-Fa-f]{1,2})")
+
+
+def ansi_c_value(body):
+    """The text `$'body'` stands for, where zsh and bash decode every escape in it alike (_ANSI_C_ESCAPES), or None where
+    they part, or where a code is NUL or past 0x7f, one byte of a character a command line held as text cannot spell."""
+    if "\\" not in body:
+        return body
+    out, i, n = [], 0, len(body)
+    while i < n:
+        c = body[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        escape = body[i + 1 : i + 2]
+        if escape and escape in _ANSI_C_ESCAPES:
+            out.append(_ANSI_C_ESCAPES[escape])
+            i += 2
+            continue
+        m = _ANSI_C_CODE_RE.match(body, i + 1)
+        if m is None:
+            return None
+        code = int(m.group(1), 8) if m.group(1) else int(m.group(2), 16)
+        if not 0 < code < 0x80:
+            return None
+        out.append(chr(code))
+        i = m.end()
+    return "".join(out)
 
 
 # Claude Code writes a snapshot of the user's interactive shell -- ~/.claude/shell-snapshots/snapshot-<shell>-<stamp>-<id>.sh
@@ -229,7 +268,7 @@ def unquote_word(text):
     '\\''{print $1}'\\''` in a body reaches the analysis as `awk '{print $1}'`, quotes and all.  `$'...'` is its value
     (SPD-202): zsh prints an alias whose body holds a newline that way (probed: `alias -L` printed `alias nl=$'echo
     a\\necho b'`), and the body is two commands, not `echo anecho b`.  One whose escapes the hook does not decode
-    (prepare.ansi_c_value; zsh printed a carriage return as `\\C-M`) is quoting it cannot take off, and None."""
+    (ansi_c_value; zsh printed a carriage return as `\\C-M`) is quoting it cannot take off, and None."""
     if not text:
         return text
     if "'" not in text and '"' not in text and "\\" not in text:
@@ -244,7 +283,7 @@ def unquote_word(text):
             j = i + 2
             while j < n and text[j] != "'":
                 j += 2 if text[j] == "\\" else 1
-            value = prepare.ansi_c_value(text[i + 2 : j]) if j < n else None
+            value = ansi_c_value(text[i + 2 : j]) if j < n else None
             if value is None:
                 return None
             out.append(value)

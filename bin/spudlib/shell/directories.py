@@ -3,7 +3,7 @@
 import os
 import re
 
-from . import globbing, prepare, syntax
+from . import arg_writes, globbing, prepare, syntax
 from ..hooks import hookio
 
 
@@ -159,6 +159,7 @@ def wrapped_directories(chdir, command, a):
     one it moved to, which no single set of directories reads.  An empty value leaves the directories as they are: chdir(2)
     fails on it, and env runs nothing after a directory it cannot enter (probed: exit 125)."""
     value, own_word = chdir
+    value = settled(value, a)  # a value the line settled, read as a cd target's is (SPD-147)
     if any(w.startswith("~+") or _FILENAME_GLOB_RE.search(w) for w in command[1:]):
         return None
     if value == "":
@@ -242,10 +243,23 @@ def cdpath_entries(a):
     return [prepare.deglob(e) for e in raw]
 
 
+def settled(word, a):
+    """The word with each variable the line settled put in its place, as SPD-127 reads a write target (arg_writes.resolved),
+    so a directory a write is relative to holds the same reading as the write itself (SPD-147): after `S=<dir>; cd
+    "$S/x"` the shell is in <dir>/x.  A value the line cannot settle stays spelled, and the `$` left in the word keeps the
+    directory unknown.  So does a value that puts a `~` at the word's start: no shell expands a tilde an expansion
+    produced, so `S='~'; cd "$S"` enters a directory named `~`, which the word as resolved would read as the home."""
+    value = arg_writes.resolved(word, a)
+    if value.startswith("~") and not word.startswith("~"):
+        return word
+    return value
+
+
 def cd_target(word, a, physical=False):
     """The directories one cd argument may lead to from the directories in force, or None when the hook cannot know:
-    `-` and `~-` (OLDPWD), a stack entry (+N, -N, ~N), `~name` (a user, or a zsh named directory), a variable, a glob or a
-    brace expansion, a CDPATH it cannot read, a relative target in a loop or a function body.  A bare relative target
+    `-` and `~-` (OLDPWD), a stack entry (+N, -N, ~N), `~name` (a user, or a zsh named directory), a variable the line did
+    not settle (a settled one is in place by now: settled), a glob or a brace expansion, a CDPATH it cannot read, a
+    relative target in a loop or a function body.  A bare relative target
     may also land under a CDPATH entry (bash tries those first, zsh after the current directory)."""
     if word == "":
         return a.cwds  # both shells stay
@@ -289,6 +303,7 @@ def cd_destinations(name, args, a):
     changes to the first, a later bash stays."""
     if name == "popd":
         return None
+    args = [settled(w, a) for w in args]  # a value the line settled is the word the builtin gets, option or target (SPD-147)
     physical = False
     while args and args[0].startswith("-") and args[0] != "-":
         if args[0] == "--":

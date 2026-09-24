@@ -31,9 +31,8 @@ Kept whole past 250 lines (the package's look-again point): (e)'s evaluation and
 text as the shells expand it, and split apart they would each need the other's scan; a body's parameters are read with
 (e)'s settled values (_variable_texts) and its cache (_Reading)."""
 
-import re
-
 from . import analyse, assignment_words, prepare, syntax, zsh
+from ..core import lazy
 from ..hooks import hookio
 
 # analyse_command's own bound: past it a body is dropped unread, so a value (e) would evaluate there refuses a member
@@ -49,14 +48,14 @@ _WORD_TEXT = str.maketrans({k: v for k, v in syntax._SENTINEL_TEXT.items()
 _ARITHMETIC_OPEN = "$" + syntax._LITERAL_DOLLAR + syntax._GLOB_SENTINELS["{"] + syntax._ARITH_SENTINELS["("]
 _ESCAPED_DOLLAR = "\\$" + syntax._LITERAL_DOLLAR  # a backslash before a literal `$` in a masked value (_value_readings)
 # What body_values reads in an unquoted here-document's body (SPD-208):
-_PLACED_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{(\(e\))?([A-Za-z_][A-Za-z0-9_]*)\})\Z")  # handed on as its value
+_PLACED_RE = lazy.LazyPattern(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{(\(e\))?([A-Za-z_][A-Za-z0-9_]*)\})\Z")  # handed on as its value
 # the characters a shell fed the body parses as more than a word's plain text: blanks and separators, redirections,
 # quotes and escapes, expansions, braces, globs, and `=`, which makes a command's first word an assignment
-_BODY_SYNTAX_RE = re.compile(r"[\s;&|<>()'\"\\$`{}*?\[\]=]")
+_BODY_SYNTAX_RE = lazy.LazyPattern(r"[\s;&|<>()'\"\\$`{}*?\[\]=]")
 _NUMBER_PARAMETERS = frozenset("?$!#-")  # an exit status, a process id, a count, the option letters
-_BRACED_UNREAD_RE = re.compile(r"[$`\\'\"(){}]")  # a nested expansion, quoting, zsh's flags, braces
-_BRACED_HEAD_RE = re.compile(r"([#!^=~+]*)([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*?$!#-])")  # modifiers, then the parameter
-_OPERATOR_RE = re.compile(r":?[-=+?]|##?|%%?|//?|\^\^?|,,?|:")
+_BRACED_UNREAD_RE = lazy.LazyPattern(r"[$`\\'\"(){}]")  # a nested expansion, quoting, zsh's flags, braces
+_BRACED_HEAD_RE = lazy.LazyPattern(r"([#!^=~+]*)([A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*?$!#-])")  # modifiers, then the parameter
+_OPERATOR_RE = lazy.LazyPattern(r":?[-=+?]|##?|%%?|//?|\^\^?|,,?|:")
 _PATTERN_OPERATORS = frozenset(("#", "##", "%", "%%", ":?", "?", "^", "^^", ",", ",,"))  # their word leaves no text
 
 
@@ -84,9 +83,9 @@ class _Reading:
 # and a `${~x}` GLOB_SUBST glob.  The value in each is one the line assigns that holds a substitution, a backtick, or --
 # for the glob -- an execute glob qualifier.
 _PROMPT_VARIABLES = frozenset({"PS1", "PS2", "PS3", "PS4", "PROMPT", "PROMPT2", "PROMPT3", "PROMPT4", "RPROMPT", "RPS1", "PROMPT_COMMAND", "prompt"})
-_SUBSCRIPT_CODE_RE = re.compile(r"\[[^\]]*(?:\$\(|`)")  # a `[subscript]` holding a substitution
-_EVAL_KIN_RE = re.compile(r"\$\{(?:\(([^)]*)\))?([~=#^+]*)([A-Za-z_][A-Za-z0-9_]*|[@*])")  # ${(flags)mods name}, ${~name}
-_QUALIFIER_CODE_RE = re.compile(r"\((?:#q)?[^)]*e[:{\[]")  # a glob qualifier that runs code, `(e:...:)` or `(#qe:...:)`
+_SUBSCRIPT_CODE_RE = lazy.LazyPattern(r"\[[^\]]*(?:\$\(|`)")  # a `[subscript]` holding a substitution
+_EVAL_KIN_RE = lazy.LazyPattern(r"\$\{(?:\(([^)]*)\))?([~=#^+]*)([A-Za-z_][A-Za-z0-9_]*|[@*])")  # ${(flags)mods name}, ${~name}
+_QUALIFIER_CODE_RE = lazy.LazyPattern(r"\((?:#q)?[^)]*e[:{\[]")  # a glob qualifier that runs code, `(e:...:)` or `(#qe:...:)`
 
 
 def _value_holds_code(a, name, glob=False):

@@ -3,6 +3,8 @@
 import re
 import shlex
 
+from ..core import lazy
+
 
 # Shell analysis for PreToolUse(Bash).
 # `<>` opens its target read-write and creates it (probed in zsh 5.9, bash 3.2 and sh: `1<>f` overwrote f from its
@@ -71,7 +73,7 @@ WRAPPER_VALUE_OPTIONS = {
 # before it runs anything, so reading it too costs nothing) and sudo's `-D`/`--chdir` (sudo(8)).  sudo's `-C` closes
 # descriptors and doas's `-C` names a config file: neither moves anything.
 WRAPPER_CHDIR_OPTIONS = {"env": {"-C", "--chdir"}, "sudo": {"-D", "--chdir"}}
-DURATION_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?|\.\d+[smhd]?")
+DURATION_RE = lazy.LazyPattern(r"\d+(?:\.\d+)?[smhd]?|\.\d+[smhd]?")
 # The shell's operators, longest first: shlex (punctuation_chars) returns a run of them such as `)>` or `;;&` as one token.
 # `;|` is zsh's: it ends a case arm and goes on testing the patterns after it, and anywhere else it is a parse error in zsh
 # (probed in zsh 5.9 -f: `echo a;| cat` failed near `;|`) and in bash, which reads `;` then `|` (SPD-181).
@@ -92,8 +94,8 @@ LOOP_PREFIX_WORDS = {"coproc", "time", "!"}
 # `[[ ... ]]` each ran after the name, and a name that is not a valid identifier ran nothing; `coproc NAME echo x` is a
 # simple command named NAME, and zsh, whose coproc takes a command only, is a parse error for every named form).
 COPROC_COMPOUND_WORDS = {"{", "(", "[[", "if", "while", "until", "for", "select", "case"}
-IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
-LOOP_NAME_RE = re.compile(r"(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)\Z")  # a loop's name to zsh: an identifier or a run of digits
+IDENTIFIER_RE = lazy.LazyPattern(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+LOOP_NAME_RE = lazy.LazyPattern(r"(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+)\Z")  # a loop's name to zsh: an identifier or a run of digits
 DIRECTORY_COMMANDS = {"cd", "chdir", "pushd", "popd"}  # the builtins, spelled exactly: CD and /usr/bin/cd are programs
 SHELL_DECLARATIONS = {"export", "typeset", "declare", "local", "readonly"}
 # A redirection or tee target the shell expands is checked as every file it opens, not as its literal spelling.
@@ -123,6 +125,9 @@ _LITERAL_EQUALS = chr(0xE020)  # a word's leading `=` that zsh's EQUALS is not t
 # of an unquoted one at its blanks (SPD-167); it ends the name as _NAME_END does.  deglob removes all five.
 _LITERAL_DOLLAR, _QUOTED_DOLLAR, _ARRAY_VALUE, _NAME_END = chr(0xE021), chr(0xE022), chr(0xE023), chr(0xE024)
 _QUOTED_NAME = chr(0xE025)
+# _QUOTED_SUBST follows the placeholder of a `$( )` or backtick body that stands in double quotes, whose output neither
+# shell splits or globs (SPD-146: shell/loop_bindings settles a quoted `$(basename ...)` as one name).  deglob removes it.
+_QUOTED_SUBST = chr(0xE027)
 # What newlines_as_separators writes, between two blanks, for an unquoted newline, where it once wrote `;` (SPD-183): the
 # `;` the walk reads everywhere but inside a zsh glob group, where zsh reads the newline as one more character of the
 # pattern and a spelled `;` ends the word.  mark_zsh_patterns replaces every one, with `;` or with the group's newline, so
@@ -150,7 +155,7 @@ _PUNCT_SENTINELS = {c: chr(0xE040 + i) for i, c in enumerate(_PUNCT_CHARS)}
 _PUNCT_UNSENTINEL = {v: k for k, v in _PUNCT_SENTINELS.items()}
 _SENTINEL_TEXT = dict(_GLOB_UNSENTINEL, **_ZSH_UNSENTINEL, **_ARITH_UNSENTINEL, **_PUNCT_UNSENTINEL,
                       **{_LITERAL_EQUALS: "=", _LITERAL_DOLLAR: "", _QUOTED_DOLLAR: "", _ARRAY_VALUE: "", _NAME_END: "",
-                         _QUOTED_NAME: ""})
+                         _QUOTED_NAME: "", _QUOTED_SUBST: ""})
 # The operands a line does not spell.  FIND_PATH stands where find's -exec, -execdir, -ok and -okdir put `{}`: a path
 # under find's starting points, which shell/find_xargs turns into a whole-subtree write of each starting point.  INPUT_OPERAND
 # stands for what xargs reads from its input -- appended after the words the line spells, or where -I or -J put it -- which
@@ -170,15 +175,15 @@ FIND_PATH, INPUT_OPERAND, ANY_PATH = chr(0xE050), chr(0xE051), chr(0xE052)
 PROCSUB_MARK = chr(0xE055)
 _OPERAND_TEXT = {FIND_PATH: "{}", INPUT_OPERAND: "{input}", ANY_PATH: "(anywhere)", PROCSUB_MARK: ""}
 _LITERALIZE = str.maketrans(dict(_GLOB_SENTINELS, **_ZSH_UNSENTINEL))
-_GLOB_SENTINEL_RE = re.compile("[" + "".join(_SENTINEL_TEXT) + "]")
-GLOB_RE = re.compile(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}|[" + ZSH_OPEN + ZSH_RANGE_OPEN + "]")
-ZSH_RANGE_RE = re.compile(r"<(\d*)-(\d*)>")  # zsh's numeric glob, read as one wherever it stands unquoted (probed)
+_GLOB_SENTINEL_RE = lazy.LazyPattern("[" + "".join(_SENTINEL_TEXT) + "]")
+GLOB_RE = lazy.LazyPattern(r"[*?\[]|\{[^}]*(?:,|\.\.)[^}]*\}|[" + ZSH_OPEN + ZSH_RANGE_OPEN + "]")
+ZSH_RANGE_RE = lazy.LazyPattern(r"<(\d*)-(\d*)>")  # zsh's numeric glob, read as one wherever it stands unquoted (probed)
 GLOB_MATCH_CAP = 500   # the most files a redirection glob is expanded to before the hook refuses a member
 GLOB_SCAN_CAP = 5000   # the most directory entries scanned expanding one glob, so `**` never walks a large tree unbounded
 # An `alias` definition word, `name=body`, as it reaches the analysis with its quotes taken (`alias gp='git push'`
 # is one word, `gp=git push`).  The shells take almost any name, so the name is everything before the first `=`; a bare word
 # is a query, which defines nothing.
-ALIAS_WORD_RE = re.compile(r"^([^=\s]+)=(.*)\Z", re.S)
+ALIAS_WORD_RE = lazy.LazyPattern(r"^([^=\s]+)=(.*)\Z", re.S)
 # The key an alias's name is recorded under in `assigned` and `doubt`, so every rule that doubts a variable the line assigned
 # doubts the alias too.  No variable name can hold it.
 ALIAS_KEY = "\x00alias\x00"
@@ -194,25 +199,26 @@ SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias
 # the member's own path).  A write target holding one is never pruned from text the shell holds, whatever else is: `$@`,
 # `$*`, `$0`..`$9` and every braced form of them (`${@}`, `${@:2}`, `${@:$#}`, `${1:-x}`, `${#@}`, `${1+"$@"}`).  `$HOME`
 # and `$_cc_bin` are not matched -- a name never starts with a digit or one of those two characters.
-POSITIONAL_RE = re.compile(r"\$(?:[0-9@*]|\{[#!]?[0-9@*][^}]*\})")
+POSITIONAL_RE = lazy.LazyPattern(r"\$(?:[0-9@*]|\{[#!]?[0-9@*][^}]*\})")
 # The entry ShellAnalysis.functions and .hashed hold when the line set an element of zsh's `functions` or
 # `commands` parameter whose name the hook cannot read (`functions[$k]=`, `functions+=($pairs)`), so every name the hook
 # reads may now be one.  No command name can hold it.
 UNKNOWN_NAME = "\x00unknown\x00"
-ASSIGNMENT_WORD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)\Z", re.S)
+ASSIGNMENT_WORD_RE = lazy.LazyPattern(r"^([A-Za-z_][A-Za-z0-9_]*)(\+?)=(.*)\Z", re.S)
 SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "ash", "fish", "csh", "tcsh"}
-PYTHON_RE = re.compile(r"^python(?:\d+(?:\.\d+)?)?$")
+PYTHON_RE = lazy.LazyPattern(r"^python(?:\d+(?:\.\d+)?)?$")
 JS_RUNTIMES = {"node", "nodejs", "bun", "deno"}
-ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
-VARREF_RE = re.compile(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})" + _QUOTED_NAME + r"?\Z")  # `$X` or `${X}`, whole
+ASSIGNMENT_RE = lazy.LazyPattern(r"^[A-Za-z_][A-Za-z0-9_]*=")
+VARREF_RE = lazy.LazyPattern(r"\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})" + _QUOTED_NAME + r"?\Z")  # `$X` or `${X}`, whole
 # A `$` that expands (not one neutralize_quoted_globs marked literal, and not the last character of the word).
-_EXPANDING_DOLLAR_RE = re.compile("\\$(?!" + _LITERAL_DOLLAR + ")")  # a word-final `$` too: `$((1))` reaches a word as `$` alone
+_EXPANDING_DOLLAR_RE = lazy.LazyPattern("\\$(?!" + _LITERAL_DOLLAR + ")")  # a word-final `$` too: `$((1))` reaches a word as `$` alone
 # `${X=v}`, `${X:=v}` and zsh's `${X::=v}` (flags and a subscript allowed) assign X wherever they are expanded.
-_ASSIGNING_EXPANSION_RE = re.compile(r"\$\{(?:\([^)]*\))?[#!]?([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?:{0,2}=")
-_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_NAME_CHAR_RE = re.compile(r"[A-Za-z0-9_]")
-_BARE_NAME_TAIL_RE = re.compile(r"\$[A-Za-z_][A-Za-z0-9_]*\Z")
-_IFS_BLANKS_RE = re.compile(r"[ \t\n]+")
+_ASSIGNING_EXPANSION_RE = lazy.LazyPattern(r"\$\{(?:\([^)]*\))?[#!]?([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?:{0,2}=")
+_NAME_RE = lazy.LazyPattern(r"[A-Za-z_][A-Za-z0-9_]*")
+_BRACED_NAME_RE = lazy.LazyPattern(r"\{[A-Za-z_][A-Za-z0-9_]*\}")  # the `{X}` of a plain `${X}`, no operator (SPD-141)
+_NAME_CHAR_RE = lazy.LazyPattern(r"[A-Za-z0-9_]")
+_BARE_NAME_TAIL_RE = lazy.LazyPattern(r"\$[A-Za-z_][A-Za-z0-9_]*\Z")
+_IFS_BLANKS_RE = lazy.LazyPattern(r"[ \t\n]+")
 # Builtins that assign a shell variable named by an argument (`read X`, `printf -v X`, `getopts o X`, `unset X`, zsh's
 # `print -v X`, `vared X`, `zparseopts -A X`, `set -A X` ...): a variable any of their words names may no longer hold what the line
 # assigned it.  `trap`, `source` and `.` run code the hook does not read, so after them no variable is certain.
@@ -412,7 +418,7 @@ DOWNLOAD_COMMANDS = frozenset({"curl", "wget"})
 # read with hooks/pathrule.NAME_CHAR), and perl's -i, each on this Mac's man page (perl: perlrun).  perl is matched by
 # PERL_RE, which takes its versioned names too.
 SPELLED_WRITE_COMMANDS = frozenset({"dd", "sort", "mktemp", "split"})
-PERL_RE = re.compile(r"^perl(?:\d+(?:\.\d+)*)?$")
+PERL_RE = lazy.LazyPattern(r"^perl(?:\d+(?:\.\d+)*)?$")
 # The two commands whose script is one word of the line and names files and commands of its own, which
 # shell/script_text reads -- sed's `w` command and `s///w` flag, awk's `print`/`printf` redirections and pipes, its
 # `system(...)` and its `"cmd" | getline`.  sed is also in ARG_WRITE_COMMANDS, which reads its -i; awk writes nothing by
@@ -559,6 +565,13 @@ class ShellAnalysis:
         # `walking`, the readings under way, whose walk_line will still read a body on a call's input; `body_walks`, the
         # walks the whole analysis has made to read bodies on calls' inputs, which positional.READINGS_PER_NAME bounds.
         self.function_bodies, self.function_inputs, self.walking, self.body_walks = {}, {}, set(), 0
+        # SPD-146 (shell/loop_bindings): `loop_words`, each for loop's variable whose words the line settles -> (its
+        # values, the function bodies open where the loop is), until the loop closes or something assigns the name;
+        # `func_depth`, how many function bodies are open; `subst_words`, each word of the simple command being read that
+        # holds a lifted substitution -> its bodies in order (None where one word stands twice with other bodies);
+        # `derived`, a name a certain `NAME=$(basename ...)` assigned -> (the value, what it printed); `binding`, the one reading of
+        # those a write channel is resolving its words under (loop_bindings.per_reading), None everywhere else.
+        self.loop_words, self.func_depth, self.subst_words, self.derived, self.binding = {}, 0, {}, {}, None
 
     @property
     def all_spud(self):

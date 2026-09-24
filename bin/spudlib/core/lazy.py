@@ -1,5 +1,6 @@
-"""core/lazy: LazyModule and the standard-library modules no hook imports."""
+"""core/lazy: LazyModule, the standard-library modules no hook imports, and LazyPattern."""
 
+import re
 import sys
 
 
@@ -34,3 +35,30 @@ tempfile = LazyModule("tempfile")
 urllib_error = LazyModule("urllib.error", "urllib_error")
 urllib_parse = LazyModule("urllib.parse", "urllib_parse")
 urllib_request = LazyModule("urllib.request", "urllib_request")
+
+
+class LazyPattern:
+    """A regular expression compiled at its first use, for a module on the hook path whose patterns a line mostly never
+    reaches (SPD-216): compiling a module's patterns at import cost every Bash and Write hook run the time of each, about
+    0.8 ms for shell/positional, shell/reevaluation and shell/heredocs together, whatever the line held.
+
+    It answers the compiled pattern's methods and attributes, `match`, `search`, `sub` and the rest, each bound once on
+    this object at the first access, so every use after the first is a plain attribute read of the real method.  It is
+    not a `re.Pattern`: give it to `re.match(...)` or `re.compile(...)` and it fails, so only a pattern read through its
+    own methods is made one.
+    """
+
+    def __init__(self, pattern, flags=0):
+        self._args = (pattern, flags)
+
+    def __getattr__(self, attr):
+        if attr.startswith("__") or attr == "_args":
+            raise AttributeError(attr)
+        compiled = re.compile(*self._args)
+        for name in _PATTERN_ATTRIBUTES:
+            setattr(self, name, getattr(compiled, name))
+        return getattr(compiled, attr)
+
+
+_PATTERN_ATTRIBUTES = ("match", "search", "fullmatch", "finditer", "findall", "sub", "subn", "split", "scanner",
+                       "pattern", "flags", "groups", "groupindex")
