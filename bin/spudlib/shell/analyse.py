@@ -101,8 +101,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
                    False, stdin, fed)
     if zsh_locals is not None:  # a name is surely local only where both readings declared it so (SPD-246)
         a.body_locals[-1] = {name: before for name, before in a.body_locals[-1].items() if name in zsh_locals}
-    for name, found in zsh_bodies.items():  # a function body either reading defines (SPD-212, line_functions.read_call)
-        a.function_bodies.setdefault(name, set()).update(found)
+    line_functions.merge_readings(a, zsh_bodies)  # a function body either reading defines (SPD-212), or removes (SPD-281)
     a.cwds = directories.union_dirs(zsh_cwds, a.cwds)
     a.doubt.update(set(zsh_vars) ^ set(a.vars))  # a variable only one reading assigns
     for name, value in zsh_vars.items():
@@ -437,6 +436,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # `read X`, `printf -v X`, `unset X`, `getopts o X`, `let X=1`: the line's own assignments, each builtin's names read
         # by its grammar (SPD-254, SPD-225); a builtin's program run by its path or behind env assigns nothing here
         expansions.read_assigning_builtin(words, a, effect)
+    if cmd in line_functions.REMOVING and directories.builtin_runs_here(effect):
+        # `unset -f f`, `unfunction f`: a call of f after it runs the command of that name, not the line's body (SPD-281)
+        line_functions.remove_functions(words, a, effect)
     options = cmd in ("setopt", "unsetopt", "emulate") or cmd == "set" and any(prepare.deglob(w)[:2] in ("-o", "+o") for w in words[1:])
     if options:
         a.arith_opaque = True  # an option may change how arithmetic reads a number (SPD-225, ShellAnalysis.arith_opaque)
@@ -680,6 +682,10 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             expansions.record_alias_line(words, a)
         else:
             expansions.clear_alias_line(words, a)
+    elif cmd == "functions" and directories.builtin_runs_here(effect):
+        # zsh's `functions -c OLD NEW` binds NEW to OLD's body, as a definition of NEW would (SPD-279)
+        a.kinds.append("other")
+        line_functions.copy_function(words, a)
     elif cmd == "hash" and directories.builtin_runs(effect):
         # The builtin, spelled exactly, puts a file of the line's own choosing in the shell's command table, so a
         # later bare call of that name runs it whatever PATH holds.  Probed in bash 3.2 and sh (`hash -p <dir>/<name> <name>`)

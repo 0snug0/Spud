@@ -70,7 +70,7 @@ names.
 import os
 import re
 
-from . import arg_writes, directories, expansions, globbing, heredocs, prepare, syntax
+from . import arg_writes, directories, expansions, globbing, heredocs, line_functions, prepare, syntax
 from ..hooks import snapshots
 
 # The operands that name the standard input the line gave the shell rather than a script file of its own (probed:
@@ -382,11 +382,11 @@ def printed_text(tokens, stdin, a=None, feeds_pipe=False):
     if words and words[0].startswith(_ARITHMETIC_COMMAND):
         return redirected_text("", tokens, feeds_pipe)  # an arithmetic command prints nothing (probed: `(( 1 + 1 ))`)
     name = word_text(words[0]) if words else None
-    bodies = _line_bodies(name, a)
+    bodies, certain = _line_bodies(name, a)
     if bodies:
         # a call of a function the line defines: the text its body prints where the call runs it (SPD-272), and, where no
-        # definition surely ran before it, the text the command of that name prints as well, either being what runs
-        certain = any(body.certain for body in bodies)
+        # definition surely ran before it or a removal may have run since (SPD-281), the text the command of that name
+        # prints as well, either being what runs
         return LineCall(name, tokens, feeds_pipe, _CERTAIN if certain else _command_text(words, tokens, stdin, a, feeds_pipe, name))
     return _command_text(words, tokens, stdin, a, feeds_pipe)
 
@@ -455,15 +455,16 @@ def either_text(texts):
 
 
 def _line_bodies(name, a):
-    """The bodies a call of `name` reads where the line defines it (line_functions.read_call, SPD-277), when nothing else
-    the shell could run under the name stands beside them (_shadowed's other shadows: a function whose name the hook cannot read, a
-    hashed program, an alias, the snapshot's own); else none, and the name reads as a shadowed one does."""
+    """(the bodies a call of `name` reads where the line defines it, whether one of them surely runs) -- line_functions.
+    line_bodies, which a removal the line makes settles (SPD-281) -- when nothing else the shell could run under the name
+    stands beside them (_shadowed's other shadows: a function whose name the hook cannot read, a hashed program, an alias,
+    the snapshot's own); else none, and the name reads as a shadowed one does."""
     if a is None or not name:
-        return []
-    bodies = [body for body in a.function_bodies.get(name, ()) if body.complete()]
+        return [], False
+    bodies, certain = line_functions.line_bodies(a, name)
     if not bodies or _shadowed(name, a, name):
-        return []
-    return bodies
+        return [], False
+    return bodies, certain
 
 
 def _command(words, a, called=None):

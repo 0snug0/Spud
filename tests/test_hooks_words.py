@@ -1778,8 +1778,9 @@ class FunctionShadowTest(BashHookCase):
     line of several commands a refusal the words as spelled already earn answers first.  A definition in a `( ... )` subshell
     is dropped when it closes (ShellWalk restores the set); one in a branch, a loop, a function body, a background list, a
     pipeline or a command substitution is kept (refuse on doubt, never allow on doubt), as is one an `unset -f` or
-    `unfunction` may have removed (the hook keeps refusing rather than allow on doubt).  Law 7 does not bind Spud.  AGENT_A
-    plans tests/** and bin/spud; AGENT_C plans **.
+    `unfunction` may have removed (the hook keeps refusing rather than allow on doubt); one an `unset -f` surely removed
+    is dropped (SPD-281, FunctionRemovalTest).  Law 7 does not bind Spud.  AGENT_A plans tests/** and bin/spud; AGENT_C
+    plans **.
 
     SPD-105 (Atlantic's SPD-084 proposal): zsh also binds a function through its special `functions` association, which the
     hook read as a command word or an unrelated variable.  Probed in zsh 5.9 -f and -o nobareglobqual (bash and sh have no
@@ -1934,8 +1935,8 @@ class FunctionShadowTest(BashHookCase):
                     "git() { true; } & wait; git status",
                     "git() { true; } | cat; git status",
                     "X=$(git() { true; }; echo d); git status",
-                    "git() { true; }; unset -f git; git status",
-                    "git() { true; }; unfunction git; git status"):
+                    "git() { true; }; unfunction git; git status",
+                    "git() { true; }; true && unset -f git; git status"):
             with self.subTest(cmd):
                 r = self.refused_for_members(cmd)
                 self.assertIn("shell function", r.reason)
@@ -2093,6 +2094,159 @@ class FunctionsParameterBodyTest(PlantedRepository, BashHookCase):
     def test_the_controls_read_as_before(self):
         for command in ("functions[deploy]='echo hi'; deploy", "functions+=(deploy 'echo hi')", "echo $functions[f]",
                         "functions[$k]=true; ls", "unset 'functions[f]'", "dis_functions[f]='git status'; cd tests/fake"):
+            self.silent_for(command)
+
+
+# SPD-279: the refusal a member earns for zsh's `functions -c` where the hook cannot say which body the new name holds,
+# which names the respelling.
+FUNCTION_COPY_WORDING = "define the new name with name() { ... }"
+
+
+class FunctionCopyTest(PlantedRepository, BashHookCase):
+    """SPD-279 (Elmer's SPD-277 proposal): zsh's `functions -c OLD NEW` copies OLD's body to NEW, but the reader never
+    bound NEW: a call of NEW after a cd was read as no function at all, while OLD's body, read in place where nothing
+    called it, had its git checked in the directory the definition stood in -- `f() { git status; }; functions -c f g;
+    cd tests/fake; g` ran git in a planted repository unchecked; NEW was no shadowing definition (`functions -c f git; git
+    status` ran the copy); and a copy under a name zsh runs by itself was no deferred runner.  NEW is now bound to OLD's
+    bodies as a definition of NEW is (line_functions.copy_function) -- read at each call, a shadowing name, a runner --
+    as one that may not have run, since bash has no `functions` builtin; a copy the hook cannot follow (a name the line
+    does not spell, a function the shell's profile defines) refuses a member as SPD-217 refuses text it did not read.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and -f,
+    each case in a subshell or a `zsh -f -c` child, `echo $PWD` standing for git: `f() { echo F-in $PWD; }; functions -c f
+    g; cd d; g` printed d; `functions -c f echo; echo x` ran the copy; `functions -c -- f g`, `+c`, `-uc`, `-ck`, `-M -c`
+    and `builtin functions -c` copied, `-cm`, `-x 2 -c` and `-c +u` were invalid options, one or three operands `requires
+    two arguments`, and a missing OLD `no such function`; a copy made in a subshell or before a `|` did not reach a call
+    after it, one made in a called body did; redefining or unsetting OLD left the copy as it was.  A copy named chpwd,
+    zshexit, command_not_found_handler or zsh_directory_name ran as those do, and so did one a chpwd_functions array
+    names, but one named TRAPEXIT, TRAPUSR1 or TRAPDEBUG installed no trap (zsh sets a trap when it defines a TRAPxxx
+    function, not when it copies one).  GNU bash 3.2.57 has no `functions` builtin and ran none of them."""
+
+    def test_the_tickets_lines(self):
+        """Silent on main for every caller: g's call read nothing, and f's body was read in place in the home."""
+        for command in ("f() { git status; }; functions -c f g; cd tests/fake; g",
+                        "f() { git status; }; functions -c f g; cd tests/fake && g",
+                        "f() { git status; }; cd tests/fake; functions -c f g; g",
+                        "f() { git status; }; functions -c -- f g; cd tests/fake; g",
+                        "f() { git status; }; functions +c f g; cd tests/fake; g",
+                        "f() { git status; }; functions -uc f g; cd tests/fake; g",
+                        "f() { git status; }; builtin functions -c f g; cd tests/fake; g",
+                        "f() { git status; }; h() { functions -c f g; }; h; cd tests/fake; g",
+                        "f() { git status; }; functions -c f g; unset -f f; cd tests/fake; g",
+                        "functions[f]='git status'; functions -c f g; cd tests/fake; g"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        # ... as the definition's own call already was
+        self.members_refused("f() { git status; }; cd tests/fake; f", GIT_NESTED_WORDING)
+
+    def test_the_copy_is_a_shadowing_definition(self):
+        for command in ("f() { true; }; functions -c f git; git status", "f() { true; }; functions -c f env; env git status"):
+            r = self.members_refused(command, "shell function")
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+        self.assertEqual(self.analysis("f() { true; }; functions -c f git; git status").findings,
+                         [("git", ("status", None)), ("function", "git")])
+        self.assertIn("git", r.reason)
+
+    def test_a_copy_zsh_runs_by_itself_is_read_as_a_traps_action(self):
+        for command in ("f() { git status; }; functions -c f chpwd; cd tests/fake",
+                        "f() { git status; }; functions -c f zshexit; cd tests/fake",
+                        "f() { git status; }; functions -c f g; chpwd_functions=(g); cd tests/fake",
+                        "chpwd_functions=(g); f() { git status; }; functions -c f g; cd tests/fake"):
+            self.members_refused(command, TRAP_WORDING)
+            self.spud_refused(command)
+        self.members_refused("f() { git status; }; functions -c f command_not_found_handler", TRAP_WORDING)
+
+    def test_a_copy_the_hook_cannot_follow_is_refused_a_member(self):
+        for command in ("f() { true; }; functions -c f $x", "f() { true; }; functions -c $x g; g",
+                        "functions -c $x $y", "f() { true; }; functions -c f \"$x\"",
+                        "f() { true; }; functions -c f $(echo g)"):
+            r = self.members_refused(command, FUNCTION_COPY_WORDING)
+            self.assertIn("functions -c", r.reason)
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+        # a name the line settles is the name it spells
+        self.members_refused("f() { git status; }; n=g; functions -c f $n; cd tests/fake; g", GIT_NESTED_WORDING)
+        # a function the shell's profile defines, whose body the hook reads at its own name's calls alone
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000279-279279.sh").write_text("gs () {\n\tgit status\n}\n", encoding="utf-8")
+        self.members_refused("functions -c gs g; cd tests/fake; g", FUNCTION_COPY_WORDING)
+
+    def test_the_controls_read_as_before(self):
+        """A copy that does not reach the call, or names no function, binds nothing; a TRAPxxx copy is no trap."""
+        for command in ("f() { git status; }; (functions -c f g); cd tests/fake; g",
+                        "functions -c nosuch g; cd tests/fake; g", "f() { git status; }; functions -c f; cd tests/fake",
+                        "f() { git status; }; functions -c f g h; cd tests/fake; g",
+                        "f() { git status; }; functions -c f TRAPEXIT; cd tests/fake",
+                        "f() { git status; }; functions -c f g; unset -f g; cd tests/fake; g", "functions", "functions -c",
+                        "f() { true; }; functions f"):
+            self.silent_for(command)
+        self.assertEqual(self.git_dirs("f() { git status; }; functions -c f g"), [frozenset([str(self.home.path)])])
+
+
+class FunctionRemovalTest(PlantedRepository, BashHookCase):
+    """SPD-281 (Bertha's SPD-272 proposal): nothing told the reading that `unset -f NAME`, `unfunction NAME` or `unhash -f
+    NAME` removed a function the line defines, so a later call was read as the body while the shell runs the command of
+    that name: `f() { git status; }; unset -f f; cd tests/fake; f` was refused as git in a planted repository, and
+    `echo() { printf hi; }; unset -f echo; echo 'git push' | sh` read `hi` where the builtin prints `git push`
+    (tests/test_hooks_input.py PrinterShadowTest).  A removal that surely runs in the line's shell now drops the name's
+    bodies and its shadowing from that point on (line_functions.remove_functions); one that may not -- after `&&`, before
+    a `|` or a `&`, in a body or an eval, behind `command`, or a builtin one of the two shells does not have -- leaves the
+    name maybe defined, which SPD-272's reading takes as a definition that may not have run.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and
+    -f and GNU bash 3.2.57, each case in a subshell, a function echo printing `hi`: `unset -f echo`, `builtin unset -f
+    echo` and `unset -f -- echo` ran the builtin in all three; `unfunction echo`, `unhash -f echo`, `disable -f echo`,
+    `unset -fv echo` and the -m pattern forms in zsh alone (bash: command not found, or an error), and `enable -f echo`
+    gave the function back; a plain `unset echo` in bash alone, where no variable echo was set; `command unset -f echo` in
+    bash alone; a removal before `&`, before `|`, in `{ ...; } &` or in a subshell did not reach the call; one in a called
+    body or an eval did; `unset -v echo` and `unset 'functions[echo]'` removed nothing."""
+
+    def test_a_removed_function_is_not_read_at_a_later_call(self):
+        """Refused every caller on main: the call read the removed body in the planted repository."""
+        for command in ("f() { git status; }; unset -f f; cd tests/fake; f",
+                        "f() { git status; }; builtin unset -f f; cd tests/fake; f",
+                        "f() { git status; }; unset -f -- f; cd tests/fake; f",
+                        "f() { git status; }; unset -f x f; cd tests/fake; f",
+                        "f() { git status; }; n=f; unset -f $n; cd tests/fake; f",
+                        "git() { true; }; unset -f git; git status", "git() { true; }; unset -f git; git log"):
+            self.silent_for(command)
+        self.assertEqual(self.analysis("git() { true; }; unset -f git; git status").findings, [("git", ("status", None))])
+        self.assertEqual(self.analysis("git() { true; }; unset -f git").functions, set())
+
+    def test_a_removal_that_may_not_have_run_leaves_the_body_read(self):
+        for command in ("f() { git status; }; true && unset -f f; cd tests/fake; f",
+                        "f() { git status; }; unset -f f & cd tests/fake; f",
+                        "f() { git status; }; unset -f f | cat; cd tests/fake; f",
+                        "f() { git status; }; { unset -f f; } & cd tests/fake; f",
+                        "f() { git status; }; (unset -f f); cd tests/fake; f",
+                        "f() { git status; }; unfunction f; cd tests/fake; f",
+                        "f() { git status; }; unhash -f f; cd tests/fake; f",
+                        "f() { git status; }; disable -f f; cd tests/fake; f",
+                        "f() { git status; }; unset f; cd tests/fake; f",
+                        "f() { git status; }; unset -fv f; cd tests/fake; f",
+                        "f() { git status; }; command unset -f f; cd tests/fake; f",
+                        "f() { git status; }; unset -f $x; cd tests/fake; f",
+                        "f() { git status; }; unfunction -m 'f*'; cd tests/fake; f",
+                        "f() { git status; }; eval 'unset -f f'; cd tests/fake; f",
+                        "f() { git status; }; h() { unset -f f; }; h; cd tests/fake; f",
+                        "f() { git status; }; unset -f f; f() { git status; }; cd tests/fake; f"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        # the shadowing of git stays where the removal may not have run
+        for command in ("git() { true; }; unfunction git; git status", "git() { true; }; true && unset -f git; git status",
+                        "git() { true; }; unset -f git | cat; git status"):
+            self.members_refused(command, "shell function")
+
+    def test_the_controls_read_as_before(self):
+        for command in ("f() { git status; }; unset -v f; cd tests/fake; f", "f() { git status; }; unset -f g; cd tests/fake; f",
+                        "f() { git status; }; unset 'functions[f]'; cd tests/fake; f"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        # a removed function's body is still read in place, where nothing calls it (SPD-277)
+        self.members_refused("f() { git push; }; unset -f f", "Law 7")
+        for command in ("unset -f f", "unfunction f", "unset -f", "unset x; git status"):
             self.silent_for(command)
 
 

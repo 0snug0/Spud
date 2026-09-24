@@ -1264,9 +1264,9 @@ class PrinterShadowTest(PrintedTextCase):
     subshell did not reach a call after it; and `command -v echo` printed `echo`, a name and no text of its own.
 
     Such a name prints what the function's body prints (SPD-272, finished by SPUD-272/Bertha on the SPD-277 tree): each
-    call reads the body where it runs (walk.read_call), and the text that reading prints is the call's, from the state
-    the call starts in and on the input it is given, so the text a shell after the pipe runs is read for Law 7 and
-    Spud's Law 1 as a printer's is.  A body whose own text the hook cannot spell -- a command it does not read, a
+    call reads the body where it runs (line_functions.read_call), and the text that reading prints is the call's, from
+    the state the call starts in and on the input it is given, so the text a shell after the pipe runs is read for Law 7
+    and Spud's Law 1 as a printer's is.  A body whose own text the hook cannot spell -- a command it does not read, a
     positional parameter, a body zsh's `functions` parameter is handed -- leaves the call's text unread, refused a
     member as SPD-145 refuses a shell reading any.
 
@@ -1365,6 +1365,63 @@ class PrinterShadowTest(PrintedTextCase):
         self.law_7("(echo() { printf 'hi\\n'; }); echo 'git push' | sh")
         self.data("(echo() { printf 'git push\\n'; }); echo hi | sh")
 
+    def test_a_function_the_line_removed_prints_the_command_s_text(self):
+        """SPD-281: `unset -f` in the line's shell removes the function, so the command of its name prints (probed
+        2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f and bash 3.2.57: `echo() {
+        printf 'hi\\n'; }; unset -f echo; echo x1` printed x1 in all three); `unfunction`, `unhash -f` and `disable -f`
+        remove it in zsh alone, a plain `unset` in bash alone, and one before `&` or `|`, after `&&` or in a subshell may
+        not reach the call, so the body's text is read beside the command's (tests/test_hooks_words.py
+        FunctionRemovalTest has the probes).  Read 'hi' alone on main, as though the function still ran."""
+        for line in ("echo() { printf 'hi\\n'; }; unset -f echo; echo 'git push' | sh",
+                     "echo() { printf 'hi\\n'; }; builtin unset -f echo; echo 'git push' | sh",
+                     "echo() { printf 'hi\\n'; }; unfunction echo; echo 'git push' | sh",
+                     "echo() { printf 'hi\\n'; }; unhash -f echo; echo 'git push' | sh",
+                     "echo() { printf 'hi\\n'; }; disable -f echo; echo 'git push' | sh",
+                     "echo() { printf 'hi\\n'; }; unset echo; echo 'git push' | sh",
+                     "echo() { printf 'hi\\n'; }; true && unset -f echo; echo 'git push' | sh",
+                     "echo() { printf 'hi\\n'; }; unset -f $x; echo 'git push' | sh",
+                     "echo() { printf 'hi\\n'; }; unfunction -m 'ec*'; echo 'git push' | sh",
+                     "cat() { echo hi; }; unset -f cat; echo 'git push' | cat | sh",
+                     "printf() { echo hi; }; unset -f printf; printf 'git push\\n' | sh"):
+            self.law_7(line)
+        for form in ("echo() { printf 'hi\\n'; }; unset -f echo; echo 'echo x > %s' | sh",
+                     "cat() { echo hi; }; unset -f cat; echo 'echo x > %s' | cat | sh",
+                     "echo() { printf 'hi\\n'; }; unfunction echo; echo 'echo x > %s' | sh"):
+            self.law_1(form)
+
+    def test_a_removal_that_does_not_reach_the_call_leaves_the_body_s_text(self):
+        for line in ("echo() { printf 'git push\\n'; }; unset -f echo | cat; echo hi | sh",
+                     "echo() { printf 'git push\\n'; }; unset -f echo & echo hi | sh",
+                     "echo() { printf 'git push\\n'; }; (unset -f echo); echo hi | sh",
+                     "echo() { printf 'git push\\n'; }; { unset -f echo; } & echo hi | sh",
+                     "echo() { printf 'git push\\n'; }; unset -v echo; echo hi | sh",
+                     "echo() { printf 'git push\\n'; }; unset -f other; echo hi | sh",
+                     "echo() { printf 'hi\\n'; }; unset -f echo; echo() { printf 'git push\\n'; }; echo hi | sh"):
+            self.law_7(line)
+        self.data("echo() { printf 'hi\\n'; }; unset -v echo; echo 'git push' | sh")
+        # ... nor one in the body of a function nothing calls, read in place, which runs nothing there (SPD-277): the body's
+        # text stays the call's alone, where the command's own is text the hook cannot spell
+        self.law_1("f() { echo 'echo x > %s'; }; h() { unset -f f; }; f | sh")
+        self.law_1("f() { ls; }; h() { functions -c f echo; }; echo 'echo x > %s' | sh")
+
+    def test_a_copy_under_a_printer_s_name_prints_its_body(self):
+        """SPD-279: zsh's `functions -c OLD NEW` binds NEW to OLD's body (probed 2026-09-24 through
+        tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f: `f() { printf 'COPY\\n'; }; functions -c f
+        echo; echo x` printed COPY; bash 3.2.57 has no `functions` builtin and printed x), so both texts are read.  Read x
+        alone on main."""
+        for line in ("f() { printf 'git push\\n'; }; functions -c f echo; echo hi | sh",
+                     "f() { echo 'git push'; }; functions -c f cat; echo hi | cat | sh",
+                     "f() { echo 'git push'; }; functions -c f true; true | sh"):
+            self.law_7(line)
+        self.law_1("f() { printf 'echo x > %s\\n'; }; functions -c f echo; echo hi | sh")
+        # a copy named echo whose body calls echo calls itself (probed in zsh 5.9 -f -o nobareglobqual: `f() { echo hi; };
+        # functions -c f echo; echo x` stopped at `maximum nested function level reached`): text the hook cannot spell
+        self.unspelled("f() { echo 'git push'; }; functions -c f echo; echo hi | sh")
+        self.law_7("f() { printf 'hi\\n'; }; functions -c f echo; echo 'git push' | sh")
+        self.unspelled("f() { echo 'git push'; }; functions -c f g; g | sh")
+        self.law_7("f() { printf 'git push\\n'; }; (functions -c f echo); echo 'git push' | sh")
+        self.data("f() { printf 'git push\\n'; }; (functions -c f echo); echo hi | sh")
+
 
 class SnapshotPrinterTest(PrintedTextCase):
     """SPD-272: a printer's or a silent command's name the shell's snapshot defines as an alias or a function runs that
@@ -1408,8 +1465,8 @@ class FunctionInputTest(BashHookCase):
     `{ sh; } < x.sh` records a script "stdin" finding, and read nothing of the here-string in `g() { sh; }; g <<< 'touch
     g1'`.  SPD-210 covered a redirection on the definition itself (`fn() { sh; } < x.sh`), not on the call.
 
-    The rule (walk.read_call, SPD-277): a call of a function the line defines, in command position, hands the function's
-    body the standard input the call is given (its pipe and its own input redirections, as SPD-209 reads a command's),
+    The rule (line_functions.read_call, SPD-277): a call of a function the line defines, in command position, hands the
+    function's body the standard input the call is given (its pipe and its own input redirections, as SPD-209 reads a command's),
     and the body is read at that call, from the state the call starts in, on that input -- with a compound body's own
     input redirections after it, zsh reading the call's input and then the definition's (held_text.read_function).  A
     call inside a body, or in a group given input, is read the same way where it runs.  The readings on a call's input

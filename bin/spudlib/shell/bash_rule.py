@@ -199,6 +199,8 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 #             the line gets past it, so the respelling is the profile's.
 # "function-body" a function body zsh's `functions` parameter is handed that the line does not spell -- a variable, a
 #             substitution, text appended to a body (line_functions.assign_function, SPD-278); shown is the assignment.
+# "function-copy" zsh's `functions -c OLD NEW` where the hook cannot follow the copy -- a name the line does not spell, or
+#             an OLD the shell's snapshot defines (line_functions.copy_function, SPD-279); shown is the command.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
@@ -243,6 +245,10 @@ UNREAD_MESSAGES = {
                       " a substitution, or text appended to a body, which runs when the function is called, or by itself"
                       " for a TRAPxxx, zshexit or chpwd name",
                       "define the function with name() { ... } on the line, where the hook reads its body"),
+    "function-copy": ("zsh's `functions -c` copies a function whose body the hook cannot follow to a new name (`%s`): a"
+                      " name the line does not spell, or a function the shell's profile defines, whose body runs when the"
+                      " new name is called, or by itself for a chpwd or zshexit name",
+                      "define the new name with name() { ... } on the line, where the hook reads its body"),
 }
 
 

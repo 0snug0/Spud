@@ -5,7 +5,8 @@ for read, printf -v, mapfile, getopts, unset, set -A, zsh's module builtins and 
 builtins; its `settle` is shell/arithmetic_assignments'.  It reads words only and imports nothing of the shell
 reading's import cycle: assignment_words, which reads it an element's subscript, is outside it too.  Past 250 lines as
 one reading: builtin_names and every grammar it dispatches to share one option scan (_scan) and one gatherer (_Assigned),
-which no cut would leave whole."""
+which no cut would leave whole.  The same scan reads the builtins that copy and remove a shell function for
+shell/line_functions (function_copy, SPD-279; function_removals, SPD-281)."""
 
 import re
 
@@ -322,3 +323,52 @@ def _zparseopts_names(args, got):
         spec = prepare.deglob(word)
         if "=" in spec:
             got.name(spec.rsplit("=", 1)[1])
+
+
+def function_copy(words, settle=None):
+    """SPD-279: the function zsh's `functions -c OLD NEW` copies and the name it copies it to, (OLD, NEW), each None where
+    the hook cannot read it -- both where an option or an operand may become several words or none -- or None where the
+    words copy nothing: no `c` among `functions`' options, or other than two operands.  Probed 2026-09-24 through
+    tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f: `functions -c f g`, `-c -- f g`, `-c - f g`, `+c
+    f g`, `-uc f g`, `-ck f g` and `-M -c f g` copied f to g, `-cm`, `-x 2 -c` and `-c +u` were refused as invalid
+    options, and one or three operands `requires two arguments`; the line_functions reading binds the copy as one that
+    may not have run, so an option zsh refuses beside `c` costs nothing (bash has no `functions` builtin)."""
+    for options, operands, stuck in _scan(list(words[1:]), "x", plus=True, settle=settle):
+        if stuck is not None:
+            return None, None
+        if "c" not in {c for c, _ in options}:
+            return None
+        reaches = [_word_reach(word) for word in operands]
+        if "any" in reaches:
+            return None, None
+        if len(operands) != 2:
+            return None
+        return tuple(prepare.deglob(word) if reach == "plain" else None for word, reach in zip(operands, reaches))
+    return None
+
+
+def function_removals(words, settle=None):
+    """SPD-281: the functions the builtin `words` remove, (names, sure) -- names None where it may remove any (zsh's -m
+    pattern, a word the hook cannot read), sure where both shells surely remove them -- or None where it removes none.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f and bash 3.2.57, a
+    function echo defined first: `unset -f echo`, `unset -f -- echo` and `builtin unset -f echo` removed it in all three;
+    `unfunction echo`, `unhash -f echo`, `disable -f echo`, `unset -fv echo`, `unset -vf echo` and the -m forms
+    (`unfunction -m 'ec*'`, `unset -fm`, `unhash -fm`) in zsh alone (bash has none of the first three, and refused -fv
+    and -m); a plain `unset echo` in bash alone, which falls back to a function where no variable of that name is set;
+    `unset -v echo` and `unset 'functions[echo]'` removed nothing."""
+    cmd = prepare.deglob(words[0])
+    for options, operands, stuck in _scan(list(words[1:]), "", settle=settle):
+        letters = {c for c, _ in options}
+        if cmd == "unset":
+            if "m" in letters and "f" not in letters or "f" not in letters and letters & {"v", "n"}:
+                return None  # zsh's pattern over variables, a variable, a nameref
+            sure = "f" in letters and "v" not in letters and "m" not in letters
+        elif cmd in ("unhash", "disable") and "f" not in letters:
+            return None  # an alias, a named directory, a builtin, a hashed command
+        else:
+            sure = False  # unfunction, unhash -f and disable -f: zsh's alone
+        if stuck is not None or "m" in letters or any(_word_reach(word) != "plain" for word in operands):
+            return None, False
+        return [prepare.deglob(word) for word in operands], sure
+    return None
