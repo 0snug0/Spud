@@ -3,8 +3,9 @@
 A transcript sum keeps, beside the four-key usage the Team card reads, a per-model breakdown: its API requests
 grouped by message.model and by the usage's speed, service_tier and inference_geo as the transcript records them,
 each group with its requests, its input, output and cache-read tokens, its cache writes split by TTL
-(cache_creation.ephemeral_5m_input_tokens and ephemeral_1h_input_tokens, else unsplit), its server-tool requests,
-and the iterations of any request billed per attempt.  Cost is the API list price in USD, computed when the card
+(cache_creation.ephemeral_5m_input_tokens and ephemeral_1h_input_tokens, else unsplit) and its server-tool requests.
+A request billed per attempt (a server-side fallback, a compaction) is summed from usage.iterations, each attempt it
+billed in the group of the model that ran it (SPD-220).  Cost is the API list price in USD, computed when the card
 and the notes render, from that breakdown and the dated price table spud.config.json gives (`pricing`); it is
 never stored, so a price change only re-renders.  tests/fixtures/pricing.json is that table as read from
 https://platform.claude.com/docs/en/about-claude/pricing on 2026-09-13.  Every case runs in a scratch SPUD_HOME
@@ -25,6 +26,8 @@ PRICING = json.loads((Path(__file__).resolve().parent / "fixtures" / "pricing.js
 LIST_PRICE = "at API list price (USD, prices as of 2026-09-13)"
 NO_TABLE = "no price table in spud.config.json"
 NO_BREAKDOWN = "no breakdown, which `spud member resum` adds"
+NOT_SPLIT = "a request billed per attempt kept whole, which `spud member resum` splits"
+NO_MODEL = "no price for usage that names no model"
 
 
 def config_with(pricing):
@@ -104,6 +107,77 @@ def two_models():
         entry("msg_C", "claude-opus-5", usage(input_tokens=600, output_tokens=40_000, write_1h=100_000, read=2_000_000, web_search=3, web_fetch=2),
               "2026-09-13T09:00:10.000Z", tool_use("toolu_C1")),
     ]
+
+
+def iteration(kind, model=None, input_tokens=0, output_tokens=0, write_1h=0, read=0):
+    """One usage.iterations entry as the live transcripts write it (SPD-220): its type, its model when it names one, the
+    four token keys and the TTL split that adds up to its cache writes."""
+    it = {"type": kind, "input_tokens": input_tokens, "output_tokens": output_tokens, "cache_creation_input_tokens": write_1h, "cache_read_input_tokens": read,
+          "cache_creation": {"ephemeral_1h_input_tokens": write_1h, "ephemeral_5m_input_tokens": 0}}
+    if model is not None:
+        it["model"] = model
+    return it
+
+
+def ended(e, stop_reason):
+    """A transcript entry with the stop_reason its message ended on."""
+    e["message"]["stop_reason"] = stop_reason
+    return e
+
+
+# SPUD-094/Tim's request msg_011CfKaSPRN9q2ds7wVRRfSB, from its live transcript (agent-a3e5ef0412afe7cf9.jsonl, lines 73-77):
+# claude-fable-5-1 declined mid-output after 1,004 output tokens and claude-opus-4-8 served it.  Each iteration names its
+# model; the top-level usage is the fallback attempt's, beside the declined attempt's stale TTL split (22,898 against 4,822).
+DECLINED = iteration("message", "claude-fable-5-1", input_tokens=32, output_tokens=1_004, write_1h=22_898, read=109_053)
+SERVED = iteration("fallback_message", "claude-opus-4-8", input_tokens=32, output_tokens=4_928, write_1h=4_822, read=109_053)
+FALLBACK_BREAKDOWN = [
+    {"model": "claude-fable-5-1", "speed": "standard", "service_tier": "standard", "inference_geo": "not_available", "requests": 0,
+     "input_tokens": 32, "output_tokens": 1_004, "cache_read_input_tokens": 109_053, "cache_creation": {"ephemeral_1h_input_tokens": 22_898, "ephemeral_5m_input_tokens": 0}},
+    {"model": "claude-opus-4-8", "speed": "standard", "service_tier": "standard", "inference_geo": "not_available", "requests": 1,
+     "input_tokens": 32, "output_tokens": 4_928, "cache_read_input_tokens": 109_053, "cache_creation": {"ephemeral_1h_input_tokens": 4_822, "ephemeral_5m_input_tokens": 0},
+     "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 0}},
+]
+FALLBACK_USAGE = {"input_tokens": 64, "output_tokens": 5_932, "cache_creation_input_tokens": 27_720, "cache_read_input_tokens": 218_106}
+# Per the pricing page, per million tokens.  claude-fable-5-1: 32 input x $10 + 1,004 output x $50 + 109,053 cache reads x
+# $0.25 + 22,898 1-hour writes x $20 = $0.53574325.  claude-opus-4-8: 32 x $5 + 4,928 x $25 + 109,053 x $0.50 + 4,822 x $10
+# = $0.2261065.  In all $0.76184975, shown $0.76.
+FALLBACK_COST = Fraction("0.76184975")
+# The same request as a SubagentStop stored it before SPD-220: kept whole on claude-opus-4-8, its top-level figures alone
+# (the stale split counted unsplit), its iteration types counted.
+KEPT_WHOLE_USAGE = {"input_tokens": 32, "output_tokens": 4_928, "cache_creation_input_tokens": 4_822, "cache_read_input_tokens": 109_053}
+KEPT_WHOLE_BREAKDOWN = [
+    {"model": "claude-opus-4-8", "speed": "standard", "service_tier": "standard", "inference_geo": "not_available", "requests": 1,
+     "input_tokens": 32, "output_tokens": 4_928, "cache_read_input_tokens": 109_053, "cache_creation_unsplit_input_tokens": 4_822,
+     "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 0}, "iterations": {"message": 1, "fallback_message": 1}},
+]
+
+
+def fallback_run():
+    """Tim's request as the transcript wrote it: the declined model's thinking block, the fallback block, then the served
+    tool call, the last entry carrying usage.iterations."""
+    partial = {"input_tokens": 32, "output_tokens": 3, "cache_creation_input_tokens": 22_898, "cache_read_input_tokens": 109_053,
+               "cache_creation": {"ephemeral_1h_input_tokens": 22_898, "ephemeral_5m_input_tokens": 0}, "service_tier": "standard", "inference_geo": "not_available"}
+    final = dict(partial, output_tokens=4_928, cache_creation_input_tokens=4_822, output_tokens_details={"thinking_tokens": 3_871},
+                 server_tool_use={"web_fetch_requests": 0, "web_search_requests": 0}, speed="standard", iterations=[DECLINED, SERVED])
+    return [
+        user("2026-09-23T09:00:00.000Z"),
+        entry("msg_F", "claude-fable-5-1", partial, "2026-09-23T09:00:01.000Z", {"type": "thinking", "thinking": "", "signature": "s"}),
+        entry("msg_F", "claude-opus-4-8", partial, "2026-09-23T09:00:02.000Z", {"type": "fallback", "from": {"model": "claude-fable-5-1"}, "to": {"model": "claude-opus-4-8"}}),
+        ended(entry("msg_F", "claude-opus-4-8", final, "2026-09-23T09:00:09.000Z", tool_use("toolu_F1")), "tool_use"),
+    ]
+
+
+def compacted_run():
+    """Two claude-sonnet-5 requests that compacted: one at a token threshold (the documented example: a compaction of
+    180,000 in / 3,500 out, then the message, 7 / 2, which alone the top level shows) and one on demand (a compaction
+    alone, 144 / 276, the top level zero); neither iteration names its model, as the compaction docs show them."""
+    threshold = usage(input_tokens=7, output_tokens=2)
+    threshold["iterations"] = [iteration("compaction", input_tokens=180_000, output_tokens=3_500), iteration("message", input_tokens=7, output_tokens=2)]
+    on_demand = usage()
+    on_demand["iterations"] = [iteration("compaction", input_tokens=144, output_tokens=276)]
+    return [user("2026-09-23T09:00:00.000Z"),
+            entry("msg_1", "claude-sonnet-5", threshold, "2026-09-23T09:00:01.000Z"),
+            entry("msg_2", "claude-sonnet-5", on_demand, "2026-09-23T09:00:02.000Z")]
 
 
 TWO_MODELS_USAGE = {"input_tokens": 1_500, "output_tokens": 150_000, "cache_creation_input_tokens": 402_000, "cache_read_input_tokens": 3_000_000}
@@ -229,9 +303,10 @@ class BreakdownTest(HookCase):
                                                            "cache_creation_unsplit_input_tokens": 750}])
         self.assertEqual(got["usage_json"]["usage"]["cache_creation_input_tokens"], 765)  # 10 + 5 + 750: the breakdown adds up to the usage
 
-    def test_a_request_billed_per_attempt_keeps_its_iterations(self):
-        """usage.iterations beyond one message iteration (a server-side fallback's attempts, a compaction) is counted
-        with the bucket by type; the top-level figures, which cover the attempt that served the response, stay the sum."""
+    def test_a_request_billed_per_attempt_is_summed_by_attempt(self):
+        """usage.iterations beyond one message iteration (a server-side fallback's attempts, a compaction) is what the
+        request billed: the sum and the breakdown take the attempts it billed, never the top-level figures beside them.
+        The fallback's first attempt declined before any output (0 out), so it is not billed; the compaction is."""
         attempt = {"type": "message", "input_tokens": 5, "output_tokens": 0, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
         fallback = usage(input_tokens=5, output_tokens=30)
         fallback["iterations"] = [attempt, dict(attempt, type="fallback_message", model="claude-opus-4-8", output_tokens=30)]
@@ -246,12 +321,146 @@ class BreakdownTest(HookCase):
             entry("msg_4", "claude-opus-4-8", compacted, "2026-09-13T09:00:04.000Z"),
         ])
         [b] = got["usage_json"]["breakdown"]
-        self.assertEqual((b["requests"], b["input_tokens"], b["output_tokens"], b["iterations"]), (4, 12, 34, {"message": 2, "fallback_message": 1, "compaction": 1}))
-        self.assertEqual(got["usage_json"]["usage"], {"input_tokens": 12, "output_tokens": 34, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0})
+        self.assertEqual((b["requests"], b["input_tokens"], b["output_tokens"]), (4, 180_012, 3_534))
+        self.assertFalse({"iterations", "unpriced_iterations"} & set(b))
+        self.assertEqual(got["usage_json"]["usage"], {"input_tokens": 180_012, "output_tokens": 3_534, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0})
+        self.assertEqual(got["total_tokens"], 183_546)
+
+    def test_a_fallback_is_summed_on_the_two_models_that_billed_it(self):
+        """Tim's request: the declined attempt, which produced output, on claude-fable-5-1, the served one on
+        claude-opus-4-8, each with its own TTL split; the request counts once, with the model that served it.  The
+        breakdown adds up to the usage, which counts both attempts."""
+        got = self.sum_of(fallback_run())
+        self.assertEqual(got["usage_json"], {"source": "transcript", "counting": "request", "messages": 1, "usage": FALLBACK_USAGE, "breakdown": FALLBACK_BREAKDOWN})
+        self.assertEqual((got["total_tokens"], got["duration_ms"], got["tool_uses"]), (251_822, 9_000, 1))
+        self.assertEqual(spud.token_counts(json.dumps(got["usage_json"])), {"out": 5_932, "in": 27_784, "cached": 218_106})
+
+    def test_a_compaction_is_summed_on_the_requests_model(self):
+        got = self.sum_of(compacted_run())
+        self.assertEqual(got["usage_json"]["usage"], {"input_tokens": 180_151, "output_tokens": 3_778, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0})
+        self.assertEqual(got["usage_json"]["breakdown"], [
+            {"model": "claude-sonnet-5", "speed": "standard", "service_tier": "standard", "inference_geo": "not_available", "requests": 2,
+             "input_tokens": 180_151, "output_tokens": 3_778, "cache_read_input_tokens": 0, "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 0},
+             "server_tool_use": {"web_search_requests": 0, "web_fetch_requests": 0}}])
+
+    def test_which_attempts_a_request_billed(self):
+        """request_attempts: (the model each billed attempt ran on, its output tokens) and the iteration types that kept
+        the request whole.  A declined attempt (a message iteration of a request that fell back; the last attempt but a
+        compaction of a request that ended in a refusal) that produced no output is not billed; an attempt that names no
+        model ran on message.model unless the request fell back."""
+        opus, sonnet, fable = "claude-opus-4-8", "claude-sonnet-5", "claude-fable-5-1"
+
+        def with_iterations(*iterations):
+            u = usage(input_tokens=1, output_tokens=9)
+            u["iterations"] = list(iterations)
+            return u
+
+        cases = [
+            ("a fallback declined mid-output", opus, [DECLINED, SERVED], "tool_use", [(fable, 1_004), (opus, 4_928)]),
+            ("a fallback declined before any output (the documented example)", opus,
+             [iteration("message", fable, input_tokens=535), iteration("fallback_message", opus, input_tokens=412, output_tokens=264)], "end_turn", [(opus, 264)]),
+            ("every model declined before any output", opus, [iteration("message", fable, input_tokens=535), iteration("fallback_message", opus, input_tokens=412)], "refusal", []),
+            ("every model declined, the last mid-output", opus,
+             [iteration("message", fable, input_tokens=535), iteration("fallback_message", opus, input_tokens=412, output_tokens=7)], "refusal", [(opus, 7)]),
+            ("a sticky turn, served by the fallback model alone", opus, [iteration("fallback_message", opus, input_tokens=10, output_tokens=10)], "end_turn", [(opus, 10)]),
+            ("a compaction at a token threshold", sonnet, [iteration("compaction", input_tokens=180_000, output_tokens=3_500), iteration("message", input_tokens=7, output_tokens=2)],
+             "end_turn", [(sonnet, 3_500), (sonnet, 2)]),
+            ("a compaction on demand", sonnet, [iteration("compaction", input_tokens=144, output_tokens=276)], "compaction", [(sonnet, 276)]),
+            ("a compaction, then a refusal before any output", sonnet, [iteration("compaction", input_tokens=1_000, output_tokens=200), iteration("message", input_tokens=50)],
+             "refusal", [(sonnet, 200)]),
+            ("a compaction on demand that was refused: still billed", sonnet, [iteration("compaction", input_tokens=144)], "refusal", [(sonnet, 0)]),
+            ("a compaction naming no model in a request that fell back", opus,
+             [iteration("compaction", input_tokens=1_000, output_tokens=100), iteration("message", fable, input_tokens=10), iteration("fallback_message", opus, input_tokens=10, output_tokens=5)],
+             "end_turn", [(None, 100), (opus, 5)]),
+        ]
+        for label, model, iterations, stop, want in cases:
+            with self.subTest(label):
+                attempts, outside = spud.request_attempts(model, with_iterations(*iterations), stop)
+                self.assertEqual(([(m, figures["output_tokens"]) for m, figures in attempts], outside), (want, {}))
+        whole = [
+            ("one message iteration", [iteration("message")], {}),
+            ("no iterations", None, {}),
+            ("an empty list", [], {}),
+            ("the preview's iteration types", [iteration("fallback_primary", fable), iteration("fallback_retry", opus)], {"fallback_primary": 1, "fallback_retry": 1}),
+            ("an iteration that is no object", [iteration("message"), 7], {"unknown": 1}),
+        ]
+        for label, iterations, outside in whole:
+            with self.subTest(label):
+                u = usage(input_tokens=1, output_tokens=9)
+                if iterations is None:
+                    u.pop("iterations")
+                else:
+                    u["iterations"] = iterations
+                self.assertEqual(spud.request_attempts(opus, u, "end_turn"), ([(opus, u)], outside))
+
+    def test_what_the_rule_does_not_cover_is_kept_whole(self):
+        """A request whose iterations hold a type the per-attempt rule does not cover keeps its top-level figures with the
+        model that served it, the types counted under unpriced_iterations; an attempt naming no model in a request that
+        fell back is summed in a bucket without a model."""
+        preview = usage(input_tokens=3, output_tokens=40)
+        preview["iterations"] = [iteration("fallback_primary", "claude-fable-5-1", output_tokens=5), iteration("fallback_retry", "claude-opus-4-8", input_tokens=3, output_tokens=40)]
+        unnamed = usage(input_tokens=10, output_tokens=5)
+        unnamed["iterations"] = [iteration("compaction", input_tokens=1_000, output_tokens=100), iteration("message", "claude-fable-5-1", input_tokens=10),
+                                 iteration("fallback_message", "claude-opus-4-8", input_tokens=10, output_tokens=5)]
+        got = self.sum_of([entry("msg_1", "claude-opus-4-8", preview, "2026-09-23T09:00:01.000Z"), entry("msg_2", "claude-opus-4-8", unnamed, "2026-09-23T09:00:02.000Z")])
+        nameless, opus = got["usage_json"]["breakdown"]
+        self.assertEqual((nameless.get("model"), nameless["requests"], nameless["input_tokens"], nameless["output_tokens"]), (None, 0, 1_000, 100))
+        self.assertEqual((opus["requests"], opus["input_tokens"], opus["output_tokens"], opus["unpriced_iterations"]), (2, 13, 45, {"fallback_primary": 1, "fallback_retry": 1}))
+        self.assertEqual(got["usage_json"]["usage"], {"input_tokens": 1_013, "output_tokens": 145, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0})
 
     def test_a_run_served_in_one_attempt_records_no_iterations(self):
         got = self.sum_of(two_models())
-        self.assertFalse(any("iterations" in b for b in got["usage_json"]["breakdown"]))
+        self.assertFalse(any({"iterations", "unpriced_iterations"} & set(b) for b in got["usage_json"]["breakdown"]))
+
+
+# =============================================================================
+# A request billed per attempt, priced (SPD-220)
+# =============================================================================
+
+
+class PerAttemptCostTest(HookCase):
+    def sum_of(self, entries):
+        return spud.transcript_usage(self.write_transcript(AGENT_A, entries))
+
+    def test_a_fallback_is_priced_across_two_models(self):  # SPD-220
+        """Tim's request: each attempt it billed at the rates of the model that ran it, the declined attempt that produced
+        output included, as the fallback docs bill it; stored before SPD-220 it was kept whole and left unpriced."""
+        got = self.sum_of(fallback_run())
+        cost, reasons = spud.run_cost(json.dumps(got["usage_json"]), table())
+        self.assertEqual((cost, reasons), (FALLBACK_COST, []))
+        self.assertEqual(spud.money(cost), "$0.76")
+        kept_whole = json.dumps({"source": "transcript", "counting": "request", "messages": 1, "usage": KEPT_WHOLE_USAGE, "breakdown": KEPT_WHOLE_BREAKDOWN})
+        self.assertEqual(spud.run_cost(kept_whole, table()), (None, [NOT_SPLIT]))
+
+    def test_a_compaction_is_priced(self):  # SPD-220
+        # claude-sonnet-5, the compactions and the message: 180,151 input x $2 + 3,778 output x $10 = $0.398082
+        got = self.sum_of(compacted_run())
+        self.assertEqual(spud.run_cost(json.dumps(got["usage_json"]), table()), (Fraction("0.398082"), []))
+
+    def test_a_request_declined_before_any_output_costs_nothing(self):  # SPD-220
+        """Every model declined before producing output: the attempts are reported but not billed, and the request counts
+        with the model that returned the refusal at no cost."""
+        refused = usage(input_tokens=412)
+        refused["iterations"] = [iteration("message", "claude-fable-5-1", input_tokens=535), iteration("fallback_message", "claude-opus-4-8", input_tokens=412)]
+        got = self.sum_of([ended(entry("msg_1", "claude-opus-4-8", refused, "2026-09-23T09:00:01.000Z"), "refusal"),
+                           entry("msg_2", "claude-sonnet-5", usage(output_tokens=100_000), "2026-09-23T09:00:02.000Z")])
+        self.assertEqual([(b["model"], b["requests"], b["input_tokens"]) for b in got["usage_json"]["breakdown"]], [("claude-opus-4-8", 1, 0), ("claude-sonnet-5", 1, 0)])
+        self.assertEqual(spud.run_cost(json.dumps(got["usage_json"]), table()), (Fraction(1), []))
+
+    def test_what_the_per_attempt_rule_does_not_cover_stays_unpriced(self):  # SPD-220, the refusal that remains
+        preview = usage(input_tokens=3, output_tokens=40)
+        preview["iterations"] = [iteration("fallback_primary", "claude-fable-5-1", output_tokens=5), iteration("fallback_retry", "claude-opus-4-8", input_tokens=3, output_tokens=40)]
+        unnamed = usage(input_tokens=10, output_tokens=5)
+        unnamed["iterations"] = [iteration("compaction", input_tokens=1_000, output_tokens=100), iteration("message", "claude-fable-5-1", input_tokens=10),
+                                 iteration("fallback_message", "claude-opus-4-8", input_tokens=10, output_tokens=5)]
+        cases = [
+            ("an iteration type the rule does not cover", preview, ["no price for usage.iterations type fallback_primary", "no price for usage.iterations type fallback_retry"]),
+            ("an attempt naming no model in a request that fell back", unnamed, [NO_MODEL]),
+        ]
+        for label, figures, reasons in cases:
+            with self.subTest(label):
+                got = self.sum_of([entry("msg_1", "claude-opus-4-8", figures, "2026-09-23T09:00:01.000Z")])
+                self.assertEqual(spud.run_cost(json.dumps(got["usage_json"]), table()), (None, reasons))
 
 
 # =============================================================================
@@ -294,15 +503,18 @@ class CostTest(unittest.TestCase):
         count = {"usage": {"input_tokens": 0, "output_tokens": 1, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}}
         cases = [
             ("a model the table lacks", [bucket("claude-future-9", output_tokens=1)], {}, ["no price for model claude-future-9"]),
-            ("requests that name no model", [bucket(None, output_tokens=1)], {}, ["no price for requests that name no model"]),
+            ("usage that names no model", [bucket(None, output_tokens=1)], {}, [NO_MODEL]),
             ("fast mode on a model without fast rates", [bucket("claude-sonnet-5", output_tokens=1, speed="fast")], {}, ["no price for speed fast on claude-sonnet-5"]),
             ("a speed the table does not know", [bucket(output_tokens=1, speed="turbo")], {}, ["no price for speed turbo on claude-opus-5"]),
             ("the Priority Tier", [bucket(output_tokens=1, service_tier="priority")], {}, ["no price for service_tier priority"]),
             ("another geography", [bucket(output_tokens=1, inference_geo="eu")], {}, ["no price for inference_geo eu"]),
             ("another cache TTL", [dict(bucket(output_tokens=1), cache_creation={"ephemeral_24h_input_tokens": 5})], {}, ["no price for cache_creation.ephemeral_24h_input_tokens"]),
             ("a server tool billed by the hour", [dict(bucket(output_tokens=1), server_tool_use={"code_execution_requests": 1})], {}, ["no price for server_tool_use.code_execution_requests"]),
-            ("a request billed per attempt", [dict(bucket(output_tokens=1), iterations={"message": 1, "fallback_message": 1})], {},
-             ["billed per attempt: usage.iterations holds fallback_message, message"]),
+            ("a request billed per attempt kept whole before SPD-220", [dict(bucket(output_tokens=1), iterations={"message": 1, "fallback_message": 1})], {}, [NOT_SPLIT]),
+            ("an iteration type the per-attempt rule does not cover", [dict(bucket(output_tokens=1), unpriced_iterations={"fallback_retry": 1, "fallback_primary": 1})], {},
+             ["no price for usage.iterations type fallback_primary", "no price for usage.iterations type fallback_retry"]),
+            ("unpriced iterations beside nothing billed", [dict(bucket(), unpriced_iterations={"fallback_retry": 1})], {}, ["no price for usage.iterations type fallback_retry"]),
+            ("unpriced iterations that are no object", [dict(bucket(output_tokens=1), unpriced_iterations=["fallback_retry"])], {}, ["a breakdown figure that is not a count"]),
             ("one bucket priced and one not", [bucket(output_tokens=1), bucket("claude-future-9", output_tokens=1), bucket("claude-future-9", output_tokens=2, speed="fast")], {},
              ["no price for model claude-future-9"]),
             ("a figure that is no count", [dict(bucket(), output_tokens=-1)], count, ["a breakdown figure that is not a count"]),
@@ -571,6 +783,38 @@ class NotPricedTest(PricedCase):
         self.assertEqual(self.card_lines()[-1], "total: no tokens recorded")
         section = self.section(self.render_out())
         self.assertEqual(total_row(section), "| **Total** |  |  |  |  |  | — | — | — |")
+
+
+class PerAttemptRunTest(PricedCase):  # SPD-220
+    def test_a_fallback_run_is_priced_on_the_card_and_by_doctor(self):
+        self.run_member(AGENT_A, fallback_run(), "Russet")
+        node = {n["name"]: n for n in flatten(self.home.json("card", self.t["key"])["team"])}["Russet"]
+        self.assertEqual((node["tokens"], node["cost_usd"], node["not_priced"]), ({"out": 5_932, "in": 27_784, "cached": 218_106}, "0.76", []))
+        self.assertTrue(self.line_of(self.card_lines(), "Russet").endswith(" · $0.76"), self.card_lines())
+        self.assertEqual(self.home.json("doctor")["pricing"]["not_priced"], [])
+
+    def test_member_resum_splits_a_request_kept_whole(self):
+        """A sum stored before SPD-220 kept Tim's request whole: its serving attempt alone in the usage, the run unpriced.
+        `member resum` finds it ("attempts") and sums it again from the transcript, by attempt; a second run finds it counted."""
+        m = self.plan(name="Russet")
+        self.spawn(m, AGENT_A)
+        self.home.json("member", "result", "Built it.", actor=AGENT_A)
+        path = self.write_transcript(AGENT_A, fallback_run())
+        old = json.dumps({"source": "transcript", "counting": "request", "messages": 1, "usage": KEPT_WHOLE_USAGE, "breakdown": KEPT_WHOLE_BREAKDOWN})
+        self.set_member(m["id"], transcript_path=str(path), total_tokens=118_835, duration_ms=9_000, tool_uses=1, usage_json=old)
+        ref = "%s/Russet" % self.team
+        self.assertEqual(spud.stored_counting(old), "attempts")
+        self.assertEqual(self.home.json("doctor")["pricing"]["not_priced"], [{"ref": ref, "reasons": [NOT_SPLIT]}])
+        out = self.home.json("member", "resum", "--all", actor="spud")
+        self.assertEqual([(r["ref"], r["action"], r["old"]["total_tokens"], r["new"]["total_tokens"]) for r in out["members"]], [(ref, "re-sum", 118_835, 251_822)])
+        row = self.home.rows("SELECT total_tokens, usage_json FROM members WHERE id = ?", m["id"])[0]
+        self.assertEqual((row["total_tokens"], json.loads(row["usage_json"])),
+                         (251_822, {"source": "transcript", "counting": "request", "messages": 1, "usage": FALLBACK_USAGE, "breakdown": FALLBACK_BREAKDOWN}))
+        self.assertEqual(spud.stored_counting(row["usage_json"]), "breakdown")
+        self.assertEqual(self.home.json("doctor")["pricing"]["not_priced"], [])
+        self.assertTrue(self.line_of(self.card_lines(), "Russet").endswith(" · $0.76"), self.card_lines())
+        again = self.home.json("member", "resum", "--all", actor="spud")
+        self.assertEqual([(r["ref"], r["action"]) for r in again["members"]], [(ref, "counted")])
 
 
 class PriceChangeTest(PricedCase):

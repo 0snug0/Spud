@@ -70,10 +70,35 @@ TOKEN_KEYS = ("input_tokens", "output_tokens", "cache_creation_input_tokens", "c
 # request's usage with its model (message.model), a service_tier and an inference_geo, nearly all with a speed; a
 # cache_creation split by TTL that sums to cache_creation_input_tokens (one exception, a server-side fallback's request:
 # 4,369 split beside a total of 0); server_tool_use counts; and usage.iterations holding one message iteration (the same
-# exception held a fallback_message attempt).  The API bills a compaction iteration beside the top-level figures and a
-# fallback per attempt, neither of which the top level shows whole.
+# exception held a fallback_message attempt).
 BREAKDOWN_IDENTITY = ("model", "speed", "service_tier", "inference_geo")
 BREAKDOWN_TOKENS = ("input_tokens", "output_tokens", "cache_read_input_tokens")
+
+# A request billed per attempt (SPD-220).  usage.iterations records each sampling attempt of one API request, in order: a
+# compaction (the summary the API writes of earlier context), a message for each model that declined the request and a
+# fallback_message for the model that served it (server-side fallback).  The Claude API documentation, read on 2026-09-23:
+# - platform.claude.com/docs/en/build-with-claude/refusals-and-fallback, "Billing and rate limits": an attempt that declined
+#   before producing any output is not billed, its tokens reported on its usage.iterations entry but not charged; every
+#   attempt that produced output, one that declined partway through included, is billed separately at the rates of the
+#   model that ran it; usage.iterations is the per-attempt record of what is billed, and the top-level usage describes only
+#   the attempt that produced the returned message.  "A model that declined appears as an ordinary message entry"; when
+#   every model declines, the response is the last model's refusal.  The same page: the API runs "the same request" on the
+#   fallback model.
+# - .../compaction-threshold, "Understanding usage", and .../compaction-on-demand, "Count compaction usage": the top-level
+#   input_tokens and output_tokens exclude compaction and reflect the non-compaction iterations; the tokens consumed and
+#   billed are the sum across usage.iterations; the summarization call "uses the request's model" and is billed whatever
+#   it returns.
+# The live transcripts agree.  A read-only survey on 2026-09-23 (2,137 files, 106,384 requests carrying usage.iterations)
+# found four requests that fell back, SPUD-094/Tim's msg_011CfKaSPRN9q2ds7wVRRfSB and SPUD-217/Hector's
+# msg_011CfLxEUXfjaQRcanJbrLFF among them.  Each held [message on the requested model (claude-fable-5-1, claude-opus-5-5),
+# declined mid-output after 427 to 2,291 output tokens; fallback_message on claude-opus-4-8], every iteration naming its
+# model and carrying input, output, cache-read and cache-write tokens with a TTL split that adds up, and none a speed, a
+# service tier, an inference geography or a server-tool count.  Their top-level usage is the fallback attempt's, beside the
+# declined attempt's stale TTL split (the 4,369 split beside a total of 0 above is one).  A message iteration of a request
+# served in one attempt names no model (the key absent, or null); no request compacted.
+PER_ATTEMPT = ("message", "fallback_message", "compaction")  # the iteration types a request is summed and priced by, attempt by attempt
+KEPT_WHOLE = "iterations"  # before SPD-220 a breakdown kept a request billed per attempt whole, counting its iteration types here
+UNPRICED_ITERATIONS = "unpriced_iterations"  # since: a request kept whole for an iteration type outside PER_ATTEMPT, those types
 
 
 def usage_count(value):
@@ -81,47 +106,97 @@ def usage_count(value):
     return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
 
 
+def request_attempts(model, usage, stop_reason=None):
+    """(the attempts one API request billed, [(the model that ran it, its usage figures)]; the iteration types that kept it
+    whole, {} when none), by the rule and the evidence above.  A request served in one attempt (no usage.iterations, an
+    empty list, or a single message iteration) is its top-level usage on message.model.  Any other is summed from
+    usage.iterations alone, the top-level figures never added (they repeat the serving attempt, or the non-compaction
+    iterations).  An attempt ran on the model it names; one that names none ran on message.model when the request did
+    not fall back (the model it asked for and was served by, which a compaction uses), and on no model the breakdown can
+    price when it did (the model it asked for is not recorded).  A declined attempt (each message iteration of a request
+    holding a fallback_message, and the last attempt but a compaction when the request ended in a refusal) that reports
+    no output tokens is left out: it is not billed.  A request whose iterations hold a type outside PER_ATTEMPT is kept
+    whole, its top-level usage on message.model, with those types counted: its bill is not known."""
+    iterations = usage.get("iterations")
+    if not isinstance(iterations, list) or not iterations or (
+            len(iterations) == 1 and isinstance(iterations[0], dict) and iterations[0].get("type") == "message"):
+        return [(model, usage)], {}
+    kinds = [it["type"] if isinstance(it, dict) and isinstance(it.get("type"), str) else "unknown" for it in iterations]
+    outside = {}
+    for kind in kinds:
+        if kind not in PER_ATTEMPT:
+            outside[kind] = outside.get(kind, 0) + 1
+    if outside:
+        return [(model, usage)], outside
+    fell_back = "fallback_message" in kinds
+    attempts = []
+    for index, (kind, iteration) in enumerate(zip(kinds, iterations)):
+        declined = (kind == "message" and fell_back) or (index == len(kinds) - 1 and kind != "compaction" and stop_reason == "refusal")
+        if declined and not usage_count(iteration.get("output_tokens")):
+            continue
+        named = iteration.get("model")
+        attempts.append((named if isinstance(named, str) and named else None if fell_back else model, iteration))
+    return attempts, {}
+
+
+def breakdown_bucket(buckets, model, usage):
+    """The bucket of usage_breakdown's buckets for this model and the speed, service tier and inference geography this
+    usage names, made empty when it is new."""
+    identity = tuple(v if isinstance(v, str) and v else None for v in (model,) + tuple(usage.get(k) for k in BREAKDOWN_IDENTITY[1:]))
+    bucket = buckets.get(identity)
+    if bucket is None:
+        bucket = buckets[identity] = {k: v for k, v in zip(BREAKDOWN_IDENTITY, identity) if v is not None}
+        bucket.update(requests=0, **dict.fromkeys(BREAKDOWN_TOKENS, 0))
+    return bucket
+
+
 def usage_breakdown(requests):
-    """[(message.model, usage)] of a transcript's requests, each by its last entry, grouped into buckets by model, speed,
-    service tier and inference geography as the transcript writes them (a key left out when the usage has none), sorted
-    by those four.  A bucket keeps its requests; its input, output and cache-read tokens; its cache writes by TTL under
-    cache_creation when the request's split adds up to cache_creation_input_tokens, as the API documents it, else as
-    cache_creation_unsplit_input_tokens; its usage.server_tool_use counts; and, under iterations, the iteration types of
-    any request whose usage.iterations holds more than one message iteration (a compaction, a fallback's attempts),
-    which the top-level figures do not bill whole.  Its token figures add up to the sum's usage."""
+    """[(message.model, usage, stop_reason)] of a transcript's requests, each by its last entry, as the attempts each
+    billed (request_attempts), grouped into buckets by the model that ran the attempt and the request's speed, service
+    tier and inference geography as the transcript writes them (a key left out when the usage has none), sorted by those
+    four.  An attempt takes its request's speed, tier and geography: the iterations carry none, and each attempt runs the
+    same request.  A bucket keeps the requests its model served (message.model), each counted once, so a model that only
+    billed declined attempts has a bucket of 0 requests; the input, output and cache-read tokens of the attempts it ran; their
+    cache writes by TTL under cache_creation when an attempt's split adds up to its cache_creation_input_tokens, as the API
+    documents it, else as cache_creation_unsplit_input_tokens; the usage.server_tool_use counts of the requests it served
+    (the iterations carry none, and a server tool's fee does not depend on the model); and, under unpriced_iterations, the
+    iteration types of a request kept whole because request_attempts does not price them.  Its token figures add up to
+    the sum's usage, which counts every billed attempt."""
     buckets = {}
-    for model, usage in requests:
-        identity = tuple(v if isinstance(v, str) and v else None for v in (model,) + tuple(usage.get(k) for k in BREAKDOWN_IDENTITY[1:]))
-        bucket = buckets.get(identity)
-        if bucket is None:
-            bucket = buckets[identity] = {k: v for k, v in zip(BREAKDOWN_IDENTITY, identity) if v is not None}
-            bucket.update(requests=0, **dict.fromkeys(BREAKDOWN_TOKENS, 0))
-        bucket["requests"] += 1
-        for k in BREAKDOWN_TOKENS:
-            bucket[k] += usage_count(usage.get(k))
-        writes = usage_count(usage.get("cache_creation_input_tokens"))
-        split = usage.get("cache_creation")
-        split = {k: usage_count(v) for k, v in split.items() if isinstance(v, (int, float)) and not isinstance(v, bool)} if isinstance(split, dict) else None
-        if split is not None and sum(split.values()) == writes:
-            into = bucket.setdefault("cache_creation", {})
-            for k, v in split.items():
-                into[k] = into.get(k, 0) + v
-        elif writes:
-            bucket["cache_creation_unsplit_input_tokens"] = bucket.get("cache_creation_unsplit_input_tokens", 0) + writes
+    for model, usage, stop_reason in requests:
+        attempts, outside = request_attempts(model, usage, stop_reason)
+        served = breakdown_bucket(buckets, model, usage)
+        served["requests"] += 1
+        for by, figures in attempts:
+            bucket = breakdown_bucket(buckets, by, usage)
+            for k in BREAKDOWN_TOKENS:
+                bucket[k] += usage_count(figures.get(k))
+            writes = usage_count(figures.get("cache_creation_input_tokens"))
+            split = figures.get("cache_creation")
+            split = {k: usage_count(v) for k, v in split.items() if isinstance(v, (int, float)) and not isinstance(v, bool)} if isinstance(split, dict) else None
+            if split is not None and sum(split.values()) == writes:
+                into = bucket.setdefault("cache_creation", {})
+                for k, v in split.items():
+                    into[k] = into.get(k, 0) + v
+            elif writes:
+                bucket["cache_creation_unsplit_input_tokens"] = bucket.get("cache_creation_unsplit_input_tokens", 0) + writes
         tools = usage.get("server_tool_use")
         if isinstance(tools, dict):
-            into = bucket.setdefault("server_tool_use", {})
+            into = served.setdefault("server_tool_use", {})
             for k, v in tools.items():
                 if isinstance(v, (int, float)) and not isinstance(v, bool):
                     into[k] = into.get(k, 0) + int(v)
-        iterations = usage.get("iterations")
-        if isinstance(iterations, list) and iterations and not (
-                len(iterations) == 1 and isinstance(iterations[0], dict) and iterations[0].get("type") == "message"):
-            into = bucket.setdefault("iterations", {})
-            for iteration in iterations:
-                kind = iteration.get("type") if isinstance(iteration, dict) and isinstance(iteration.get("type"), str) else "unknown"
-                into[kind] = into.get(kind, 0) + 1
+        if outside:
+            into = served.setdefault(UNPRICED_ITERATIONS, {})
+            for kind, n in outside.items():
+                into[kind] = into.get(kind, 0) + n
     return [buckets[identity] for identity in sorted(buckets, key=lambda identity: tuple(v or "" for v in identity))]
+
+
+def kept_whole(breakdown):
+    """Whether a stored breakdown keeps a request billed per attempt whole, as one stored before SPD-220 did (its
+    iteration types counted under iterations): `spud member resum` sums it again, attempt by attempt."""
+    return isinstance(breakdown, list) and any(isinstance(b, dict) and KEPT_WHOLE in b for b in breakdown)
 
 
 def request_key(entry, index):
@@ -143,8 +218,10 @@ def transcript_usage(path):
     block ids (a block without an id counts where it appears), the same whether a response's blocks come
     one per entry or together; duration_ms runs from the first timestamp in the file to the last.  The
     sum is marked "counting": "request" and keeps the per-model breakdown of its requests
-    (usage_breakdown) that a list-price cost is computed from.  None when the file holds no assistant usage;
-    OSError when it cannot be read."""
+    (usage_breakdown) that a list-price cost is computed from.  Its usage counts what each request billed: a request
+    served in one attempt by its top-level usage, one billed per attempt by the attempts it billed (request_attempts),
+    so a declined attempt that produced output and a compaction count, and one declined before any output does not.
+    None when the file holds no assistant usage; OSError when it cannot be read."""
     requests = {}
     tool_ids = set()
     tools_without_id = 0
@@ -164,8 +241,8 @@ def transcript_usage(path):
             msg = entry.get("message")
             if entry.get("type") != "assistant" or not isinstance(msg, dict):
                 continue
-            if isinstance(msg.get("usage"), dict):
-                requests[request_key(entry, index)] = (msg.get("model"), msg["usage"])  # a later entry of the request replaces an earlier one
+            if isinstance(msg.get("usage"), dict):  # a later entry of the request replaces an earlier one
+                requests[request_key(entry, index)] = (msg.get("model"), msg["usage"], msg.get("stop_reason"))
             content = msg.get("content")
             if isinstance(content, list):
                 for block in content:
@@ -177,11 +254,10 @@ def transcript_usage(path):
     if not requests:
         return None
     totals = dict.fromkeys(TOKEN_KEYS, 0)
-    for _, usage in requests.values():
-        for k in TOKEN_KEYS:
-            v = usage.get(k)
-            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                totals[k] += int(v)
+    for model, usage, stop_reason in requests.values():
+        for _, figures in request_attempts(model, usage, stop_reason)[0]:
+            for k in TOKEN_KEYS:
+                totals[k] += usage_count(figures.get(k))
     duration = int((last - first).total_seconds() * 1000) if first is not None and last is not None else None
     return {"total_tokens": sum(totals.values()), "duration_ms": duration, "tool_uses": len(tool_ids) + tools_without_id,
             "usage_json": {"source": "transcript", "counting": REQUEST_COUNTING, "messages": len(requests), "usage": totals,
