@@ -1600,10 +1600,12 @@ class ReaderFailsClosedTest(ShellSnapshotCase):
         verb too, where the hook cannot resolve the loop variable).  None is a git write this Mac's profile defines.
         SPD-269: a loop over words the call spells, none that may be an option, is read once per word, each the word it
         is (expansions.resolve_expansion), so `loopgit push` is refused as `git push` is and `loopgit status` is the read
-        it runs; a word that may be an option (`-m`) settles no loop, and its variable is refused on doubt as before."""
+        it runs.  SPD-274: a word that may be an option (`-m`) no longer unsettles the loop where git's words are read, so
+        `loopgit commit -m x` is read as `git commit`, `git -m` and `git x`, and refused under Law 7 as spelled."""
         self.write_snapshot("snapshot-zsh-1700000000009-999999.sh",
             "loopgit () {\n\tfor a in \"$@\"; do git $a; done\n}\nglobalgit () {\n\tgit $GITVERB\n}\n")
-        for line, needle in (("GITVERB=$(echo push); globalgit", "cannot resolve"), ("loopgit commit -m x", "cannot resolve"),
+        # SPD-274: the `-m` loop is read per value, so its refusal is Law 7's, not the unresolved variable's
+        for line, needle in (("GITVERB=$(echo push); globalgit", "cannot resolve"), ("loopgit commit -m x", "Law 7"),
                              ("loopgit $(echo status)", "cannot resolve"), ("loopgit push", "Law 7"), ("loopgit status push", "Law 7")):
             with self.subTest(line=line):
                 self.refused_for_members(line, needle)  # the member-filled variable is refused on doubt, or read as spelled
