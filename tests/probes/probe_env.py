@@ -157,6 +157,22 @@ def build_tool(root, checkout=None):
     return tool
 
 
+def worktree_path(tool, name):
+    """Where add_worktree puts the linked worktree `name` of `tool`: `<tool>/.claude/worktrees/<name>`, where a real
+    session's EnterWorktree puts one."""
+    return Path(tool) / ".claude" / "worktrees" / name
+
+
+def add_worktree(tool, name):
+    """A linked worktree of the tool (build_tool), made with plain `git worktree add` as the suite's worktree tests make
+    theirs (SPD-251): `<tool>/.claude/worktrees/<name>` on a new branch `worktree-<name>` from main, the layout and the
+    branch name a real session's EnterWorktree gives.  A `member new` run there binds its ticket to it, so the spawn,
+    subagent and member steps after it meet a planned row, as a real session's do.  Returns the worktree's path."""
+    path = worktree_path(tool, name)
+    git(tool, "worktree", "add", "-q", "-b", "worktree-" + name, path, "main")
+    return path
+
+
 def init_args(tool):
     """A probe's `spud init`: the `tool` registered as project 1 by init's own step 3, key `spud`, its name the directory's
     and its prefixes the config's, as helpers.Home.init registers it; and `--no-schedule`, since step 8 would reach

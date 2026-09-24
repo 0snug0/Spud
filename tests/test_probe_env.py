@@ -178,6 +178,38 @@ class ProbeShapeTest(ProbeEnvCase):
         added = self.rows("SELECT actor, at, json_extract(data, '$.root') AS root FROM events WHERE kind = 'project.added'")
         self.assertEqual(added, [{"actor": "spud", "at": project["created_at"], "root": project["root_path"]}])
 
+    def test_add_worktree_makes_a_linked_worktree_of_the_tool(self):
+        """SPD-251: where session_diff plans its members from, laid out as EnterWorktree lays one out."""
+        tool = self.probe_env.build_tool(self.root)
+        worktree = self.probe_env.add_worktree(tool, "spd-002-probe")
+        self.assertEqual(worktree, tool / ".claude" / "worktrees" / "spd-002-probe")
+        self.assertEqual(worktree, self.probe_env.worktree_path(tool, "spd-002-probe"))
+        git_dir, common = git_lines(worktree, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
+        self.assertNotEqual(os.path.realpath(git_dir), os.path.realpath(common))  # linked, not the main checkout
+        self.assertEqual(os.path.realpath(common), os.path.realpath(tool / ".git"))
+        self.assertEqual(git_lines(worktree, "branch", "--show-current"), ["worktree-spd-002-probe"])
+        self.assertEqual(git_lines(worktree, "rev-parse", "HEAD"), git_lines(tool, "rev-parse", "main"))
+        self.assertEqual(git_lines(tool, "branch", "--show-current"), ["main"])  # the main checkout stays on main
+        self.assertTrue((worktree / "bin" / "spud").is_file())
+
+    def test_a_member_planned_from_the_worktree_binds_its_ticket_there(self):
+        """SPD-251, end to end: `member new` with a bare glob, run in the worktree, plans the member and binds the ticket;
+        the same command in the home is refused (exit 5)."""
+        self.probe_env.write_config(self.home, name_pool=True)
+        tool = self.probe_env.build_tool(self.root)
+        worktree = self.probe_env.add_worktree(tool, "spd-001-probe")
+        env = self.probe_env.isolated_env(self.home, tool)
+        self.spud(env, *self.probe_env.init_args(tool))
+        self.spud(env, "--as", "spud", "ticket", "new", "--title", "T", "--priority", "P2", "--status", "active", "--brief", "b", "--sizing", "s")
+        plan = ("--as", "spud", "member", "new", "--ticket", "SPD-001", "--persona", "engineer", "--model", "opus", "--brief", "b", "--deliverable", "bin/**")
+        refused = subprocess.run([sys.executable, "-I", "-S", str(SPUD), *plan], env=env, cwd=self.home, capture_output=True, text=True)
+        self.assertEqual(refused.returncode, 5, refused.stderr)
+        planned = subprocess.run([sys.executable, "-I", "-S", str(SPUD), *plan], env=env, cwd=worktree, capture_output=True, text=True)
+        self.assertEqual(planned.returncode, 0, planned.stderr)
+        self.assertIn("planned SPUD-001/", planned.stdout)
+        [ticket] = self.rows("SELECT worktree FROM tickets")
+        self.assertEqual(os.path.realpath(ticket["worktree"]), os.path.realpath(worktree))
+
     def test_init_args_register_the_tool_and_skip_step_8(self):
         args = self.probe_env.init_args(self.tool)
         self.assertEqual(args[0], "init")
@@ -205,6 +237,12 @@ class ProbesUseItTest(unittest.TestCase):
             self.assertNotIn("seed_project_one", text, path.name)
             self.assertIsNone(re.search(r"INSERT\s+INTO\s+projects", text, re.I), path.name)
             self.assertNotIn("link_share", text, path.name)
+
+    def test_session_diff_plans_its_members_from_a_linked_worktree(self):
+        """SPD-251: its members are planned in a worktree of the tool, so its spawn and member steps meet a planned row."""
+        text = (PROBES / "session_diff.py").read_text(encoding="utf-8")
+        self.assertIn("probe_env.add_worktree(", text)
+        self.assertRegex(text, r'"member", "new", [^\n]*, worktree\)')
 
     def test_no_probe_runs_init_with_step_8(self):
         """A bare `init` would reach launchctl; every probe's own init skips step 8."""
