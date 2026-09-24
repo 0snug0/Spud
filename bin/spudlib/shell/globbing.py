@@ -39,6 +39,8 @@ GLOB_SAMPLES = frozenset(
 GLOB_OPTION = "-%"  # a glob that may start with `-` read as an option that takes no value
 GLOB_WORD_LIMIT = 256  # a longer glob word, or a segment with more than two stars or four groups, is not matched (backtracking)
 GLOB_READING_BUDGET = 128  # the readings of one simple command's glob words before the hook stops reading them and refuses a member
+CLUSTER_GLOB_LIMIT = 4  # a masked option cluster with more glob positions than this is too large to enumerate (fail closed)
+CLUSTER_CANDIDATE_LIMIT = 256  # the spellings one option-cluster glob is enumerated to before the hook fails closed for a member
 _EQUALS_RE = re.compile(r"=([^/=\s]+)\Z")  # zsh's EQUALS: `=name` is the path of the command name
 _STAR_RUN_RE = re.compile(r"\*+")
 
@@ -178,7 +180,108 @@ def command_path(name):
     return "/usr/bin/" + name
 
 
-def glob_readings(word, a, command=False, script=False, dash=False, shift=False, options=None):
+def cluster_value_letters(words, i, kind):
+    """The short single-letter value options the command `words[0]` reads by getopt, when `words[i]` stands where that
+    getopt reads an option cluster (`kind`: an option position the reader may skip as a value, never the command word or a
+    script): env's `-u -P -S -C -L -U`, sudo's, an arg-write command's (syntax.ARG_WRITE_COMMANDS' value letters), or None
+    when `words[0]` names no such command.  A glob among such a cluster is read as each cluster it can become
+    (wrapper_cluster_readings), a value option included, since getopt reads `-iS` as `-i -S` and `-S` takes the next word
+    (probed: `env -iS 'echo split-ran'` split its string; `env -vS X` took X as -S's value -- BSD env, zsh 5.9, bash 3.2)."""
+    if i == 0 or kind.get("command") or kind.get("script") or not kind.get("shift"):
+        return None
+    base = os.path.basename(prepare.deglob(words[0])).casefold()
+    wrapper = syntax.WRAPPER_VALUE_OPTIONS.get(base)
+    if wrapper is not None:
+        return frozenset(o[1] for o in wrapper if len(o) == 2 and o.startswith("-"))
+    entry = syntax.ARG_WRITE_COMMANDS.get(base)
+    if entry is not None:
+        return frozenset(entry[1])
+    return None
+
+
+def _cluster_filler(letters):
+    """A single non-value option letter a `?` or `[...]` may stand for, so a cluster's letters before its value one can be
+    read as options getopt skips: any letter the command does not read as a value option."""
+    for c in "zqjxkwvybpg":
+        if c not in letters:
+            return c
+    return "z"
+
+
+def _cluster_units(tail, alphabet):
+    """The output characters each position of a masked cluster tail may take (a `?` any of `alphabet`, a `[...]` the class
+    members among it, any other character itself), or None when the tail holds a `*` (unbounded, fail closed) or a bracket
+    the reader cannot compile."""
+    units, i, n = [], 0, len(tail)
+    while i < n:
+        c = tail[i]
+        if c == "*":
+            return None
+        if c == "?":
+            units.append(list(alphabet))
+            i += 1
+        elif c == "[":
+            found = redirect_globs._bracket_regex(tail, i)
+            if found is None:  # a literal `[`, as both shells read an unbalanced bracket
+                units.append(["["])
+                i += 1
+            else:
+                try:
+                    rx = re.compile("(?:" + found[0] + r")\Z")
+                except re.error:
+                    return None
+                units.append([ch for ch in alphabet if rx.match(ch)])
+                i = found[1]
+        elif c in syntax._GLOB_UNSENTINEL:
+            units.append([syntax._GLOB_UNSENTINEL[c]])
+            i += 1
+        elif c in syntax._SENTINEL_TEXT:
+            units.append([syntax._SENTINEL_TEXT[c]])
+            i += 1
+        else:
+            units.append([c])
+            i += 1
+    return units
+
+
+def wrapper_cluster_readings(word, letters):
+    """([readings], too_large): the concrete option-word spellings a masked getopt option-cluster glob (`-` then a tail
+    holding a glob) can become that the command's getopt reads as taking a value -- the rest of the word or the next word --
+    each read again by the caller from the start of the line, so `env -i? 'git push'` is read as `env -iS 'git push'` and
+    the value-option `-S` splits the string (SPD-138).  Only a cluster with a value-option letter (`letters`) among its
+    positions is a reading; the harmless ones the spelled reading already covers.  too_large when a `*` makes the word
+    unbounded, the glob positions are too many, or the spellings reach the enumeration cap: the hook then fails closed for a
+    member (SPD-217)."""
+    if not letters or word[:1] != "-" or len(word) < 3:
+        return [], False
+    tail = word[1:]
+    if not any(c in "*?[" for c in tail):
+        return [], False
+    if "*" in tail:
+        return [], True
+    if sum(tail.count(c) for c in "?[") > CLUSTER_GLOB_LIMIT:
+        return [], True
+    units = _cluster_units(tail, sorted(set(letters) | {_cluster_filler(letters)}))
+    if units is None:
+        return [], True
+    count = 1
+    for u in units:
+        count *= max(len(u), 1)
+        if count > CLUSTER_CANDIDATE_LIMIT:
+            return [], True
+    readings, seen = [], set()
+    stack = [""]
+    for u in units:
+        stack = [prefix + ch for prefix in stack for ch in u]
+    for tail_spelling in stack:
+        cand = "-" + tail_spelling
+        if any(ch in letters for ch in tail_spelling) and cand not in seen:
+            seen.add(cand)
+            readings.append([literalize(cand)])
+    return readings, False
+
+
+def glob_readings(word, a, command=False, script=False, dash=False, shift=False, options=None, cluster=None):
     """(readings, ambiguous) for a masked word the shell expands before it runs the command (probed in zsh 5.9 -f, zsh
     -f -o nobareglobqual as the Bash tool runs it, and bash 3.2 with a fake git on a scratch PATH).  Each reading is the list of
     words the word may become:
@@ -226,6 +329,10 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False,
         matched = glob_sample_matches(key, False) if sep and active_glob_word(key) else None
         readings += [[s + sep + rest] for s in sorted(matched or ()) if s.startswith("-")]
         ambiguous = ambiguous or git_writes.may_become_file_option(word, *options)
+    if cluster and not ambiguous:
+        cluster_readings, too_large = wrapper_cluster_readings(word, cluster)
+        readings += cluster_readings
+        ambiguous = ambiguous or too_large
     span = trailing_group(word)
     if span is not None and "N" in word[span[0] :]:
         readings.append([])
@@ -250,14 +357,18 @@ def resolve_glob(words, i, kind, bodies, a, depth, budget, effect, prefixed, fre
     """Read words[i], a word the shell expands first, as each reading glob_readings gives.  One reading replaces it in
     place and the caller reads on (False).  Several are each analysed from the start of `words`, with the directories and
     variables after them those of every reading, as ShellWalk merges branches, and the caller stops (True).  An ambiguous word
-    is a "glob" finding, which refuses a member; past the budget every glob word left is read as spelled, ambiguous too."""
+    is a "glob" finding, which refuses a member; past the budget every glob word left is read as spelled, ambiguous too.
+
+    A glob at a getopt option position (`kind` carries `shift`, never the command word) is also read as each option cluster
+    it can become by `words[0]`'s own getopt (cluster_value_letters), a value option that takes the next word included, so
+    `env -i? 'git push'` reaches `env -iS 'git push'` and the wrapper splits the string (SPD-138)."""
     if budget[0] <= 0:
         spelled = prepare.deglob(words[i])
         words[i:] = [literalize(w) if active_glob_word(w) else w for w in words[i:]]
         a.kinds.append("glob")
         a.findings.append(("glob", spelled))
         return False
-    readings, ambiguous = glob_readings(words[i], a, **kind)
+    readings, ambiguous = glob_readings(words[i], a, cluster=cluster_value_letters(words, i, kind), **kind)
     if len(readings) > budget[0]:
         readings, ambiguous = readings[:1], True
     budget[0] -= len(readings)

@@ -712,6 +712,68 @@ class GlobCommandWordTest(BashHookCase):
         self.assertRefused("git push", "Law 7")
 
 
+class WrapperClusterGlobTest(BashHookCase):
+    """SPD-138: a glob inside a wrapper's option cluster is read as every cluster the wrapper's own getopt can take it for,
+    a value option included -- the letter that takes the rest of the word or the next word -- as a whole-word option glob
+    (`env -? ...`) already was.  env(1) and sudo(8) read a cluster with getopt: the first letter that takes a value ends it
+    (`env -iS 'echo hi'` split its string, probed with tests/probes/shell_probe.py).  A cluster whose letters the reader
+    cannot settle fails closed for a member (SPD-217); Spud's answers do not change.  AGENT_A plans tests/** and bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.planted = Path(tempfile.mkdtemp(prefix="spud-cluster-")).resolve()
+        self.addCleanup(shutil.rmtree, self.planted, True)
+        (self.planted / "-iS").write_text("", encoding="utf-8")  # the file zsh expands `-i?` to
+
+    def test_the_tickets_lines_are_refused_for_a_member(self):
+        lines = ("env -i? 'git push'", "env -v? 'git push'", "env -i? %s touch f" % self.out, "sudo -n? %s touch f" % self.out)
+        for cwd in (None, str(self.planted)):
+            for cmd in lines:
+                with self.subTest(cmd=cmd, cwd=cwd):
+                    self.assertRefused(cmd, "", AGENT_A, cwd)
+
+    def test_a_split_string_reached_through_a_cluster_names_the_push(self):
+        for cmd in ("env -i? 'git push'", "env -v? 'git push'", "env -i[S] 'git push'"):
+            with self.subTest(cmd):
+                self.assertIn("git push", self.assertRefused(cmd, "Law 7", AGENT_A).reason)
+
+    def test_spelled_clusters_and_a_whole_word_option_glob_read_as_today(self):
+        for ok in ("env -i ls", "env -iv ls", "env -i 'x'", "sudo -n ls", "nice -n 5 ls", "env -u X ls"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+        self.assertIn("git push", self.assertRefused("env -? 'git push'", "Law 7", AGENT_A).reason)
+        self.assertRefused("env -iS 'git push'", "Law 7", AGENT_A)
+
+    def test_spud_is_allowed_the_split_string_and_whole_word_lines(self):
+        # The git-push lines and the whole-word option glob read as before: Spud is never bound by a git finding.
+        for cmd in ("env -i? 'git push'", "env -v? 'git push'", "env -? 'git push'", "env -iS 'git push'"):
+            for cwd in (None, str(self.planted)):
+                with self.subTest(cmd=cmd, cwd=cwd):
+                    self.assertSilent(cmd, agent_id=None, cwd=cwd)
+
+    def test_arg_write_command_clusters_close_the_same_gap(self):
+        # Same kind, in scope: an arg-write command's getopt cluster (syntax.ARG_WRITE_COMMANDS' value letters) had the same
+        # gap.  `sed -n? '' f` can become `sed -ni '' f` (i=in-place, probed: BSD sed writes f), so a member is refused the
+        # in-place write it hid, while `sed -n '' f` (no in-place) stays silent.  Spud is not bound by an outside write.
+        target = "%s/x.txt" % self.out
+        self.assertRefused("sed -n? '' %s" % target, "write by argument", AGENT_A)
+        self.assertSilent("sed -n '' %s" % target)
+        for cwd in (None, str(self.planted)):
+            self.assertSilent("sed -n? '' %s" % target, agent_id=None, cwd=cwd)
+        self.assertSilent("sed -n? '' tests/keep.py")  # a deliverable in place: allowed
+
+    def test_spud_now_sees_the_write_the_cluster_hid(self):
+        # SPD-128's shape: `env -i? <dir> touch f` read <dir> as the command and recorded no write.  The cluster reading now
+        # reaches `env -iu <dir> touch f` (u=--unset), whose `touch f` runs in the cwd, so Spud earns Law 1 in the home for
+        # it (as `touch push` in the home already did) and is allowed where the cwd is outside every project.
+        for cmd in ("env -i? %s touch f" % self.out, "sudo -n? %s touch f" % self.out):
+            with self.subTest(cmd=cmd):
+                self.assertRefused(cmd, "Law 1", agent_id=None)  # cwd None: the home
+                self.assertSilent(cmd, agent_id=None, cwd=str(self.out))
+
+
 class GlobGroupSegmentTest(BashHookCase):
     """SPD-179, filed by SPD-174's engineer: globbing.glob_readings split a command word at its last `/` even inside a zsh
     group, and redirect_globs._segment_regex read a segment it could not compile -- the group's unbalanced close -- as
