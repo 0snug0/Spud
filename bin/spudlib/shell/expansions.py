@@ -2,7 +2,7 @@
 
 import functools
 
-from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
+from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_programs, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
 from ..core import lazy
 from ..hooks import hookio, snapshots
 
@@ -536,10 +536,17 @@ def verb_option_read_index(words, verb_at, start):
     git writes (git_writes.may_become_file_option: `git log --outp?t=<path>`, never `--grep=$P`); and on a verb of
     syntax.GIT_VERB_FILE_OPTIONS also a word that starts with its expansion (`git archive $OPT HEAD`), which may become
     any option at all.  The value a literal file option takes as the next word is a path, not an option, and is left
-    to the path rule (`git archive -o $T HEAD`)."""
+    to the path rule (`git archive -o $T HEAD`).
+    On a verb of syntax.GIT_VERB_PROGRAM_OPTIONS (git_programs.reads_leading_expansion) a word that starts with its
+    expansion is read too, where git still reads options (SPD-171): not as the value a spelled option takes as the next
+    word (`git fetch --depth $N r`, `git grep -e $P`), nor past the first word ls-remote or grep reads as no option
+    (`git ls-remote origin $REF`, `git grep foo $R`: git_programs.GIT_OPTIONS_STOP_VERBS)."""
     verb = words[verb_at]
     longs, shorts = git_writes.git_read_options(verb)
     program, table = verb in syntax.GIT_VERB_PROGRAM_OPTIONS, verb in syntax.GIT_VERB_FILE_OPTIONS
+    leading = git_programs.reads_leading_expansion(verb)
+    stops = leading and verb in git_programs.GIT_OPTIONS_STOP_VERBS
+    value = past = False  # the word is a spelled option's value; git reads no more options (a stopping verb)
     k = verb_at + 1
     while k < len(words):
         w = words[k]
@@ -547,10 +554,16 @@ def verb_option_read_index(words, verb_at, start):
             return None
         if active_read_word(w):
             dash = w.startswith("-")
-            if k >= start and ((program and dash) or ((dash or table) and git_writes.may_become_file_option(w, longs, shorts))):
+            opens = leading and not (dash or value or past) and expansion_word(w) and git_writes.literal_head(w) == ""
+            if k >= start and ((program and (dash or opens)) or ((dash or table) and git_writes.may_become_file_option(w, longs, shorts))):
                 return k
+            value = False
         elif (git_writes.file_option_spelling(w, longs, shorts) or (None, False))[1]:
             k += 1  # the path a spaced file option names
+            value = False
+        elif leading:
+            past = past or (stops and not value and not w.startswith("-"))
+            value = not value and w.startswith("-") and git_programs.takes_value(verb, w)
         k += 1
     return None
 

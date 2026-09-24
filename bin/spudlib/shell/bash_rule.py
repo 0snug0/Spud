@@ -107,6 +107,12 @@ VAR_WORD_REASON = ("the word %s holds a parameter expansion, arithmetic or a sub
                    " line does not spell at all, where the command is read by name (a wrapper's options, git's options, verb and the"
                    " arguments it checks, a shell's or an interpreter's options and program, a spud call's words, the options of a command"
                    " that writes by argument); spell the words out")
+# ... and what it adds on a line that runs git, whose options a word starting with an expansion may become (SPD-089,
+# SPD-171): the respellings git itself takes.  Probed on git 2.54.0: after `--` ls-remote and fetch read a word as their
+# repository or a refspec and never an option (git_programs.GIT_OPTIONS_STOP_VERBS' note).
+GIT_VAR_WORD_NOTE = (" (where git still reads its options, spell the option itself, or end git's options with `--` before"
+                     " the word, so git reads it as a repository, a refspec or a path: `git fetch origin -- \"$B\"`,"
+                     " `git ls-remote -- \"$URL\"`)")
 # The reason for an awk program or a sed script the line does not settle at all (shell/script_text's "script-word" and
 # "script-input", SPD-260, SPD-265), read where "inline-word" is, last, so a write out of the same input keeps its own
 # reason.  A member alone.  The detail is one string, the command word and the script word as spelled.
@@ -508,7 +514,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         elif kind == "var":
             return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
         elif kind == "var-word":
-            return VAR_WORD_REASON % detail, analysis
+            return VAR_WORD_REASON % detail + (GIT_VAR_WORD_NOTE if analysis.git_calls else ""), analysis
         elif kind == "git-input":
             return GIT_INPUT_REASON % detail, analysis
         elif kind == "eval-flag":
