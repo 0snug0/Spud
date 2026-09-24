@@ -10,11 +10,13 @@ append-only triggers intact.  Forward only: a v4 database carries no pull reques
 import sqlite3
 import unittest
 
-from helpers import EXIT_ERROR, Home, load_spud_module
+from helpers import load_spud_module
+from test_migrations import MigrationCase
 
 spud = load_spud_module()
 
-# The views and triggers of schema v4, verbatim from bin/spudlib/state/schema.py before SPD-077.
+# The views and triggers of schema v4, verbatim from bin/spudlib/state/schema.py before SPD-077.  0005 to 0008 changed no
+# view (git diff 2a7fcee 21a835e: a comment), so this is v5's to v8's as well; 0009_member_effort named effort in v_fleet.
 V4_VIEWS_AND_TRIGGERS = """
 CREATE VIEW v_board AS
 SELECT t.key, (SELECT pr.key FROM projects pr WHERE pr.id = t.project_id) AS project,
@@ -52,61 +54,30 @@ AT = "2026-09-17T10:00:00-07:00"
 TICKETS = [(1, "active", "P1", "Active one"), (2, "queued", "P2", "Queued one"), (3, "done", "P0", "Done one")]
 
 
-class MigratePullRequestsTest(unittest.TestCase):
-    def setUp(self):
-        self.home = Home()
-        self.addCleanup(self.home.cleanup)
-        self.home.db.parent.mkdir(parents=True)
-        con = sqlite3.connect(self.home.db, autocommit=True)
-        try:
-            con.execute("PRAGMA journal_mode = WAL")
-            for ddl in (spud.DDL_0001, spud.DDL_0002, spud.DDL_0003, spud.DDL_0004):
-                con.executescript(ddl)
-            con.executescript(V4_VIEWS_AND_TRIGGERS)
-            con.execute("PRAGMA user_version = 4")
-            con.execute("INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at) VALUES (1, 'spud', 'Spud', ?, 'SPD', 'SPUD', ?)",
-                        (str(self.home.path), AT))
-            for name in self.home.config["naming"]["pool"]:
-                con.execute("INSERT INTO name_pool (name) VALUES (?)", (name,))
-            for number, status, priority, title in TICKETS:
-                con.execute("INSERT INTO tickets (project_id, number, key, team_key, title, priority, status, origin, created_at, updated_at)"
-                            " VALUES (1, ?, ?, ?, ?, ?, ?, 'eric', ?, ?)",
-                            (number, "SPD-%03d" % number, "SPUD-%03d" % number, title, priority, status, AT, AT))
-            con.execute("INSERT INTO members (ticket_id, lineage, depth, name, persona, model, status, brief, deliverables, planned_at)"
-                        " VALUES (1, '01', 1, 'Russet', 'engineer', 'opus', 'active', 'Build it.', '[\"bin/**\"]', ?)", (AT,))
-            con.execute("UPDATE tickets SET lead_id = 1 WHERE id = 1")
-            con.execute("INSERT INTO events (at, actor, ticket_id, member_id, kind, body) VALUES (?, 'spud', 1, 1, 'member.planned', 'planned Russet')", (AT,))
-            con.execute("INSERT INTO events (at, actor, ticket_id, kind, body, data) VALUES (?, 'spud', 1, 'ticket.worktree', 'bound', '{}')", (AT,))
-            con.execute("INSERT INTO handoffs (ticket_id, at, from_member_id, what) VALUES (1, ?, 1, 'the spike')", (AT,))
-            con.execute("INSERT INTO proposals (ticket_id, origin_member_id, title, why, evidence, filed_at, status)"
-                        " VALUES (1, 1, 'A proposal', 'because', 'the code', ?, 'open')", (AT,))
-        finally:
-            con.close()
+class MigratePullRequestsTest(MigrationCase):
+    MIGRATION, VERSION, VIEWS, AT = "0005_pull_requests", 4, V4_VIEWS_AND_TRIGGERS, AT
 
-    def migrate(self):
-        return self.home.json("migrate")
-
-    def test_the_cli_refuses_a_v4_database_until_migrate(self):
-        proc = self.home.run("board", check=False)
-        self.assertEqual(proc.returncode, EXIT_ERROR)
-        self.assertIn("behind", proc.stderr)
-        self.migrate()
-        self.assertIn("SPD-001", self.home.run("board").stdout)
+    def seed(self, con):
+        for number, status, priority, title in TICKETS:
+            con.execute("INSERT INTO tickets (project_id, number, key, team_key, title, priority, status, origin, created_at, updated_at)"
+                        " VALUES (1, ?, ?, ?, ?, ?, ?, 'eric', ?, ?)",
+                        (number, "SPD-%03d" % number, "SPUD-%03d" % number, title, priority, status, AT, AT))
+        con.execute("INSERT INTO members (ticket_id, lineage, depth, name, persona, model, status, brief, deliverables, planned_at)"
+                    " VALUES (1, '01', 1, 'Russet', 'engineer', 'opus', 'active', 'Build it.', '[\"bin/**\"]', ?)", (AT,))
+        con.execute("UPDATE tickets SET lead_id = 1 WHERE id = 1")
+        con.execute("INSERT INTO events (at, actor, ticket_id, member_id, kind, body) VALUES (?, 'spud', 1, 1, 'member.planned', 'planned Russet')", (AT,))
+        con.execute("INSERT INTO events (at, actor, ticket_id, kind, body, data) VALUES (?, 'spud', 1, 'ticket.worktree', 'bound', '{}')", (AT,))
+        con.execute("INSERT INTO handoffs (ticket_id, at, from_member_id, what) VALUES (1, ?, 1, 'the spike')", (AT,))
+        con.execute("INSERT INTO proposals (ticket_id, origin_member_id, title, why, evidence, filed_at, status)"
+                    " VALUES (1, 1, 'A proposal', 'because', 'the code', ?, 'open')", (AT,))
 
     def test_migrate_writes_the_backup_and_the_empty_table(self):
         tickets = self.home.rows("SELECT * FROM tickets ORDER BY id")
         events = self.home.rows("SELECT * FROM events ORDER BY id")
-        out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9))
-        self.assertEqual(len(out["backups"]), 5)
-        self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0005_pull_requests\.db$")
-        backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
-        try:
-            self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 4)
-        finally:
-            backup.close()
-        self.assertEqual(self.home.rows("SELECT * FROM tickets ORDER BY id"), [dict(r, origin="owner") for r in tickets])
-        self.assertEqual(self.home.rows("SELECT * FROM events ORDER BY id"), events)
+        self.assert_migrated(self.migrate())
+        # 0006_owner_origin, later in the chain, writes 'eric' as 'owner'
+        self.assertEqual(self.as_before(self.home.rows("SELECT * FROM tickets ORDER BY id"), tickets), [dict(r, origin="owner") for r in tickets])
+        self.assertEqual(self.as_before(self.home.rows("SELECT * FROM events ORDER BY id"), events), events)
         self.assertEqual(self.home.rows("SELECT * FROM pull_requests"), [])
         self.assertEqual(self.home.rows("PRAGMA foreign_key_check"), [])
         self.assertEqual(self.home.json("migrate")["applied"], [])
@@ -172,14 +143,6 @@ class MigratePullRequestsTest(unittest.TestCase):
         self.migrate()
         self.assertEqual(self.home.rows("SELECT key, worktree FROM v_board WHERE key = 'SPD-001'"), [{"key": "SPD-001", "worktree": None}])
         self.assertEqual([r["name"] for r in self.home.rows("SELECT name FROM v_fleet")], ["Russet"])
-
-    def test_a_fresh_init_applies_them_all(self):
-        other = Home()
-        self.addCleanup(other.cleanup)
-        out = other.init()
-        self.assertEqual((out["applied"], out["user_version"], out["backups"]),
-                         (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9, []))
-        self.assertEqual(other.scalar("SELECT count(*) FROM pull_requests"), 0)
 
 
 if __name__ == "__main__":

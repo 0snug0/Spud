@@ -15,7 +15,8 @@ from hookcase import AGENT_A, AGENT_B, AGENT_C, INLINE_WORDING, SCRIPT_WORDING, 
 
 
 # A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
-# files on this Mac are 4,100 lines and 124 KB; nothing here reads them, and a test never touches ~/.claude.
+# files on this Mac are 4,100 lines and 124 KB; nothing here reads them unless RealShellSnapshotTest is asked to
+# (REAL_SNAPSHOTS), and a test never touches ~/.claude.
 SHELL_SNAPSHOT = """\
 # Snapshot file
 # Unset all aliases to avoid conflicts with functions
@@ -293,8 +294,10 @@ class ShellSnapshotTest(ShellSnapshotCase):
         """Reading the shell's table is only safe because a member cannot write one: an alias of its own making would make
         a line the hook refuses silent (`alias git=echo` reaches the dispatch as `echo push`).  SPD-064 already refuses a
         caller with an agent_id every path outside a registered project, and ~/.claude is one -- asserted here because it
-        is this reading's premise, not an accident of it.  Nothing is written: the hook is asked about the path."""
-        planted = os.path.expanduser("~/.claude/shell-snapshots/snapshot-zsh-1900000000000-planted.sh")
+        is this reading's premise, not an accident of it.  Nothing is written: the hook is asked about the path.  SPD-233:
+        the ~/.claude is the payloads' own user's (TRANSCRIPT's /Users/Someone), which no machine has, where it was this
+        Mac's real one: the hook's answer is the path's, and the test reads nothing of the machine's."""
+        planted = "/Users/Someone/.claude/shell-snapshots/snapshot-zsh-1900000000000-planted.sh"
         self.assertFalse(os.path.exists(planted))
         for agent_id in (AGENT_A, AGENT_B):
             with self.subTest(agent_id=agent_id):
@@ -340,18 +343,29 @@ class ShellSnapshotTest(ShellSnapshotCase):
         return a.shell_expanded
 
 
+REAL_SNAPSHOTS = "SPUD_TEST_REAL_SHELL_SNAPSHOTS"  # set to 1 to run RealShellSnapshotTest against this machine's profile
+
+
 class RealShellSnapshotTest(BashHookCase):
-    """The same rule against this Mac's own ~/.claude/shell-snapshots, skipped where there is none: the ticket's evidence
-    was Eric's oh-my-zsh profile, and nothing here is asserted about a name that profile does not define.  Never fails the
-    suite on Eric's dotfiles -- it only checks that a name the shell really does define as a git write is refused, and
-    that the names members run all day are not."""
+    """The same rule against this Mac's own ~/.claude/shell-snapshots: the ticket's evidence was Eric's oh-my-zsh profile,
+    and nothing here is asserted about a name that profile does not define.  It checks that a name the shell really does
+    define as a git write is refused, and that the names members run all day are not.
+
+    SPD-233: what it reads is the machine's, not the tree's, so it is an explicit skip unless REAL_SNAPSHOTS is set to 1
+    and the directory holds a snapshot: a run then says what it needs rather than passing on one Mac and skipping on
+    another.  Every rule it checks is also asserted on a snapshot of the suite's own making -- a git write an alias names
+    (ShellSnapshotTest), `__git_prompt_git`'s own body (FunctionWordsTest's `gitfn`), the commands members run all day
+    (ShellSnapshotTest, test_hooks_programs.InlineProgramTest) -- so this is a check of this Mac's profile, run on purpose, and never the
+    only test of a rule."""
 
     def setUp(self):
+        directory = Path(os.path.expanduser("~/.claude")) / "shell-snapshots"
+        if os.environ.get(REAL_SNAPSHOTS) != "1":
+            self.skipTest("reads this machine's own %s: set %s=1 to run it" % (directory, REAL_SNAPSHOTS))
+        if not directory.is_dir() or not list(directory.glob("snapshot-*.sh")):
+            self.skipTest("needs a shell snapshot in %s, which Claude Code writes once a session has run Bash" % directory)
         super().setUp()
         m = load_spud_module()
-        directory = Path(os.path.expanduser("~/.claude")) / "shell-snapshots"
-        if not directory.is_dir() or not list(directory.glob("snapshot-*.sh")):
-            self.skipTest("no shell snapshot in %s" % directory)
         self.table = m.build_table(sorted((str(p) for p in directory.glob("snapshot-*.sh")), reverse=True))
         self.env = dict(self.home.env)
         self.env.pop("SPUD_USER_CLAUDE_DIR")  # this run reads the real ~/.claude

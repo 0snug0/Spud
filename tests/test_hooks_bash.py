@@ -71,8 +71,8 @@ class PreBashTest(BashHookCase):
             reason = self.assertRefused("%s schedule %s" % (self.spud_cli, verb), "Law 6").reason
             self.assertIn("spud schedule", reason)
             self.assertIn("proposal file", reason)
-        self.assertRefused("%s/bin/spud ticket new --title x" % self.home.path, "Law 6")
-        self.assertRefused("cd %s && python3.14 -I -S bin/spud ticket new --title x" % self.home.path, "Law 6")
+        self.assertRefused("%s ticket new --title x" % self.home.launcher, "Law 6")
+        self.assertRefused("cd %s && python3.14 -I -S bin/spud ticket new --title x" % self.home.tool, "Law 6")
         self.assertRefused("spud ticket new --title x", "Law 6")
         self.assertRefused("%s ticket show SPD-001 && %s init" % (self.spud_cli, self.spud_cli), "Law 6")
 
@@ -213,7 +213,7 @@ class PreBashTest(BashHookCase):
     def test_a_spud_call_is_recognized_however_its_script_is_spelled(self):
         """SPD-029: Law 6's refusals depend on seeing a spud call.  A case variant or a fold of bin/spud's name is the
         same file on macOS, and a symlink by any name runs the launcher (it finds its program from its real path)."""
-        home = self.home.path
+        home = self.home.tool  # the launcher's checkout
         (home / "bin").mkdir(exist_ok=True)
         (home / "bin" / "spud").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
         (home / "tests").mkdir(exist_ok=True)
@@ -242,12 +242,25 @@ class SpudAllowIdentityTest(BashHookCase):
     but SPUD_HOME naming the root, and no redirection into a file.  A call it recognizes by name but cannot vouch for is still
     refused for Laws 5 and 6 and otherwise stays silent, so the harness's permission rules and prompt decide."""
 
+    tool_sessions_always = True  # one spelling runs from a worktree of the tool, as a session of Spud's there without a claim
+
     def setUp(self):
         super().setUp()
         self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
         self.addCleanup(shutil.rmtree, self.out, True)
-        self.launcher = self.home.path / "bin" / "spud"
+        self.launcher = self.home.launcher
         self.log = "--as %s member log hi" % AGENT_A
+        # SPD-233: a bare `python3.14` is vouched for only when the first python3.14 on the hook's PATH is the file the hook
+        # runs on, in its own directory (shell/spud_calls.interpreter_vouched).  The hook reads the home's environment, which
+        # was the suite's own PATH, so the allow hung on the order of whoever started the run; the PATH it sees is pinned
+        # here, the interpreter's directory first and the rest as it was.
+        interpreters = os.path.dirname(sys.executable)
+        beside = os.path.join(interpreters, "python3.14")
+        if not (os.path.isfile(beside) and os.path.samefile(beside, sys.executable)):
+            self.skipTest("needs a python3.14 beside the interpreter running the suite (%s), the one file a bare name is vouched "
+                          "for" % sys.executable)
+        rest = [p for p in self.home.env.get("PATH", "").split(os.pathsep) if p and p != interpreters]
+        self.home.env["PATH"] = os.pathsep.join([interpreters] + rest)
 
     def assertSilentForBoth(self, spelled, cwd=None):
         """`spelled` is a command line with {tail} where the spud arguments go: silent for the lead and for Spud."""
@@ -296,7 +309,7 @@ class SpudAllowIdentityTest(BashHookCase):
     def test_a_worktrees_launcher_is_not_the_ledgers(self):
         """Root only: a worktree's bin/spud_ledger.py is a member's deliverable on a code ticket (bin/**), so its launcher runs
         code a member may just have written.  The prescribed spelling names the root's launcher, from any directory."""
-        wt = self.home.path / ".claude" / "worktrees" / "spd-999-x"
+        wt = self.home.tool / ".claude" / "worktrees" / "spd-999-x"
         (wt / "bin").mkdir(parents=True)
         shutil.copyfile(SPUD, wt / "bin" / "spud")
         shutil.copyfile(PROGRAM, wt / "bin" / "spud_ledger.py")
@@ -388,7 +401,7 @@ class SpudAllowIdentityTest(BashHookCase):
         """The #! line runs /opt/homebrew/bin/python3.14 with no flags, so the environment's PYTHONPATH and the site .pth files
         load code before the program (probed).  Silent, and since SPD-038 settings sync writes no native allow rule for that
         spelling, so the harness prompts."""
-        for spelled in ("%s {tail}" % self.launcher, "cd %s && bin/spud {tail}" % self.home.path, "spud {tail}"):
+        for spelled in ("%s {tail}" % self.launcher, "cd %s && bin/spud {tail}" % self.home.tool, "spud {tail}"):
             with self.subTest(spelled=spelled):
                 self.assertSilentForBoth(spelled)
                 self.assertStillRefused(spelled)
@@ -415,8 +428,6 @@ class SpudAllowIdentityTest(BashHookCase):
         launcher = self.launcher
         self.assertAllowedForBoth("SPUD_HOME=%s python3.14 -I -S %s {tail}" % (home, launcher))
         self.assertAllowedForBoth("SPUD_HOME=%s/ python3.14 -I -S %s {tail}" % (home, launcher))
-        if case_insensitive_fs(home):
-            self.assertAllowedForBoth("SPUD_HOME=%s python3.14 -I -S %s {tail}" % (str(home).swapcase(), launcher))
         for value in (self.out, "%s/elsewhere" % home, "$HOME/x", "", "'%s'x" % home, "~"):
             with self.subTest(value=str(value)):
                 spelled = "SPUD_HOME=%s python3.14 -I -S %s {tail}" % (value, launcher)
@@ -424,9 +435,27 @@ class SpudAllowIdentityTest(BashHookCase):
                 self.assertStillRefused(spelled)
                 self.assertSilentForBoth("SPUD_HOME=%s; python3.14 -I -S %s {tail}" % (value, launcher))
 
+    # SPD-233: a path in another case names the same directory only where the filesystem folds case, which is the
+    # machine's, so these are tests of their own that skip, saying so, on a case-sensitive filesystem -- where an `if` in
+    # the tests above once dropped them without a word.
+    def needs_a_case_insensitive_filesystem(self, path):
+        if not case_insensitive_fs(path):
+            self.skipTest("needs a case-insensitive filesystem at %s" % path)
+
+    def test_spud_home_in_another_case_names_the_root_where_the_filesystem_folds_case(self):
+        home = self.home.path
+        self.needs_a_case_insensitive_filesystem(home)
+        self.assertAllowedForBoth("SPUD_HOME=%s python3.14 -I -S %s {tail}" % (str(home).swapcase(), self.launcher))
+
+    def test_the_launcher_in_another_case_is_the_roots_where_the_filesystem_folds_case(self):
+        tool = self.home.tool
+        self.needs_a_case_insensitive_filesystem(tool)
+        self.assertAllowedForBoth("python3.14 -I -S %s/BIN/SPUD {tail}" % str(tool).upper())
+        self.assertAllowedForBoth("cd %s && python3.14 -I -S Bin/Spud {tail}" % str(tool).swapcase())
+
     def test_relative_and_indirect_spellings_by_identity(self):
         """A relative launcher is the root's from every directory the shell may be in (SPD-030's candidates), or silent."""
-        home = self.home.path
+        home = self.home.tool  # the directory the launcher is in: bin/spud is relative to the tool checkout
         (home / "tests").mkdir(exist_ok=True)
         (home / "tests" / "tool").symlink_to(self.launcher)
         for spelled, cwd in (("python3.14 -I -S bin/spud {tail}", str(home)), ("python3.14 -I -S ./bin/spud {tail}", str(home)),
@@ -435,9 +464,6 @@ class SpudAllowIdentityTest(BashHookCase):
                              ("python3.14 -I -S %s/tests/../bin/spud {tail}" % home, None)):
             with self.subTest(spelled=spelled, cwd=cwd):
                 self.assertAllowedForBoth(spelled, cwd)
-        if case_insensitive_fs(home):
-            self.assertAllowedForBoth("python3.14 -I -S %s/BIN/SPUD {tail}" % str(home).upper())
-            self.assertAllowedForBoth("cd %s && python3.14 -I -S Bin/Spud {tail}" % str(home).swapcase())
         (self.out / "bin").mkdir()
         (self.out / "bin" / "spud").write_text("print('not the ledger')\n", encoding="utf-8")
         for spelled, cwd in (("python3.14 -I -S bin/spud {tail}", str(self.out)), ("cd %s && python3.14 -I -S bin/spud {tail}" % self.out, None),
@@ -466,7 +492,7 @@ class SpudAllowIdentityTest(BashHookCase):
 
     def test_every_prescribed_spelling_stays_allowed(self):
         """CLAUDE.md's `spud` and the brief template's: Spud's and a member's, --json, @- heredocs, @file, a worktree's cwd."""
-        wt = self.home.path / ".claude" / "worktrees" / "spd-999-x"
+        wt = self.home.tool / ".claude" / "worktrees" / "spd-999-x"
         wt.mkdir(parents=True)
         cli = "python3.14 -I -S %s" % self.launcher
         lead = self.lead["ref"]

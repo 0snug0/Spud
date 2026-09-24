@@ -32,7 +32,7 @@ class ProjectAddTest(RepoMixin, SpudTestCase):
         self.assertFalse((self.other / ".claude").exists())
         self.assertEqual(git(self.other, "status", "--porcelain"), "")
         events = self.home.json("events", "--kind", "project.added")["events"]
-        self.assertEqual([e["data"]["project"] for e in events], ["badtakes"])
+        self.assertEqual([e["data"]["project"] for e in events], ["spud", "badtakes"])  # init registered project 1
         entries = self.home.json("events", "--kind", "report.entry")["events"]
         self.assertTrue(any("Project badtakes added" in e["data"]["title"] for e in entries), entries)
 
@@ -62,9 +62,8 @@ class ProjectAddTest(RepoMixin, SpudTestCase):
         self.assertIn("register the main checkout, %s" % self.other, proc.stderr)
 
     def test_rule_3_not_the_home_and_never_nested(self):
-        git(self.home.path, "init", "-q", "-b", "main")
         self.refused("project", "add", self.home.path, "--key", "x", "--ticket-prefix", "X", "--team-prefix", "XS", "--landing", "pr", actor="spud", needle="Spud's home")
-        inner = self.home.path / "vendor" / "lib"
+        inner = self.home.tool / "vendor" / "lib"
         inner.mkdir(parents=True)
         git(inner, "init", "-q", "-b", "main")
         self.refused("project", "add", inner, "--key", "x", "--ticket-prefix", "X", "--team-prefix", "XS", "--landing", "pr", actor="spud", needle="inside project spud's root")
@@ -118,7 +117,7 @@ class ProjectAddTest(RepoMixin, SpudTestCase):
         self.add_project(self.other)
         rows = self.cli_json("project", "list")["projects"]
         self.assertEqual([r["key"] for r in rows], ["spud", "badtakes"])
-        self.assertEqual(rows[0]["root"], str(self.home.path))
+        self.assertEqual(rows[0]["root"], str(self.home.tool))
         text = self.cli("project", "show", "badtakes").stdout
         self.assertIn("BAD-nnn tickets, BADS-nnn teams", text)
         self.assertIn("installed       no", text)
@@ -166,7 +165,7 @@ class ProjectEditRemoveTest(RepoMixin, SpudTestCase):
                 self.assertEqual(proc.returncode, EXIT_ERROR, proc)
                 self.assertIn(needle, proc.stderr)
         self.assertEqual(self.cli_json("project", "edit", "spud", "--default-branch", "trunk", actor="spud")["changed"], ["default_branch"])
-        self.assertEqual(self.cli_json("project", "edit", "spud", "--sessions", "claim", actor="spud")["changed"], ["sessions"])
+        self.assertEqual(self.cli_json("project", "edit", "spud", "--sessions", "always", actor="spud")["changed"], ["sessions"])
 
     def test_remove_deletes_an_empty_project_and_archives_one_with_tickets(self):
         out = self.cli_json("project", "remove", "badtakes", actor="spud")
@@ -496,8 +495,9 @@ class ProjectRenderTest(RepoMixin, SpudTestCase):
         for rel in ("ledger/tickets/BAD-001.md", "ledger/teams/BADS-001/Russet.md", "ledger/Projects.md"):
             mine = (self.home.path / rel).read_text(encoding="utf-8")
             theirs = (out / rel).read_text(encoding="utf-8")
-            if rel.endswith("Projects.md"):  # the home row's root is each home's own
-                mine, theirs = mine.replace(str(self.home.path), "<home>"), theirs.replace(str(fresh.path), "<home>")
+            if rel.endswith("Projects.md"):  # the home row's root is each home's own, and project spud's each home's tool
+                mine = mine.replace(str(self.home.path), "<home>").replace(str(self.home.tool), "<tool>")
+                theirs = theirs.replace(str(fresh.path), "<home>").replace(str(fresh.tool), "<tool>")
             self.assertEqual(theirs, mine, rel)
 
     def test_board_card_and_events_by_project(self):

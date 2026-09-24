@@ -4,12 +4,17 @@ other key preserved. Always against a temp file.
 
 HookEvidenceTest is SPW-003: the one reading of a settings file, which `settings sync`
 writes, doctor asks per project and `session show` asks of the files its own session
-loads -- and the two hand-rolled pieces that reading rests on, pinned against the
-standard library and against the table sync installs.
+loads; HookTableTest pins the two hand-rolled pieces that reading rests on against the
+standard library and against the table sync installs, and needs no home.
 
-OlderInstallTest is SPD-223: the table writes PreToolUse as one row where every sync before
-it wrote three, so a file an older sync or install left must read as installed and come
-out of the next one with the one row.
+SPD-233 retired OlderInstallTest (SPD-223's three PreToolUse rows read as installed and
+rewritten as one, in a plain and a quoted home) and the direct launcher allow rule's own
+test (SPD-038): on 2026-09-24 `spud doctor` on this machine, and the settings files it
+reads, showed the home and both installed projects past both shapes.  What they reached beside the upgrade is still held:
+foreign rows kept through a merge (test_merge_keeps_foreign_hooks_and_replaces_stale_ledger_hooks),
+the quoted home's lines replaced in place (QuotedPathHomeTest, test_install.QuotedPathInstallTest),
+and every rule of the ledger's shape dropped while its near misses stay
+(test_a_ledger_shaped_rule_for_another_home_is_replaced_like_a_stale_one).
 
 DoctorHomeSettingsTest is SPW-006: the same reading turned on the home's own
 .claude/settings.json, which is the file this command writes by default and the whole
@@ -23,7 +28,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from helpers import EXIT_ERROR, EXIT_OK, RepoMixin, SpudTestCase, load_spud_module
+from helpers import EXIT_ERROR, EXIT_OK, SpudTestCase, load_spud_module
 
 FIXTURE = {
     "model": "claude-fable-5-1",
@@ -42,19 +47,11 @@ EVENTS = {
     "UserPromptSubmit": [None],  # SPD-057
 }
 
-# The table every sync wrote before SPD-223, PreToolUse in three rows carrying the one command and timeout: what an older
-# `settings sync` or `project install` left in a settings file, and so what OlderInstallTest starts from.
-OLDER_TABLE = (
-    ("PreToolUse", "Agent"), ("PreToolUse", "Bash"), ("PreToolUse", "Write|Edit|MultiEdit|NotebookEdit"),
-    ("PostToolUse", "Agent"), ("SubagentStart", None), ("SubagentStop", None),
-    ("SessionStart", "startup|resume|clear|compact"), ("Stop", None), ("UserPromptSubmit", None),
-)
 
-
-def prescribed_allow_rules(home):
-    """The allow rules settings sync writes for a home since SPD-038: the prescribed call, `python3.14 -I -S <home>/bin/spud`,
+def prescribed_allow_rules(tool):
+    """The allow rules settings sync writes for a home since SPD-038: the prescribed call, `python3.14 -I -S <tool>/bin/spud`,
     by the documented interpreter name and by the absolute interpreter.  No rule for the launcher run by its own path."""
-    return ["Bash(python3.14 -I -S %s/bin/spud *)" % home, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, home)]
+    return ["Bash(python3.14 -I -S %s/bin/spud *)" % tool, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, tool)]
 
 
 AGENT_DENY = ["Agent(isolation:*)", "Agent(model:inherit)"]
@@ -168,7 +165,7 @@ class SettingsSyncTest(SpudTestCase):
         for event, matcher, h in found:
             self.assertEqual(h["type"], "command")
             self.assertEqual(h["timeout"], 30)
-            self.assertTrue(h["command"].startswith("SPUD_HOME=%s %s -I -S %s/bin/spud hook %s" % (self.home.path, sys.executable, self.home.path, event)), h["command"])
+            self.assertTrue(h["command"].startswith("SPUD_HOME=%s %s -I -S %s hook %s" % (self.home.path, sys.executable, self.home.launcher, event)), h["command"])
         # matcher-less events carry no matcher key at all
         for group in data["hooks"]["SubagentStart"] + data["hooks"]["SubagentStop"] + data["hooks"]["Stop"] + data["hooks"]["UserPromptSubmit"]:
             self.assertNotIn("matcher", group)
@@ -189,33 +186,27 @@ class SettingsSyncTest(SpudTestCase):
         path = self.home.path / ".claude" / "settings.json"
         out = self.home.json("settings", "sync", "--path", path)
         allow = out["settings"]["permissions"]["allow"]
-        self.assertEqual(allow, prescribed_allow_rules(self.home.path))
-        self.assertNotIn("Bash(%s/bin/spud *)" % self.home.path, allow)
+        self.assertEqual(allow, prescribed_allow_rules(self.home.tool))
+        self.assertNotIn("Bash(%s *)" % self.home.launcher, allow)
         self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"], allow)
-
-    def test_sync_removes_the_direct_launcher_rule_and_keeps_unrelated_rules(self):
-        # SPD-038: a settings file an older sync wrote holds `Bash(<home>/bin/spud *)`.  The rule of the ledger's own shape
-        # (ALLOW_RULE_MARK, as for a stale home) is dropped and not written back; every other rule keeps its place.
-        home = self.home.path
-        unrelated = ["Bash(date:*)", "Bash(git status *)", "Read(./notes/**)", "Bash(%s/bin/spud_ledger.py *)" % home, "Bash(cat %s/bin/spud)" % home]
-        old = ["Bash(python3.14 -I -S %s/bin/spud *)" % home, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, home), "Bash(%s/bin/spud *)" % home]
-        legacy = "Bash(%s/bin/spud:*)" % home
-        path = self.home.write_settings({"permissions": {"allow": unrelated[:2] + old + [legacy] + unrelated[2:], "deny": ["Bash(rm -rf *)"]}})
-        out = self.home.json("settings", "sync", "--path", path)
-        self.assertTrue(out["written"])
-        allow = json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"]
-        self.assertEqual(allow, unrelated + prescribed_allow_rules(home))
-        self.assertFalse(any(a in allow for a in ("Bash(%s/bin/spud *)" % home, legacy)), allow)
-        again = self.home.json("settings", "sync", "--path", path)
-        self.assertFalse(again["written"])
 
     def test_a_ledger_shaped_rule_for_another_home_is_replaced_like_a_stale_one(self):
         # What the merge does with another home's rules (SPD-038 brief item 2): every `Bash(... bin/spud *)` rule is the
-        # ledger's, whatever home it names, so the direct and prescribed rules of a moved or other home both go, as the
-        # /old case below pins; rules of any other shape stay.
-        path = self.home.write_settings({"permissions": {"allow": ["Bash(/other/bin/spud *)", "Bash(python3.14 -I -S /other/bin/spud *)", "Bash(/other/bin/tool *)"]}})
+        # ledger's (ALLOW_RULE_MARK), whatever home it names, so the direct, the colon-form and the prescribed rules of a
+        # moved or other home -- or of this one, rewritten -- all go, as the /old case below pins, and the prescribed pair
+        # is written after the rest.  Rules of any other shape keep their places, the near misses too: a rule on
+        # bin/spud_ledger.py, and one whose command is not the launcher's.
+        tool = self.home.tool
+        unrelated = ["Bash(date:*)", "Bash(git status *)", "Read(./notes/**)", "Bash(/other/bin/tool *)",
+                     "Bash(%s/bin/spud_ledger.py *)" % tool, "Bash(cat %s/bin/spud)" % tool]
+        ledgers = ["Bash(/other/bin/spud *)", "Bash(python3.14 -I -S /other/bin/spud *)", "Bash(/other/bin/spud:*)",
+                   "Bash(%s/bin/spud *)" % tool] + prescribed_allow_rules(tool)
+        path = self.home.write_settings({"permissions": {"allow": unrelated[:2] + ledgers + unrelated[2:], "deny": ["Bash(rm -rf *)"]}})
         out = self.home.json("settings", "sync", "--path", path)
-        self.assertEqual(out["settings"]["permissions"]["allow"], ["Bash(/other/bin/tool *)"] + prescribed_allow_rules(self.home.path))
+        self.assertTrue(out["written"])
+        self.assertEqual(out["settings"]["permissions"]["allow"], unrelated + prescribed_allow_rules(tool))
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["permissions"]["allow"], unrelated + prescribed_allow_rules(tool))
+        self.assertFalse(self.home.json("settings", "sync", "--path", path)["written"])
 
     def test_deny_rules_for_the_agent_parameters_law_3_forbids(self):
         # SPD-016: the permission system itself refuses these spawns, even when the PreToolUse(Agent) hook is removed or
@@ -247,7 +238,7 @@ class SettingsSyncTest(SpudTestCase):
         names = {"a [b] c": "a b c", "star*q?": "starXXqZ", "back\\slash": "backslash", "Sp üd (2024)": None, "!bang": None, "#hash": None}
         for name, sibling in names.items():
             home = Path("/tmp/spd-033") / name / "home"
-            ctx = spud.Ctx(home, "SPUD_HOME", False, tool=home)
+            ctx = spud.Ctx(home, "SPUD_HOME", False, tool=home.parent / "tool")  # SPD-233: the tool apart from the home
             rules = spud.state_dir_deny_rules(ctx)
             self.assertEqual(rules, state_deny_rules(home), name)
             for path in (home / ".spud", home / ".spud" / "ledger.db"):
@@ -304,7 +295,7 @@ class SettingsSyncTest(SpudTestCase):
         foreign = [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"] if "bin/spud hook" not in h["command"]]
         self.assertEqual(foreign, ["echo foreign", "echo also-mine"])
         self.assertEqual(data["permissions"]["deny"], ["Bash(rm -rf *)"] + prescribed_deny_rules(self.home.path))
-        self.assertEqual(data["permissions"]["allow"], ["Bash(date:*)"] + prescribed_allow_rules(self.home.path))
+        self.assertEqual(data["permissions"]["allow"], ["Bash(date:*)"] + prescribed_allow_rules(self.home.tool))
         self.assertFalse(any("/old/" in a for a in data["permissions"]["allow"]))
 
     def test_malformed_input_is_coerced_not_copied(self):
@@ -354,89 +345,10 @@ class SettingsSyncTest(SpudTestCase):
         self.assertEqual(path.stat().st_mtime_ns, mtime)
 
 
-class OlderInstallTest(RepoMixin, SpudTestCase):
-    """SPD-223: PreToolUse is one row of the table, matcher Agent|Bash|Write|Edit|MultiEdit|NotebookEdit, where every sync
-    before it wrote three carrying the identical command and timeout (OLDER_TABLE).  The hook reads the payload's tool_name
-    and dispatches on it, so a call that matched one of the three matches the one, and runs one process either way.  A file
-    an older sync or install wrote therefore reads as installed, no event missing, and the next `settings sync`, `project
-    install` or `project sync --all` (which runs install's merge) leaves the one row in place of the three, and the user's
-    own row kept."""
-
-    USER_ROW = {"matcher": "Bash", "hooks": [{"type": "command", "command": "echo mine"}]}
-
-    def older_hooks(self, key=None):
-        """The hooks an older sync wrote for this home -- with `key`, an older `project install`'s, whose lines end in
-        `--project <key>` -- each line spelled as those syncs spelled it, and a PreToolUse row of the user's own written by
-        hand between the ledger's first two."""
-        hooks = {}
-        q = shlex.quote  # as every sync has spelled each word since SPD-008, so a home whose path needs quoting gets it quoted
-        for event, matcher in OLDER_TABLE:
-            line = "SPUD_HOME=%s %s -I -S %s hook %s" % (q(str(self.home.path)), q(sys.executable), q(str(self.home.path / "bin" / "spud")), event)
-            entry = {"type": "command", "command": line + (" --project %s" % q(key) if key else ""), "timeout": 30}
-            hooks.setdefault(event, []).append({"matcher": matcher, "hooks": [entry]} if matcher else {"hooks": [entry]})
-        hooks["PreToolUse"].insert(1, self.USER_ROW)
-        return hooks
-
-    def assert_one_row(self, path, older):
-        """`path` carries the user's own PreToolUse row and then the table's one, whose entry is the very command and
-        timeout the older three carried, and every other event as the older sync left it."""
-        hooks = json.loads(path.read_text(encoding="utf-8"))["hooks"]
-        entry = older["PreToolUse"][0]["hooks"][0]
-        self.assertEqual(hooks["PreToolUse"], [self.USER_ROW, {"matcher": "Agent|Bash|Write|Edit|MultiEdit|NotebookEdit", "hooks": [entry]}])
-        self.assertEqual({e: g for e, g in hooks.items() if e != "PreToolUse"}, {e: g for e, g in older.items() if e != "PreToolUse"})
-
-    def synced_all(self):
-        """{project key: the paths it wrote} for one `project sync --all`."""
-        return {r["project"]: r["written"] for r in self.cli_json("project", "sync", "--all", actor="spud")["projects"]}
-
-    def test_an_older_three_row_install_is_installed_and_the_next_sync_or_install_leaves_one_row(self):
-        spud = load_spud_module()
-        ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
-        # The home's own .claude/settings.json as an older `settings sync` left it: three rows are one event, so nothing
-        # is missing before the sync, and nothing after it.
-        older = self.older_hooks()
-        path = self.home.write_settings({"model": "claude-fable-5-1", "hooks": older})
-        self.assertEqual(spud.settings_missing_hooks(ctx, path), [])
-        self.assertTrue(self.home.json("settings", "sync")["written"])
-        self.assert_one_row(path, older)
-        self.assertEqual(spud.settings_missing_hooks(ctx, path), [])
-        self.assertFalse(self.home.json("settings", "sync")["written"])  # the one row is what the next sync keeps
-        # A project's .claude/settings.local.json as an older `project install` left it: installed once, then given the
-        # older sync's hooks with the project's key.
-        other = self.make_repo("badtakes-")
-        self.add_project(other)
-        self.cli("project", "install", "badtakes", actor="spud")
-        local = other / ".claude" / "settings.local.json"
-        data = json.loads(local.read_text(encoding="utf-8"))
-        older = self.older_hooks("badtakes")
-        data["hooks"] = older
-        local.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        self.assertEqual(spud.settings_missing_hooks(ctx, local, "badtakes"), [])
-        self.assertEqual(self.cli_json("project", "install", "badtakes", actor="spud")["written"], [str(local)])
-        self.assert_one_row(local, older)
-        self.assertEqual(spud.settings_missing_hooks(ctx, local, "badtakes"), [])
-        self.assertEqual(self.cli_json("project", "sync", "badtakes", actor="spud")["projects"][0]["written"], [])
-        # `project sync --all`, the command that rewrites every install once this lands, from the older file itself: it
-        # runs install's merge for each installed project, so it leaves the one row too, and its next run writes nothing.
-        local.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        self.assertEqual(spud.settings_missing_hooks(ctx, local, "badtakes"), [])
-        self.assertEqual(self.synced_all()["badtakes"], [str(local)])
-        self.assert_one_row(local, older)
-        self.assertEqual(self.synced_all()["badtakes"], [])
-
-
-class QuotedOlderInstallTest(OlderInstallTest):
-    """SPD-226: the same older files in a home whose path shlex.quote quotes, where every line an older sync or install
-    wrote reads `... '<home>/bin/spud' hook <event>` and projects/sessions.HOOK_MARK is not a substring of any of them.
-    The next sync, install or `project sync --all` must still see the three rows as the ledger's and leave the one."""
-
-    home_name = "Sp üd"
-
-
 class HookEvidenceTest(SpudTestCase):
     def ctx(self):
         spud = load_spud_module()
-        return spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+        return spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.tool)
 
     def test_the_events_a_settings_file_carries_are_read_once_for_every_reader(self):
         """SPW-003 moved the reading to projects/sessions.settings_hook_events, where `session show` can reach it;
@@ -468,6 +380,31 @@ class HookEvidenceTest(SpudTestCase):
             path.write_text(junk, encoding="utf-8")
             self.assertEqual(spud.settings_hook_events(ctx, path), set(), junk)
 
+    def test_the_missing_events_are_the_table_minus_what_the_file_carries(self):
+        """settings_missing_hooks (SPW-006): settings_hold_hooks is it being empty, so the two cannot drift, and the
+        list is what doctor's `settings` line and its partial problem name."""
+        spud = load_spud_module()
+        ctx = self.ctx()
+        path = self.home.path / "elsewhere" / "settings.json"
+        self.assertEqual(spud.settings_missing_hooks(ctx, path), list(spud.TABLE_EVENTS))  # absent: every event
+        self.home.json("settings", "sync", "--path", path)
+        self.assertEqual(spud.settings_missing_hooks(ctx, path), [])
+        self.assertTrue(spud.settings_hold_hooks(ctx, path))
+        data = json.loads(path.read_text(encoding="utf-8"))
+        del data["hooks"]["SessionStart"]
+        data["hooks"]["Stop"] = []
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        # the table's order, not the file's and not sorted: SessionStart before Stop
+        self.assertEqual(spud.settings_missing_hooks(ctx, path), ["SessionStart", "Stop"])
+        self.assertFalse(spud.settings_hold_hooks(ctx, path))
+        # a project's key still decides whose lines count, as it does for the whole-table answer
+        self.home.json("settings", "sync", "--path", path)
+        self.assertEqual(spud.settings_missing_hooks(ctx, path, "badtakes"), list(spud.TABLE_EVENTS))
+
+
+class HookTableTest(unittest.TestCase):
+    """The two hand-rolled pieces HookEvidenceTest's reading rests on (SPW-003), read from the program alone: no home."""
+
     def test_the_two_spellings_of_a_shell_word_are_the_two_shlex_quote_writes(self):
         """SPW-003: projects/sessions generates both forms instead of importing shlex, which every hook run would pay
         0.11 ms for.  Exact for any text, this pins it: whatever shlex.quote writes is one of the two."""
@@ -489,27 +426,6 @@ class HookEvidenceTest(SpudTestCase):
         self.assertEqual(len(spud.HOOK_TABLE), len(spud.TABLE_EVENTS))
         self.assertEqual(dict(spud.HOOK_TABLE)["PreToolUse"], "Agent|Bash|Write|Edit|MultiEdit|NotebookEdit")
         self.assertEqual(dict(spud.HOOK_TABLE)["PreToolUse"].split("|"), list(spud.ENFORCED_TOOLS))
-
-    def test_the_missing_events_are_the_table_minus_what_the_file_carries(self):
-        """settings_missing_hooks (SPW-006): settings_hold_hooks is it being empty, so the two cannot drift, and the
-        list is what doctor's `settings` line and its partial problem name."""
-        spud = load_spud_module()
-        ctx = self.ctx()
-        path = self.home.path / "elsewhere" / "settings.json"
-        self.assertEqual(spud.settings_missing_hooks(ctx, path), list(spud.TABLE_EVENTS))  # absent: every event
-        self.home.json("settings", "sync", "--path", path)
-        self.assertEqual(spud.settings_missing_hooks(ctx, path), [])
-        self.assertTrue(spud.settings_hold_hooks(ctx, path))
-        data = json.loads(path.read_text(encoding="utf-8"))
-        del data["hooks"]["SessionStart"]
-        data["hooks"]["Stop"] = []
-        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        # the table's order, not the file's and not sorted: SessionStart before Stop
-        self.assertEqual(spud.settings_missing_hooks(ctx, path), ["SessionStart", "Stop"])
-        self.assertFalse(spud.settings_hold_hooks(ctx, path))
-        # a project's key still decides whose lines count, as it does for the whole-table answer
-        self.home.json("settings", "sync", "--path", path)
-        self.assertEqual(spud.settings_missing_hooks(ctx, path, "badtakes"), list(spud.TABLE_EVENTS))
 
 
 class DoctorHomeSettingsTest(SpudTestCase):
@@ -636,7 +552,7 @@ class QuotedPathHomeTest(SpudTestCase):
     home_name = "Sp üd"
 
     def ctx(self):
-        return load_spud_module().Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+        return load_spud_module().Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.tool)
 
     def test_a_home_whose_path_needs_quoting_reads_as_installed_and_doctor_is_green(self):
         spud = load_spud_module()
@@ -645,7 +561,7 @@ class QuotedPathHomeTest(SpudTestCase):
         command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["Stop"][0]["hooks"][0]["command"]
         # the premise: the line is this home's own, and the mark cannot see it
         self.assertEqual(command, spud.hook_command(ctx, "Stop"))
-        self.assertIn("'%s/bin/spud' hook Stop" % self.home.path, command)
+        self.assertIn("'%s' hook Stop" % self.home.launcher, command)
         self.assertNotIn(spud.HOOK_MARK, command)
         # SPD-226: the marked reading sees it anyway, by its shape, and so does `session show`
         self.assertEqual(spud.settings_hook_events(ctx, settings), set(spud.TABLE_EVENTS))

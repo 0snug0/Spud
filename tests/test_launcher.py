@@ -16,7 +16,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from helpers import EXIT_USAGE, REPO, SPUD, SpudTestCase
+from helpers import EXIT_USAGE, LAUNCHER, REPO, SPUD, SpudTestCase
 
 PROGRAM = REPO / "bin" / "spud_ledger.py"
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
@@ -42,8 +42,8 @@ class LauncherTest(SpudTestCase):
 
     def test_the_launcher_is_small_and_the_program_is_a_module_beside_it(self):
         self.assertTrue(PROGRAM.is_file())
-        self.assertLess(len(SPUD.read_text(encoding="utf-8").splitlines()), 80)
-        self.assertNotIn("def main(", SPUD.read_text(encoding="utf-8"))
+        self.assertLess(len(LAUNCHER.read_text(encoding="utf-8").splitlines()), 80)
+        self.assertNotIn("def main(", LAUNCHER.read_text(encoding="utf-8"))
 
     def test_the_programs_bytecode_is_cached_under_the_homes_spud_directory(self):
         cache = self.home.path / ".spud" / "pycache"

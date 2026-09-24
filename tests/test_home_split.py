@@ -4,7 +4,7 @@ repository; `home:<glob>` names the home in a deliverable; `session show` names 
 import json
 import unittest
 
-from helpers import EXIT_ERROR, EXIT_OK, Home, RepoMixin, SpudTestCase, git, load_spud_module
+from helpers import EXIT_ERROR, RepoMixin, SpudTestCase, load_spud_module
 
 spud = load_spud_module()
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
@@ -12,14 +12,12 @@ AGENT = "a0123456789abcdef"
 
 
 class SplitCase(RepoMixin, SpudTestCase):
-    """A scratch home whose tool is a separate scratch main checkout, named before `spud init` records it as project spud's root."""
+    """A scratch home whose tool is a separate scratch main checkout, which `spud init` registered as project spud: every
+    SpudTestCase's home since SPD-233 (tests/helpers.fixture)."""
 
     def setUp(self):
-        self.tool = self.make_tool()
-        self.home = Home()
-        self.addCleanup(self.home.cleanup)
-        self.home.env["SPUD_TOOL_DIR"] = str(self.tool)
-        self.home.init()
+        super().setUp()
+        self.tool = self.home.tool
 
     def ctx(self):
         return spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.tool)
@@ -28,7 +26,7 @@ class SplitCase(RepoMixin, SpudTestCase):
 class HomeRowTest(SplitCase):
     def test_project_spud_is_rooted_at_the_tool_and_the_home_is_no_project(self):
         p = self.home.json("project", "show", "spud")["project"]
-        self.assertEqual((p["root"], p["sessions"], p["landing"]), (str(self.tool), "always", "merge"))
+        self.assertEqual((p["root"], p["sessions"], p["landing"]), (str(self.tool), "claim", "merge"))
         self.assertEqual(spud.home_row(self.ctx())["key"], "home")
         self.assertTrue(spud.is_home(spud.home_row(self.ctx())))
         con = spud.connect(self.ctx())
@@ -84,15 +82,17 @@ class SessionInTheHomeTest(SplitCase):
         text = self.cli("session", "show", cwd=self.home.path, session=SESSION).stdout
         self.assertIn("checkout  %s (home)" % self.home.path, text)
         self.assertIn("Spud's home, not a project", text)
+        # project spud claims (init's default), so a session in the tool is plain until it claims; claimed, it is Spud's
         shown = self.cli_json("session", "show", cwd=self.tool, session=SESSION)
-        self.assertEqual((shown["project"]["key"], shown["checkout"]["kind"], shown["checkout"]["branch"], shown["mode"]), ("spud", "root", "main", "spud"))
+        self.assertEqual((shown["project"]["key"], shown["checkout"]["kind"], shown["checkout"]["branch"], shown["mode"]), ("spud", "root", "main", "plain"))
+        self.cli("session", "claim", actor="spud", cwd=self.tool, session=SESSION)
+        self.assertEqual(self.cli_json("session", "show", cwd=self.tool, session=SESSION)["mode"], "spud")
 
     def test_the_session_start_hook_gives_the_board_in_the_home_and_the_project_context_in_the_tool_once_it_claims(self):
         self.new_ticket("Board me", status="active")
         r = self.home.hook("SessionStart", {"hook_event_name": "SessionStart", "session_id": SESSION, "cwd": str(self.home.path), "source": "startup"})
         self.assertTrue(r.context.startswith("Ledger board ("), r.context)
         self.assertIn("SPD-001 active", r.context)
-        self.cli("project", "edit", "spud", "--sessions", "claim", actor="spud")
         r = self.home.hook("SessionStart", {"hook_event_name": "SessionStart", "session_id": SESSION, "cwd": str(self.tool), "source": "startup"})
         self.assertIn("is Spud project `spud`", r.context)
         self.assertIn("This session is not Spud", r.context)
@@ -136,7 +136,7 @@ class ProjectSpudTest(SplitCase):
         self.assertIn("Spud's home, which is not a project", proc.stderr)
 
     def test_project_spud_changes_sessions_and_root_but_keeps_its_name_and_prefixes(self):
-        self.assertEqual(self.cli_json("project", "edit", "spud", "--sessions", "claim", actor="spud")["changed"], ["sessions"])
+        self.assertEqual(self.cli_json("project", "edit", "spud", "--sessions", "always", actor="spud")["changed"], ["sessions"])
         moved = self.make_repo("moved-")
         self.assertEqual(self.cli_json("project", "edit", "spud", "--root", moved, actor="spud")["project"]["root"], str(moved))
         for args, needle in ((["--name", "X"], "spud.config.json"), (["--ticket-prefix", "ZZ"], "spud.config.json")):
@@ -149,9 +149,13 @@ class ProjectSpudTest(SplitCase):
         self.assertIn("never removed", proc.stderr)
 
     def test_project_spud_installs_like_any_project(self):
-        self.assertEqual(self.home.json("project", "show", "spud")["project"]["settings_file"], str(self.tool / ".claude" / "settings.local.json"))
-        out = self.cli_json("project", "install", "spud", actor="spud")
+        """Init installed project 1 (its step 7); uninstalled, it installs again as any project does."""
         local = self.tool / ".claude" / "settings.local.json"
+        self.assertEqual(self.home.json("project", "show", "spud")["project"]["settings_file"], str(local))
+        self.assertTrue(self.cli_json("project", "show", "spud")["project"]["installed"])
+        self.assertEqual(self.cli_json("project", "uninstall", "spud", actor="spud")["changed"][:1], ["removed %s" % local])
+        self.assertFalse(local.exists())
+        out = self.cli_json("project", "install", "spud", actor="spud")
         self.assertIn(str(local), out["written"])
         data = json.loads(local.read_text(encoding="utf-8"))
         commands = [h["command"] for groups in data["hooks"].values() for g in groups for h in g["hooks"]]
@@ -162,26 +166,13 @@ class ProjectSpudTest(SplitCase):
         report = self.cli_json("doctor")
         self.assertEqual(report["tool"], {"path": str(self.tool), "launcher": str(self.tool / "bin" / "spud"), "checkout": "main"})
         self.assertEqual([p["checks"] for p in report["projects"]], [["main checkout", "hooks", "ignored", "agent", "skill"]])
-        self.assertEqual(self.cli_json("project", "uninstall", "spud", actor="spud")["changed"][:1], ["removed %s" % local])
-
-    def test_project_spud_is_not_installed_while_its_root_is_the_home(self):
-        home = Home()
-        self.addCleanup(home.cleanup)
-        home.init()  # SPUD_TOOL_DIR is the scratch home itself: the transition window's shape
-        proc = home.run("project", "install", "spud", actor="spud", check=False)
-        self.assertEqual(proc.returncode, EXIT_ERROR)
-        self.assertIn("root is the home", proc.stderr)
-        report = home.json("doctor")
-        self.assertEqual(report["projects"][0]["checks"], ["root is the home (before home move)", "not installed"])
-        self.assertEqual(report["tool"]["checkout"], "none")
 
 
 class WorktreeRootsTest(SplitCase):
     """SPD-097, who carries the generated roots.  Once the home is a directory of its own, `ledger/` in a worktree of the
     tool repository is an ordinary path: the vault is not checked out there any more, and only the home's own `ledger/`
-    is generated.  WindowWorktreeTest is the other side of the same decision, where the home and project spud's root are
-    still one directory.  The deliverable globs never follow the generated roots: a worktree of the tool is project
-    spud's checkout in both, so a bare glob binds in it and a `home:` glob does not."""
+    is generated.  The deliverable globs never follow the generated roots: a worktree of the tool is project spud's
+    checkout, so a bare glob binds in it and a `home:` glob does not."""
 
     def reasons(self, tool, deliverable, cwd=None):
         """edit_reason for a member of a ticket in project spud, planned from `cwd`, as a function of the path it writes."""
@@ -208,38 +199,6 @@ class WorktreeRootsTest(SplitCase):
         self.assertIn("Law 5", reason(wt / "bin" / "x.py"))
         self.assertIn("bin/x.py is not among", reason(wt / "bin" / "x.py"))  # the ticket's own project: the path is named bare
         self.assertIsNone(reason(self.home.path / "docs" / "x.md"))
-
-
-class WindowWorktreeTest(RepoMixin, SpudTestCase):
-    """SPD-097, the transition window: the home and project spud's root are the same directory (a Home's SPUD_TOOL_DIR is
-    the home itself), so every worktree of it has a `ledger/` checked out from main and Law 5 covers those files there as
-    it does at the home -- a loosening the split must not make while the vault is still in the tool repository.  The globs
-    stay project spud's: `home:**` does not reach a worktree, a bare glob does."""
-
-    def setUp(self):
-        super().setUp()
-        git(self.home.path, "init", "-q", "-b", "main")
-        git(self.home.path, "commit", "-q", "--allow-empty", "-m", "root")
-        self.wt = self.add_worktree(self.home.path, "spd-097")
-
-    def test_a_worktree_of_the_home_carries_the_generated_roots_and_not_the_home_globs(self):
-        t = self.new_ticket("Window", status="active")
-        m = self.new_member(t["key"], name="Russet", deliverable=["home:**"])
-        ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
-        con = spud.connect(ctx)
-        self.addCleanup(con.close)
-        row = con.execute("SELECT * FROM members WHERE id = ?", (m["id"],)).fetchone()
-
-        def reason(path, member=row):
-            return spud.edit_reason(ctx, con, AGENT if member is not None else None, member, str(path), str(self.home.path))[0]
-
-        self.assertIn(str(self.wt), spud.git_worktree_list(self.home.path))
-        self.assertIn("generated", reason(self.wt / "ledger" / "tickets" / "SPD-001.md"))
-        self.assertIn("generated", reason(self.wt / "reports" / "2026-09-16.md"))
-        self.assertIn("generated", reason(self.wt / "ledger" / "x.md", member=None))  # and for Spud, whose own set holds there too
-        self.assertIsNone(reason(self.wt / "CLAUDE.md", member=None))
-        self.assertIn("Law 5", reason(self.wt / "bin" / "x.py"))  # home:** is the home's, and the worktree is project spud's
-        self.assertIsNone(reason(self.home.path / "bin" / "x.py"))
 
 
 if __name__ == "__main__":

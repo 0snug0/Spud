@@ -10,7 +10,7 @@ import unicodedata
 import unittest
 from pathlib import Path
 
-from helpers import EXIT_ERROR, load_spud_module, SpudTestCase
+from helpers import EXIT_ERROR, git, load_spud_module, SpudTestCase
 from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, DB_WORDING, OUTSIDE, SESSION, STATE, case_insensitive_fs, HookCase
 from hookcase import quote_split
 
@@ -124,11 +124,20 @@ class PreEditTest(PathRuleAsserts, HookCase):
                 self.assertSilent(home / ok, tool=tool)
         for bad in ("bin/other", "docs/x/sub/a.md", "docs/y.md", "CLAUDE.md", "spud.config.json", ".claude/settings.json", "tests"):
             self.assertRefused(home / bad, "deliverables")
-        # on a case-insensitive filesystem Tests/x.py is tests/x.py; on a case-sensitive one it is another file
-        if case_insensitive_fs(home):
-            self.assertSilent(home / "Tests" / "x.py")
-        else:
-            self.assertRefused(home / "Tests" / "x.py", "deliverables")
+
+    # SPD-233: what the filesystem makes of a path's case is the machine's, so each half is a test of its own that skips,
+    # saying so, on the other kind of filesystem -- where an `if` once dropped it without a word.
+    def needs_filesystem(self, folds):
+        if case_insensitive_fs(self.home.path) != folds:
+            self.skipTest("needs a case-%s filesystem at %s" % ("insensitive" if folds else "sensitive", self.home.path))
+
+    def test_a_deliverable_in_another_case_is_the_same_file_where_the_filesystem_folds_case(self):
+        self.needs_filesystem(folds=True)
+        self.assertSilent(self.home.path / "Tests" / "x.py")  # tests/x.py
+
+    def test_a_deliverable_in_another_case_is_another_file_where_the_filesystem_keeps_case(self):
+        self.needs_filesystem(folds=False)
+        self.assertRefused(self.home.path / "Tests" / "x.py", "deliverables")
 
     def test_a_bracketed_segment_is_a_directory_the_hook_lets_its_member_write(self):
         """SPD-086, end to end: BAD-054/Snowden was refused admin/src/app/accounts/[email]/page.tsx -- its own planned
@@ -155,10 +164,13 @@ class PreEditTest(PathRuleAsserts, HookCase):
             self.assertRefused(home / bad, "generated", agent_id=AGENT_B)
         self.assertSilent(home / "docs" / "x.md", agent_id=AGENT_B)
         self.assertSilent(home / "CLAUDE.md", agent_id=AGENT_B)  # a ** member may write CLAUDE.md: Law 1 binds Spud, not members
-        if case_insensitive_fs(home):
-            self.assertSilent(home / "Ledger" / "Home.md", agent_id=None)  # the same file as Spud's ledger/Home.md
-            self.assertRefused(home / "Ledger" / "Tickets" / "x.md", "generated", agent_id=None)
         self.assertEqual(wide["deliverables"], ["home:**"])
+
+    def test_spuds_own_ledger_files_in_another_case_where_the_filesystem_folds_case(self):
+        self.needs_filesystem(folds=True)
+        home = self.home.path
+        self.assertSilent(home / "Ledger" / "Home.md", agent_id=None)  # the same file as Spud's ledger/Home.md
+        self.assertRefused(home / "Ledger" / "Tickets" / "x.md", "generated", agent_id=None)
 
     def test_every_edit_tool_is_covered_and_denials_are_recorded(self):
         home = self.home.path
@@ -185,10 +197,14 @@ class PreEditTest(PathRuleAsserts, HookCase):
             self.assertSilent(home / ok, agent_id=None)
         for bad in ("bin/spud", "tests/test_x.py", "docs/spikes/x.md", "README.md"):
             self.assertRefused(home / bad, "Law 1", agent_id=None)
-        if case_insensitive_fs(home):
-            self.assertSilent(home / "claude.md", agent_id=None)  # the same file as CLAUDE.md here
-        else:
-            self.assertRefused(home / "claude.md", "Law 1", agent_id=None)
+
+    def test_spuds_own_file_in_another_case_is_his_where_the_filesystem_folds_case(self):
+        self.needs_filesystem(folds=True)
+        self.assertSilent(self.home.path / "claude.md", agent_id=None)  # the same file as CLAUDE.md here
+
+    def test_spuds_own_file_in_another_case_is_another_file_where_the_filesystem_keeps_case(self):
+        self.needs_filesystem(folds=False)
+        self.assertRefused(self.home.path / "claude.md", "Law 1", agent_id=None)
 
     def test_outside_every_project_root_is_spuds_and_the_scratchpad_is_the_members(self):
         """SPD-064: a path outside every registered project was refused to nobody; only the scratchpad and the system temp
@@ -246,72 +262,72 @@ class PreEditTest(PathRuleAsserts, HookCase):
 
 
 class WorktreeElsewhereTest(StateDirAsserts, HookCase):
-    """SPD-016: every worktree `git worktree list --porcelain` names for the home maps to repository-relative paths,
-    wherever `git worktree add` put it, so the deliverable globs and the generated roots bind there too.  The home is
-    a real repository here; the list is cached under .spud/ until a worktree is added, moved or removed, and a list
-    that cannot be read fails the enforcing hook closed.
+    """SPD-016: every worktree `git worktree list --porcelain` names for a project's root maps to repository-relative paths,
+    wherever `git worktree add` put it, so the deliverable globs bind there too.  The project here is project spud, the
+    tool checkout beside the home (SPD-233), and `elsewhere` is a worktree of it outside .claude/worktrees; the list is
+    cached under the home's .spud/ until a worktree is added, moved or removed, and a list that cannot be read fails the
+    enforcing hook closed.  The lead holds tests/** and bin/spud and is planned from `elsewhere`, which binds SPD-001 there
+    (SPD-098).
 
-    SPD-097: the home of these tests is also project spud's root (SPUD_TOOL_DIR), the transition window's shape, and a
-    worktree of it is that project's checkout.  Its generated roots are the home's (worktrees.home_roots: the vault is
-    checked out in every worktree of the tool until `home move`), but its deliverable globs are project spud's, so the
-    lead is planned with both scopes: `home:tests/**` binds at the home and the bare `tests/**`, the ticket's project,
-    in the worktree.  test_a_home_glob_does_not_bind_in_a_worktree_of_the_tool pins that half."""
+    SPD-097: a worktree of the tool carries none of the home's rules -- no generated roots, no Spud's own set -- because
+    the home is a directory of its own and the vault is not checked out there; a `home:` glob binds at the home and never
+    in the tool.  test_a_home_glob_does_not_bind_in_a_worktree_of_the_tool pins that."""
 
     in_process = True  # SPD-231
 
-    def setUp(self):
-        super().setUp()
-        self.lead = self.spawn(self.plan(persona="engineer", model="opus",
-                                         deliverable=["home:tests/**", "home:bin/spud", "tests/**", "bin/spud"]), AGENT_A)
-        self.git("init", "-q", "-b", "main")
-        self.git("commit", "-q", "--allow-empty", "-m", "root")
+    def build_home(self):
+        super().build_home()
         self.elsewhere = self.add_worktree("elsewhere")
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["tests/**", "bin/spud"], cwd=self.elsewhere), AGENT_A)
 
     def git(self, *args):
-        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-        env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1")
-        proc = subprocess.run(["git", "-C", str(self.home.path), "-c", "user.name=Spud", "-c", "user.email=spud@example.invalid", "-c", "commit.gpgsign=false", *args],
-                              capture_output=True, text=True, env=env)
-        self.assertEqual(proc.returncode, 0, proc)
-        return proc.stdout
+        return git(self.home.tool, *args)
 
     def add_worktree(self, name):
-        path = self.home.path.parent / ("%s-%s" % (self.home.path.name, name))
-        self.addCleanup(shutil.rmtree, path, True)
+        """A worktree of the tool beside it, inside the root the class home restores."""
+        path = self.home.tool.parent / ("%s-%s" % (self.home.tool.name, name))
         self.git("worktree", "add", "-q", "-b", name, str(path))
         return path
+
+    def assertCheckoutHolds(self, spelled):
+        """The tool's worktree `elsewhere`, spelled another way the filesystem honours: the lead's globs bind there, every
+        other path is a deliverable of nobody's, and Spud writes none of it."""
+        a = str(spelled)
+        self.assertSilent("%s/tests/x.py" % a)
+        self.assertRefused("%s/CLAUDE.md" % a, "deliverables")
+        self.assertRefused("%s/ledger/tickets/SPD-001.md" % a, "deliverables")
+        self.assertRefused("%s/bin/spud" % a, "Law 1", agent_id=None)
+        self.assertRefused("%s/CLAUDE.md" % a, "Law 1", agent_id=None)
+        self.assertBashRefused("echo x > %s/ledger/tickets/SPD-001.md" % a, "deliverables")
+        self.assertBashRefused("cd %s && echo x > docs/x.md" % a, "deliverables")
+        self.assertBashRefused("echo x > %s/bin/spud" % a, "Law 1", agent_id=None)
+        self.assertBashSilent("echo x > %s/tests/out.txt" % a)
 
     def test_a_worktree_outside_claude_worktrees_maps_to_the_repository(self):
         wt = self.elsewhere
         self.assertIn("worktree %s\n" % wt, self.git("worktree", "list", "--porcelain"))
-        self.assertSilent(wt / "tests" / "x.py")
+        self.assertCheckoutHolds(wt)
         self.assertSilent(wt / "bin" / "spud")
-        self.assertRefused(wt / "CLAUDE.md", "deliverables")
-        self.assertRefused(wt / "ledger" / "tickets" / "SPD-001.md", "generated")
-        self.assertRefused(wt / "reports" / "2026-09-13.md", "generated", agent_id=None)
-        self.assertRefused(wt / "bin" / "spud", "Law 1", agent_id=None)
-        self.assertSilent(wt / "CLAUDE.md", agent_id=None)
-        r = self.home.hook("PreToolUse", self.pre_bash("echo x > %s" % (wt / "ledger" / "x.md"), agent_id=AGENT_A))
-        self.assertEqual((r.code, r.decision), (0, "deny"), r)
-        self.assertIn("generated", r.reason)
-        # a sibling directory that is no worktree stays outside every project root, and the home still maps
-        self.assertSilent(self.home.path.parent / ("%s-elsewhere-not" % self.home.path.name) / "ledger" / "x.md")
+        # a sibling directory that is no worktree stays outside every project root (in the temp roots, so silent), and the
+        # home still maps
+        self.assertSilent(self.home.tool.parent / ("%s-elsewhere-not" % self.home.tool.name) / "ledger" / "x.md")
         self.assertRefused(self.home.path / "ledger" / "x.md", "generated")
 
     def test_a_worktree_added_later_is_mapped_at_once(self):
-        later = self.home.path.parent / ("%s-later" % self.home.path.name)
-        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated")
-        self.assertSilent(later / "ledger" / "x.md")
+        """A worktree added after the list was cached is project spud's checkout at once: another checkout of the lead's
+        bound ticket's project, where it writes nothing (SPD-098)."""
+        later = self.home.tool.parent / ("%s-later" % self.home.tool.name)
+        self.assertSilent(later / "tests" / "x.py")
         self.add_worktree("later")
-        self.assertRefused(later / "ledger" / "x.md", "generated")
+        self.assertRefused(later / "tests" / "x.py", "a checkout of project spud")
         self.git("worktree", "remove", "--force", str(later))
-        self.assertSilent(later / "ledger" / "x.md")
+        self.assertSilent(later / "tests" / "x.py")
 
     def test_the_list_is_cached_until_the_worktrees_change(self):
-        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated")
+        self.assertSilent(self.elsewhere / "tests" / "x.py")
         path = self.home.env["PATH"]
         self.home.env["PATH"] = "/nonexistent"  # no git to run: the answer comes from the cache
-        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated")
+        self.assertSilent(self.elsewhere / "tests" / "x.py")
         self.home.env["PATH"] = path
         self.add_worktree("third")
         self.home.env["PATH"] = "/nonexistent"  # the worktrees changed and git cannot list them: fail closed
@@ -320,21 +336,21 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
         self.assertIn("failing closed", r.stderr)
 
     def test_a_list_git_cannot_give_fails_the_enforcing_hook_closed(self):
-        (self.home.path / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")  # no longer a repository to git
-        r = self.edit(self.home.path / "tests" / "x.py")
+        (self.home.tool / ".git" / "HEAD").write_text("garbage\n", encoding="utf-8")  # no longer a repository to git
+        r = self.edit(self.elsewhere / "tests" / "x.py")
         self.assertEqual((r.code, r.stdout), (2, ""), r)
         self.assertIn("worktree", r.stderr)
         self.assertIn("failing closed", r.stderr)
 
     def test_a_worktree_elsewhere_in_upper_case(self):
         """SPD-029: git names the worktree by one spelling; a case variant of it is the same checkout."""
-        self.assertRootHolds(self.alias_or_skip(self.elsewhere, str(self.elsewhere).upper(), "upper case"))
+        self.assertCheckoutHolds(self.alias_or_skip(self.elsewhere, str(self.elsewhere).upper(), "upper case"))
 
     def test_a_worktree_elsewhere_in_mixed_case(self):
-        self.assertRootHolds(self.alias_or_skip(self.elsewhere, mixed_case(str(self.elsewhere)), "mixed case"))
+        self.assertCheckoutHolds(self.alias_or_skip(self.elsewhere, mixed_case(str(self.elsewhere)), "mixed case"))
 
     def test_a_worktree_elsewhere_under_the_data_volume_firmlink(self):
-        self.assertRootHolds(self.alias_or_skip(self.elsewhere, FIRMLINK + str(self.elsewhere), "the %s firmlink prefix" % FIRMLINK))
+        self.assertCheckoutHolds(self.alias_or_skip(self.elsewhere, FIRMLINK + str(self.elsewhere), "the %s firmlink prefix" % FIRMLINK))
 
     def test_a_linked_worktree_is_fingerprinted_like_the_main_checkout(self):
         """SPD-097: a linked worktree's `.git` is a gitfile, not a directory, so worktrees_fingerprint answered None there,
@@ -342,37 +358,38 @@ class WorktreeElsewhereTest(StateDirAsserts, HookCase):
         again -- +13.36 ms on PreToolUse(Write) in the timing probe, which runs the branch's own launcher from a worktree.
         The gitfile is resolved to the repository directory now, so a checkout that is a worktree caches like a root."""
         m = load_spud_module()
-        home, wt = str(self.home.path), str(self.elsewhere)
+        root, wt = str(self.home.tool), str(self.elsewhere)
         self.assertTrue(os.path.isfile(os.path.join(wt, ".git")), "a linked worktree's .git is a gitfile")
-        self.assertEqual(os.path.realpath(m.repository_dir(wt)), os.path.realpath(os.path.join(home, ".git")))
+        self.assertEqual(os.path.realpath(m.repository_dir(wt)), os.path.realpath(os.path.join(root, ".git")))
         fingerprint = m.worktrees_fingerprint(wt)
         self.assertIsNotNone(fingerprint)
-        self.assertEqual(fingerprint, m.worktrees_fingerprint(home))
+        self.assertEqual(fingerprint, m.worktrees_fingerprint(root))
         self.add_worktree("third")  # what the fingerprint exists to notice, from either checkout
         self.assertNotEqual(m.worktrees_fingerprint(wt), fingerprint)
-        self.assertEqual(m.worktrees_fingerprint(wt), m.worktrees_fingerprint(home))
-        self.assertIsNone(m.repository_dir(self.home.path.parent / "no-such-checkout"))
-        self.assertIsNone(m.worktrees_fingerprint(self.home.path.parent / "no-such-checkout"))
+        self.assertEqual(m.worktrees_fingerprint(wt), m.worktrees_fingerprint(root))
+        self.assertIsNone(m.repository_dir(self.home.root / "no-such-checkout"))
+        self.assertIsNone(m.worktrees_fingerprint(self.home.root / "no-such-checkout"))
 
     def test_a_home_glob_does_not_bind_in_a_worktree_of_the_tool(self):
         """SPD-097: a worktree elsewhere is project spud's checkout, so a member whose deliverables name the home is refused
-        there and is free at the home; the generated roots hold in both, because in the window the vault is checked out in
-        every worktree of the tool.  The reverse for a bare glob, which is the ticket's project's."""
+        there and is free at the home, and the reverse for a bare glob, which is the ticket's project's.  The generated
+        roots are the home's alone: a worktree of the tool is no vault, so its ledger/ is an ordinary path there."""
         self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_B)
         self.assertRefused(self.elsewhere / "tests" / "x.py", "deliverables", agent_id=AGENT_B)
-        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated", agent_id=AGENT_B)
+        self.assertRefused(self.elsewhere / "ledger" / "x.md", "deliverables", agent_id=AGENT_B)
         self.assertSilent(self.home.path / "tests" / "x.py", agent_id=AGENT_B)
         self.assertRefused(self.home.path / "ledger" / "x.md", "generated", agent_id=AGENT_B)
-        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"], cwd=self.elsewhere), AGENT_C)  # SPD-098: binds SPD-001 there
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["**"], cwd=self.elsewhere), AGENT_C)
         self.assertSilent(self.elsewhere / "tests" / "x.py", agent_id=AGENT_C)
-        self.assertRefused(self.elsewhere / "ledger" / "x.md", "generated", agent_id=AGENT_C)
+        self.assertSilent(self.elsewhere / "ledger" / "x.md", agent_id=AGENT_C)
         self.assertRefused(self.home.path / "tests" / "x.py", "deliverables", agent_id=AGENT_C)
+        self.assertRefused(self.home.path / "ledger" / "x.md", "generated", agent_id=AGENT_C)
 
     def test_the_state_directory_holds_at_the_home_and_at_a_worktree_elsewhere(self):
         """SPD-031: the worktree cache this class exercises, which the hook itself writes, and a worktree elsewhere's own state
         directory, refused to a member whose glob is ** and to Spud.  Both scopes since SPD-097, so the globs really do reach
         every path the state directory is refused at: `home:**` at the home, the bare `**` in project spud's worktree."""
-        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**", "**"], cwd=self.elsewhere), AGENT_B)  # SPD-098: binds SPD-001 there
+        self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**", "**"], cwd=self.elsewhere), AGENT_B)
         self.assertSilent(self.elsewhere / "tests" / "x.py", agent_id=AGENT_B)  # lists the worktrees, writing the cache
         cache = self.home.path / STATE / "worktrees" / "spud.json"  # one cache per project since SPD-014
         self.assertTrue(cache.is_file())
@@ -708,6 +725,11 @@ class DeliverableGlobTest(SpudTestCase):
         self.assertEqual(m["deliverables"], ["home:tests/**", "home:docs/**", "home:bin/spud"])
         proc = self.home.run("member", "edit", m["ref"], "--deliverable", "../y", actor="spud", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
+
+
+class GlobSemanticsTest(unittest.TestCase):
+    """The deliverable glob's own functions, read from the program: every one a function of its arguments, so no home
+    (SPD-233; DeliverableGlobTest keeps the one test that plans members)."""
 
     def test_glob_semantics(self):
         spud = load_spud_module()

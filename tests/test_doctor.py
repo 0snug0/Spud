@@ -40,7 +40,7 @@ class ShippedCheckTest(SpudTestCase):
         report = self.report()
         self.assertEqual(report["shipped"]["differences"], [])
         self.assertEqual(report["shipped"]["files"], len(spud.tool_owned(
-            spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path))))
+            spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.tool))))
         self.assertIn("every one is what it ships", self.line())
         for note in report["notes"]:
             self.assertNotIn("home sync", note)
@@ -88,7 +88,7 @@ class ShippedCheckTest(SpudTestCase):
         report = self.report()
         note = [n for n in report["notes"] if "cannot be rendered" in n][0]
         self.assertIn("{{nobody_fills_this}}", note)
-        self.assertEqual(report["shipped"]["differences"], [str(self.home.path / "share")])
+        self.assertEqual(report["shipped"]["differences"], [str(self.home.tool / "share")])
 
     def test_the_shipped_skill_is_one_of_the_files_the_check_reads(self):
         self.home.shipped_skill("spud-reference", "---\nname: spud-reference\ndescription: d\n---\n\nIn {{home}}.\n")
