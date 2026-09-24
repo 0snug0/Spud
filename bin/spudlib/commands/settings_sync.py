@@ -11,11 +11,14 @@ from ..projects import sessions
 from ..state import ledgerdb
 
 
-# The hook table of the spike's Enforcement plan, installed by `spud settings sync`.
+# The hook table of the spike's Enforcement plan, installed by `spud settings sync`: one row per event.  PreToolUse's
+# matcher names every tool the hook enforces, hooks/hookio.ENFORCED_TOOLS, and the hook reads the payload's tool_name and
+# dispatches on it, so one row does what the three rows every sync wrote before SPD-223 did (Agent; Bash;
+# Write|Edit|MultiEdit|NotebookEdit, each carrying the same command): a call to any of those tools matches one row and runs
+# one process.  A matcher of letters and `|` alone is a list of exact tool names to the harness, not a regular expression
+# (Claude Code's hooks reference, "Matcher patterns"), so it matches those six tools and no other.
 HOOK_TABLE = (
-    ("PreToolUse", "Agent"),
-    ("PreToolUse", "Bash"),
-    ("PreToolUse", "Write|Edit|MultiEdit|NotebookEdit"),
+    ("PreToolUse", "Agent|Bash|Write|Edit|MultiEdit|NotebookEdit"),
     ("PostToolUse", "Agent"),
     ("SubagentStart", None),
     ("SubagentStop", None),
@@ -23,9 +26,10 @@ HOOK_TABLE = (
     ("Stop", None),
     ("UserPromptSubmit", None),  # a prompt naming a claim project's ticket claims the session; the event takes no matcher
 )
-# The events those nine rows install, in the table's order: PreToolUse has three matchers and is one event, and one hook
-# line is one event however many matchers it has -- which is what merge_hooks writes, what settings_hook_events reads
-# back, and what settings_missing_hooks and doctor's `settings` line count.
+# The events those rows install, in the table's order.  One hook line is one event however many matchers it has -- which
+# is what merge_hooks writes, what settings_hook_events reads back, and what settings_missing_hooks and doctor's `settings`
+# line count -- so a file an older sync wrote, PreToolUse in three rows, reads as carrying every event, and the next sync
+# leaves the one row in their place.
 TABLE_EVENTS = tuple(dict.fromkeys(e for e, _ in HOOK_TABLE))
 HOOK_TIMEOUT = 30  # seconds; a hook is one Python start and one short transaction (busy_timeout 5 s)
 # What marks an allow rule as the ledger's, whatever home it names and whatever spelling an older sync wrote (the #! rule
@@ -75,7 +79,8 @@ def is_ledger_hook(entry):
 
 def merge_hooks(ctx, settings, project_key=None):
     """Keep every hook that is not the ledger's, replace the ledger's own entries, one
-    group per row of the hook table, appended in table order."""
+    group per row of the hook table, appended in table order.  An entry is the ledger's by its command, whatever group or
+    matcher it sits under, so the three PreToolUse rows an older sync wrote go with the rest and one row takes their place."""
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         hooks = {}
@@ -248,7 +253,8 @@ def settings_missing_hooks(ctx, path, key=None):
     event short and a file with nothing in it are fixed by the same `settings sync` and read completely differently --
     the first is a hand edit or an older table, the second an installation that never happened -- and a report that
     says neither leaves Eric to diff the file himself.  One line is one event however many matchers it has, as
-    merge_hooks writes it and both readings below take it, so the table's nine rows answer for seven events."""
+    merge_hooks writes it and both readings below take it: the table has one row per event, and the three PreToolUse
+    rows a sync before SPD-223 wrote answer for their one event, so such a file is missing nothing."""
     found = settings_exact_hooks(ctx, path, key) | sessions.settings_hook_events(ctx, path, key)
     return [e for e in TABLE_EVENTS if e not in found]
 
