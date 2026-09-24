@@ -6,7 +6,7 @@ import os
 
 from . import git_programs, globbing, prepare, spud_calls, syntax
 from ..core import homeconf, lazy
-from ..hooks import hookio
+from ..hooks import hookio, pathrule
 
 
 def git_verb(words):
@@ -277,10 +277,155 @@ def git_write_env_targets(variables):
     return out
 
 
+def git_read_options(verb):
+    """git_file_options, and the naming options of the verb's syntax.GIT_VERB_CWD_WRITES entry (format-patch's -v and
+    --suffix, bugreport's and diagnose's -s): the options a glob or an expansion is read as it may become, since a value
+    of either kind can move the file git writes."""
+    longs, shorts = git_file_options(verb)
+    entry = syntax.GIT_VERB_CWD_WRITES.get(verb)
+    if entry is None:
+        return longs, shorts
+    naming = [part for name in entry[2] for part in name if isinstance(part, tuple)]
+    return longs + tuple(p[0] for p in naming if p[0] not in longs), shorts + "".join(p[1] for p in naming if p[1] not in shorts)
+
+
+def head_option(word, long, short, takes_value):
+    """How `word` spells one option of syntax.GIT_VERB_CWD_WRITES: None when it does not, else (the value it carries
+    attached, whether its value is the next word instead).  A long option in any `--`-prefix, git's parse-options
+    resolving an unambiguous one and refusing an ambiguous one, so a prefix is either this option or no write at all;
+    the short letter only at the head of its cluster (`-o<dir>`, `-o <dir>`), so a letter inside another option's
+    value is never read as it (`-Sxo d`), which leaves the default reading in place: fail closed.  A flag carries ""."""
+    key, sep, attached = word.partition("=")
+    if key.startswith("--") and len(key) >= 3 and long.startswith(key):
+        if not takes_value:
+            return None if sep else ("", False)
+        return (attached, False) if sep else (None, True)
+    if short and takes_value and word.startswith("-" + short) and not word.startswith("--"):
+        rest = word[2:]
+        return (rest, False) if rest else (None, True)
+    return None
+
+
+def git_chdir_and_config(words, config_key):
+    """(the directory the composed -C chain names or None, the value `-c`/`--config-env` give `config_key` last or
+    None), read from git's global options.  A `--config-env` value lives in a variable the hook cannot read, so it
+    comes back as that variable's `$NAME`, which the path rule refuses as unresolvable."""
+    base, value, i = None, None, 1
+    while i < len(words):
+        w = words[i]
+        if w == "-C":
+            named = words[i + 1] if i + 1 < len(words) else None
+            if named:
+                base = named if os.path.isabs(named) or base is None else os.path.join(base, named)
+            i += 2
+            continue
+        operand = None
+        if w in ("-c", "--config-env"):
+            operand, i = (words[i + 1] if i + 1 < len(words) else ""), i + 2
+        elif w.startswith("--config-env="):
+            operand, i = w[len("--config-env="):], i + 1
+        if operand is not None:
+            key, _, given = operand.partition("=")
+            if config_key and key.strip().casefold() == config_key:
+                value = given if w == "-c" else "$" + given
+            continue
+        if w in syntax.GIT_GLOBAL_VALUE_FLAGS:
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        break
+    return base, value
+
+
+def strftime_shape(value):
+    """A -s value as the name strftime makes of it: each conversion a run git picks, one that may print a `/`
+    (syntax.STRFTIME_SLASHES) picked runs two slashes deep, `%%` a `%`."""
+    pick, out, i = pathrule.NAME_CHAR + pathrule.NAME_MORE, [], 0
+    while i < len(value):
+        c = value[i]
+        if c != "%" or i + 1 == len(value):
+            out.append(c)
+            i += 1
+            continue
+        n = value[i + 1]
+        if n == "%":
+            out.append("%")
+        else:
+            out.append("/".join([pick] * 3) if n in syntax.STRFTIME_SLASHES else pick)
+            if n in "EO":
+                i += 1  # the modifier's conversion letter
+        i += 2
+    return "".join(out)
+
+
+def git_cwd_write_targets(words):
+    """The file a verb of syntax.GIT_VERB_CWD_WRITES writes into the directory git runs in when the line sends it
+    nowhere else, as (the spelling a reason names it by, the path): a name git picks directly in that directory -- -C's
+    when the line gives one, format.outputDirectory's when `-c` sets it -- and, for each name a naming option on the line
+    shapes, that name too, whose value may reach another directory.  None at all under a first `-h` or `--help`, which
+    print git's usage or its manual, or when an option the entry names sends the files elsewhere (whose path
+    git_write_option_targets reads) or to stdout."""
+    verb, args = git_verb(words)
+    entry = syntax.GIT_VERB_CWD_WRITES.get(verb)
+    if entry is None or (args and args[0] in ("-h", "--help")):
+        return []
+    away, config_key, names = entry
+    naming = {part[0]: part for name in names for part in name if isinstance(part, tuple)}
+    sent, values, i = {}, {}, 0
+    while i < len(args):
+        w = args[i]
+        if w == "--":
+            break
+        i += 1
+        if w.startswith("--no-") and len(w) > 5:
+            for long, _short, _takes in away:
+                if long[2:].startswith(w[5:]):
+                    sent[long] = False  # `--no-output-directory`, `--no-stdout`: back to the current directory
+            continue
+        spaced = False
+        for long, short, takes in away:
+            got = head_option(w, long, short, takes)
+            if got is not None:
+                value = args[i] if got[1] and i < len(args) else got[0]
+                sent[long] = bool(value) or not takes
+                spaced = spaced or got[1]
+        for long, short, _template, _strftime in naming.values():
+            got = head_option(w, long, short, True)
+            if got is not None:
+                values[long] = args[i] if got[1] and i < len(args) else got[0]
+                spaced = spaced or got[1]
+        i += 1 if spaced else 0
+    if any(sent.values()):
+        return []
+    base, directory = git_chdir_and_config(words, config_key)
+    pick = pathrule.NAME_CHAR + pathrule.NAME_MORE
+    shaped = [pick]
+    for name in names:
+        if not any(isinstance(p, tuple) and values.get(p[0]) is not None for p in name):
+            continue  # the picked name reads it already
+        parts = []
+        for p in name:
+            if isinstance(p, tuple) and values.get(p[0]) is not None:
+                parts.append(p[2] % (strftime_shape(values[p[0]]) if p[3] else values[p[0]]))
+            else:
+                parts.append(pick if p is None or isinstance(p, tuple) else p)
+        if "".join(parts) not in shaped:
+            shaped.append("".join(parts))
+    out = []
+    for name in shaped:
+        path = os.path.join(*[x for x in (base, directory, name) if x])  # an absolute directory drops -C's
+        shown = path if os.path.isabs(path) else "./" + path
+        out.append(("%s with no -o, into %s" % (verb, shown), path))
+    return out
+
+
 def git_write_targets(words, variables):
-    """Every file or directory a git call writes beside the repository it reads: what its options name, then
-    what the environment in force names.  Each is checked with the path rule in bash_reason, like a redirection target."""
-    return git_write_option_targets(words) + git_write_env_targets(variables)
+    """Every file or directory a git call writes beside the repository it reads: what its options name, the file
+    a default form writes into the directory git runs in, then what the environment in force names.  Each is checked
+    with the path rule in bash_reason, like a redirection target."""
+    return git_write_option_targets(words) + git_cwd_write_targets(words) + git_write_env_targets(variables)
 
 
 def flag_list_refused(verb, args, read_flags, value_flags):

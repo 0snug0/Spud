@@ -230,8 +230,7 @@ GIT_WRITE_VERBS = {"commit", "add", "stage", "checkout", "switch", "rebase", "re
 # `mailinfo` and `mailsplit` leave the repository alone and write only what the line names them to write, which the git
 # file-write tables hold to the path rule for every caller, member and Spud alike; that is the division of labour this
 # table keeps.  `git format-patch -1`, `git bugreport` and `git diagnose` with no `-o` write into the current directory
-# under a name the line never spells, which neither rule sees; that gap is left open rather than
-# overturn that division here.
+# under a name the line never spells, which GIT_VERB_CWD_WRITES reads as a file of git's naming there (SPD-093).
 GIT_MEMBER_VERBS = frozenset({
     # git's read verbs.  Probed with `-h`: each takes input, revisions, pathspecs and formatting alone, and the only
     # file any of them names git to write is the diff `--output`, which GIT_FILE_OPTIONS checks on every verb.
@@ -330,6 +329,53 @@ GIT_VERB_FILE_OPTIONS = {
 # `git bundle create <file> <rev-list-args>`, `git mailinfo <msg> <patch>` and `git pack-objects <base-name>` each wrote
 # what they name (probed; bundle create with `-q` and `--version=2` before the file too).
 GIT_VERB_FILE_POSITIONALS = {"bundle": ("create", 1), "mailinfo": (None, 2), "pack-objects": (None, 1)}
+# The verbs whose default form writes a file of git's own naming into the current directory, a form the line never
+# spells (SPD-093): `git format-patch -1` writes 0001-<subject>.patch, `git bugreport` git-bugreport-<date>.txt and
+# `git diagnose` git-diagnose-<date>.zip into the directory git runs in -- -C's, when the line gives one.  Their man
+# pages say so: format-patch's files "are created in the current working directory" without -o, and bugreport's and
+# diagnose's -o writes "instead of the current directory".  Read by git_verbs.git_cwd_write_targets as a write of a new
+# file directly in that directory, held to the path rule; a directory the hook cannot follow refuses everyone, as any
+# unfollowable relative write does.
+#
+# The file's name is read as picked whole (hooks/pathrule.NAME_CHAR and NAME_MORE), so a member may run the default form
+# only where one of its globs covers every file directly in that directory (`tests/**`, `out/*`, never `out/*.patch`).
+# The directory is the one thing the line settles: format-patch's name comes from the commit's subject, -v's reroll
+# prefix, --suffix, --numbered-files, --cover-letter and format.suffix, and bugreport's and diagnose's from -s's strftime
+# format, so a glob that matches only some shapes of it would be a guess.  The names git picks all start with a digit,
+# `v`, `git-bugreport-` or `git-diagnose-`, so none is a name the path rule refuses by its spelling (.git, a config
+# file, the ledger's roots).  A naming option the line spells adds a reading of its own, since its value may carry a `/`
+# git writes through: bugreport makes the leading directories of git-bugreport-<-s>.txt, so `-s /../x` escapes the
+# directory, and strftime's %D prints a date with two slashes.  bugreport's name for its --diagnose zip is read always,
+# fail closed.
+#
+# Per verb: (the options that send the files elsewhere or nowhere, each (long, short letter or "", whether it takes a
+# value) -- set to an empty value, one writes into the current directory again; each is read spaced, `=`-attached, as a
+# prefix of the long and as the letter only at the head of its cluster, since in `-Sxo d` the o is pickaxe's, and
+# `--no-<prefix>` sets it back; the config key that moves the default directory, read from `-c` on the line
+# (format.outputDirectory, which -o overrides); and the names, each a tuple of parts: a literal, None for a run git
+# picks, or (long, short letter, template, strftime) for a naming option whose value fills the template).
+#
+# Surveyed on git 2.54.0 (Apple Git-157): every verb of `git --list-cmds=main` against its man page for "current
+# (working) directory" and "temporary file".  Checked and left out: archive, fast-export, request-pull and shortlog write to
+# stdout, and pack-objects names its base; mailsplit needs -o, and mailinfo and bundle create name their files; clone and
+# init make a directory here when named none, but GIT_WRITE_VERBS refuses both to a member and Spud's own are his;
+# unpack-file ("Creates a temporary file", .merge_file_XXXXX) and checkout-index --temp write at the work tree's top
+# level ("the temporary file names are always relative to the top level directory"), not the current directory, and
+# neither is a member's; mergetool and difftool keep their temporary files for the tool they run, and are Law 7's;
+# fast-import "does not use or alter the current working directory".
+GIT_VERB_CWD_WRITES = {
+    "format-patch": ((("--output-directory", "o", True), ("--output", "", True), ("--stdout", "", False)),
+                     "format.outputdirectory",
+                     ((("--reroll-count", "v", "v%s-", False), None, ("--suffix", "", "%s", False)),)),
+    "bugreport": ((("--output-directory", "o", True),), None,
+                  (("git-bugreport-", ("--suffix", "s", "%s", True), ".txt"),
+                   ("git-diagnose-", ("--suffix", "s", "%s", True), ".zip"))),
+    "diagnose": ((("--output-directory", "o", True),), None,
+                 (("git-diagnose-", ("--suffix", "s", "%s", True), ".zip"),)),
+}
+# strftime conversions that may print a `/`: %D is %m/%d/%y, and %x, %c, %+ and the E and O modifiers print the
+# locale's date, which may hold one.  Read by git_verbs.strftime_shape as picked runs two slashes deep.
+STRFTIME_SLASHES = frozenset("Dxc+EO")
 # The commands that write the files they name as operands, which shell/arg_writes reads for bash_reason to hold
 # to the path rule as it holds a redirection target.  Per command, (its shape, the short options that take a value --
 # attached, or the next word -- and the GNU long options that take the next word unless `=` attaches it).  Read on this
