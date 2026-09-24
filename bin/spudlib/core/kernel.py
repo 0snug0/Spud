@@ -24,6 +24,14 @@ MEMBER_STATUSES = ("planned", "active", "done", "blocked", "failed")
 MODELS = ("fable", "opus", "sonnet", "haiku")
 PERSONAS = ("researcher", "architect", "reviewer", "engineer", "designer", "writer", "scout", "contractor")
 ALIVE = ("planned", "active")
+# Effort (SPD-222).  The levels Claude Code takes, and the one every spudagent runs at: share/agents/spudagent.md's
+# frontmatter says `effort: high`, which beats the spawning session's level (tests/probes/subagent_effort.py showed it on
+# 2.1.280).  Haiku takes no effort, so a haiku member's is NULL; so is a contractor's, whose agent type is not ours.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+SPUDAGENT_EFFORT = "high"
+EFFORT_MODELS = ("fable", "opus", "sonnet")
+# The one escalation (SPD-222): a member that returned failed or blocked on this model is re-planned once on that one.
+ESCALATION = ("opus", "fable")
 
 # The reserved key of Spud's home in a deliverable glob (home:<glob>) and in the path rule.  The home is not a
 # project and never a projects row; project 1, `spud`, is the tool repository.

@@ -406,6 +406,17 @@ class ShippedConfigTest(unittest.TestCase):
         # SPD-157: the person the home works for, beside the identity of the one working.
         self.assertEqual((config["owner"]["name"], config["owner"]["pronouns"]["possessive"]), ("Robin", "her"))
 
+    def test_the_persona_table_in_the_claude_md_is_the_config_s(self):
+        """SPD-222: a tier is written twice, in the config `member new` reads and in the table the home's CLAUDE.md shows,
+        and the two never disagree.  researcher, architect and reviewer default to opus since then; fable is a tier reason."""
+        personas = json.loads((SHARE / "spud.config.json").read_text(encoding="utf-8"))["personas"]
+        rows = re.findall(r"^\| (\w+) \| (\w+) \| (.+) \|$", (SHARE / "CLAUDE.md").read_text(encoding="utf-8"), re.M)
+        table = {persona: (tier, role) for persona, tier, role in rows if persona != "Persona"}
+        self.assertEqual(table, {persona: (spec["tier"], spec["role"]) for persona, spec in personas.items()})
+        self.assertEqual({persona: personas[persona]["tier"] for persona in ("researcher", "architect", "reviewer")},
+                         {"researcher": "opus", "architect": "opus", "reviewer": "opus"})
+        self.assertNotIn("fable", {spec["tier"] for spec in personas.values()})
+
     def test_the_unrendered_template_is_json_and_is_not_a_config(self):
         # Deliberate (design 3.2): "{{ticket_prefix}}" is valid JSON and an invalid prefix, so every check above runs
         # against the rendered text and never against the file's bytes.
@@ -510,6 +521,15 @@ class ShippedSetTest(unittest.TestCase):
                              ["agents/spudagent.md", "skills/spud-reference/SKILL.md"])
         finally:
             home.cleanup()
+
+    def test_the_spudagent_definition_sets_the_effort_member_new_records(self):
+        """SPD-222: a spudagent runs at the effort its definition's frontmatter sets, which beats the spawning session's
+        level (tests/probes/subagent_effort.py), and `member new` writes kernel.SPUDAGENT_EFFORT on the row as that level
+        -- one value in two places, held equal here, so the ledger never records an effort the definition does not set."""
+        fields = skill_frontmatter((SHARE / "agents" / "spudagent.md").read_text(encoding="utf-8"))
+        self.assertEqual(fields.get("effort"), spud.SPUDAGENT_EFFORT)
+        self.assertIn(spud.SPUDAGENT_EFFORT, spud.EFFORTS)
+        self.assertEqual(fields.get("model"), "inherit")  # the Agent call's explicit model decides it (Law 3)
 
     def test_the_shipped_vault_holds_no_layout_no_plugin_code_and_no_note(self):
         # Design section 1: `workspace.json` and `workspace-mobile.json` are one person's window layout, `.DS_Store` is

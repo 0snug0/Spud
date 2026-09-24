@@ -192,6 +192,9 @@ def import_member_file(ctx, con, at, path, rel, team_key):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s: lineage %s needs a parent member" % (rel, lineage))
     if fm["persona"] not in kernel.PERSONAS or fm["model"] not in kernel.MODELS or fm["status"] not in kernel.MEMBER_STATUSES:
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s: persona, model or status outside the schema's values" % rel)
+    effort = fm.get("effort") or None  # SPD-222: rendered only when the row has one
+    if effort is not None and effort not in kernel.EFFORTS:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s: effort %r is not one of %s" % (rel, effort, ", ".join(kernel.EFFORTS)))
     names = [n for n, _ in doc["sections"]]
     if len(set(names)) != len(names):
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s: a section repeats" % rel)
@@ -202,11 +205,11 @@ def import_member_file(ctx, con, at, path, rel, team_key):
     blocked = sections.get("Blocked") if "Blocked" in sections else None
     usage = usage_columns(fm, rel)
     cur = con.execute(
-        "INSERT INTO members (ticket_id, lineage, depth, parent_id, name, persona, agent_type, model, status, brief,"
+        "INSERT INTO members (ticket_id, lineage, depth, parent_id, name, persona, agent_type, model, effort, status, brief,"
         " result, blocked, outcome, layout, planned_at, spawned_at, finished_at, duration_ms, tool_uses, total_tokens, usage_json)"
-        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ticket["id"], lineage, lineage.count(".") + 1, parent["id"] if parent else None, fm["name"], fm["persona"],
-         fm.get("agent_type") or "spudagent", fm["model"], fm["status"], sections.get("Brief", ""),
+         fm.get("agent_type") or "spudagent", fm["model"], effort, fm["status"], sections.get("Brief", ""),
          sections.get("Result") if "Result" in sections else None, blocked,
          sections.get("Outcome") if "Outcome" in sections else None,
          json.dumps(member_layout(names, blocked)) if member_layout(names, blocked) else None,

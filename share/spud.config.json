@@ -122,15 +122,15 @@
   },
   "personas": {
     "researcher": {
-      "tier": "fable",
+      "tier": "opus",
       "role": "investigates, compares options with evidence, writes spikes"
     },
     "architect": {
-      "tier": "fable",
+      "tier": "opus",
       "role": "designs structures and schemas, reviews plans"
     },
     "reviewer": {
-      "tier": "fable",
+      "tier": "opus",
       "role": "checks another spudagent's output against its brief"
     },
     "engineer": {

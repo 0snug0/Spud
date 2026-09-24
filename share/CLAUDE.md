@@ -71,6 +71,7 @@ Every delegation, at every level of the tree, runs these steps. Nested parents r
 3. **Spawn.** `Agent` with `subagent_type: "spudagent"` (or the contractor's type), an explicit `model` equal to the planned tier, `description: "{{team_prefix}}-nnn/<Name> (<lineage>, <persona>)"` exactly as printed, `run_in_background: true`, and the brief template below as the prompt. If the harness fails the spawn, `member finish <ref> --status failed --outcome "…"` and plan a new row; never re-issue the same description while the first is pending.
 4. **Parallel work** gets disjoint deliverable globs. Spudagents share your working tree; never pass `isolation: worktree`.
 5. **Return.** `spud --as spud member finish {{team_prefix}}-nnn/<Name> --status done|blocked|failed --outcome "…" --summary "…" --next "…"`. The summary is the member's line on the ticket's Team card: one or two sentences, 150 to 350 characters, past tense, what it built or changed and where, with at most one clause of proof; never a verdict ("Accepted"), never where the work sits ("on branch …, uncommitted"), no lists or line breaks. Decide each open proposal (`spud proposal list --open`, `proposal decide`). `handoff add --ticket {{ticket_prefix}}-nnn --from {{team_prefix}}-nnn/<Name> --to spud --what "…"`. Update the ticket (`ticket edit --outcome`, `ticket move --status done --next`). Report entries write themselves on `member finish`, `proposal decide`, `ticket new`, `ticket move` and a priority change; you type only `--next`, and `report add "<title>" --next "…"` covers a merge or an install. Commit code on the worktree branch, every commit naming the ticket, push, and land it yourself; ask {{owner_object}} only when the suite fails or the merge conflicts.
+6. **Escalate once.** A member that returns failed on opus, or blocked for want of capability (a question only {{owner_name}} can answer is not that), is re-planned once on fable: `member new --escalates {{team_prefix}}-nnn/<Name> --model fable`, its Result under Read first in the new brief. The CLI records the link and fills the tier reason; nothing re-spawns by itself, and nothing is escalated twice.
 
 Sizing: one spudagent with no children is the default. Spawn a lead that builds its own team only when the work has genuinely separable parts. A designer-then-engineer handoff is two sequential children of the same parent, recorded with `handoff add`.
 
@@ -80,15 +81,15 @@ A **team** is every spudagent spawned for one ticket, keyed `{{team_prefix}}-nnn
 
 | Persona | Tier | Role |
 |---|---|---|
-| researcher | fable | investigates, compares options with evidence, writes spikes |
-| architect | fable | designs structures and schemas, reviews plans |
-| reviewer | fable | checks another spudagent's output against its brief |
+| researcher | opus | investigates, compares options with evidence, writes spikes |
+| architect | opus | designs structures and schemas, reviews plans |
+| reviewer | opus | checks another spudagent's output against its brief |
 | engineer | opus | implements code and config |
 | designer | opus | UI, UX, layouts, visual specs |
 | writer | sonnet | docs, reports, prose |
 | scout | haiku | lookups, summaries, file surveys |
 
-Override a tier with `--tier-reason` and a line in the ticket's sizing: fable for anything expensive if wrong (data, security, architecture, review), opus for ordinary implementation and design, sonnet for mechanical edits and prose, haiku for lookups.
+Every spudagent runs at `effort: high`, from its definition, and its row records it (haiku takes none). Override a tier with `--tier-reason` and a line in the ticket's sizing: sonnet for mechanical edits and prose, haiku for lookups, and fable where a miss would not show: a review of the hook path, the ledger's schema or migrations, or security is planned `--model fable --tier-reason "review of <which>"`, never on opus.
 
 The handle in prose is `Russet (01, researcher)`; in the `Agent` description it is `{{team_prefix}}-nnn/Russet (01, researcher)`, team key first. Wikilinks to a member are folder-qualified, `[[{{team_prefix}}-002/Russet|Russet]]`; ticket links are plain `[[{{ticket_prefix}}-002]]`.
 

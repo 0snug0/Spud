@@ -18,7 +18,7 @@ def cmd_member_new(ctx, args):
         binder.prepare(con, actor, worktreebind.planned_ticket(con, actor, args.ticket), args.deliverable)
         m = ops.plan_member(ctx, con, actor, args.ticket, args.persona, args.model, name=args.name, tier_reason=args.tier_reason,
                         agent_type=args.agent_type, brief=args.brief or "", deliverables=args.deliverable,
-                        session_id=actors.planning_session(os.environ), binder=binder)
+                        session_id=actors.planning_session(os.environ), binder=binder, escalates=args.escalates)
         d = lookup.member_dict(con, m)
     finally:
         con.close()
@@ -114,6 +114,10 @@ def cmd_member_edit(ctx, args):
                 updates["model"] = args.model
             if args.tier_reason is not None and args.tier_reason != m["tier_reason"]:
                 updates["tier_reason"] = args.tier_reason
+            if "model" in updates or "agent_type" in updates:  # the effort follows the model and the definition it runs as
+                effort = ops.planned_effort(updates.get("model", m["model"]), updates.get("agent_type", m["agent_type"]))
+                if effort != m["effort"]:
+                    updates["effort"] = effort
             if updates:
                 con.execute("UPDATE members SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), m["id"]))
                 ledgerdb.write_event(con, at, actor.label, "member.edited", "%s edited: %s" % (lookup.member_ref(con, m["id"]), ", ".join(sorted(updates))),
@@ -157,8 +161,12 @@ def cmd_member_own(ctx, args, kind):
 def format_member(d):
     lines = ["%s (%s, %s, %s) %s on %s" % (d["ref"], d["lineage"], d["persona"], d["model"], d["status"], d["ticket"])]
     lines.append("parent: %s   planned: %s   spawned: %s   finished: %s" % (d["parent"] or "Spud", d["planned_at"], d["spawned_at"] or "-", d["finished_at"] or "-"))
+    if d["effort"]:
+        lines.append("effort: " + d["effort"])
     if d["tier_reason"]:
         lines.append("tier reason: " + d["tier_reason"])
+    if d["escalates"]:
+        lines.append("escalates: " + d["escalates"])
     if d["deliverables"]:
         lines.append("deliverables: " + ", ".join(d["deliverables"]))
     for name, key in (("Brief", "brief"), ("Result", "result"), ("Blocked", "blocked"), ("Outcome", "outcome"), ("Summary", "summary")):

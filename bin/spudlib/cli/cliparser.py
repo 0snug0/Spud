@@ -297,6 +297,9 @@ def build_parser():
     q.add_argument("--model", required=True, choices=kernel.MODELS)
     q.add_argument("--name", help="a pool name instead of a random draw")
     q.add_argument("--tier-reason", type=text_arg, help="required when the model is not the persona's default tier")
+    q.add_argument("--escalates", metavar="SPUD-nnn/<Name>",
+                   help="re-plan on fable, once, a sibling that returned failed or blocked on opus: records the link and, without"
+                        " --tier-reason, fills it as `escalation after SPUD-nnn/<Name> <status>`")
     q.add_argument("--agent-type", help="native agent type (required for a contractor)")
     q.add_argument("--brief", type=text_arg, help="the brief, required and non-empty (no brief, no spudagent); @file or @- accepted")
     q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable): bare for the ticket's project, in the worktree the ticket"

@@ -142,14 +142,46 @@ def normalize_deliverables(globs):
     return [normalize_deliverable(g) for g in (globs or [])]
 
 
+def planned_effort(model, agent_type):
+    """The effort a member is planned to run at (SPD-222): the spudagent definition's, kernel.SPUDAGENT_EFFORT, on a model
+    that takes one; None for haiku, which takes none, and for any other agent type, whose effort is its own definition's
+    or the spawning session's and nothing the ledger can know."""
+    if agent_type != "spudagent" or model not in kernel.EFFORT_MODELS:
+        return None
+    return kernel.SPUDAGENT_EFFORT
+
+
+def escalation_target(con, ref, ticket, parent_id, model):
+    """The member `member new --escalates <ref>` re-plans (SPD-222), checked inside the plan's transaction: on the same
+    ticket under the same parent, returned failed or blocked, run on the first model of kernel.ESCALATION and re-planned on
+    the second, and escalated by no other member yet -- once, never twice."""
+    target = lookup.get_member(con, ref)
+    handle = lookup.member_ref(con, target["id"])
+    low, high = kernel.ESCALATION
+    if target["ticket_id"] != ticket["id"]:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s is not on %s; an escalation is planned on the ticket of the member it re-plans" % (handle, ticket["key"]))
+    if target["parent_id"] != parent_id:
+        raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "%s is %s's child; its own parent re-plans it" % (handle, lookup.member_ref(con, target["parent_id"]) or "Spud"))
+    if target["status"] not in ("failed", "blocked"):
+        raise kernel.SpudError(kernel.EXIT_TRANSITION, "%s is %s; only a member that returned failed or blocked is escalated" % (handle, target["status"]))
+    if target["model"] != low or model != high:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "the one escalation is %s to %s: %s ran on %s and this plan names %s" % (low, high, handle, target["model"], model))
+    again = con.execute("SELECT id FROM members WHERE escalates_id = ?", (target["id"],)).fetchone()
+    if again is not None:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s was escalated once already, by %s; a %s failure is not retried" % (handle, lookup.member_ref(con, again["id"]), high))
+    return target
+
+
 def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_reason=None, agent_type=None, brief="", deliverables=None, session_id=None,
-                binder=None):
+                binder=None, escalates=None):
     """member new: the four limit checks, the lineage and the name draw, all inside
     one BEGIN IMMEDIATE, reading the ticket and the parent inside it too.  session_id is
     the Claude Code session planning it, None outside one.  `binder` is the
     command's commands/worktreebind.Binder, prepared before this call: its decision runs
     last, inside the transaction, so a plan refused for its worktree writes nothing and a
-    binding is written only with the member it binds for."""
+    binding is written only with the member it binds for.  `escalates` names the failed
+    opus member this plan re-runs on fable (escalation_target), and fills the tier reason
+    when none is given."""
     limits = ctx.limits
     deliverables = normalize_deliverables(deliverables)
     if persona not in ctx.personas():
@@ -164,7 +196,7 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
     else:
         agent_type = agent_type or "spudagent"
         default_tier = ctx.persona_tier(persona)
-        if default_tier and model != default_tier and not tier_reason:
+        if default_tier and model != default_tier and not tier_reason and not escalates:
             raise kernel.SpudError(kernel.EXIT_ERROR, "%s defaults to %s; model %s needs --tier-reason" % (persona, default_tier, model))
     if not (brief or "").strip():
         raise kernel.SpudError(kernel.EXIT_ERROR, "no brief, no spudagent (Law 2): member new needs --brief (a non-empty brief; @file and @- are accepted)")
@@ -203,18 +235,26 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
         pad = ctx.id_pad()
         lineage = ((parent["lineage"] + ".") if parent else "") + str(ever + 1).zfill(pad)
         chosen = draw_name(con, ticket["id"], name)
+        target = escalation_target(con, escalates, ticket, parent_id, model) if escalates else None
+        if target is not None and not tier_reason:
+            tier_reason = "escalation after %s %s" % (lookup.member_ref(con, target["id"]), target["status"])
+        effort = planned_effort(model, agent_type)
         if binder is not None:
             binder.decide(con, at, actor, ticket, deliverables)
         cur = con.execute(
-            "INSERT INTO members (ticket_id, lineage, depth, parent_id, name, persona, agent_type, model, tier_reason,"
-            " status, brief, deliverables, planned_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)",
-            (ticket["id"], lineage, depth, parent_id, chosen, persona, agent_type, model, tier_reason, brief,
-             json.dumps(list(deliverables or [])), at, session_id),
+            "INSERT INTO members (ticket_id, lineage, depth, parent_id, name, persona, agent_type, model, effort, tier_reason,"
+            " escalates_id, status, brief, deliverables, planned_at, session_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?, ?, ?)",
+            (ticket["id"], lineage, depth, parent_id, chosen, persona, agent_type, model, effort, tier_reason,
+             target["id"] if target is not None else None, brief, json.dumps(list(deliverables or [])), at, session_id),
         )
         member_id = cur.lastrowid
         if parent is None:
             con.execute("UPDATE tickets SET lead_id = ?, updated_at = ? WHERE id = ? AND lead_id IS NULL", (member_id, at, ticket["id"]))
         data = {"lineage": lineage, "name": chosen, "persona": persona, "model": model, "agent_type": agent_type}
+        if effort:
+            data["effort"] = effort
+        if target is not None:
+            data["escalates"] = lookup.member_ref(con, target["id"])
         if session_id:
             data["session_id"] = session_id
         ledgerdb.write_event(con, at, actor.label, "member.planned", "planned %s (%s, %s, %s)" % (chosen, lineage, persona, model),

@@ -504,5 +504,108 @@ class MemberListTest(SpudTestCase):
         self.assertIn("fleet", text)
 
 
+class OpusFirstTest(SpudTestCase):
+    """SPD-222: researcher, architect and reviewer default to opus; every spudagent is planned at the effort its definition
+    sets, recorded on the row; and a member that returned failed or blocked on opus is re-planned once on fable."""
+
+    def plan(self, ticket, persona, model, *extra, actor="spud"):
+        return self.home.run("member", "new", "--ticket", ticket, "--persona", persona, "--model", model, "--brief", "x", *extra,
+                             actor=actor, check=False)
+
+    def test_researcher_architect_and_reviewer_default_to_opus(self):
+        for persona in ("researcher", "architect", "reviewer"):
+            with self.subTest(persona):
+                t = self.new_ticket("Tiers: " + persona)  # a ticket each, so root_fan_out never counts the three
+                self.assertIsNone(self.new_member(t["key"], persona=persona, model="opus")["tier_reason"])
+                proc = self.plan(t["key"], persona, "fable")
+                self.assertEqual(proc.returncode, EXIT_ERROR)
+                self.assertIn("%s defaults to opus; model fable needs --tier-reason" % persona, proc.stderr)
+        kept = self.new_member(t["key"], persona="reviewer", model="fable", tier_reason="review of the hook path")
+        self.assertEqual((kept["model"], kept["tier_reason"]), ("fable", "review of the hook path"))
+
+    def test_the_effort_is_the_definitions_on_a_model_that_takes_one(self):
+        cases = [("engineer", "opus", {}, "high"), ("reviewer", "fable", {"tier_reason": "review of security"}, "high"),
+                 ("writer", "sonnet", {}, "high"), ("scout", "haiku", {}, None),
+                 ("contractor", "sonnet", {"agent_type": "claude-code-guide"}, None)]
+        for persona, model, extra, effort in cases:
+            with self.subTest(persona=persona, model=model):
+                t = self.new_ticket("Effort: " + persona)
+                m = self.new_member(t["key"], persona=persona, model=model, **extra)
+                self.assertEqual(m["effort"], effort)
+                shown = self.home.run("member", "show", m["ref"]).stdout
+                self.assertEqual("effort: high" in shown.splitlines(), effort == "high")
+                planned = self.home.json("events", "--member", m["ref"])["events"][0]
+                self.assertEqual(planned["data"].get("effort"), effort)
+        fleet = [r["effort"] for r in self.home.json("fleet")["members"]]  # a name repeats across teams, so a list
+        self.assertEqual(sorted(fleet, key=str), sorted([c[3] for c in cases], key=str))
+        self.assertIn("effort", self.home.run("fleet").stdout.splitlines()[0])
+
+    def test_member_edit_resets_the_effort_with_the_model(self):
+        t = self.new_ticket("Edit")
+        m = self.new_member(t["key"], persona="engineer", model="opus")
+        edited = self.home.json("member", "edit", m["ref"], "--model", "haiku", "--tier-reason", "a lookup after all", actor="spud")
+        self.assertEqual((edited["member"]["effort"], edited["changed"]), (None, ["effort", "model", "tier_reason"]))
+        back = self.home.json("member", "edit", m["ref"], "--model", "opus", actor="spud")
+        self.assertEqual(back["member"]["effort"], "high")
+        brief = self.home.json("member", "edit", m["ref"], "--brief", "Again.", actor="spud")
+        self.assertEqual((brief["member"]["effort"], brief["changed"]), ("high", ["brief"]))
+
+    def test_a_failed_opus_member_is_escalated_once_on_fable(self):
+        t = self.new_ticket("Escalate")
+        failed = self.new_member(t["key"], persona="engineer", model="opus", name="Russet")
+        self.home.json("member", "finish", failed["ref"], "--status", "failed", "--outcome", "could not build it", actor="spud")
+        again = self.new_member(t["key"], persona="engineer", model="fable", escalates=failed["ref"])
+        self.assertEqual((again["escalates"], again["tier_reason"], again["effort"]),
+                         (failed["ref"], "escalation after %s failed" % failed["ref"], "high"))
+        shown = self.home.run("member", "show", again["ref"]).stdout.splitlines()
+        self.assertIn("escalates: " + failed["ref"], shown)
+        self.assertIn("tier reason: escalation after %s failed" % failed["ref"], shown)
+        planned = self.home.json("events", "--member", again["ref"])["events"][0]
+        self.assertEqual(planned["data"]["escalates"], failed["ref"])
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", failed["ref"])
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("%s was escalated once already, by %s" % (failed["ref"], again["ref"]), proc.stderr)
+
+    def test_a_blocked_member_keeps_a_tier_reason_given_and_names_its_status(self):
+        t = self.new_ticket("Blocked")
+        m = self.new_member(t["key"], persona="architect", model="opus")
+        self.home.json("member", "start", m["ref"], actor="spud")
+        self.home.json("member", "finish", m["ref"], "--status", "blocked", "--outcome", "the design is beyond it", actor="spud")
+        filled = self.new_member(t["key"], persona="architect", model="fable", escalates=m["ref"])
+        self.assertEqual(filled["tier_reason"], "escalation after %s blocked" % m["ref"])
+        other = self.new_member(t["key"], persona="engineer", model="opus")
+        self.home.json("member", "finish", other["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+        given = self.new_member(t["key"], persona="engineer", model="fable", escalates=other["ref"], tier_reason="escalation: the schema")
+        self.assertEqual((given["tier_reason"], given["escalates"]), ("escalation: the schema", other["ref"]))
+
+    def test_what_an_escalation_refuses(self):
+        t = self.new_ticket("Refusals")
+        live = self.new_member(t["key"], persona="engineer", model="opus", name="Russet")
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", live["ref"])
+        self.assertEqual(proc.returncode, EXIT_TRANSITION)
+        self.assertIn("is planned; only a member that returned failed or blocked is escalated", proc.stderr)
+        self.home.json("member", "finish", live["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+        proc = self.plan(t["key"], "engineer", "opus", "--escalates", live["ref"])
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("the one escalation is opus to fable: %s ran on opus and this plan names opus" % live["ref"], proc.stderr)
+        on_fable = self.new_member(t["key"], persona="engineer", model="fable", tier_reason="the schema", name="Kestrel")
+        self.home.json("member", "finish", on_fable["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", on_fable["ref"])
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("%s ran on fable" % on_fable["ref"], proc.stderr)
+        elsewhere = self.new_ticket("Elsewhere")
+        proc = self.plan(elsewhere["key"], "engineer", "fable", "--escalates", live["ref"])
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("is not on %s" % elsewhere["key"], proc.stderr)
+        lead = self.new_member(t["key"], persona="engineer", model="opus")
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", live["ref"], actor=lead["ref"])
+        self.assertEqual(proc.returncode, EXIT_OWNERSHIP)
+        self.assertIn("%s is Spud's child; its own parent re-plans it" % live["ref"], proc.stderr)
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", "SPUD-001/Nobody")
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("no member SPUD-001/Nobody", proc.stderr)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM members WHERE escalates_id IS NOT NULL"), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
