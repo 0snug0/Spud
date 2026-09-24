@@ -649,6 +649,10 @@ class ShellAnalysis:
         # cannot say, being None both for text the line does not spell and for no input at all.  An interpreter with no
         # program of its own runs whatever stands there, and reads a terminal where nothing does (shell/inline_programs).
         self.stdin_fed = False
+        # SPD-144: the file the simple command being read has on standard input when the line names exactly one and
+        # nothing else feeds it -- its own `<` or `<>` on descriptor 0, the word as spelled -- else None
+        # (analyse.stdin_file_word); an archive or a patch read from standard input is read from it (shell/tree_writes).
+        self.stdin_file = None
         self.cwds = frozenset([cwd]) if cwd else None
         # What stopped the hook tokenizing text it reads for this line, or None (SPD-191): (what -- the quote character
         # that never closes, or a backslash that ends the text with nothing to escape; the text from that quote on, or up

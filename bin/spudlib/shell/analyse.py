@@ -155,6 +155,27 @@ def analyse_new_shell(a, command, depth, stdin=None, fed=False):
         a.alias_scope, a.aliases, a.alias_unknown = state
 
 
+def stdin_file_word(tokens, bodies, piped_fed):
+    """The one file a simple command reads on standard input, as the line spells it (SPD-144): its own `<` or `<>` on
+    descriptor 0, when it has exactly one such input and neither a pipe nor a here-document or here-string feeds it too.
+    None otherwise -- no input redirection, several (zsh reads each in turn, bash the last), a descriptor (`<&`), a pipe
+    beside it (zsh reads the pipe first) -- and a compound command's input is no command's own."""
+    if piped_fed or bodies:
+        return None
+    files, i = [], 0
+    while i < len(tokens):
+        t, fd = tokens[i], None
+        if t.isdigit() and i + 1 < len(tokens) and tokens[i + 1] in (syntax.OUT_REDIRECTS | syntax.IN_REDIRECTS):
+            fd, i, t = t, i + 1, tokens[i + 1]
+        if t in syntax.IN_REDIRECTS or t == "<>":
+            if fd in (None, "0"):
+                files.append(tokens[i + 1] if t in ("<", "<>") and i + 1 < len(tokens) else None)
+            i += 2
+            continue
+        i += 2 if t in syntax.OUT_REDIRECTS else 1
+    return files[0] if len(files) == 1 else None
+
+
 def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, stdin=None, piped_fed=False):
     """A simple command: its output targets, then its words.  A target is resolved here, before analyse_words reads
     the command's own prefix assignments, because those reach neither the redirection nor the arguments in either shell
@@ -173,10 +194,11 @@ def analyse_segment(tokens, bodies, a, depth, redirect_cwds=syntax._CURRENT, std
         a.redirects.append((target, cwds))
     outer_stdin, a.stdin = a.stdin, stdin
     outer_fed, a.stdin_fed = a.stdin_fed, stdin_text.input_fed(tokens, bodies, piped_fed)
+    outer_file, a.stdin_file = a.stdin_file, stdin_file_word(tokens, bodies, piped_fed)
     try:
         analyse_words(words, bodies, a, depth, [globbing.GLOB_READING_BUDGET], "shell", False)
     finally:
-        a.stdin, a.stdin_fed = outer_stdin, outer_fed
+        a.stdin, a.stdin_fed, a.stdin_file = outer_stdin, outer_fed, outer_file
     if targets and words and all(assignment_words.assignment_word(w) for w in words):
         # An assignment-only command's own redirection is where the shells part: zsh opens it with the value the line had
         # before the command, bash with the one the command assigns (probed: `S=$D/a; S=$D/b > $S.f` made a.f in zsh and

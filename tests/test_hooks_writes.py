@@ -2,9 +2,12 @@
 recursive copy or an extraction write, spelled and scripted writes, and how a target resolves."""
 
 import importlib
+import io
 import os
 import re
+import tarfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -555,8 +558,17 @@ class TreeWriteCase(BashHookCase):
         for d in ("out/tmp", "bin/sub", "vendor/plain/sub", "vendor/repo/src", "tests/out", "docs", "ledger/tickets"):
             (home / d).mkdir(parents=True, exist_ok=True)
         for f in ("out/tmp/a.pyc", "out/keep.txt", "bin/sub/x.py", "bin/x.py", "vendor/plain/a.txt", "vendor/plain/sub/b.txt",
-                  "vendor/repo/src/c.py", "docs/x.md", "ledger/tickets/SPD-001.md", "a.tar", "a.zip", "x.patch", "list"):
+                  "vendor/repo/src/c.py", "docs/x.md", "ledger/tickets/SPD-001.md", "list"):
             (home / f).write_text("a\n", encoding="utf-8")
+        # SPD-144: an archive and a patch the hook can list, each writing one file, f.txt, since the hook now reads the
+        # names an extraction writes and refuses a member one it cannot read
+        with tarfile.open(home / "a.tar", "w") as tf:
+            info = tarfile.TarInfo("f.txt")
+            info.size = 2
+            tf.addfile(info, io.BytesIO(b"a\n"))
+        with zipfile.ZipFile(home / "a.zip", "w") as zf:
+            zf.writestr("f.txt", b"a\n")
+        (home / "x.patch").write_text("--- f.txt\n+++ f.txt\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
         plant_git_dir(home / "vendor" / "repo" / ".git")
         plant_git_dir(home / "tests" / "fake" / ".git")
         (home / "bin" / "link").symlink_to(home / "bin" / "sub")
@@ -945,28 +957,45 @@ class ExtractionWriteTest(TreeWriteCase):
 
     def test_the_analysis_records_the_directory(self):
         m = self.module
-        for command, writes in (("tar -xf a.tar -C out", [("out", "tree")]), ("tar xzf a.tar -C out", [("out", "tree")]),
-                                ("tar -x -C out -C sub -f a.tar", [("out/sub", "tree")]), ("tar -xf a.tar -C /tmp/x", [("/tmp/x", "tree")]),
-                                ("tar -xf a.tar", [(".", "tree")]), ("tar -tf a.tar", []), ("tar -xOf a.tar", []),
+        numbered = ".~" + m.NAME_CHAR + m.NAME_MORE + "~"
+
+        def patched(directory):  # SPD-144: x.patch's one name, f.txt, with its backups and its reject file beside it
+            here = "./f.txt" if directory == "." else directory + "/./f.txt"
+            return [(directory + "/f.txt", None), (here + ".orig", None), (here + numbered, None), (here + ".rej", None)]
+
+        # SPD-144: after the tree, each name the archive or patch holds (a.tar, a.zip and x.patch write f.txt)
+        for command, writes in (("tar -xf a.tar -C out", [("out", "tree"), ("out/f.txt", None)]),
+                                ("tar xzf a.tar -C out", [("out", "tree"), ("out/f.txt", None)]),
+                                ("tar -x -C out -C sub -f a.tar", [("out/sub", "tree"), ("out/sub/f.txt", None)]),
+                                ("tar -xf a.tar -C /tmp/x", [("/tmp/x", "tree"), ("/tmp/x/f.txt", None)]),
+                                ("tar -xf a.tar", [(".", "tree"), ("./f.txt", None)]), ("tar -tf a.tar", []), ("tar -xOf a.tar", []),
                                 ("tar -xPf a.tar -C out", [(m.ANY_PATH, "tree")]),
                                 ("tar -cf out/a.tar docs", [("out/a.tar", None)]),  # SPD-126's second engineer: the archive
-                                ("unzip -q a.zip -d out", [("out", "tree")]), ("unzip -dout a.zip", [("out", "tree")]),
-                                ("unzip a.zip", [(".", "tree")]), ("unzip -l a.zip", []), ("unzip -: a.zip -d out", [(m.ANY_PATH, "tree")]),
-                                ("patch -p1 < x.patch", [(".", "tree")]), ("patch -d out -p1 -i x.patch", [("out", "tree")]),
+                                ("unzip -q a.zip -d out", [("out", "tree"), ("out/f.txt", None)]),
+                                ("unzip -dout a.zip", [("out", "tree"), ("out/f.txt", None)]),
+                                ("unzip a.zip", [(".", "tree"), ("./f.txt", None)]), ("unzip -l a.zip", []),
+                                ("unzip -: a.zip -d out", [(m.ANY_PATH, "tree")]),
+                                ("patch -p1 < x.patch", [(".", "tree")] + patched(".")),
+                                ("patch -d out -p1 -i x.patch", [("out", "tree")] + patched("out")),
                                 ("patch --dry-run -p1 < x.patch", []),
                                 # SPD-126's second engineer: a later patch in the file names its own file, so the tree
-                                # stays; the named file, its backups and its reject file beside it
+                                # stays; the named file, its backups and its reject file beside it.  With a file operand
+                                # alone, the patch is standard input, which nothing feeds here: no name of its own
                                 ("patch -o out/y x.patch", [(".", "tree"), ("out/y", None), ("out/y.orig", None),
-                                                            ("out/y.~" + m.NAME_CHAR + m.NAME_MORE + "~", None), ("out/y.rej", None)]),
+                                                            ("out/y" + numbered, None), ("out/y.rej", None)]),
                                 ("patch docs/x.md x.patch", [(".", "tree"), ("docs/x.md", None), ("docs/x.md.orig", None),
-                                                             ("docs/x.md.~" + m.NAME_CHAR + m.NAME_MORE + "~", None),
-                                                             ("docs/x.md.rej", None)]),
+                                                             ("docs/x.md" + numbered, None), ("docs/x.md.rej", None)] + patched(".")),
                                 ("curl -O https://example.com/x", [(".", "tree")]), ("curl -sSLO https://example.com/x", [(".", "tree")]),
                                 ("curl -O --output-dir out https://example.com/x", [("out", "tree")]),
                                 ("curl --remote-name-all https://example.com/x", [(".", "tree")]),
                                 ("curl -s https://example.com/x", []), ("curl -K cfg https://example.com/x", [(m.ANY_PATH, "tree")])):
             with self.subTest(command):
                 self.assertEqual(self.writes(command), writes)
+        # SPD-144: a patch fed by a pipe from a program is text the line does not spell, so after the tree its names are a
+        # write the line cannot place, refused a member; a `<` file the line names is read, above
+        (tree, kind), (unlisted, _) = self.writes("cat x.patch | patch -p1")
+        self.assertEqual((tree, kind), (".", "tree"))
+        self.assertTrue(unlisted.startswith(m.ANY_PATH) and "from standard input" in unlisted, unlisted)
 
     def test_into_the_members_own_subtree_is_silent(self):
         for command in ("tar -xf a.tar -C out", "tar xzf a.tar -C out", "tar -x -C out -f a.tar", "tar -xf a.tar --directory=out/x",
@@ -1121,14 +1150,21 @@ class SpelledWriteTest(TreeWriteCase):
             ("tar -czf out/a.tgz src", [("out/a.tgz", None)]), ("tar czf out/a.tgz src", [("out/a.tgz", None)]),
             ("tar -C src -cf out/a.tar .", [("out/a.tar", None)]), ("tar -uf out/a.tar src", [("out/a.tar", None)]),
             ("tar -cf - src", []), ("export TAPE=out/t; tar -c src", [("out/t", None)]),
+            # SPD-144: after the line's own names, x.patch's, f.txt, with what the same options put beside it
             ("patch -d out -r rej f x.patch", [("out", "tree"), ("out/f", None), ("out/f.orig", None), (p("out/f.~?*~"), None),
-                                              ("out/rej", None)]),
-            ("patch -d out -V none f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None)]),
-            ("patch -d out --posix f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None)]),
-            ("patch -d out -V simple -z .bak f x.patch", [("out", "tree"), ("out/f", None), ("out/f.bak", None), ("out/f.rej", None)]),
+                                              ("out/rej", None), ("out/f.txt", None), ("out/./f.txt.orig", None),
+                                              (p("out/./f.txt.~?*~"), None)]),
+            ("patch -d out -V none f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None), ("out/f.txt", None),
+                                                ("out/./f.txt.rej", None)]),
+            ("patch -d out --posix f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None), ("out/f.txt", None),
+                                                ("out/./f.txt.rej", None)]),
+            ("patch -d out -V simple -z .bak f x.patch", [("out", "tree"), ("out/f", None), ("out/f.bak", None), ("out/f.rej", None),
+                                                          ("out/f.txt", None), ("out/./f.txt.bak", None), ("out/./f.txt.rej", None)]),
             ("patch -d out -B bak/ f x.patch", [("out", "tree"), ("out/bak", "tree"), ("out/f", None), ("out/bak/f", None),
-                                                ("out/f.rej", None)]),
-            ("patch -d out -d sub -p1 < x.patch", [("out/sub", "tree")]),  # each -d from the one before it
+                                                ("out/f.rej", None), ("out/f.txt", None), ("out/bak/./f.txt", None),
+                                                ("out/./f.txt.rej", None)]),
+            ("patch -d out -d sub -p1 < x.patch", [("out/sub", "tree"), ("out/sub/f.txt", None), ("out/sub/./f.txt.orig", None),
+                                                    (p("out/sub/./f.txt.~?*~"), None), ("out/sub/./f.txt.rej", None)]),  # each -d from the one before it
             ("wget -O out/f https://x", [("out/f", None), ("~/.wget-hsts", None)]),
             ("wget --no-hsts -P out https://x", [("out", "tree")]), ("wget --no-hsts https://x", [(".", "tree")]),
             ("wget --no-hsts -O - https://x", []), ("wget --no-hsts -b -P out https://x", [(p("wget-log*"), None), ("out", "tree")]),

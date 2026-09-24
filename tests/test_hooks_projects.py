@@ -16,13 +16,16 @@ launched in that project (a home session's line carries none).
 
 import contextlib
 import importlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import time
+import zipfile
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -1384,7 +1387,13 @@ class TreeWriteProjectTest(ProjectHookCase):
         self.spawn_in(self.CLAIMED, self.plan_bad(name="Yukon", deliverables=("**",)), AGENT_B)
         for checkout in (self.bad, self.bad_wt):
             (Path(checkout) / "src" / "plain").mkdir(parents=True, exist_ok=True)
-            (Path(checkout) / "a.tar").write_text("a\n", encoding="utf-8")
+            # SPD-144: archives the hook can list, one file each, since it now reads the names an extraction writes
+            with tarfile.open(Path(checkout) / "a.tar", "w") as tf:
+                info = tarfile.TarInfo("f.txt")
+                info.size = 2
+                tf.addfile(info, io.BytesIO(b"a\n"))
+            with zipfile.ZipFile(Path(checkout) / "a.zip", "w") as zf:
+                zf.writestr("f.txt", b"a\n")
         plant_git_dir(Path(self.bad_wt) / "src" / "fake" / ".git")
 
     def run_line(self, s, cwd, line, agent_id=AGENT_A):
