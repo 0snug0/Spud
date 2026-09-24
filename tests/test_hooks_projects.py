@@ -20,9 +20,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
+from unittest import mock
 
 from helpers import EXIT_ERROR, SPUD, HookResult, spawn_type
 from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split, run_main
@@ -881,10 +883,26 @@ class PlantedRepositoryTest(ProjectHookCase):
         self.assertEqual(proc.returncode, 0, proc)
         return {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines() if line.startswith("import time:")}
 
+    def settle(self):
+        """Every file and directory in the common git directory and in the worktree's git directory an hour old by mtime
+        (ctime stays now: nothing but the kernel sets it).  Both caches keep an entry only once every stamp it is kept
+        under is SETTLED_NS old (SPD-131's findings cache, SPD-238's scopes cache), so a test that wants them warm settles
+        the repository it built first, as PlantedCacheTest.settle does.  The tool checkout's (project spud's) git
+        directory too: since SPD-233 it is a known checkout restored from a snapshot the worker took moments before the
+        class's first test, so its stamps are no older than that snapshot, and SessionStart's line reads every known
+        checkout through the findings cache (SPD-240)."""
+        then = time.time() - 3600
+        for gitdir in (self.common, self.wt_gitdir, self.home.tool / ".git"):
+            for path in (gitdir, *gitdir.iterdir()):
+                os.utime(path, (then, then))
+        os.utime(self.bad_wt / ".git", (then, then))
+
     def test_the_check_runs_no_git_once_its_caches_are_warm(self):
         """The cost rule: the repository check adds no subprocess to a hook beyond the config scopes' own git run, which
         happens only after a config file changes; the hooks listing is a scandir.  What a hook process imports is the
-        launcher's, so the warming run is a process too, as the one before it in a session would be."""
+        launcher's, so the warming run is a process too, as the one before it in a session would be.  The repository is settled before each
+        warming (settle): an entry is kept only under stamps two seconds old."""
+        self.settle()
         for s, event, payload in ((self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")),
                                   (self.CLAIMED, "PreToolUse", self.bash_p(self.CLAIMED, "git -C %s log" % self.bad_wt)),
                                   (self.CLAIMED, "SessionStart", self.session_start_p(self.CLAIMED))):
@@ -892,6 +910,7 @@ class PlantedRepositoryTest(ProjectHookCase):
                 self.hook_in(s, event, payload, process=True)  # warms the worktree list, git's command list and the config scopes
                 self.assertNotIn("subprocess", self.imports_of(s, event, payload))
         self.plant_local("[core]\n\tfsmonitor = /bin/echo\n")  # a config edit: the one git run, then warm again
+        self.settle()  # its new ctime still moves the stamp, so the next call misses and runs git, and keeps what it read
         self.assertIn("subprocess", self.imports_of(self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")))
         self.assertNotIn("subprocess", self.imports_of(self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")))
 
@@ -949,6 +968,277 @@ class PlantedRepositoryTest(ProjectHookCase):
                 head = shown[label].split("\nLedger board (", 1)[0].split("\n")
                 self.assertIn(lines[0], head)  # in the head, above the board, where no cut reaches it
         self.assertNotIn(PLANTED_LINE, shown[self.PLAIN.label])  # Eric's own session: its one-line notice, as before
+
+
+FINDINGS_CACHE = os.path.join(".spud", "git-checkout-findings.json")  # SPD-131: in the state directory, refused to every tool
+POISON = {"kind": "hook", "what": "/poisoned", "file": "/poisoned", "text": "/poisoned, a finding only the cache holds"}
+
+
+class PlantedCacheTest(ProjectHookCase):
+    """SPD-131: the line `spud board --brief` and a Spud session's context carry reads each known checkout's repository and
+    findings from a cache in the state directory, kept per checkout under the stat of its .git, its git directory's
+    commondir, every config file git reads at its local and worktree scopes and the common directory's hooks/, so
+    SessionStart stays flat in the number of checkouts.  Nothing may read a checkout clean from a stale entry: a hook added,
+    replaced or removed, a program key added (in the config, a file it includes, or a worktree's config.worktree), a
+    worktree's gitfile or commondir rewritten to name another repository, after the cache is warm, is seen on the next
+    read; a change whose mtime was put back is seen by its ctime; and an entry that is corrupt, unreadable or covers less
+    than it must is a miss, never "no findings".
+
+    A test settles what it planted by putting its mtime an hour back (settle): an entry is written only when every stamp it
+    is kept under is two seconds old, since a change in the same clock tick as the stamp read would not move it."""
+
+    def setUp(self):
+        super().setUp()
+        self.common = self.bad / ".git"
+        self.hooks = self.common / "hooks"
+        self.wt_gitdir = Path((self.bad_wt / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
+        self.config_text = (self.common / "config").read_text(encoding="utf-8")
+        self.hooks.mkdir(exist_ok=True)
+        (self.hooks / "pre-push.sample").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        self.cache = self.home.path / FINDINGS_CACHE
+
+    # -- planting, settling, reading ------------------------------------------------------------
+    def plant_hook(self, name="post-index-change"):
+        hook = self.hooks / name
+        hook.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        hook.chmod(0o755)
+        return hook
+
+    def plant_local(self, text):
+        (self.common / "config").write_text(self.config_text + text, encoding="utf-8")
+
+    def settle(self, *extra):
+        """Every path the entries are kept under, and `extra`, an hour old by mtime (ctime stays now: nothing can set it)."""
+        then = time.time() - 3600
+        for path in (self.common / "config", self.common / "config.worktree", self.wt_gitdir / "config",
+                     self.wt_gitdir / "config.worktree", self.hooks, self.bad_wt / ".git", self.wt_gitdir / "commondir", *extra):
+            if os.path.lexists(path):
+                os.utime(path, (then, then))
+
+    def clock_at(self, ns):
+        """The clock the settle rule reads (gitrepos' time.time_ns) stopped at `ns` for the block (SPD-240)."""
+        return mock.patch("spudlib.hooks.gitrepos.time", mock.Mock(wraps=time, time_ns=lambda: ns))
+
+    def planted(self):
+        """The line board --brief carries naming a checkout, or None when every checkout reads clean."""
+        lines = [line for line in self.cli("board", "--brief").stdout.split("\n") if line.startswith(PLANTED_LINE)]
+        self.assertLessEqual(len(lines), 1, lines)
+        return lines[0] if lines else None
+
+    def stored(self):
+        try:
+            return json.loads(self.cache.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+
+    def warm(self):
+        """board --brief once, settled: both checkouts' entries written, returned by checkout."""
+        self.settle()
+        self.planted()
+        stored = self.stored()
+        for checkout, gitdir in ((self.bad, self.common), (self.bad_wt, self.wt_gitdir)):
+            self.assertIn(str(checkout), stored, "a settled read writes an entry for %s" % checkout)
+            self.assertEqual((stored[str(checkout)]["gitdir"], stored[str(checkout)]["commondir"]), (str(gitdir), str(self.common)))
+        return stored
+
+    def assertNames(self, line, *checkouts):
+        """The line names exactly these checkouts (one checkout's path is a prefix of the other's, so no substring test)."""
+        self.assertIsNotNone(line, "a finding must be seen")
+        named = line.split(", in ", 1)[-1].split(" (`spud doctor`", 1)[0].split(", ")
+        self.assertEqual(sorted(named), sorted(str(c) for c in checkouts), line)
+
+    # -- the cache is read ------------------------------------------------------------------------
+    def test_a_settled_read_is_kept_and_answers_the_next_one(self):
+        """The cache is real: a finding only the entry holds is shown, so every invalidation test below reads a warm entry."""
+        # SPD-233: every checkout is restored from the class's snapshot, so its files carry that build's mtimes, settled
+        # by now; badtakes' hooks/ and config and the tool checkout's (project spud's) own stamps are touched at one
+        # instant here, so no known checkout's entry may be kept by the first read.  SPD-240: the cache goes too, since a
+        # read of the settled snapshot before (setUp's, on a loaded machine) kept entries under the old stamps, which no
+        # read trusts now but stored() would still return; and that read runs on a clock stopped at the touch, however
+        # long its git runs take on a loaded machine.
+        now = time.time_ns()
+        for path in (self.hooks, self.common / "config", self.home.tool / ".git" / "config", self.home.tool / ".git" / "hooks"):
+            os.utime(path, ns=(now, now))
+        self.cache.unlink(missing_ok=True)
+        with self.clock_at(now):
+            self.assertIsNone(self.planted())
+        self.assertFalse(self.stored(), "hooks/ and the config were written this second: nothing is kept yet")
+        stored = self.warm()
+        self.assertEqual(stored[str(self.bad)]["findings"], [])
+        self.assertEqual(stored[str(self.bad_wt)]["findings"], [])
+        stored[str(self.bad)]["findings"] = [POISON]
+        self.cache.write_text(json.dumps(stored), encoding="utf-8")
+        self.assertNames(self.planted(), self.bad)  # read from the entry, not from the repository
+
+    def test_doctor_reads_the_repository_not_the_cache(self):
+        stored = self.warm()
+        stored[str(self.bad)]["findings"] = [POISON]
+        self.cache.write_text(json.dumps(stored), encoding="utf-8")
+        report = json.loads(self.cli("--json", "doctor", check=False).stdout)
+        self.assertEqual(report["repositories"]["findings"], [], report["repositories"])
+
+    # -- a hook added, replaced or removed ----------------------------------------------------
+    def test_a_hook_added_after_the_cache_is_warm_is_seen(self):
+        self.warm()
+        hook = self.plant_hook()
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
+        hook.unlink()
+        self.assertIsNone(self.planted())
+
+    def test_a_hook_put_in_with_the_directorys_mtime_put_back_is_seen_by_its_ctime(self):
+        """A sample renamed to a hook's name of the same length, then the directory's mtime put back: the same entries,
+        inode, size and mtime, and only the ctime (which utime itself moves) tells."""
+        self.warm()
+        before = os.stat(self.hooks)
+        os.replace(self.hooks / "pre-push.sample", self.hooks / "post-applypatch")  # 15 characters each
+        os.utime(self.hooks, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(self.hooks)
+        self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns), (before.st_ino, before.st_size, before.st_mtime_ns))
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
+
+    def test_a_hook_replaced_after_the_cache_is_warm_is_seen(self):
+        """The same number of entries, one of them now something git runs: a sample renamed to its hook's name, and a
+        sample file replaced by a symlink of the same name (refused as any entry that is not a plain *.sample file)."""
+        self.warm()
+        os.replace(self.hooks / "pre-push.sample", self.hooks / "pre-push")
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
+        os.replace(self.hooks / "pre-push", self.hooks / "pre-push.sample")
+        self.warm()
+        self.assertIsNone(self.planted())
+        os.symlink("/bin/sh", self.hooks / "swap")
+        os.replace(self.hooks / "swap", self.hooks / "pre-push.sample")
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
+
+    def test_a_hook_removed_after_the_cache_is_warm_is_seen(self):
+        hook = self.plant_hook()
+        stored = self.warm()
+        self.assertEqual([f["what"] for f in stored[str(self.bad)]["findings"]], [str(hook)])
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
+        hook.unlink()
+        self.assertIsNone(self.planted())
+
+    # -- a program key added ----------------------------------------------------------------------
+    def test_a_program_key_added_after_the_cache_is_warm_is_seen(self):
+        self.warm()
+        self.plant_local("[core]\n\tfsmonitor = /bin/echo\n")
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
+        self.plant_local("")
+        self.warm()
+        self.assertIsNone(self.planted())
+        self.plant_local("[extensions]\n\tworktreeConfig = true\n")
+        self.warm()
+        self.assertIsNone(self.planted())
+        (self.wt_gitdir / "config.worktree").write_text("[core]\n\tfsmonitor = /bin/echo\n", encoding="utf-8")
+        self.assertNames(self.planted(), self.bad_wt)  # config.worktree is the worktree's alone
+
+    def test_a_program_key_added_to_an_included_file_is_seen(self):
+        included = self.common / "extra.config"
+        included.write_text("[color]\n\tui = auto\n", encoding="utf-8")
+        self.plant_local("[include]\n\tpath = extra.config\n")
+        self.settle(included)
+        stored = self.warm()
+        self.assertIn(str(included), [s[0] for s in stored[str(self.bad)]["fingerprint"]])
+        self.assertIsNone(self.planted())
+        included.write_text("[core]\n\tpager = /bin/echo\n", encoding="utf-8")
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
+
+    def test_a_program_key_written_at_the_same_size_with_its_mtime_put_back_is_seen_by_its_ctime(self):
+        inert, program = "[color]\n\tui = auto\n\tbranch = auto\n", "[core]\n\tpager = /x\n"
+        program += "#" * (len(inert) - len(program) - 1) + "\n"
+        self.assertEqual(len(inert), len(program))
+        self.plant_local(inert)
+        self.warm()
+        config = self.common / "config"
+        before = os.stat(config)
+        with open(config, "r+", encoding="utf-8") as f:  # in place: the same inode and the same size
+            f.seek(len(self.config_text))
+            f.write(program)
+        os.utime(config, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(config)
+        self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns), (before.st_ino, before.st_size, before.st_mtime_ns))
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
+
+    # -- the repository a checkout is --------------------------------------------------------------
+    def test_a_worktree_whose_gitfile_or_commondir_is_rewritten_after_the_cache_is_warm_is_seen(self):
+        """The entry keeps which repository each checkout is; a worktree's gitfile or commondir rewritten to name another
+        repository makes it a foreign one, as SPD-066's check reads it."""
+        elsewhere = self.make_repo("spud-elsewhere-")
+        gitfile = self.bad_wt / ".git"
+        own = gitfile.read_text(encoding="utf-8")
+        self.warm()
+        gitfile.write_text("gitdir: %s\n" % (elsewhere / ".git"), encoding="utf-8")
+        self.assertNames(self.planted(), self.bad_wt)
+        gitfile.write_text(own, encoding="utf-8")
+        self.warm()
+        self.assertIsNone(self.planted())
+        (self.wt_gitdir / "commondir").write_text("%s\n" % (elsewhere / ".git"), encoding="utf-8")
+        self.assertNames(self.planted(), self.bad_wt)
+
+    def test_a_checkouts_git_directory_replaced_by_a_gitfile_after_the_cache_is_warm_is_read_anew(self):
+        """The root's .git moved aside and a gitfile naming another repository put in its place: the root is still the
+        registered one, so that repository is its own now, and its planted hook is seen (in the root, and in that
+        repository's own work tree, which `git worktree list` now names as the project's main one)."""
+        elsewhere = self.make_repo("spud-elsewhere-")
+        (elsewhere / ".git" / "hooks").mkdir(exist_ok=True)
+        planted = elsewhere / ".git" / "hooks" / "post-index-change"
+        planted.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.warm()
+        self.assertIsNone(self.planted())
+        moved = self.bad / ".git-moved"
+        os.rename(self.common, moved)
+        self.addCleanup(lambda: moved.exists() and ((self.bad / ".git").unlink(missing_ok=True), os.rename(moved, self.common)))
+        (self.bad / ".git").write_text("gitdir: %s\n" % (elsewhere / ".git"), encoding="utf-8")
+        self.assertNames(self.planted(), self.bad, elsewhere)
+
+    # -- a cache that is corrupt, unreadable or covers too little ---------------------------------
+    def test_a_corrupt_or_unreadable_cache_is_a_miss_never_no_findings(self):
+        self.plant_hook()
+        stored = self.warm()
+        hooks_dir, commondir_file = str(self.hooks), str(self.wt_gitdir / "commondir")
+        config = str(self.common / "config")
+
+        def with_entry(drop=None, **changes):
+            """Every entry changed as `changes` says, its findings [] unless they say otherwise, and the stamps of the
+            paths `drop` names left out."""
+            broken = {k: dict(v) for k, v in stored.items()}
+            for entry in broken.values():
+                entry.update(changes)
+                entry["findings"] = changes.get("findings", [])
+                if drop is not None:
+                    entry["fingerprint"] = [s for s in entry["fingerprint"] if not drop(s[0])]
+            return json.dumps(broken)
+
+        both = (self.bad, self.bad_wt)
+        cases = {
+            "not JSON": ("{\"%s\": " % self.bad, both),
+            "a list": ("[]", both),
+            "an entry that is a string": (json.dumps({str(self.bad): "clean", str(self.bad_wt): "clean"}), both),
+            "no fingerprint": (with_entry(fingerprint=None), both),
+            "an empty fingerprint": (with_entry(fingerprint=[]), both),
+            "a fingerprint without hooks/": (with_entry(drop=lambda p: p == hooks_dir), both),
+            "a fingerprint without the config": (with_entry(drop=lambda p: p == config), both),
+            # the root's own entry stays whole (and reads [] as written): the worktree's is the one that must miss
+            "a fingerprint without the worktree's commondir": (with_entry(drop=lambda p: p == commondir_file), (self.bad_wt,)),
+            "no stamp of .git": (with_entry(dot=None), both),
+            "a stamp of .git that is another's": (with_entry(dot=["dir", 1, 2]), both),
+            "findings that are not a list": (with_entry(findings={}), both),
+            "a finding that is not one": (with_entry(findings=["clean"]), both),
+            "another checkout's entry": (with_entry(where="/elsewhere"), both),
+            "another repository's": (with_entry(gitdir="/elsewhere/.git", commondir="/elsewhere/.git"), both),
+        }
+        for label, (text, named) in cases.items():
+            with self.subTest(cache=label):
+                self.cache.write_text(text, encoding="utf-8")
+                self.assertNames(self.planted(), *named)
+        self.cache.unlink()
+        self.cache.mkdir()  # unreadable as a file, and unwritable
+        self.addCleanup(shutil.rmtree, self.cache, True)
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
+        self.cache.rmdir()
+        self.cache.write_text(json.dumps(stored), encoding="utf-8")
+        self.cache.chmod(0)
+        self.addCleanup(self.cache.chmod, 0o644)
+        self.assertNames(self.planted(), self.bad, self.bad_wt)
 
 
 class ArgumentWriteProjectTest(ProjectHookCase):

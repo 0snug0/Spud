@@ -232,7 +232,7 @@ DYNAMIC_VARIABLES = {"_", "PWD", "OLDPWD", "REPLY", "OPTARG", "OPTIND", "MATCH",
 # The verbs Law 7 refuses a member by name, whatever git's own command list says: the ones a member would reach for, so
 # the refusal keeps its own reason (`git push` is still "Spud commits" when the hook cannot run git at all).
 # Every other name git answers to is refused by GIT_MEMBER_VERBS below; this table is the named half, not the whole set,
-# and git_verbs.git_write_option_targets reads it to skip the file target of a verb refused here -- which is why a
+# and git_writes.git_write_option_targets reads it to skip the file target of a verb refused here -- which is why a
 # verb that names a file git writes (read-tree, checkout-index, index-pack, repack, commit-graph ...) is refused by the
 # allowlist instead and not added here: its GIT_VERB_FILE_OPTIONS entry stays live, and Law 7 does not bind Spud, whose
 # own call is still held to the path rule.  `stage` and `init-db` are git's own spellings of `add` and `init`, which the
@@ -315,7 +315,7 @@ GIT_VERB_PROGRAM_OPTIONS = {
 }
 # What a git call writes beside the repository -- the environment and the options that name a file or directory
 # git creates or appends to, under a verb Law 7's table allows.  Each is checked with the path rule, like a redirection
-# target, against every directory the shell may be in; read by git_verbs.git_write_targets.
+# target, against every directory the shell may be in; read by git_writes.git_write_targets.
 #
 # The environment, probed on git 2.54.0 (Apple Git-157): every GIT_TRACE* variable set to an absolute path appended its
 # trace to that file (GIT_TRACE, GIT_TRACE_PERFORMANCE, GIT_TRACE_SETUP, GIT_TRACE_PACK_ACCESS, GIT_TRACE_REFS,
@@ -326,8 +326,10 @@ GIT_VERB_PROGRAM_OPTIONS = {
 # 'GIT_TRACE'") and writes nothing, so only an absolute value (or a `~` the shell expanded before git saw it) is a file.
 GIT_TRACE_VAR_PREFIX = "GIT_TRACE"
 # The variables that name a path git writes whatever its shape: `GIT_INDEX_FILE=<file> git read-tree HEAD` wrote a 44 KB
-# index there and `GIT_OBJECT_DIRECTORY=<dir> git hash-object -w --stdin` a loose object under it (probed).
-GIT_WRITE_PATH_ENV_VARS = ("GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY")
+# index there and `GIT_OBJECT_DIRECTORY=<dir> git hash-object -w --stdin` a loose object under it (probed), each read in
+# the shape and from the base GIT_FILE_FORMS names (below): a relative GIT_INDEX_FILE landed at the work tree's top from
+# a subdirectory and under -C (SPD-227, probed on git 2.54.0), and an object directory is written two levels deep.
+GIT_WRITE_PATH_ENV_VARS = {"GIT_INDEX_FILE": ("file", "top"), "GIT_OBJECT_DIRECTORY": ("tree", "top")}
 # `--output=<file>` is a diff option, so it is read on every verb rather than a list of them: probed opening its file
 # under diff, log, show, whatchanged, format-patch, range-diff, diff-tree, diff-index, diff-files and blame.  A verb that
 # does not take it errors ("unknown option") instead of writing, so reading it everywhere costs a refused path at worst.
@@ -346,7 +348,12 @@ GIT_FILE_OPTIONS = ("--output",)
 # ("write resulting index to <file>"), fast-export `--export-marks <file>`, commit-graph and multi-pack-index
 # `--object-dir <dir>` (where git writes the graph and the index), repack `--expire-to`/`--filter-to <dir>` (packs) and
 # credential-store `--file <path>` ("fetch and store credentials in <path>").  An option that only reads a file it names
-# (`archive --add-file`, `grep -f`, `commit-tree -F`, `ls-files -X`) carries no entry.
+# (`archive --add-file`, `grep -f`, `commit-tree -F`, `ls-files -X`) carries no entry.  Where each lands -- a file, a
+# directory holding files of git's naming, a pack base name, from the directory -C names or from the work tree's top --
+# is GIT_FILE_FORMS' (SPD-227; repack's two turned out to be base names, not the directories the help calls them).
+# `git config --file` (SPD-227's adjacent gap: a verb the survey passed over, since its read forms name the file too) is
+# read only where git_refused reads the call as a write: probed on git 2.54.0, `config -f c1 a.b c`, `--file=c2`, `config
+# set --file c3`, `-fc4` and `--fil=c8` each wrote their file (under -C sub, sub/c6), while `-f c5 --get a.b` wrote none.
 GIT_VERB_FILE_OPTIONS = {
     "archive": (("--output",), "o"),
     "format-patch": (("--output", "--output-directory"), "o"),
@@ -361,17 +368,60 @@ GIT_VERB_FILE_OPTIONS = {
     "multi-pack-index": (("--object-dir",), ""),
     "repack": (("--expire-to", "--filter-to"), ""),
     "credential-store": (("--file",), ""),
+    "config": (("--file",), "f"),
 }
 # Per verb, (the subcommand the writing form takes or None, how many of its positional words name a path git writes):
 # `git bundle create <file> <rev-list-args>`, `git mailinfo <msg> <patch>` and `git pack-objects <base-name>` each wrote
 # what they name (probed; bundle create with `-q` and `--version=2` before the file too).
 GIT_VERB_FILE_POSITIONALS = {"bundle": ("create", 1), "mailinfo": (None, 2), "pack-objects": (None, 1)}
+# How git places what each of those names (SPD-227): (verb, the option's long name or short letter, or "" for the
+# positional form, mailsplit's older one included) -> (shape, base), and ("file", "cwd") for every one not listed.
+# Probed on git 2.54.0 (Apple Git-157) in a scratch repository in the scratchpad, from its top, from a subdirectory,
+# under -C and under --git-dir.  Shapes, each read as the paths git_writes.shaped_paths makes of the value, a name git
+# picks standing as hooks/pathrule.NAME_CHAR and NAME_MORE:
+#   "file"    the path itself;
+#   "dir"     a directory git writes files of its own naming directly into: format-patch, bugreport and diagnose -o a/b/c
+#             made a/b/c and wrote 0001-second.patch, git-bugreport-<date>.txt and git-diagnostics-<date>.zip in it,
+#             mailsplit -oD wrote D/0001 and D/0002, and so did its older form `mailsplit <mbox> D` (or `mailsplit D`
+#             with the mailbox on standard input: GIT_VERB_CWD_WRITES' survey read "the last word of its older form");
+#   "tree"    a directory git writes into two or three levels down: commit-graph --object-dir D wrote
+#             D/info/commit-graph (--split: D/info/commit-graphs/...), multi-pack-index D/pack/multi-pack-index;
+#   "base"    a pack base name git adds -<hash>.pack, .idx, .rev and .mtimes to: `pack-objects o1pack`, `repack
+#             --filter-to=zz/pk` and `--expire-to=xx/pk` wrote zz/pk-<hash>.pack and its siblings, in no directory named so;
+#   "prefix"  text put before every path of the index: checkout-index --prefix=o1/ wrote o1/f and o1/sub/g, and
+#             --prefix=o1- wrote o1-f and o1-sub/g;
+#   "idx"     a pack index and the reverse index beside it: index-pack -o o1.idx wrote o1.idx and o1.rev.
+# Bases: "cwd", the directory git runs in -- the shell's, or the one the composed -C chain names, which every value was
+# relative to in the probe but these -- and "top", the top of the work tree git finds from there, which git chdirs to and
+# does not rebase these values on: from a subdirectory and under -C, fast-export --export-marks, read-tree
+# --index-output, pack-objects, repack's two, checkout-index --prefix and --object-dir each wrote at the top, while under
+# --git-dir with no work tree, or run inside .git, they wrote in the directory git ran in, and under --work-tree=W at W
+# when git ran inside W.  So a "top" value is read at every one of those places (git_writes.top_readings).
+GIT_FILE_FORMS = {
+    ("format-patch", "--output-directory"): ("dir", "cwd"), ("format-patch", "o"): ("dir", "cwd"),
+    ("bugreport", "--output-directory"): ("dir", "cwd"), ("bugreport", "o"): ("dir", "cwd"),
+    ("diagnose", "--output-directory"): ("dir", "cwd"), ("diagnose", "o"): ("dir", "cwd"),
+    ("mailsplit", "o"): ("dir", "cwd"), ("mailsplit", ""): ("dir", "cwd"),
+    ("index-pack", "o"): ("idx", "cwd"),
+    ("checkout-index", "--prefix"): ("prefix", "top"),
+    ("read-tree", "--index-output"): ("file", "top"),
+    ("fast-export", "--export-marks"): ("file", "top"),
+    ("commit-graph", "--object-dir"): ("tree", "top"), ("multi-pack-index", "--object-dir"): ("tree", "top"),
+    ("repack", "--expire-to"): ("base", "top"), ("repack", "--filter-to"): ("base", "top"),
+    ("pack-objects", ""): ("base", "top"),
+}
+# The verbs git_refused reads by their operands -- a name, a key, a subcommand -- which write whatever stands before
+# them, `--` included: an operand the line does not spell there is refused whole (SPD-230).  Probed on git 2.54.0 (Apple
+# Git-157) in a scratch repository: `branch -- b1` and `branch --list -- b2` made b1 (and exited 0), `tag -- t1` made
+# t1, `config -- a.b c` set a.b and `reflog -- expire --all` expired, while `log --oneline -- --output=zz` and `archive
+# HEAD -- -o zz.tar` read what followed the `--` as paths and wrote nothing.
+GIT_OPERAND_VERBS = frozenset({"branch", "tag", "config", "stash", "worktree", "remote", "reflog"})
 # The verbs whose default form writes a file of git's own naming into the directory git runs in, a form the line never
 # spells (SPD-093): `git format-patch -1` writes 0001-<subject>.patch there, `git bugreport` git-bugreport-<date>.txt
 # (and with --diagnose git-diagnostics-<date>.zip) and `git diagnose` git-diagnostics-<date>.zip -- the shell's
 # directory, or the one -C names (a repeated -C composes, an empty one changes nothing).  Their man pages say so:
 # format-patch's files "are created in the current working directory" without -o, and bugreport's and diagnose's -o
-# writes "instead of the current directory".  git_verbs.git_cwd_write_targets reads such a call as a write of a new
+# writes "instead of the current directory".  git_writes.git_cwd_write_targets reads such a call as a write of a new
 # file directly in that directory, held to the path rule like a redirection target, for every caller; a directory
 # the hook cannot follow refuses everyone, as any unfollowable relative write does.  -o's own directory is
 # GIT_VERB_FILE_OPTIONS' reading (SPD-049) and stays so.

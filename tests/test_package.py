@@ -44,7 +44,8 @@ DISPATCH = "hooks.dispatch"
 # shell.reevaluation for the text zsh's (e) flag evaluates in a word (SPD-189), shell.positional for the words a call hands a
 # function of the shell's, set where its body reads them (SPD-203), shell.unread for the one fail-closed finding, text the
 # reader did not read (SPD-217), shell.program_writes for the write markers an inline program's text shows (SPD-175),
-# shell.loop_bindings for the values a for loop's words and a basename substitution give a write target (SPD-146).
+# shell.loop_bindings for the values a for loop's words and a basename substitution give a write target (SPD-146),
+# shell.git_writes for the files a git call writes, taken out of shell.git_verbs (SPD-229).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
@@ -52,7 +53,7 @@ HOOK_PATH = {
     "hooks.dispatch", "hooks.gitrepos", "hooks.hookio", "hooks.pathrule", "hooks.pretool", "hooks.recording", "hooks.sessionhooks",
     "hooks.snapshots", "hooks.stophook", "hooks.subagent_stop", "hooks.worktrees",
     "shell.analyse", "shell.arg_writes", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
-    "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.globbing", "shell.heredocs", "shell.inline_programs",
+    "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.git_writes", "shell.globbing", "shell.heredocs", "shell.inline_programs",
     "shell.interpreter_words", "shell.loop_bindings", "shell.positional", "shell.prepare", "shell.program_writes", "shell.redirect_globs", "shell.reevaluation", "shell.runner_files", "shell.runtime_shells", "shell.spud_calls",
     "shell.script_files", "shell.script_runners", "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
     "shell.unread", "shell.walk", "shell.zsh",

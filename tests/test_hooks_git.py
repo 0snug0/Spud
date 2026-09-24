@@ -1,6 +1,7 @@
 """PreToolUse(Bash) and the path rule on git: config aliases and the programs git runs, git's own config files and
 directories, the repository a call reads, nested repositories, the files git writes, and the verb allowlist."""
 
+import contextlib
 import importlib
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -608,13 +610,15 @@ class GitConfigFileTest(BashHookCase):
                     "git config --rename-section a b", "git config --remove-section a", "git config --edit",
                     "git config -e", "git config --global --edit", "git config --local core.pager less",
                     "git config set core.pager x", "git config unset core.pager", "git config edit",
-                    "git config rename-section a b", "git config remove-section a", "git config --file f core.pager x",
+                    "git config rename-section a b", "git config remove-section a", "git config --file .claude/f core.pager x",
                     "git config set --all core.pager x"):
             with self.subTest(cmd):
                 for agent_id in (AGENT_A, AGENT_C):
                     r = self.assertRefused(cmd, "Law 7", agent_id=agent_id)
                     self.assertIn("git config", r.reason)
                 self.assertSilent(cmd, agent_id=None)
+        # SPD-227: the file a write form's --file names is one git writes, held to Law 1 for Spud (.claude/ is his own)
+        self.assertRefused("git config --file f core.pager x", "Law 1", agent_id=None)
 
     def test_the_reading_forms_of_git_config_stay_silent(self):
         for cmd in ("git config --get core.pager", "git config --get-all a.b", "git config --get-regexp a",
@@ -820,6 +824,41 @@ class GitLocalConfigTest(BashHookCase):
     def plant(self, text, name="config"):
         (self.repo / ".git" / name).write_text(text, encoding="utf-8")
 
+    def settle(self):
+        """Every entry of the git directory, files and directories, an hour old by mtime (its ctime stays now: nothing but
+        the kernel sets it).  The scopes cache keeps an entry only once every stamp it is kept under is SETTLED_NS old
+        (SPD-238), as SPD-131's findings cache does, so a test that wants a warm entry settles what it planted first.  The
+        findings cache stamps the hooks/ directory too, and since SPD-233 the tool checkout is copied from a template the
+        worker made moments before, so its hooks/ may be younger than SETTLED_NS unless it is settled here."""
+        then = time.time() - 3600
+        for path in (self.repo / ".git").iterdir():
+            os.utime(path, (then, then))
+
+    def unsettle(self, *names):
+        """The named files of the git directory touched at one instant, returned in nanoseconds, as a write then leaves
+        them: since SPD-233 the checkout is restored from a snapshot taken when the worker began, so its files are already
+        settled when a test starts, and a test about an entry not kept yet makes its own stamps fresh first.  The scopes
+        cache goes with them: a hook that read the settled snapshot before (setUp's, on a loaded machine) kept an entry
+        under the old stamps, which no hook trusts now but scopes() would still return (SPD-240)."""
+        now = time.time_ns()
+        for name in names:
+            os.utime(self.repo / ".git" / name, ns=(now, now))
+        (self.home.path / STATE / "git-config-scopes.json").unlink(missing_ok=True)
+        return now
+
+    def clock_at(self, ns):
+        """The clock the settle rule reads (gitrepos' time.time_ns) stopped at `ns` for the block: a hook that reads in the
+        tick of the write, however long its git run takes on a loaded machine (SPD-240)."""
+        return mock.patch("spudlib.hooks.gitrepos.time", mock.Mock(wraps=time, time_ns=lambda: ns))
+
+    def scopes(self):
+        """The scopes cache's entry for the home's repository, or None."""
+        try:
+            stored = json.loads((self.home.path / STATE / "git-config-scopes.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        return stored.get(str(self.repo / ".git"))
+
     def calls(self):
         return ("git -C %s status" % self.repo, "cd %s && git status" % self.repo, "git -C %s log --oneline" % self.repo,
                 "git --git-dir=%s/.git status" % self.repo, "cd %s && git diff" % self.repo)
@@ -898,6 +937,7 @@ class GitLocalConfigTest(BashHookCase):
 
     def test_the_answer_is_cached_and_a_config_edit_invalidates_it(self):
         cache = self.home.path / STATE / "git-config-scopes.json"
+        self.settle()
         self.assertSilent("git -C %s status" % self.repo)
         self.assertTrue(cache.exists(), "the first call writes the cache")
         stored = json.loads(cache.read_text(encoding="utf-8"))
@@ -910,6 +950,7 @@ class GitLocalConfigTest(BashHookCase):
 
     def test_a_cache_hit_imports_no_subprocess(self):
         """The Bash hook runs on every command line; SPD-016 keeps subprocess off its path, so only a miss may pay for it."""
+        self.settle()
         cold = self.imports_of("git -C %s status" % self.repo)
         self.assertIn("subprocess", cold)
         self.assertNotIn("subprocess", self.imports_of("git -C %s status" % self.repo))
@@ -920,6 +961,141 @@ class GitLocalConfigTest(BashHookCase):
                               input=json.dumps(payload), capture_output=True, text=True, env=self.home.env)
         self.assertEqual(proc.returncode, 0, proc)
         return {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines() if line.startswith("import time:")}
+
+    # -- SPD-238: what the scopes cache is kept under ------------------------------------------------------------------
+    def stamped(self):
+        entry = self.scopes()
+        self.assertIsNotNone(entry, "a settled read keeps an entry")
+        return [s[0] for s in entry["fingerprint"]]
+
+    def test_an_entry_is_kept_only_once_its_stamps_have_settled(self):
+        """A change made in the same clock tick as the stamp read leaves the stamp as it was (HFS+ keeps seconds, FAT two),
+        so an entry written then could answer for a file that changed after it: none is kept until every stamp is
+        SETTLED_NS old, and the hook runs git again until then."""
+        cmd = "git -C %s status" % self.repo
+        written = self.unsettle("config")  # the one stamp this repository's entry is kept under (no config.worktree, no include)
+        with self.clock_at(written):
+            self.assertSilent(cmd)
+        self.assertIsNone(self.scopes(), "the config was written this second: nothing is kept yet")
+        self.settle()
+        self.assertSilent(cmd)
+        self.assertIn(str(self.repo / ".git" / "config"), self.stamped())
+        with mock.patch("spudlib.hooks.gitrepos.git_run_config_scopes", return_value=None):
+            self.assertSilent(cmd)  # a hit: git is not run (a run that failed would refuse the call)
+
+    def test_a_branch_switch_is_seen_where_an_include_depends_on_the_branch(self):
+        """An includeIf "onbranch:<b>" puts the file it names in force only while HEAD names that branch, so the keys in
+        force change with a checkout that edits no config file: HEAD is stamped wherever such a condition is written, a
+        subsection's backslash escape included."""
+        cmd = "git -C %s status" % self.repo
+        for header in ('[includeIf "onbranch:feature"]', '[includeIf "on\\branch:feature"]', '[includeIf "onb\\ranch:feature"]',
+                       '[includeIf "onbranch:feat*"]'):
+            with self.subTest(header):
+                self.plant("ref: refs/heads/main\n", name="HEAD")
+                self.plant("[core]\n\tpager = /bin/echo\n", name="extra")
+                self.plant("[core]\n\trepositoryformatversion = 0\n%s\n\tpath = extra\n" % header)
+                self.settle()
+                self.assertSilent(cmd)  # on main the include is not in force
+                self.assertIn(str(self.repo / ".git" / "HEAD"), self.stamped())
+                self.plant("ref: refs/heads/feature\n", name="HEAD")
+                self.assertRefused(cmd, "core.pager")
+                self.settle()
+                self.assertRefused(cmd, "core.pager")
+                self.plant("ref: refs/heads/main\n", name="HEAD")
+                self.assertSilent(cmd)
+
+    def test_a_branch_switch_at_the_same_size_with_its_mtime_put_back_is_seen_by_its_ctime(self):
+        cmd = "git -C %s status" % self.repo
+        self.plant("ref: refs/heads/feat1\n", name="HEAD")
+        self.plant("[core]\n\tpager = /bin/echo\n", name="extra")
+        self.plant('[core]\n\trepositoryformatversion = 0\n[includeIf "onbranch:feat2"]\n\tpath = extra\n')
+        self.settle()
+        self.assertSilent(cmd)
+        self.assertIn(str(self.repo / ".git" / "HEAD"), self.stamped())
+        head = self.repo / ".git" / "HEAD"
+        before = os.stat(head)
+        with open(head, "r+", encoding="utf-8") as f:  # in place: the same inode and the same size
+            f.write("ref: refs/heads/feat2\n")
+        os.utime(head, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(head)
+        self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns), (before.st_ino, before.st_size, before.st_mtime_ns))
+        self.assertRefused(cmd, "core.pager")
+
+    def test_head_is_stamped_only_where_an_include_depends_on_the_branch(self):
+        """A repository with no branch condition keeps its entry across a checkout, which changes nothing git reads at
+        its own scopes; one with a condition is stamped by HEAD and by the reftable stack a reftable repository keeps
+        HEAD in."""
+        cmd = "git -C %s status" % self.repo
+        self.settle()
+        self.assertSilent(cmd)
+        self.assertNotIn(str(self.repo / ".git" / "HEAD"), self.stamped())
+        self.plant("ref: refs/heads/other\n", name="HEAD")
+        with mock.patch("spudlib.hooks.gitrepos.git_run_config_scopes", return_value=None):
+            self.assertSilent(cmd)  # still a hit
+        self.plant('[core]\n\trepositoryformatversion = 0\n[includeIf "onbranch:x"]\n\tpath = extra\n')
+        self.settle()
+        self.assertSilent(cmd)
+        stamped = self.stamped()
+        for name in ("HEAD", os.path.join("reftable", "tables.list")):
+            self.assertIn(str(self.repo / ".git" / name), stamped)
+
+    def test_the_board_line_sees_a_branch_switch_too(self):
+        """SPD-131's findings cache keeps a checkout's program keys under the same stamps as the scopes cache."""
+        self.plant("[core]\n\tpager = /bin/echo\n", name="extra")
+        self.plant('[core]\n\trepositoryformatversion = 0\n[includeIf "onbranch:feature"]\n\tpath = extra\n')
+        self.settle()
+        board = self.home.run("board", "--brief").stdout
+        self.assertNotIn("repository check:", board)
+        kept = json.loads((self.home.path / STATE / "git-checkout-findings.json").read_text(encoding="utf-8"))
+        self.assertIn(str(self.repo / ".git" / "HEAD"), [s[0] for s in kept[str(self.repo)]["fingerprint"]])
+        self.plant("ref: refs/heads/feature\n", name="HEAD")
+        self.assertIn("repository check:", self.home.run("board", "--brief").stdout)
+
+    def assertIncludeSeen(self, config, included="extra", kept=True):
+        """The config (after its core section) includes `included`, in the git directory: while that file is inert the
+        answer is kept stamped by it (`kept`) or never kept at all, and a program key written into it after is seen."""
+        cmd = "git -C %s status" % self.repo
+        with contextlib.suppress(FileNotFoundError):
+            (self.home.path / STATE / "git-config-scopes.json").unlink()
+        target = self.repo / ".git" / included
+        target.write_text("[color]\n\tui = auto\n", encoding="utf-8")
+        self.plant("[core]\n\trepositoryformatversion = 0\n" + config)
+        self.settle()
+        self.assertSilent(cmd)
+        if kept:
+            self.assertIn(str(target), self.stamped())
+        else:
+            self.assertIsNone(self.scopes(), "an include set the hook cannot be sure of is never kept")
+        target.write_text("[core]\n\tpager = /bin/echo\n", encoding="utf-8")
+        self.assertRefused(cmd, "core.pager")
+
+    def test_an_include_value_is_read_as_git_reads_it(self):
+        """The path an include names is its value as git's config parser reads it: a comment after it, a quoted value
+        holding a comment character, a key on its section header's line; a value with a backslash (an escape, a line
+        continued) the hook does not unescape, and never keeps."""
+        for config, included, kept in (("[include]\n\tpath = extra ; a note\n", "extra", True),
+                                        ("[include]\n\tpath = extra # a note\n", "extra", True),
+                                        ('[include]\n\tpath = "ex#tra" # a note\n', "ex#tra", True),
+                                        ('[include]\n\tpath = "ex;tra"\n', "ex;tra", True),
+                                        ("[include] path = extra\n", "extra", True),
+                                        ('[includeIf "gitdir:/"] path = extra\n', "extra", True),
+                                        ("[include]\n\tpath = ext\\\nra\n", "extra", False),
+                                        ('[include]\n\tpath = "ex\\\\tra"\n', "ex\\tra", False)):
+            with self.subTest(config):
+                self.assertIncludeSeen(config, included, kept)
+
+    def test_an_include_past_the_file_limit_is_never_kept(self):
+        """The hook follows a bounded number of included files; git follows every one, so a set past the bound is never
+        kept, and a program key in its last file is seen."""
+        many = 40  # side by side: git refuses includes nested more than ten deep
+        for n in range(1, many):
+            self.plant("[color]\n\tui = auto\n", name="inc%d" % n)
+        self.assertIncludeSeen("[include]\n" + "".join("\tpath = inc%d\n" % n for n in range(1, many + 1)), "inc%d" % many,
+                               kept=False)
+
+    def test_an_include_past_the_read_limit_is_never_kept(self):
+        """The hook reads a bounded prefix of each config file looking for its includes; git reads it all."""
+        self.assertIncludeSeen("#" * (1 << 20) + "\n[include]\n\tpath = extra\n", kept=False)
 
     def test_a_repository_outside_every_known_checkout_keeps_its_own_reason(self):
         outside = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
@@ -1080,6 +1256,10 @@ class NestedRepositoryTest(BashHookCase):
         """The nested repository is refused from what SPD-063 already computes (the one walk up to it): no git run, no cache
         entry for it, no subprocess import once the checkout's own caches are warm."""
         self.plant_program_key(self.nested / ".git" / "config")
+        then = time.time() - 3600  # the checkout's config settled, so its scopes are kept (SPD-238)
+        for path in (self.home.tool / ".git").iterdir():  # the checkout is the tool beside the home, which has no .git (SPD-233)
+            if path.is_file():
+                os.utime(path, (then, then))
         self.assertSilent("git status")  # warms the worktree list, git's command list and the checkout's config scopes
         r = self.assertRefused("git -C %s status" % self.nested, GIT_NESTED_WORDING)
         self.assertNotIn(GIT_SCOPE_WORDING, r.reason)  # the repository is refused before its keys are read
@@ -1537,9 +1717,11 @@ class GitFileWriteTest(BashHookCase):
                 continue  # a verb with no entry: its words are read only where spelled with a leading `-` (below)
             command = line.format(opt="$OPT")
             self.refused_to_members(command)
-            # format-patch, bugreport and diagnose with no -o write where they run (SPD-093), which Law 1 lets Spud do
-            # only among his own paths, and an unsettled $OPT may not be their -o
-            cwd = str(self.home.path / ".claude" / "patches") if line.split()[1] in ("format-patch", "bugreport", "diagnose") else None
+            # format-patch, bugreport and diagnose with no -o write where they run (SPD-093), and mailsplit with none writes
+            # into its last word (SPD-228), which Law 1 lets Spud do only among his own paths; an unsettled $OPT may
+            # not be their -o
+            cwd = (str(self.home.path / ".claude" / "patches")
+                   if line.split()[1] in ("format-patch", "bugreport", "diagnose", "mailsplit") else None)
             with self.subTest(command=command, agent_id="spud"):
                 self.assertSilent(command, agent_id=None, cwd=cwd)
             settled = "OPT=%s; %s" % ("%s=%s" % (long, note) if long else "-%s%s" % (short, note), command)
@@ -1847,8 +2029,8 @@ class GitCwdWriteTest(BashHookCase):
                          [("diagnose's default form, into ./docs/" + PICKED, "docs/" + PICKED, cwds),
                           ("diagnose's suffix x/y, into ./docs/git-diagnostics-x/y.zip", "docs/git-diagnostics-x/y.zip", cwds)])
         for writes_nothing in ("git format-patch --stdout -1", "git bugreport -h", "git diagnose -o tests/out"):
-            with self.subTest(writes_nothing):
-                self.assertEqual([w for w in self.analysis(writes_nothing).git_writes if PICKED in w[1]], [])
+            with self.subTest(writes_nothing):  # nothing here: -o's own directory is GitDirectoryOptionTest's (SPD-227)
+                self.assertEqual([w for w in self.analysis(writes_nothing).git_writes if "default form" in w[0]], [])
 
     def test_the_verbs_the_survey_read(self):
         """Every verb of GIT_MEMBER_VERBS read against its man page for "current (working) directory" and "temporary
@@ -1887,6 +2069,349 @@ class GitCwdWriteTest(BashHookCase):
                 usage = subprocess.run(["git", verb, "--help-all"], capture_output=True, text=True,
                                        stdin=subprocess.DEVNULL).stdout
                 self.assertEqual(usage, recorded_help_all(verb))
+
+
+AGENT_DIRS = "b8c9d0e1f2a3b4c5d"  # SPD-227: a member holding out/**, tests/* and patches/*.patch
+
+
+class GitDirectoryOptionTest(BashHookCase):
+    """SPD-227: what a git option names is read as git reads it, on two counts SPD-049's reading missed.
+
+    The base: git runs every relative path it is given from the directory the composed -C chain names, so `git -C docs
+    format-patch -o tests/out -1` wrote docs/tests/out/0001-*.patch while the hook read ./tests/out.  The shape: a
+    directory option names the directory git writes files of its own naming into, so `cd tests/out && git format-patch
+    -o . -1` passed a member holding tests/* (`.` is tests/out, which tests/* matches) while git wrote
+    tests/out/0001-*.patch, and `-o out` was refused to a member holding out/** although every file lands under it.
+
+    Probed on git 2.54.0 (Apple Git-157) in a scratch repository in the scratchpad, from its top, under `-C sub`, from
+    sub, under `-C sub -C ..` and under `--git-dir=<repo>/.git -C sub`: archive -o, format-patch -o and --output, diff
+    --output, bugreport -o, diagnose -o, mailsplit -o, mailinfo's two files, bundle create, index-pack -o and
+    credential-store --file each wrote under the directory -C (or cd) left git in.  format-patch, bugreport and diagnose
+    -o a/b/c made a/b/c and wrote 0001-second.patch, git-bugreport-<date>.txt and git-diagnostics-<date>.zip directly in
+    it; mailsplit -oD wrote D/0001 and D/0002 into a D that must exist.  `index-pack -o o1.idx` wrote o1.idx and o1.rev;
+    `repack --filter-to=zz/pk` wrote zz/pk-<hash>.idx/.pack/.rev and `--expire-to=xx/pk` the same with .mtimes, as
+    `pack-objects o1pack` wrote o1pack-<hash>.*: a pack base name, not the directory the man page calls it;
+    `commit-graph write --object-dir D` wrote D/info/commit-graph and `multi-pack-index --object-dir=D write`
+    D/pack/multi-pack-index; `checkout-index -a --prefix=o1/` wrote o1/f and o1/sub/g and `--prefix=o1-` o1-f and
+    o1-sub/g.  `-o~/t.tar` and `--output=~/u.tar` reached git as spelled and wrote ./~/t.tar and ./~/u.tar: no shell
+    expands a tilde inside a word (tests/probes/shell_probe.py: zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57 printed
+    `-o~/x` and `--output=~/x`, and `-o ~/x` as $HOME/x).
+
+    AGENT_A plans tests/** and bin/spud, AGENT_C home:**, AGENT_DIRS out/**, tests/* and patches/*.patch; the home is
+    no repository here, so the options git reads from the work tree's top are GitTopRelativeTest's."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.dirs = self.spawn(self.plan(actor=self.lead["ref"], persona="engineer", model="opus",
+                                         deliverable=["home:out/**", "home:tests/*", "home:patches/*.patch"]), AGENT_DIRS, caller=AGENT_A)
+        for d in ("docs/superpowers/specs", "tests/out", "out", "patches", ".claude/patches", "ledger/tickets"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+
+    def analysis(self, command, cwd=None):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=cwd or str(self.home.path), home=str(self.home.path)))
+
+    # -- the -C base ---------------------------------------------------------------------
+
+    def test_minus_C_is_the_base_of_a_relative_option_target(self):
+        home = self.home.path
+        for refused, where in (("git -C docs format-patch -o tests/out -1", "docs/tests/out/?*"),  # the ticket's line
+                               ("git -C docs archive -o tests/a.tar HEAD", "docs/tests/a.tar"),
+                               ("git -C docs diff --output=tests/d.txt", "docs/tests/d.txt"),
+                               ("git -C docs mailinfo tests/m tests/p", "docs/tests/m"),
+                               ("git -C docs bugreport -o tests/out", "docs/tests/out/?*"),
+                               ("git -C docs mailsplit -otests/out box", "docs/tests/out/?*"),
+                               ("git -C tests -C ../docs archive -o a.tar HEAD", "docs/a.tar"),
+                               ("cd tests && git -C ../docs diagnose -o out", "docs/out/?*")):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_A)
+                self.assertIn(where, r.reason)
+                self.assertIn("this git call writes", r.reason)
+        for ok in ("git -C tests format-patch -o out -1", "git -C docs format-patch -o ../tests/out -1",
+                   "git -C docs archive -o %s/tests/a.tar HEAD" % home, "git -C tests diff --output=d.txt",
+                   "git -C tests mailinfo m p", "cd docs && git -C ../tests archive -o a.tar HEAD",
+                   "git -C docs -C ../tests bugreport -o out"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+        # Spud's own paths under -C: .claude/patches is his, the home's root and ledger/ are not
+        self.assertSilent("git -C .claude/patches archive -o a.tar HEAD", agent_id=None)
+        self.assertRefused("git -C ledger archive -o tickets/SPD-002.md HEAD", "Law 1", agent_id=None)
+
+    def test_a_tilde_is_the_home_only_where_the_shell_expands_it(self):
+        """A word that starts with `~` is expanded by the shell (the house reading of a leading tilde), so a -C naming one
+        starts the chain again rather than joining the one before it; a `~` inside a word reaches git as spelled."""
+        cwds = frozenset([str(self.home.path)])
+        a = self.analysis("git -C docs -C ~/x format-patch -1")
+        self.assertEqual(a.git_writes, [("format-patch's default form, into ~/x/" + PICKED, "~/x/" + PICKED, cwds)])
+        self.assertEqual(a.git_calls, [((("-C ~/x", "~/x"),), cwds)])
+        self.assertEqual(self.analysis("git -C docs --git-dir ~/x status").git_calls,
+                         [((("-C docs", "docs"), ("--git-dir ~/x", "~/x")), cwds)])
+        self.assertEqual(self.analysis("git -C docs --git-dir=~/x status").git_calls,
+                         [((("-C docs", "docs"), ("--git-dir=~/x", "docs/./~/x")), cwds)])
+        self.assertEqual(self.analysis("git -C docs archive -o ~/t.tar HEAD").git_writes, [("archive -o ~/t.tar", "~/t.tar", cwds)])
+        for attached, spelled in (("-o~/t.tar", "archive -o~/t.tar"), ("--output=~/t.tar", "archive --output=~/t.tar")):
+            with self.subTest(attached):
+                self.assertEqual(self.analysis("git archive %s HEAD" % attached).git_writes, [(spelled, "./~/t.tar", cwds)])
+                self.assertEqual(self.analysis("git -C docs archive %s HEAD" % attached).git_writes, [(spelled, "docs/./~/t.tar", cwds)])
+                self.assertSilent("git archive %s HEAD" % attached, AGENT_C)  # ./~ is in the home, which AGENT_C holds whole
+                self.assertSilent("cd tests && git archive %s HEAD" % attached, AGENT_A)
+        self.assertRefused("git -C tests -C ~/x format-patch -1", "", AGENT_C)  # the home directory, outside every project
+
+    # -- a directory option holds the files git names -------------------------------------
+
+    def test_a_directory_option_is_read_as_the_files_git_writes_in_it(self):
+        for ok in ("git format-patch -o out -1", "git format-patch -oout -3", "git format-patch --output-directory=out -1",
+                   "git format-patch --output-directory out -1", "git format-patch -o out/a/b -1", "git format-patch -o tests -1",
+                   "git bugreport -o out", "git bugreport --output-directory out", "git bugreport --out=out", "git diagnose -o out",
+                   "git diagnose --output-directory=out/x", "git mailsplit -oout box", "cd out && git format-patch -o . -1"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_DIRS)
+        for refused, where in (("cd tests/out && git format-patch -o . -1", "tests/out/?*"),  # the ticket's line
+                               ("git format-patch -o tests/out -1", "tests/out/?*"), ("git bugreport -o tests/out", "tests/out/?*"),
+                               ("git diagnose -o tests/out", "tests/out/?*"), ("git mailsplit -otests/out box", "tests/out/?*"),
+                               ("git format-patch -o patches -1", "patches/?*"), ("git format-patch -o docs -1", "docs/?*")):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_DIRS)
+                self.assertIn(where, r.reason)
+        for ok in ("git format-patch -o tests/out -1", "cd tests/out && git format-patch -o . -1", "git mailsplit -otests/out box"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+
+    def test_the_channel_records_the_files_the_directory_holds(self):
+        cwds = frozenset([str(self.home.path)])
+        self.assertEqual(self.analysis("git format-patch -o out -1").git_writes, [("format-patch -o out", "out/" + PICKED, cwds)])
+        self.assertEqual(self.analysis("git mailsplit -oout box").git_writes, [("mailsplit -oout", "out/" + PICKED, cwds)])
+        self.assertIn(("bugreport -o out", "out/" + PICKED, cwds), self.analysis("git bugreport -o out -s x").git_writes)
+        self.assertEqual(self.analysis("git archive -o out/a.tar HEAD").git_writes, [("archive -o out/a.tar", "out/a.tar", cwds)])
+        self.assertEqual(self.analysis("git format-patch --output=out/all.patch -1").git_writes,
+                         [("format-patch --output=out/all.patch", "out/all.patch", cwds)])
+        self.assertEqual(self.analysis("git format-patch -o '' -1").git_writes,  # here: the default form's reading
+                         [("format-patch's default form, into ./" + PICKED, PICKED, cwds)])
+
+    def test_the_forms_of_spuds_own_verbs(self):
+        """Law 7 refuses a member these verbs whole; the files Spud's own call writes are read in their own shapes: a
+        pack base name, a tree under an object directory, a prefix before every path of the index, an index and its
+        reverse index.  Each line flips an answer SPD-049's reading of one file gave."""
+        for refused in ("git repack -a -d --filter-to=ledger/Home.md", "git repack --cruft -d --expire-to=ledger/Home.md",
+                        "git pack-objects ledger/Home.md --revs", "git commit-graph write --object-dir ledger/Home.md",
+                        "git multi-pack-index --object-dir=ledger/Home.md write", "git checkout-index -a --prefix=ledger/Home.md",
+                        "git index-pack -o ledger/Home.idx p.pack"):
+            with self.subTest(refused):
+                self.assertRefused(refused, "Law 1", agent_id=None)
+                self.assertRefused(refused, "Law 7", AGENT_C)
+        for ok in ("git commit-graph write --object-dir .claude", "git multi-pack-index --object-dir=.claude write",
+                   "git checkout-index -a --prefix=.claude/", "git repack -a -d --filter-to=.claude/pk", "git pack-objects .claude/pk"):
+            with self.subTest(ok):
+                self.assertSilent(ok, agent_id=None)
+        cwds = frozenset([str(self.home.path)])
+        self.assertEqual(self.analysis("git index-pack -o out/p.idx p.pack").git_writes,
+                         [("index-pack -o out/p.idx", "out/p.idx", cwds), ("index-pack -o out/p.idx", "out/p.rev", cwds)])
+        self.assertEqual(self.analysis("git pack-objects out/pk").git_writes, [("pack-objects out/pk", "out/pk-" + PICKED, cwds)])
+        self.assertEqual(self.analysis("git commit-graph write --object-dir o").git_writes,
+                         [("commit-graph --object-dir o", p, cwds) for p in
+                          ("o/" + PICKED, "o/%s/%s" % (PICKED, PICKED), "o/%s/%s/%s" % (PICKED, PICKED, PICKED))])
+
+
+    def test_config_files_file_in_a_write_form(self):
+        """`git config --file` writes its file in a write form and reads it in a read form (probed on git 2.54.0: `-f c1
+        a.b c`, `--file=c2`, `config set --file c3`, `-fc4` and `--fil=c8` wrote, `-f c5 --get a.b` did not, and `-C sub`
+        wrote sub/c6).  Law 7 refuses a member every write form of config, so the file is Spud's to be held to Law 1."""
+        for refused in ("git config -f ledger/tickets/SPD-002.md a.b c", "git config --file=ledger/tickets/SPD-002.md a.b c",
+                        "git config set --file ledger/tickets/SPD-002.md a.b c", "git config -fledger/tickets/SPD-002.md a.b c",
+                        "git -C ledger config -f tickets/SPD-002.md a.b c", "git config --fil=ledger/tickets/SPD-002.md a.b c"):
+            with self.subTest(refused):
+                self.assertRefused(refused, "Law 1", agent_id=None)
+                self.assertRefused(refused, "Law 7", AGENT_C)
+        for ok in ("git config -f ledger/tickets/SPD-002.md --get a.b", "git config --file=.claude/x a.b c",
+                   "git config -f .gitmodules --get-regexp path", "git config get --file ledger/tickets/SPD-002.md a.b"):
+            with self.subTest(ok):
+                self.assertSilent(ok, agent_id=None)
+        self.assertSilent("git config -f .gitmodules --get-regexp path", AGENT_A)
+
+
+class GitTopRelativeTest(BashHookCase):
+    """SPD-227's adjacent gap: from a subdirectory of the work tree git chdirs to its top before it reads some values,
+    and those it does not rebase on the directory it started in, so they land at the top however the line reached the
+    subdirectory.  Probed on git 2.54.0 (Apple Git-157) in a scratch repository in the scratchpad: from sub, sub/deep and
+    under -C sub, `fast-export --export-marks=m` (a verb Law 7 lets a member run) wrote <top>/m, as `read-tree
+    --index-output`, `pack-objects <base>`, `repack --filter-to`, `checkout-index --prefix` and `--object-dir` did and a
+    relative GIT_INDEX_FILE did; `--work-tree=..` from sub wrote at the work tree, `--work-tree=sub` from the top wrote in
+    the directory git ran in, and `--git-dir=../.git` from sub, or a run inside .git, wrote in the directory git ran in
+    (no work tree to go to).  So such a value is read in the directory git runs in and at the top of the work tree git
+    finds from there (the nearest directory holding a .git), and at a --work-tree the line names.
+
+    The home is a repository here (a planted .git), as a checkout is; AGENT_A plans tests/** and bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        plant_git_dir(self.home.path / ".git")
+        for d in ("tests/out", ".claude", "ledger/tickets"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+
+    def analysis(self, command, cwd=None):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=cwd or str(self.home.path), home=str(self.home.path)))
+
+    def test_fast_exports_marks_land_at_the_top(self):
+        for refused, where in (("cd tests && git fast-export --export-marks=m HEAD", "home:m "),
+                               ("git -C tests fast-export --export-marks=m HEAD", "home:m "),
+                               ("cd tests/out && git fast-export --export-marks m HEAD", "home:m "),
+                               ("git --work-tree=tests fast-export --export-marks=m HEAD", "home:m "),
+                               ("cd tests && GIT_INDEX_FILE=idx git status", "home:idx "),
+                               ("git -C tests/out -c core.quotepath=off fast-export --export-marks=out/m HEAD", "home:out/m "),
+                               ("cd tests && GIT_OBJECT_DIRECTORY=objects git status", "home:objects/?* ")):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_A)
+                self.assertIn(where, r.reason)
+        for ok in ("git fast-export --export-marks=tests/m HEAD", "cd tests && git fast-export --export-marks=tests/m HEAD",
+                   "git -C tests fast-export --export-marks=%s/tests/m HEAD" % self.home.path,
+                   "GIT_INDEX_FILE=tests/idx git status", "GIT_OBJECT_DIRECTORY=tests/objects git status"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+
+    def test_the_channel_reads_both_places(self):
+        top = os.path.realpath(str(self.home.path))
+        cwds = frozenset([str(self.home.path)])
+        self.assertEqual(self.analysis("git -C tests fast-export --export-marks=m HEAD").git_writes,
+                         [("fast-export --export-marks=m", "tests/m", cwds), ("fast-export --export-marks=m", top + "/m", cwds)])
+        self.assertEqual(self.analysis("git --work-tree=tests read-tree --index-output=i HEAD").git_writes,
+                         [("read-tree --index-output=i", p, cwds) for p in ("i", top + "/i", "tests/i")])
+        self.assertEqual(self.analysis("git fast-export --export-marks=/tmp/m HEAD").git_writes,
+                         [("fast-export --export-marks=/tmp/m", "/tmp/m", cwds)])
+
+    def test_spud_is_held_to_law_1_at_the_top(self):
+        self.assertRefused("cd .claude && git read-tree --index-output=idx HEAD", "Law 1", agent_id=None)
+        self.assertRefused("cd .claude && git checkout-index -a --prefix=x/", "Law 1", agent_id=None)
+        self.assertSilent("cd .claude && git read-tree --index-output=.claude/idx HEAD", agent_id=None)
+        self.assertSilent("git read-tree --index-output=.claude/idx HEAD", agent_id=None)
+
+
+class GitMailsplitTest(BashHookCase):
+    """SPD-228: with no -o, `git mailsplit` writes into its last word, the older form GIT_VERB_FILE_OPTIONS never read.
+    Probed on git 2.54.0 (Apple Git-157) in the scratchpad: `mailsplit box o2` wrote o2/0001 and o2/0002, and so did
+    `mailsplit o3` with the mailbox on standard input -- one word is the directory, not a mailbox (an empty input wrote
+    nothing, which is what the ticket saw); `mailsplit -- box o5` and `-b -d3 box o6` (o6/001) the same; options end at the
+    first word that is not one, so `mailsplit box -oo4` wrote into ./-oo4; with -o the words are mailboxes (`-oo1 box o2`
+    read o2 as one); three words and none printed usage (129); a spaced `-o o1` died "unknown option: -o"; and every
+    form needs the directory to exist ("unable to create 'missing/0001'").  Under `-C sub`, `-om1 <box>` and `../../box
+    m2` wrote sub/m1/0001 and sub/m2/0001, and `mailsplit m3` run from sub wrote sub/m3/0001: the directory is read
+    where every other relative path git is given is.  AGENT_A plans tests/** and bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        for d in ("tests/out", "docs", "ledger/tickets"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def test_the_older_form_writes_into_its_last_word(self):
+        for refused in ("git mailsplit box docs", "git mailsplit docs < box", "cat box | git mailsplit docs",
+                        "git mailsplit -b -d3 box docs", "git mailsplit -- box docs", "git mailsplit --keep-cr box docs",
+                        "git -C docs mailsplit box out", "cd docs && git mailsplit box out", "git mailsplit box -odocs"):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_A)
+                self.assertIn("home:docs/out/?*" if refused.endswith(" out") else "home:docs/?*", r.reason)
+        for ok in ("git mailsplit box tests/out", "git mailsplit tests/out < box", "git mailsplit -otests/out box docs",
+                   "git mailsplit -otests/out", "git mailsplit box docs tests/out", "git mailsplit", "cd tests && git mailsplit box out"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+        self.assertRefused("git mailsplit box ledger/tickets", "Law 1", agent_id=None)
+
+    def test_the_channel_records_the_directory(self):
+        cwds = frozenset([str(self.home.path)])
+        self.assertEqual(self.analysis("git mailsplit box out2").git_writes, [("mailsplit box out2", "out2/" + PICKED, cwds)])
+        self.assertEqual(self.analysis("git mailsplit out2").git_writes, [("mailsplit out2", "out2/" + PICKED, cwds)])
+        self.assertEqual(self.analysis("git mailsplit box -oo4").git_writes,
+                         [("mailsplit -oo4", "o4/" + PICKED, cwds), ("mailsplit box -oo4", "-oo4/" + PICKED, cwds)])
+        for nothing in ("git mailsplit", "git mailsplit a b c", "git mailsplit -oout a b"):
+            with self.subTest(nothing):
+                self.assertEqual([w for w in self.analysis(nothing).git_writes if not w[1].startswith("out/")], [])
+
+
+GIT_INPUT_WORDING = "end git's own words with `--`"  # SPD-230: a git call whose words xargs extends
+
+
+class GitXargsTest(BashHookCase):
+    """SPD-230: xargs hands git words the line does not spell -- appended after the spelled ones, or where -I or -J puts
+    them -- and the git reading read only the spelled ones: `cat list | xargs git archive HEAD` wrote whatever -o the list
+    held, `xargs git format-patch --stdout -1` wrote into the directory under a --no-stdout from the list, and `echo push |
+    xargs git` pushed past Law 7 (its verb was None).  git takes such a word as its verb or an option wherever it stands
+    before `--`, so a member is refused the call unless the line ends git's words with `--` (every word xargs adds is then
+    a path, however xargs splits its input: the `--` is in each call), and a word git takes as a file -- mailinfo's,
+    mailsplit's last, a spaced -o's value -- is a write the line does not spell.  The subcommand verbs read by their
+    operands (branch, tag, config, stash, worktree, remote, reflog) are refused whatever `--` does, since a name or a
+    subcommand after it still writes.  find's {} is a path under its starting points and stays one, except as the verb.
+    Spud is not refused (Law 7 is his to keep), but the default form an input may reset is still read for him (Law 1)."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        for d in ("tests/out", ".claude/patches", "push"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+        (self.home.path / "list").write_text("a\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def refused_to_members(self, command, needle=GIT_INPUT_WORDING):
+        for agent_id in (AGENT_A, AGENT_C):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+
+    def test_a_word_xargs_adds_where_git_reads_an_option_or_its_verb_is_refused(self):
+        for command in ("xargs git archive HEAD < list", "cat list | xargs git archive HEAD", "xargs git format-patch --stdout -1 < list",
+                        "echo push | xargs git", "xargs git < list", "xargs git log < list", "xargs -0 git grep foo < list",
+                        "xargs git fetch < list", "xargs -n1 git log --oneline < list", "xargs -I% git log -1 % < list",
+                        "xargs -J % git log % -1 < list", "xargs -I% git % status < list", "xargs -I% git log -o % -1 < list",
+                        "xargs git -C tests log < list", "xargs git branch --list < list", "xargs git remote < list",
+                        "xargs git reflog < list"):
+            self.refused_to_members(command)
+        # `--` makes nothing a path for these, whose operand writes: Law 7's own reading of the verb comes first
+        for command in ("xargs git branch -- < list", "xargs git config -- < list", "xargs git tag < list"):
+            self.refused_to_members(command, "Law 7")
+        r = self.assertRefused("xargs git archive HEAD < list", GIT_INPUT_WORDING)
+        self.assertIn("git archive HEAD {input}", r.reason)
+        self.refused_to_members("find push -maxdepth 0 -exec git {} \\;", "")  # the verb is a path find found
+
+    def test_a_line_that_ends_gits_words_is_read_as_before(self):
+        for ok in ("xargs git log -- < list", "xargs git archive HEAD -- < list", "xargs git format-patch --stdout -1 -- < list",
+                   "xargs -I% git log -1 -- % < list", "xargs -I% git log --author=% -1 < list", "xargs git grep -l foo -- < list",
+                   "find . -name '*.py' -exec git log -1 {} \\;", "xargs -n1 git log --oneline -- < list"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+
+    def test_a_file_git_writes_from_the_input_is_the_inputs(self):
+        for command in ("xargs -I% git archive -o % HEAD < list", "xargs -J % git archive -o % HEAD < list",
+                        "xargs git mailinfo -- < list", "xargs git mailsplit -- < list", "xargs -I% git mailinfo % tests/p < list"):
+            with self.subTest(command):
+                self.assertRefused(command, "xargs reads from its input", AGENT_A)
+
+    def test_law_7s_own_reason_comes_first(self):
+        for command, verb in (("xargs git push < list", "git push"), ("xargs git add < list", "git add"),
+                              ("xargs git stash < list", "git stash")):
+            with self.subTest(command):
+                r = self.assertRefused(command, "Law 7", AGENT_A)
+                self.assertIn(verb, r.reason)
+
+    def test_spuds_answers(self):
+        for ok in ("xargs git log < list", "xargs git archive HEAD < list", "xargs git push < list", "echo push | xargs git",
+                   "xargs git format-patch --stdout -1 -- < list"):
+            with self.subTest(ok):
+                self.assertSilent(ok, agent_id=None)
+        # an input word may be --no-stdout, which sends the patches into the directory git runs in: Law 1 there
+        self.assertRefused("xargs git format-patch --stdout -1 < list", "Law 1", agent_id=None)
+        self.assertSilent("cd .claude/patches && xargs git format-patch --stdout -1 < list", agent_id=None)
+
+    def test_the_analysis(self):
+        a = self.analysis("xargs git archive HEAD < list")
+        self.assertIn("git-input", [f[0] for f in a.findings])
+        self.assertEqual(a.git_writes, [])
+        self.assertNotIn("git-input", [f[0] for f in self.analysis("xargs git archive HEAD -- < list").findings])
+        self.assertNotIn("git-input", [f[0] for f in self.analysis("git archive HEAD").findings])
 
 
 # The verbs `git --list-cmds=main` gives on this machine that a member may run, as SPD-087's sweep read them: every name
@@ -2006,8 +2531,10 @@ class GitVerbAllowlistTest(BashHookCase):
                    "git show-index", "git verify-pack -v p.idx", "git verify-commit HEAD", "git fmt-merge-msg",
                    "git pack-redundant --all", "git ls-tree HEAD", "git diff-files", "git diff-index HEAD",
                    "git name-rev --all", "git merge-base a b", "git cat-file -p HEAD", "git var -l",
-                   # --stdout: with no -o format-patch writes where it runs, which GitCwdWriteTest reads (SPD-093)
-                   "git format-patch --stdout -1", "git archive HEAD", "git mailsplit mbox", "git fast-export HEAD"):
+                   # --stdout: with no -o format-patch writes where it runs, which GitCwdWriteTest reads (SPD-093); and
+                   # `git mailsplit mbox` writes into ./mbox/, its one word the directory (SPD-228, GitMailsplitTest)
+                   "git format-patch --stdout -1", "git archive HEAD", "git mailsplit -o/tmp/spd-228 mbox",
+                   "git fast-export HEAD"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
