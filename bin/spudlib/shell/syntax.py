@@ -232,7 +232,7 @@ DYNAMIC_VARIABLES = {"_", "PWD", "OLDPWD", "REPLY", "OPTARG", "OPTIND", "MATCH",
 # The verbs Law 7 refuses a member by name, whatever git's own command list says: the ones a member would reach for, so
 # the refusal keeps its own reason (`git push` is still "Spud commits" when the hook cannot run git at all).
 # Every other name git answers to is refused by GIT_MEMBER_VERBS below; this table is the named half, not the whole set,
-# and git_verbs.git_write_option_targets reads it to skip the file target of a verb refused here -- which is why a
+# and git_writes.git_write_option_targets reads it to skip the file target of a verb refused here -- which is why a
 # verb that names a file git writes (read-tree, checkout-index, index-pack, repack, commit-graph ...) is refused by the
 # allowlist instead and not added here: its GIT_VERB_FILE_OPTIONS entry stays live, and Law 7 does not bind Spud, whose
 # own call is still held to the path rule.  `stage` and `init-db` are git's own spellings of `add` and `init`, which the
@@ -315,7 +315,7 @@ GIT_VERB_PROGRAM_OPTIONS = {
 }
 # What a git call writes beside the repository -- the environment and the options that name a file or directory
 # git creates or appends to, under a verb Law 7's table allows.  Each is checked with the path rule, like a redirection
-# target, against every directory the shell may be in; read by git_verbs.git_write_targets.
+# target, against every directory the shell may be in; read by git_writes.git_write_targets.
 #
 # The environment, probed on git 2.54.0 (Apple Git-157): every GIT_TRACE* variable set to an absolute path appended its
 # trace to that file (GIT_TRACE, GIT_TRACE_PERFORMANCE, GIT_TRACE_SETUP, GIT_TRACE_PACK_ACCESS, GIT_TRACE_REFS,
@@ -377,7 +377,7 @@ GIT_VERB_FILE_POSITIONALS = {"bundle": ("create", 1), "mailinfo": (None, 2), "pa
 # How git places what each of those names (SPD-227): (verb, the option's long name or short letter, or "" for the
 # positional form, mailsplit's older one included) -> (shape, base), and ("file", "cwd") for every one not listed.
 # Probed on git 2.54.0 (Apple Git-157) in a scratch repository in the scratchpad, from its top, from a subdirectory,
-# under -C and under --git-dir.  Shapes, each read as the paths git_verbs.shaped_paths makes of the value, a name git
+# under -C and under --git-dir.  Shapes, each read as the paths git_writes.shaped_paths makes of the value, a name git
 # picks standing as hooks/pathrule.NAME_CHAR and NAME_MORE:
 #   "file"    the path itself;
 #   "dir"     a directory git writes files of its own naming directly into: format-patch, bugreport and diagnose -o a/b/c
@@ -396,7 +396,7 @@ GIT_VERB_FILE_POSITIONALS = {"bundle": ("create", 1), "mailinfo": (None, 2), "pa
 # does not rebase these values on: from a subdirectory and under -C, fast-export --export-marks, read-tree
 # --index-output, pack-objects, repack's two, checkout-index --prefix and --object-dir each wrote at the top, while under
 # --git-dir with no work tree, or run inside .git, they wrote in the directory git ran in, and under --work-tree=W at W
-# when git ran inside W.  So a "top" value is read at every one of those places (git_verbs.top_readings).
+# when git ran inside W.  So a "top" value is read at every one of those places (git_writes.top_readings).
 GIT_FILE_FORMS = {
     ("format-patch", "--output-directory"): ("dir", "cwd"), ("format-patch", "o"): ("dir", "cwd"),
     ("bugreport", "--output-directory"): ("dir", "cwd"), ("bugreport", "o"): ("dir", "cwd"),
@@ -421,7 +421,7 @@ GIT_OPERAND_VERBS = frozenset({"branch", "tag", "config", "stash", "worktree", "
 # (and with --diagnose git-diagnostics-<date>.zip) and `git diagnose` git-diagnostics-<date>.zip -- the shell's
 # directory, or the one -C names (a repeated -C composes, an empty one changes nothing).  Their man pages say so:
 # format-patch's files "are created in the current working directory" without -o, and bugreport's and diagnose's -o
-# writes "instead of the current directory".  git_verbs.git_cwd_write_targets reads such a call as a write of a new
+# writes "instead of the current directory".  git_writes.git_cwd_write_targets reads such a call as a write of a new
 # file directly in that directory, held to the path rule like a redirection target, for every caller; a directory
 # the hook cannot follow refuses everyone, as any unfollowable relative write does.  -o's own directory is
 # GIT_VERB_FILE_OPTIONS' reading (SPD-049) and stays so.

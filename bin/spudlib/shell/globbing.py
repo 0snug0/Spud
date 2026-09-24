@@ -4,7 +4,7 @@ import functools
 import os
 import re
 
-from . import analyse, directories, git_verbs, prepare, redirect_globs, spud_calls, syntax
+from . import analyse, directories, git_writes, prepare, redirect_globs, spud_calls, syntax
 from ..hooks import hookio
 
 
@@ -170,13 +170,13 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False,
       after it, since a glob matching two files is two words; `script` and a command word with a `/`: each existing file it
       matches that runs the spud launcher, whatever its name.
     - `options`, at a git verb's option: its (long options, short letters) that name a path git writes
-      (git_verbs.git_file_options).  A glob whose key before its first `=` is itself a glob is also read as each option
+      (git_writes.git_file_options).  A glob whose key before its first `=` is itself a glob is also read as each option
       that key can match with the rest after it (`--outp?t=/etc/x` became `--output=/etc/x` with a directory `--output=`
       holding etc/x, probed), a program-naming one too (`git archive --ex?c=cmd`).
 
     Ambiguous: it can match two names the hook checks (both files may exist, and the shell passes both: `* x` ran `git push x`
     with files git and push), it is too complex to match, its files reach the scan budget, or, with `options`, it may become
-    one of those options at all (git_verbs.may_become_file_option): which option, with which value attached or following,
+    one of those options at all (git_writes.may_become_file_option): which option, with which value attached or following,
     is the files' to decide, since a `?` or `*` can be the `=` itself (`--outp?t=y` matched a file `--outp=t=y`, probed)."""
     m = _EQUALS_RE.match(word)
     if m:
@@ -201,7 +201,7 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False,
         key, sep, rest = word.partition("=")
         matched = glob_sample_matches(key, False) if sep and active_glob_word(key) else None
         readings += [[s + sep + rest] for s in sorted(matched or ()) if s.startswith("-")]
-        ambiguous = ambiguous or git_verbs.may_become_file_option(word, *options)
+        ambiguous = ambiguous or git_writes.may_become_file_option(word, *options)
     span = trailing_group(word)
     if span is not None and "N" in word[span[0] :]:
         readings.append([])

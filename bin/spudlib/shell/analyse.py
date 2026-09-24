@@ -3,7 +3,7 @@
 import os
 import re
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, globbing, heredocs, inline_programs, interpreter_words, loop_bindings, positional, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, git_writes, globbing, heredocs, inline_programs, interpreter_words, loop_bindings, positional, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
 from ..hooks import hookio
 
 _MEMBER_VAR_RE = re.compile(r"\$\{?#?([A-Za-z_][A-Za-z0-9_]*)")  # a `$NAME` a tolerated finding names (SPD-205)
@@ -431,13 +431,13 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # git is handed the value, not the spelling, so a `$NAME` the line settled is resolved in the option that
         # names the file and in the variable whose value decides whether git writes a file at all (a GIT_TRACE* sibling
         # traces to a path only when its value is absolute; a descriptor or a relative one writes nothing).
-        for spelled, target, top in git_verbs.git_write_targets(git_words, {n: arg_writes.resolved(v, a) for n, v in a.vars.items()}):
+        for spelled, target, top in git_writes.git_write_targets(git_words, {n: arg_writes.resolved(v, a) for n, v in a.vars.items()}):
             # A file the call writes through one of its own options or the environment, held to the path rule
             # in bash_reason like a redirection target, for every caller; one git reads from the work tree's top
             # at each place that may be (SPD-227)
             target = arg_writes.resolved(target, a)
-            paths = [target] if top is None else git_verbs.top_readings(target, arg_writes.resolved(top, a),
-                                                                        [arg_writes.resolved(w, a) for w in work_trees], a.cwds)
+            paths = [target] if top is None else git_writes.top_readings(target, arg_writes.resolved(top, a),
+                                                                         [arg_writes.resolved(w, a) for w in work_trees], a.cwds)
             a.git_writes.extend((spelled, path, a.cwds) for path in paths)
     elif base in syntax.SHELLS:
         if not read_points(lambda ws, start: expansions.option_point(expansions.shell_read_index(ws, start))):

@@ -1,6 +1,6 @@
 """shell/expansions: Parameter expansions and a command's read points."""
 
-from . import analyse, arg_writes, git_verbs, globbing, loop_bindings, prepare, spud_calls, syntax
+from . import analyse, arg_writes, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax
 from ..hooks import hookio, snapshots
 
 
@@ -307,7 +307,7 @@ def git_read_point(words, start=1):
         if w in ("branch", "tag", "config"):
             return option_point(first_read_index(words, max(i + 1, start)))
         k = verb_option_read_index(words, i, start)
-        return None if k is None else (k, {"dash": True, "shift": True, "options": git_verbs.git_read_options(w)})
+        return None if k is None else (k, {"dash": True, "shift": True, "options": git_writes.git_read_options(w)})
     return None
 
 
@@ -317,12 +317,12 @@ def verb_option_read_index(words, verb_at, start):
     and of them: on a verb of syntax.GIT_VERB_PROGRAM_OPTIONS, a word spelled with a leading `-`, so `git ls-remote
     --upload-pac? cmd .` is read as --upload-pack while a pattern or a path a member greps for (`git grep '*.py'`) is
     left as the argument it is; on any verb, such a word whose literal head may still become an option that names a path
-    git writes (git_verbs.may_become_file_option: `git log --outp?t=<path>`, never `--grep=$P`); and on a verb of
+    git writes (git_writes.may_become_file_option: `git log --outp?t=<path>`, never `--grep=$P`); and on a verb of
     syntax.GIT_VERB_FILE_OPTIONS also a word that starts with its expansion (`git archive $OPT HEAD`), which may become
     any option at all.  The value a literal file option takes as the next word is a path, not an option, and is left
     to the path rule (`git archive -o $T HEAD`)."""
     verb = words[verb_at]
-    longs, shorts = git_verbs.git_read_options(verb)
+    longs, shorts = git_writes.git_read_options(verb)
     program, table = verb in syntax.GIT_VERB_PROGRAM_OPTIONS, verb in syntax.GIT_VERB_FILE_OPTIONS
     k = verb_at + 1
     while k < len(words):
@@ -331,9 +331,9 @@ def verb_option_read_index(words, verb_at, start):
             return None
         if active_read_word(w):
             dash = w.startswith("-")
-            if k >= start and ((program and dash) or ((dash or table) and git_verbs.may_become_file_option(w, longs, shorts))):
+            if k >= start and ((program and dash) or ((dash or table) and git_writes.may_become_file_option(w, longs, shorts))):
                 return k
-        elif (git_verbs.file_option_spelling(w, longs, shorts) or (None, False))[1]:
+        elif (git_writes.file_option_spelling(w, longs, shorts) or (None, False))[1]:
             k += 1  # the path a spaced file option names
         k += 1
     return None
