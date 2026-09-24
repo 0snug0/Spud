@@ -310,6 +310,22 @@ class TicketTest(SpudTestCase):
         out = self.home.json("ticket", "edit", t["key"], "--outcome", "@-", actor="spud", stdin="From stdin.\n")
         self.assertEqual(out["ticket"]["outcome"], "From stdin.")
 
+    def test_a_lone_dash_brief_is_refused_naming_at_dash(self):
+        """SPD-099: `--brief -` typed for `--brief @-` stored the brief '-'.  ticket new and ticket edit refuse it, and '-'
+        read through @- too, with a message naming @-, and write nothing."""
+        for value, stdin in (("-", "the real brief\n"), ("@-", "-\n")):
+            proc = self.home.run("ticket", "new", "--title", "Dash", "--brief", value, actor="spud", stdin=stdin, check=False)
+            self.assertEqual(proc.returncode, EXIT_USAGE, (value, proc.stderr))
+            self.assertIn("--brief", proc.stderr)
+            self.assertIn("@-", proc.stderr)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM tickets"), 0)
+        t = self.new_ticket("Dash", brief="The brief.")
+        for flag in ("--brief", "--sizing", "--outcome"):
+            proc = self.home.run("ticket", "edit", t["key"], flag, "-", actor="spud", check=False)
+            self.assertEqual(proc.returncode, EXIT_USAGE, (flag, proc.stderr))
+            self.assertIn(flag, proc.stderr)
+        self.assertEqual(self.home.json("ticket", "show", t["key"])["ticket"]["brief"], "The brief.")
+
 
 if __name__ == "__main__":
     unittest.main()
