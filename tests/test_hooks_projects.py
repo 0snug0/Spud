@@ -1027,13 +1027,14 @@ class PlantedCacheTest(ProjectHookCase):
         took a whole settle interval, as a git run can on a loaded machine (SPD-249).  Returns the patches as one context
         and the list of the step's calls for that checkout."""
         gitrepos = importlib.import_module("spudlib.hooks.gitrepos")
+        worktrees = importlib.import_module("spudlib.hooks.worktrees")
         real, now, calls = getattr(gitrepos, name), [written], []
 
         def step(*args, **kwargs):
             out = real(*args, **kwargs)
             if os.path.abspath(args[at]) == os.path.abspath(checkout):
                 calls.append(args)
-                now[0] = written + gitrepos.SETTLED_NS
+                now[0] = written + worktrees.SETTLED_NS
             return out
 
         stack = contextlib.ExitStack()
