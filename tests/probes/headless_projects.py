@@ -7,9 +7,10 @@ Run one scenario at a time, from any directory:
 (The hook probes of SPD-008, SPD-015 and SPD-018 stay in tests/probes/headless.py; the design named that file for these
 scenarios, but it was taken, so they live beside it.)
 
-Each scenario builds a scratch directory under the system temp directory: a scratch home (a git repository holding a copy of
-this checkout's bin/spud, bin/spud_ledger.py and share/ -- the spudagent template share/agents/spudagent.md included
-since SPW-004 -- and of the suite's shipped share/spud.config.json rendered, with a bare origin, `spud init`) and a scratch "other" repository standing in for BadTakes
+Each scenario builds a scratch directory under the system temp directory: a scratch home (a plain directory holding the
+suite's shipped share/spud.config.json rendered); beside it the tool (tests/probes/probe_env.py's build_tool, SPD-244: a
+main checkout holding a copy of this checkout's bin/ and its share/ -- the spudagent template share/agents/spudagent.md
+included since SPW-004 -- with a bare origin), which `spud init --project-root` registers as project 1; and a scratch "other" repository standing in for BadTakes
 (key badtakes, prefixes BAD / BADS, Eric 2026-09-14), with a commit and a bare origin.  It runs `project add` and `project install` with SPUD_USER_CLAUDE_DIR and SPUD_CONFIG_DIR in the
 scratch directory, then launches `claude -p --model haiku --setting-sources project,local` in the other repository, so the
 installed local settings are the settings that load.  `spudagent` is passed with --agents, since a headless run cannot
@@ -19,7 +20,6 @@ printed too.  Not collected by the unit test suite (the file name matches no tes
 """
 
 import json
-import os
 import re
 import shutil
 import sqlite3
@@ -42,7 +42,6 @@ CONFIG_MARKS = REPO / "tests" / "fixtures" / "config_marks.json"
 NAME_POOL = REPO / "tests" / "fixtures" / "name_pool.json"  # SPD-157: the suite's own pool, as tests/helpers.py renders it
 PY = sys.executable
 MODEL = "haiku"
-IDENTITY = {"GIT_AUTHOR_NAME": "Spud probe", "GIT_AUTHOR_EMAIL": "probe@example.invalid", "GIT_COMMITTER_NAME": "Spud probe", "GIT_COMMITTER_EMAIL": "probe@example.invalid"}
 
 
 def write_config(home):
@@ -56,32 +55,8 @@ def write_config(home):
     return config
 
 
-def seed_project_one(home, config):
-    """Project 1 as `spud init` inserted it before SPW-001: key `spud`, rooted at the home, whose bin/spud this probe's
-    launcher is.  Init registers no project now (docs/design/2026-09-21-spud-init.md section 1.4), and without this the
-    `project add` below would take id 1 -- so the probe's badtakes, not spud, would be the project the config names."""
-    con = sqlite3.connect(home / ".spud" / "ledger.db", timeout=5)
-    try:
-        with con:
-            con.execute(
-                "INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at)"
-                " VALUES (1, 'spud', ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (config["identity"]["name"], str(home), config["tickets"]["prefix"], config["teams"]["prefix"],
-                 datetime.now().astimezone().isoformat(timespec="seconds")),
-            )
-    finally:
-        con.close()
-
-
-def git_env():
-    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-    env.update(GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_COUNT="2", GIT_CONFIG_KEY_0="core.excludesFile", GIT_CONFIG_VALUE_0="/dev/null",
-               GIT_CONFIG_KEY_1="commit.gpgsign", GIT_CONFIG_VALUE_1="false", **IDENTITY)
-    return env
-
-
 def git(repo, *args, check=True):
-    proc = subprocess.run(["git", "-C", str(repo), *map(str, args)], capture_output=True, text=True, env=git_env())
+    proc = subprocess.run(["git", "-C", str(repo), *map(str, args)], capture_output=True, text=True, env=probe_env.git_env())
     if check and proc.returncode != 0:
         raise SystemExit("git %s in %s failed: %s" % (" ".join(map(str, args)), repo, proc.stderr))
     return proc.stdout.strip()
@@ -91,14 +66,15 @@ class Scratch:
     def __init__(self, name):
         self.root = Path(tempfile.mkdtemp(prefix="spud-headless-%s-" % name)).resolve()
         self.home = self.root / "home"
+        self.tool = probe_env.tool_path(self.root)  # project 1, beside the home (SPD-244); build() makes it
         self.other = self.root / "badtakes"
         self.user = self.root / "user-claude"
         self.config = self.root / "user-config"
         self.log = []
         # SPD-101: helpers.Home's isolation, from the one helper every probe shares: before it, this env left the
         # LaunchAgents directory and launchctl this Mac's, and `spud init` below would have installed its watcher over
-        # the real one.  The home is the tool (its bin/ is a copy); the user-scope directories keep this probe's names.
-        self.env = probe_env.isolated_env(self.home, scratch=self.root, base=git_env())
+        # the real one.  The tool is the checkout beside the home; the user-scope directories keep this probe's names.
+        self.env = probe_env.isolated_env(self.home, self.tool, scratch=self.root, base=probe_env.git_env())
         self.env.update(SPUD_USER_CLAUDE_DIR=str(self.user), SPUD_CONFIG_DIR=str(self.config))
         for key in [k for k in self.env if k.startswith("CLAUDE") or k == "CLAUDECODE"]:
             self.env.pop(key)
@@ -107,33 +83,25 @@ class Scratch:
         env = dict(self.env)
         if session:
             env["CLAUDE_CODE_SESSION_ID"] = session
-        proc = subprocess.run([PY, "-I", "-S", str(self.home / "bin" / "spud"), *map(str, args)], capture_output=True, text=True, env=env, cwd=str(cwd or self.root))
+        proc = subprocess.run([PY, "-I", "-S", str(self.tool / "bin" / "spud"), *map(str, args)], capture_output=True, text=True, env=env, cwd=str(cwd or self.root))
         if check and proc.returncode != 0:
             raise SystemExit("spud %s failed (%d): %s %s" % (" ".join(map(str, args)), proc.returncode, proc.stdout, proc.stderr))
         return proc
 
     def build(self):
         self.home.mkdir()
-        (self.home / "bin").mkdir()
-        for rel in ("bin/spud", "bin/spud_ledger.py"):
-            shutil.copyfile(REPO / rel, self.home / rel)
-        config = write_config(self.home)
-        shutil.copytree(REPO / "bin" / "spudlib", self.home / "bin" / "spudlib", ignore=shutil.ignore_patterns("__pycache__"))
-        os.chmod(self.home / "bin" / "spud", 0o755)
-        # SPW-004: the spudagent template is share/agents/spudagent.md, so this home-as-tool ships share/ whole -- which
-        # is also what `spud init` writes its scaffolding from (SPW-001).
-        shutil.copytree(REPO / "share", self.home / "share")
+        write_config(self.home)
         (self.home / "CLAUDE.md").write_text("# Spud (scratch home for a headless probe)\n\nYou are Spud in this probe. Follow the prompt's steps exactly.\n", encoding="utf-8")
-        (self.home / ".gitignore").write_text(".spud/\n", encoding="utf-8")
-        git(self.home, "init", "-q", "-b", "main")
-        git(self.home, "add", ".")
-        git(self.home, "commit", "-q", "-m", "scratch home")
-        self.home_origin = self.root / "home-origin.git"
-        git(self.root, "init", "-q", "--bare", "-b", "main", self.home_origin)
-        git(self.home, "remote", "add", "origin", self.home_origin)
-        git(self.home, "push", "-q", "-u", "origin", "main")
-        self.spud("init", "--no-schedule")
-        seed_project_one(self.home, config)
+        # SPD-244: the home is a plain directory, as a real one is and as init requires (a home inside a git work tree is
+        # refused), and the repository with a bare origin is the tool beside it: a main checkout holding a copy of this
+        # checkout's bin/ and its share/ -- the spudagent template (SPW-004) and what `spud init` writes its scaffolding
+        # from (SPW-001) -- which init registers as project 1, so the `project add` below takes id 2.
+        probe_env.build_tool(self.root)
+        self.tool_origin = self.root / "tool-origin.git"
+        git(self.root, "init", "-q", "--bare", "-b", "main", self.tool_origin)
+        git(self.tool, "remote", "add", "origin", self.tool_origin)
+        git(self.tool, "push", "-q", "-u", "origin", "main")
+        self.spud(*probe_env.init_args(self.tool))
         self.other.mkdir()
         (self.other / "README.md").write_text("# BadTakes stand-in\n", encoding="utf-8")
         (self.other / "src").mkdir()
@@ -221,7 +189,7 @@ def brief(calls):
 
 
 def cli(s):
-    return "python3.14 -I -S %s/bin/spud" % s.home
+    return "python3.14 -I -S %s/bin/spud" % s.tool
 
 
 def sessionless_planned_member(s):
@@ -298,8 +266,8 @@ Step 7. Reply with one line per step: the step number and its first output line 
                   "home/docs/x.md": (s.home / "docs" / "x.md").is_file(), "home/bin/x": (s.home / "bin" / "x").exists()},
         "denials": s.rows("SELECT agent_id, body FROM events WHERE kind = 'hook.denied'"),
         "hook_errors": s.rows("SELECT body FROM events WHERE kind = 'hook.error'"),
-        "home_log_1": git(s.home, "log", "-1", "--format=%s"),
-        "origin_has_it": git(s.home_origin, "log", "-1", "--format=%s", "main"),
+        "tool_log_1": git(s.tool, "log", "-1", "--format=%s"),
+        "origin_has_it": git(s.tool_origin, "log", "-1", "--format=%s", "main"),
         "ticket_note_project_line": [l for l in ticket_note.read_text(encoding="utf-8").splitlines() if l.startswith("project:")] if ticket_note.is_file() else None,
     }
 
@@ -327,13 +295,13 @@ Step 6. Agent tool with subagent_type "spudagent", model "haiku", description "B
 >>>
 Wait for it to finish.
 Step 7. Agent tool with subagent_type "probeagent", model "haiku", description "Probe agent", prompt "Reply ok."
-Step 8. Bash: git -C %(home)s log --oneline -1
+Step 8. Bash: git -C %(tool)s log --oneline -1
 Step 9. Bash: %(cli)s --as spud project show badtakes
 Step 10. Bash: %(cli)s --as spud render
 Step 11. ExitWorktree with action "keep".
 Step 12. Bash: %(cli)s --as spud member finish BADS-001/Yukon --status done --outcome "Probe run." --summary "Wrote src/w.txt in a worktree of the stand-in repository, bound from the worktree's working directory, and recorded its result through the ledger CLI."
 Step 13. Bash: %(cli)s --as spud render
-Step 14. Reply with one line per step: the step number and its first output line or refusal.""" % {"cli": cli(s), "child": child, "home": s.home}
+Step 14. Reply with one line per step: the step number and its first output line or refusal.""" % {"cli": cli(s), "child": child, "tool": s.tool}
     session, messages, result = s.claude("project-worktree", prompt, max_turns=70)
     calls = tool_calls(messages)
     worktree = s.other / ".claude" / "worktrees" / "bad-001-probe"
@@ -349,7 +317,7 @@ Step 14. Reply with one line per step: the step number and its first output line
         "denials": s.rows("SELECT body FROM events WHERE kind = 'hook.denied'"),
         "hook_errors": s.rows("SELECT body FROM events WHERE kind = 'hook.error'"),
         "commits": s.rows("SELECT body, json_extract(data, '$.pushed') AS pushed FROM events WHERE kind = 'commit'"),
-        "home_log_1": git(s.home, "log", "-1", "--format=%s"),
+        "tool_log_1": git(s.tool, "log", "-1", "--format=%s"),
     }
     if session:
         resumed_session, resumed, reply = s.claude("project-worktree-resume", "Run this Bash command and reply with its output: %s session show" % cli(s), extra=["--resume", session], max_turns=6)

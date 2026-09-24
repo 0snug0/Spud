@@ -2,10 +2,11 @@
 
   python3.14 -I -S tests/probes/session_diff.py LAUNCHER_A LAUNCHER_B
 
-Each launcher gets its own scratch SPUD_HOME (the shipped share/spud.config.json, rendered), so nothing is
-written into any ledger.  The same 44 steps run against each: commands from init to member finish, every hook event with a real payload, and two
-malformed payloads.  Each step's exit code, stdout and stderr are compared after masking the scratch home, the
-launcher's checkout, timestamps, dates, clock times and durations.  Prints how many steps are identical and a diff of
+Each launcher gets its own scratch SPUD_HOME (the shipped share/spud.config.json, rendered) and, beside it, a tool
+checkout of its own (tests/probes/probe_env.py's build_tool), which the script's `init --project-root` registers as project
+1: the shape a real home has (SPD-244).  Nothing is written into any ledger.  The same 44 steps run against each: commands from init to member finish, every hook event with a real payload, and two
+malformed payloads.  Each step's exit code, stdout and stderr are compared after masking the scratch home, its tool,
+timestamps, dates, clock times and durations.  Prints how many steps are identical and a diff of
 each that is not, and exits 1 when any differs.  A change meant to leave behaviour alone, such as a refactor of the
 program, passes with every step identical against main's launcher.
 """
@@ -15,11 +16,9 @@ import json
 import os
 import re
 import shutil
-import sqlite3
 import subprocess
 import sys
 import tempfile
-from datetime import datetime
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.dont_write_bytecode = True  # probe_env comes from this directory, and the checkout keeps no bytecode
@@ -27,38 +26,18 @@ sys.path.insert(0, HERE)  # `python3.14 -I -S` puts no script directory on sys.p
 import probe_env  # noqa: E402  SPD-101: the isolation every probe's scratch home runs under
 
 PY = sys.executable
-INIT = ["init", "--no-schedule"]  # step 8 would reach launchctl; the scratch home's is probe_env's refusing stub
 AGENT = "a0123456789abcdef"
 SESSION = "0f4b1d2e-3c5a-4e6f-8a9b-0c1d2e3f4a5b"
 
 
-def seed_project_one(home, config, checkout):
-    """Project 1 as `spud init` inserted it before SPW-001: key `spud`, the identity's name, rooted at the launcher's own
-    checkout, the config's two prefixes, `remote` from that checkout's origin.
-
-    Run right after the script's `init` step, because init registers no project now (docs/design/2026-09-21-spud-init.md
-    section 1.4) and every step below it needs one -- and because a home *with* a row 1 is the shape of the two homes
-    that exist, which is what this probe is evidence about: their `config sync`, `doctor`, `project edit` and
-    `project remove` must answer exactly as main's launcher answers."""
-    proc = subprocess.run(["git", "-C", checkout, "remote", "get-url", "origin"], capture_output=True, text=True)
-    con = sqlite3.connect(os.path.join(home, ".spud", "ledger.db"), timeout=5)
-    try:
-        with con:
-            con.execute(
-                "INSERT INTO projects (id, key, name, root_path, remote, ticket_prefix, team_prefix, created_at)"
-                " VALUES (1, 'spud', ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING",
-                (config["identity"]["name"], checkout, (proc.stdout.strip() or None) if proc.returncode == 0 else None,
-                 config["tickets"]["prefix"], config["teams"]["prefix"], datetime.now().astimezone().isoformat(timespec="seconds")),
-            )
-    finally:
-        con.close()
-
-
-def script(home):
+def script(home, tool):
+    """The steps, in order.  The fourth is init itself, registering `tool` as project 1 as a person's first init does
+    (probe_env.init_args, SPD-244), so every step after it runs against a home with a row 1: the shape of every real
+    home, which is what this probe is evidence about."""
     base = {"session_id": SESSION, "transcript_path": "/tmp/x.jsonl", "cwd": home, "permission_mode": "default"}
     pre = dict(base, hook_event_name="PreToolUse")
     return [
-        (["--version"], None), (["--help"], None), (["no-such-command"], None), (INIT, None), (["board"], None),
+        (["--version"], None), (["--help"], None), (["no-such-command"], None), (probe_env.init_args(tool), None), (["board"], None),
         (["--as", "spud", "ticket", "new", "--title", "Split", "--priority", "P1", "--status", "active", "--brief", "b", "--sizing", "s"], None),
         (["--as", "spud", "ticket", "move", "SPD-001", "--status", "done"], None),
         (["--as", "spud", "ticket", "new", "--title", "Two", "--priority", "P2", "--status", "active", "--brief", "b", "--sizing", "s"], None),
@@ -91,35 +70,37 @@ def script(home):
 
 
 def run(launcher):
-    home = tempfile.mkdtemp(prefix="spud-session-")
-    config = probe_env.write_config(home, name_pool=True)  # SPD-157: the suite's own pool, for the names the script spells
-    checkout = probe_env.main_checkout(launcher)  # project 1's root: one checkout for both launchers (SPD-101)
-    # SPD-101: helpers.Home's isolation, from the one helper every probe shares.  The home plays the tool (SPUD_TOOL_DIR),
-    # as SPW-001 made it: init refuses a bin/spud in a linked worktree, the second launcher here is exactly that, and init
-    # writes the vault scaffolding from the tool's share/.  SPUD_LAUNCH_AGENTS_DIR under the scratch is also what lets the
-    # two launchers answer alike at all: doctor and `board --brief` read the watcher's plist, and ~/Library/LaunchAgents
-    # names main's own launcher -- SPD-101's evidence, 41 of 44 identical without it.  SPUD_VAULT_DOWNLOADS is off (SPD-156),
-    # so this probe answers the same offline as online; what the real lock downloads is tests/probes/vault_download.py's.
-    env = probe_env.isolated_env(home)
-    probe_env.link_share(home)
+    root = tempfile.mkdtemp(prefix="spud-session-")
+    home = os.path.join(root, "home")
+    os.mkdir(home)
+    probe_env.write_config(home, name_pool=True)  # SPD-157: the suite's own pool, for the names the script spells
+    # Project 1's root (SPD-244): a tool checkout beside the home, one per launcher, built alike from this checkout, so both
+    # launchers read a row of the same shape at a path of the same length, masked below.
+    tool = str(probe_env.build_tool(root))
+    # SPD-101: helpers.Home's isolation, from the one helper every probe shares.  SPUD_TOOL_DIR is the scratch tool, a
+    # main checkout, since init refuses a bin/spud in a linked worktree and the second launcher here is exactly that.
+    # SPUD_LAUNCH_AGENTS_DIR under the scratch is also what lets the two launchers answer alike at all: doctor and
+    # `board --brief` read the watcher's plist, and ~/Library/LaunchAgents names main's own launcher -- SPD-101's evidence,
+    # 41 of 44 identical without it.  SPUD_VAULT_DOWNLOADS is off (SPD-156), so this probe answers the same offline as
+    # online; what the real lock downloads is tests/probes/vault_download.py's.
+    env = probe_env.isolated_env(home, tool)
     out = []
     try:
-        for argv, stdin in script(home):
+        for argv, stdin in script(home, tool):
             text = stdin if isinstance(stdin, str) else (json.dumps(stdin) if stdin is not None else None)
             # cwd is the scratch home, so a command that reads the working directory answers alike wherever this runs
             p = subprocess.run([PY, "-I", "-S", launcher, *argv], input=text, capture_output=True, text=True, env=env, cwd=home)
-            if argv == INIT:
-                seed_project_one(home, config, checkout)
             blob = "$ %s\nexit %d\n%s\n--stderr--\n%s" % (" ".join(argv[:4]), p.returncode, p.stdout, p.stderr)
-            blob = blob.replace(home, "<HOME>").replace(os.path.realpath(home), "<HOME>")
-            blob = blob.replace(checkout, "<CHECKOUT>")
+            # The real path first: /private/var/... holds /var/... whole.  The home and its tool before the root holding both.
+            for path, mark in ((home, "<HOME>"), (tool, "<TOOL>"), (root, "<ROOT>")):
+                blob = blob.replace(os.path.realpath(path), mark).replace(path, mark)
             blob = re.sub(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[-+]\d{2}:\d{2}", "<T>", blob)
             blob = re.sub(r"\d{4}-\d{2}-\d{2}( \d{2}:\d{2})?", "<D>", blob)
             blob = re.sub(r"\b\d{2}:\d{2}\b", "<HM>", blob)
             blob = re.sub(r"\d+(\.\d+)? ?ms\b", "<MS>", blob)
             out.append(blob)
     finally:
-        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(root, ignore_errors=True)
     return out
 
 
