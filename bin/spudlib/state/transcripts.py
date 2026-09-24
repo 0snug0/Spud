@@ -96,6 +96,12 @@ BREAKDOWN_TOKENS = ("input_tokens", "output_tokens", "cache_read_input_tokens")
 # service tier, an inference geography or a server-tool count.  Their top-level usage is the fallback attempt's, beside the
 # declined attempt's stale TTL split (the 4,369 split beside a total of 0 above is one).  A message iteration of a request
 # served in one attempt names no model (the key absent, or null); no request compacted.
+# A request served in one attempt is billed by the same rule (SPD-224).  The refusals-and-fallback page, "How refusals are
+# billed", read on 2026-09-24: "You are not billed for a refusal that arrives before any output. `content` is empty, and
+# token counts appear in `usage` but are not charged."  A mid-stream refusal "bills the input tokens and the output already
+# streamed at normal rates".  The page's refusal is stop_reason "refusal" with output_tokens 0, and the rule names no
+# fallback: a request that set none, or whose fallback the API skipped, is one attempt.  A read-only survey of the same 2,137
+# files on 2026-09-23 found 11 requests that ended in a refusal, every one mid-output and so billed.
 PER_ATTEMPT = ("message", "fallback_message", "compaction")  # the iteration types a request is summed and priced by, attempt by attempt
 KEPT_WHOLE = "iterations"  # before SPD-220 a breakdown kept a request billed per attempt whole, counting its iteration types here
 UNPRICED_ITERATIONS = "unpriced_iterations"  # since: a request kept whole for an iteration type outside PER_ATTEMPT, those types
@@ -109,7 +115,8 @@ def usage_count(value):
 def request_attempts(model, usage, stop_reason=None):
     """(the attempts one API request billed, [(the model that ran it, its usage figures)]; the iteration types that kept it
     whole, {} when none), by the rule and the evidence above.  A request served in one attempt (no usage.iterations, an
-    empty list, or a single message iteration) is its top-level usage on message.model.  Any other is summed from
+    empty list, or a single message iteration) is its top-level usage on message.model, or no attempt when it ended in a
+    refusal with no output tokens: a refusal before any output is not billed.  Any other is summed from
     usage.iterations alone, the top-level figures never added (they repeat the serving attempt, or the non-compaction
     iterations).  An attempt ran on the model it names; one that names none ran on message.model when the request did
     not fall back (the model it asked for and was served by, which a compaction uses), and on no model the breakdown can
@@ -120,7 +127,7 @@ def request_attempts(model, usage, stop_reason=None):
     iterations = usage.get("iterations")
     if not isinstance(iterations, list) or not iterations or (
             len(iterations) == 1 and isinstance(iterations[0], dict) and iterations[0].get("type") == "message"):
-        return [(model, usage)], {}
+        return ([] if stop_reason == "refusal" and not usage_count(usage.get("output_tokens")) else [(model, usage)]), {}
     kinds = [it["type"] if isinstance(it, dict) and isinstance(it.get("type"), str) else "unknown" for it in iterations]
     outside = {}
     for kind in kinds:
@@ -220,7 +227,8 @@ def transcript_usage(path):
     sum is marked "counting": "request" and keeps the per-model breakdown of its requests
     (usage_breakdown) that a list-price cost is computed from.  Its usage counts what each request billed: a request
     served in one attempt by its top-level usage, one billed per attempt by the attempts it billed (request_attempts),
-    so a declined attempt that produced output and a compaction count, and one declined before any output does not.
+    so a declined attempt that produced output and a compaction count, and one declined before any output does not,
+    nor a request served in one attempt that was refused before any output.
     None when the file holds no assistant usage; OSError when it cannot be read."""
     requests = {}
     tool_ids = set()
