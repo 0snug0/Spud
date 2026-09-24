@@ -60,6 +60,47 @@ GIT_PROGRAM_ENV_VARS = ("GIT_EDITOR", "GIT_SEQUENCE_EDITOR", "EDITOR", "VISUAL",
 GIT_EXEC_PATH_OPTION = "--exec-path"
 # The options that name a program on an otherwise allowed verb are syntax.GIT_VERB_PROGRAM_OPTIONS, beside the other word
 # tables, because GLOB_SAMPLES reads them too; git_verb_names_program below is what the git branch calls.
+#
+# SPD-171: where such a verb still reads options, a word that starts with an expansion the line does not settle may
+# become one of them (`git ls-remote $OPT .` with OPT=--upload-pack=sh), so expansions.verb_option_read_index reads it
+# there, which refuses a member (Eric's call, 2026-09-24).  Where that is, probed on git 2.54.0 (Apple Git-157) with an
+# unknown option in the word's place: every verb reads options up to `--`, and two stop earlier, at their first word
+# that is not an option -- `git ls-remote . --heads` printed nothing (--heads read as a pattern) while `git ls-remote
+# --heads .` listed the heads, and `git grep x --bogus-opt` failed ("option '--bogus-opt' must come before non-option
+# arguments"); `git fetch . --bogus-opt` and `git archive HEAD --bogus-opt` answered "unknown option".  After `--`
+# ls-remote and fetch refuse a word starting with `-` as their repository ("strange pathname '--heads' blocked") and
+# grep takes it as its pattern.  A verb not probed (difftool, send-email, web--browse, instaweb, each refused a member
+# whole) is read to `--`, fail closed.
+GIT_OPTIONS_STOP_VERBS = frozenset({"ls-remote", "grep"})
+# ... and the options of those verbs that take the next word as their value, which is then no option (`git fetch --depth
+# $N r`): (long options, short letters), from `git <verb> -h` on git 2.54.0, every option printed with a `<value>` that is
+# not `[=<value>]`.  A long option is matched by any prefix of it git could take (`--dep`); a short letter only as the
+# last of its cluster (`-qj $N`), since one earlier takes the rest of the cluster as its value.
+GIT_VALUE_OPTIONS = {
+    "ls-remote": (("--upload-pack", "--sort", "--server-option"), "o"),
+    "fetch": (("--upload-pack", "--jobs", "--depth", "--shallow-since", "--shallow-exclude", "--deepen", "--refmap",
+               "--server-option", "--negotiation-tip", "--filter"), "jo"),
+    "grep": (("--max-depth", "--context", "--before-context", "--after-context", "--threads", "--max-count"), "CBAfem"),
+}
+
+
+def reads_leading_expansion(verb):
+    """True when a word of this verb's that starts with an unsettled expansion is read where git still reads options:
+    a verb of syntax.GIT_VERB_PROGRAM_OPTIONS (SPD-171), grep's pattern among them (`P=-Ovi; git grep $P` runs vi;
+    `git grep -e "$P"` and `git grep -- "$P"` keep it a pattern)."""
+    return verb in syntax.GIT_VERB_PROGRAM_OPTIONS
+
+
+def takes_value(verb, word):
+    """True when `word`, spelled on this verb's line, is an option that takes the next word as its value
+    (GIT_VALUE_OPTIONS): a long option or a prefix of one with no `=`, or a short cluster whose only value letter is its
+    last."""
+    longs, shorts = GIT_VALUE_OPTIONS.get(verb, ((), ""))
+    if word.startswith("--"):
+        return len(word) >= 3 and "=" not in word and any(opt.startswith(word) for opt in longs)
+    if len(word) < 2 or not word.startswith("-"):
+        return False
+    return next((k for k in range(1, len(word)) if word[k] in shorts), None) == len(word) - 1
 
 # PATH, and zsh's `path`, which is tied to it.  Every name the hook reads a command by -- git, spud, python3.14,
 # sqlite3, tee, a shell, a wrapper -- the shell then looks for on PATH, so a member that puts a directory of its own first

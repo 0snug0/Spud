@@ -954,5 +954,64 @@ class InProcessParityTest(BashHookCase):
         self.assertTrue(changed & set(HOOK_CACHES), "the samples fill no cache, so this guard proves nothing")
 
 
+class SubstitutionShownTest(BashHookCase):
+    """SPD-200: a reason names a word the line fills from a substitution as `$(...)` -- a `$( )` or backtick body the
+    reader lifted, and the file name a `<( )` hands its command, whose reason reads as the `$( )` line's (SPD-190) -- and
+    never by the reader's own placeholder (hookio.SUBST) or process-substitution mark (syntax.PROCSUB_MARK), which a
+    member reading the refusal could not tell apart from a word of its own.  A marker the member typed keeps its own
+    "placeholder" reason (SPD-199), which test_hooks_snapshots.ReaderFailsClosedTest holds."""
+
+    # Lines whose refusal, for a member or for Spud, names a word holding a substitution or a process substitution's
+    # file: every reason bash_rule formats from a word the reader holds.
+    LINES = ("echo x | tee $(cat)", "echo x > $(cat)", "echo x > `cat`", 'echo x > "$(cat)"', "echo x > a$(cat)b",
+             "echo x >> $(cat)/y", "echo x | tee <(cat)", "echo x > <(cat)", "cp a $(cat)", "sort -o $(cat) f", "rm -rf $(cat)",
+             "mkfifo $(cat)", "touch <(cat)", "git -C $(cat) status", "git -C a$(cat) log", "git -C <(cat) status",
+             "GIT_DIR=$(cat) git log", "git --git-dir=<(cat) log", "git -c alias.x=$(cat) status", "git -c core.pager=$(cat) log",
+             "git config --file $(cat) a b", "GIT_TRACE=$(cat) git status", "git format-patch -o $(cat)",
+             "env BASH_FUNC_x$(cat)%%=y bash", "spud --as $(cat) member log hi", "spud --as <(cat) member log hi",
+             "$(cat) x", "eval $(cat)", "git --output=$(cat) log", "awk $(cat) f", "sed -i -f $(cat) f", "cat f | xargs git $(cat)",
+             "PATH=$(cat) git status", "hash -p $(cat) git", "f$(cat)() { :; }", "read $(cat)", "(( $(cat) = 1 ))")
+
+    def marks(self):
+        return (importlib.import_module("spudlib.hooks.hookio").SUBST, importlib.import_module("spudlib.shell.syntax").PROCSUB_MARK)
+
+    def test_a_substitution_target_is_shown_as_one(self):
+        for command, shown in (("echo x | tee $(cat)", "the redirection target $(...) holds"),
+                               ("echo x > $(cat)", "the redirection target $(...) holds"),
+                               ("echo x > a$(cat)b", "the redirection target a$(...)b holds"),
+                               ("cp a $(cat)", "(`cp` $(...)) names its file"),
+                               ("git format-patch -o $(cat)", "(format-patch -o $(...)) holds"),
+                               ("git -C $(cat) status", "(-C $(...))"),
+                               ("git -c alias.x=$(cat) status", "(-c alias.x=$(...))"),
+                               ("env BASH_FUNC_x$(cat)%%=y bash", "`BASH_FUNC_x$(...)%%`"),
+                               ("spud --as $(cat) member log hi", "`--as $(...)`")):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(command, agent_id=agent_id):
+                    if agent_id is None and command.startswith(("git -", "env ")):
+                        continue  # Spud's own git calls and environment are not held to these
+                    self.assertRefused(command, shown, agent_id)
+
+    def test_a_process_substitution_file_is_shown_as_a_substitution(self):
+        # shown as the same line's `$( )` is, which SPD-190 keeps (test_hooks_words.ProcessSubstitutionFileTest)
+        for command, shown in (("echo x | tee <(cat)", "the redirection target $(...) holds"),
+                               ("echo x > <(cat)", "the redirection target $(...) holds"),
+                               ("touch <(cat)", "(`touch` $(...)) names its file"),
+                               ("spud --as <(cat) member log hi", "`--as $(...)`")):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(command, agent_id=agent_id):
+                    self.assertEqual(self.assertRefused(command, shown, agent_id).reason,
+                                     self.bash(command.replace("<(cat)", "$(cat)"), agent_id).reason)
+        self.assertRefused("git -C <(cat) status", "(-C $(...))")
+
+    def test_no_reason_shows_the_readers_own_marks(self):
+        subst, procsub = self.marks()
+        for command in self.LINES:
+            for agent_id in (AGENT_A, None):
+                with self.subTest(command, agent_id=agent_id):
+                    reason = self.bash(command, agent_id).reason or ""
+                    self.assertNotIn(subst, reason)
+                    self.assertNotIn(procsub, reason)
+
+
 if __name__ == "__main__":
     unittest.main()

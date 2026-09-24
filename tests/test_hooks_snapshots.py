@@ -1597,21 +1597,31 @@ class ReaderFailsClosedTest(ShellSnapshotCase):
         read, but a variable the member's words fill on the way -- a for-loop over `$@`, or one the line assigned before
         the function's text -- was still pruned as the body's own, so a profile function of these shapes carried a git
         write past Law 7.  A dropped finding is never a pass: the finding is kept and refuses the member on doubt (a read
-        verb too, since the hook cannot resolve the loop variable).  None is a git write this Mac's profile defines."""
+        verb too, where the hook cannot resolve the loop variable).  None is a git write this Mac's profile defines.
+        SPD-269: a loop over words the call spells, none that may be an option, is read once per word, each the word it
+        is (expansions.resolve_expansion), so `loopgit push` is refused as `git push` is and `loopgit status` is the read
+        it runs; a word that may be an option (`-m`) settles no loop, and its variable is refused on doubt as before."""
         self.write_snapshot("snapshot-zsh-1700000000009-999999.sh",
             "loopgit () {\n\tfor a in \"$@\"; do git $a; done\n}\nglobalgit () {\n\tgit $GITVERB\n}\n")
-        for line in ("loopgit push", "loopgit status", "GITVERB=$(echo push); globalgit", "loopgit commit -m x"):
+        for line, needle in (("GITVERB=$(echo push); globalgit", "cannot resolve"), ("loopgit commit -m x", "cannot resolve"),
+                             ("loopgit $(echo status)", "cannot resolve"), ("loopgit push", "Law 7"), ("loopgit status push", "Law 7")):
             with self.subTest(line=line):
-                self.refused_for_members(line, "cannot resolve")  # the member-filled variable is refused on doubt
+                self.refused_for_members(line, needle)  # the member-filled variable is refused on doubt, or read as spelled
                 self.assertSilent(line, agent_id=None)
+        self.silent_for_everyone("loopgit status")
 
     def test_205_a_body_s_own_variable_stays_pruned(self):
         """A variable the body itself fills, not from the member's words, is still the body's own and stays dropped, so a
-        member is not refused a profile function it did not fill: a loop over a literal list, a call with no words."""
+        member is not refused a profile function it did not fill: a loop over a literal list, a call with no words.
+        SPD-269: that literal list is read once per word, so the verbs the body runs are read as spelled -- the reads it
+        runs pass, and a write the body's own loop hides (`pushloop`, which the prune passed unread) is refused (Law 7)."""
         self.write_snapshot("snapshot-zsh-1700000000009-999999.sh",
-            "ownloop () {\n\tfor a in one two; do git $a; done\n}\nglobalgit () {\n\tgit $GITVERB\n}\n")
-        for line in ("ownloop", "globalgit"):  # no member words fill the loop, and no line assigns GITVERB
+            "ownloop () {\n\tfor a in status log; do git $a; done\n}\nglobalgit () {\n\tgit $GITVERB\n}\n"
+            "unknownloop () {\n\tfor a in $(git config x); do git $a; done\n}\npushloop () {\n\tfor a in status push; do git $a; done\n}\n")
+        for line in ("ownloop", "globalgit", "unknownloop"):  # no member words fill the loop, and no line assigns GITVERB
             self.silent_for_everyone(line)
+        self.refused_for_members("pushloop")
+        self.assertSilent("pushloop", agent_id=None)
 
     # -- SPD-193: a line of many conditional relative cds is read in bounded time, its writes refused ---------------
     def test_193_many_conditional_cds_bound_the_directory_set(self):
@@ -2724,7 +2734,7 @@ class SnapshotOptionsTest(ShellSnapshotCase):
 # (snapshot-zsh-1790263809802-78wrv5.sh, the four before it alike), the harness's comment lines and rg's `if` included, with
 # the Mac's claude path spelled as a scratch one: the text hooks/snapshots.HARNESS_SHADOWS recognizes.  HARNESS_SHADOWS above
 # spells pkill's dash `--` where the harness writes `—`, so its pkill is other text, read in full; its find, grep and rg
-# are the harness's, which every test using it now reads through held_text.read_shadow.
+# are the harness's, which every test using it now reads through held_shadows.read_shadow.
 SCRATCH_CLAUDE = "/Users/Someone/.local/bin/claude"
 THIS_MACS_SHADOWS = """\
 # Check for rg availability
@@ -2799,7 +2809,7 @@ function pkill {
 }
 """
 SHADOWS = ("find", "grep", "rg", "pkill")
-# The words a call hands a shadow, one of each kind the reading tells apart (held_text.read_shadow): literal ones, quoted
+# The words a call hands a shadow, one of each kind the reading tells apart (held_shadows.read_shadow): literal ones, quoted
 # ones whose sentinels it takes off, a dash that keeps grep's loop from being dashless, names the words spell and the
 # bodies' own, the primaries find acts on, and what expands -- read in full, and compared all the same
 SHADOW_WORDS = ("x", "-rn", "-v", "--color=auto", "--", "-", "-Z", "-9", "-KILL", "--signal", ".", "/tmp", "src/a.py", "~/x",
@@ -2854,7 +2864,7 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
     """SPD-247 (proposal 349 by SPUD-134/Billie): Claude Code writes its own grep, find, rg and pkill into every shell
     snapshot, in a fixed shape (THIS_MACS_SHADOWS), and each hands the call's words on through `${1+"$@"}`, so SPD-134's judge
     of inert bodies could never pass them over: each call's body was read in full, at 0.8 to 1.5 ms of the Bash hook a call.
-    held_text.read_shadow now records for a body that is byte for byte the harness's (hooks/snapshots.harness_shadow) what
+    held_shadows.read_shadow now records for a body that is byte for byte the harness's (hooks/snapshots.harness_shadow) what
     the full reading of it records, without reading it, and reads any other text, or a call whose line the fixed record
     does not fit, in full.
 
@@ -2863,7 +2873,7 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
     apart, the CLAUDE_CODE_EXECPATH lines of SPD-253 and SPD-258 among them; a changed byte is read in full; and proposal
     348's leak (a shadow's locals counted as the line's), fixed by SPD-246, stays fixed on both readings.  The fixed record
     was measured on the reader as it stands: a change to it that moves what a harness body records fails here, and
-    held_text._SHADOW_READINGS is measured again.  AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; the home is the cwd."""
+    held_shadows._SHADOW_READINGS is measured again.  AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; the home is the cwd."""
 
     def setUp(self):
         super().setUp()
@@ -2872,6 +2882,7 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
         os.utime(path, (newest, newest))
         self.m = load_spud_module()
         self.held_text = importlib.import_module("spudlib.shell.held_text")
+        self.held_shadows = importlib.import_module("spudlib.shell.held_shadows")
 
     def full(self):
         """The full reading, forced: no body is the harness's text."""
@@ -2884,12 +2895,12 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
     def spied(self):
         """read_shadow, spied: `self.fast` holds its answer for each call it was asked about, True where it recorded the
         body without reading it."""
-        real, self.fast = self.held_text.read_shadow, []
+        real, self.fast = self.held_shadows.read_shadow, []
 
         def spy(*args):
             self.fast.append(real(*args))
             return self.fast[-1]
-        return mock.patch("spudlib.shell.held_text.read_shadow", side_effect=spy)
+        return mock.patch("spudlib.shell.held_shadows.read_shadow", side_effect=spy)
 
     def analysis(self, command):
         env = dict(os.environ)
@@ -3015,7 +3026,7 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
                 self.assertReadInFull(line)
 
     def test_a_profile_that_holds_a_word_the_bodies_look_up_is_read_in_full(self):
-        """Any of the words a shadow's body looks up (held_text._SHADOW_LOOKUPS, and the claude binary where the body runs
+        """Any of the words a shadow's body looks up (held_shadows._SHADOW_LOOKUPS, and the claude binary where the body runs
         it), defined by the profile, is read as the profile defines it, so the body is read in full."""
         for number, word in enumerate(("local", "[[", "[", "command", "return", "exec", "printf", "continue", SCRATCH_CLAUDE)):
             self.with_profile("# Functions\n%s () {\n\t:\n}\n" % word, number)
@@ -3092,6 +3103,33 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
                         self.assertTrue({"_cc_bin", "_cc_a"}.isdisjoint(a.line_assigned), a.line_assigned)
                         self.assertNotIn("_cc_bin", a.vars)
                         self.silent_for_everyone(line)
+
+    def test_269_a_loop_over_the_call_s_words_leaves_the_line_s_variables(self):
+        """SPD-269 (proposal 371 by SPUD-247/Garfield): grep's and pkill's bodies loop over the call's words (`for _cc_a in
+        ${1+"$@"}`), and ShellWalk.finish doubted every name a word of a for header spelled, the list's words among them,
+        so a line variable a word of the call happened to spell was doubted after it: `f=note.txt; grep -c f file; echo hi
+        > $f` left `$f` unresolved, refused to every caller (SPD-091), where `ls f` in grep's place wrote note.txt.  The
+        header assigns `_cc_a` alone now, on the fast reading and the full one, and the write is held to the path rule as
+        the control's is: refused outside a member's deliverables, allowed inside them."""
+        for call in ("grep -c f file", "grep -rn f .", "grep -e f -e in file", "pkill -f f", "pkill f"):
+            for target in ("note.txt", "tests/k.py"):
+                line = "f=%s; %s; echo hi > $f" % (target, call)
+                control = "f=%s; ls f; echo hi > $f" % target
+                for reading in ("fast", "full"):
+                    with self.subTest(line=line, reading=reading), \
+                            self.full() if reading == "full" else contextlib.nullcontext():
+                        a = self.analysis(line)
+                        self.assertEqual([t for t, _c in a.redirects if t != "/dev/null"], [target])
+                        self.assertTrue({"f", "in"}.isdisjoint(a.doubt), a.doubt)
+                        for caller in (AGENT_A, AGENT_B, None):
+                            # the answer, less the note naming what the snapshot defines the command word as
+                            got, want = [(r.code, r.stdout.split("  (The shell this command")[0], r.stderr)
+                                         for r in (self.bash(line, caller), self.bash(control, caller))]
+                            self.assertEqual(got, want)
+        self.assertRefused("f=note.txt; grep -c f file; echo hi > $f", "deliverables")
+        self.assertRefused("f=note.txt; pkill -f f; echo hi > $f", "deliverables", AGENT_B)
+        self.assertSilent("f=tests/k.py; grep -c f file; echo hi > $f")
+        self.assertSilent("f=tests/k.py; pkill -f f; echo hi > $f", AGENT_B)
 
 
 if __name__ == "__main__":

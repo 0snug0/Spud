@@ -68,19 +68,26 @@ xargs sed -n -f c.sed` wrote the file e.sed names), and SPD-248 already refuses 
 the line fills and does not settle, standing there (`P=$(cat l); awk -f c.awk "$P" f`), stays in the class left unread
 above for every caller: the -f file is read, and the word is not.
 
+A -f file is read at hook time, and the line may write it before the command runs (SPD-151): `echo 'w
+ledger/tickets/SPD-001.md' > p.sed && sed -f p.sed x` ran a script the hook read as p.sed stood before the echo, missing
+and so unread.  Every -f name is held against the line's writes (written_script) whether or not the hook can open it
+now, and a member is refused one the line may write first, with a reason naming the two-call respelling: the forms and
+their reading are shell/script_files' ("written", "rewritable").  A script the line only reads, or writes after the
+command that runs it, reads as before.
+
 One module for both, past 250 lines (the package's look-again point) and past 500: the two grammars are scanned apart, in
 two runs of short functions the `sed_` and `awk_` prefixes keep apart, but everything around them is one reading with one
 caller -- the option scan that finds a script's fragments, the -f file, the masked slice a span names, the three ways
 a span is recorded (a write, a command, a target the hook cannot name), and the script word the line does not settle
 (SPD-260), which only that option scan finds.  Splitting it would make three modules, two of them with one user each, and
 put two more imports on the hook path that every Bash, Edit and Agent call in every session pays for; the evidence Eric's
-rule asks for is the largest definition's share, and here it is sed_spans at 63 lines, 10% of the file, with nothing else
+rule asks for is the largest definition's share, and here it is sed_spans at 63 lines, 9% of the file, with nothing else
 above 45: no long region, one short function per shape of the two grammars, which is the shape shell/arg_writes and
 shell/spelled_writes already have."""
 
 import os
 
-from . import analyse, arg_writes, bash_rule, expansions, globbing, prepare, spelled_writes, syntax
+from . import analyse, arg_writes, bash_rule, expansions, globbing, prepare, script_files, spelled_writes, syntax
 from ..hooks import hookio
 
 
@@ -108,7 +115,7 @@ def read_script(cmd, base, words, a, depth):
     word as spelled.  The line's own values are put in its words first (arg_writes.resolved), as every write target is
     read."""
     args = [arg_writes.resolved(w, a) for w in words[1:]]
-    for group in sed_fragments(cmd, args, a) if base == "sed" else awk_fragments(cmd, args, a):
+    for group in sed_fragments(cmd, args, a, depth) if base == "sed" else awk_fragments(cmd, args, a, depth):
         text, offsets = script_lines(group)
         spans = sed_spans(text) if base == "sed" else awk_spans(text)
         record_spans(cmd, a, depth, text, group, offsets, spans, not hidden_script(group))
@@ -197,6 +204,41 @@ def script_file(word, a):
     return None if found is None else (found, True)
 
 
+def written_script(cmd, word, a, depth):
+    """Record a -f script file the line may write before `cmd` reads it (SPD-151; shell/script_files' docstring), whether
+    or not the hook can open it now -- the ticket's p.sed did not exist until the line's echo wrote it.  "written" where
+    a write the reading has already met names the file: a command before it, its own redirection; "rewritable" where the
+    command may run beside or after one the reading meets later (a pipeline, a background job, after && or ||, a loop's
+    or a function's body, a nested reading), which bash_rule holds against every write of the line.  A glob or a name the
+    hook cannot resolve may be any file (readings None).  Standard input is script_word's."""
+    text = prepare.deglob(word)
+    if not text or text in STDIN_FILES:
+        return
+    paths = None
+    if not (arg_writes.unresolved(word) or bash_rule.target_has_active_glob(word)):
+        paths = bash_rule.redirection_paths(text, a.cwds)
+    readings = None
+    if paths is not None:
+        readings = tuple(sorted({r for p in paths for r in (os.path.normpath(os.path.expanduser(p)),
+                                                            os.path.realpath(os.path.expanduser(p)))}))
+    if written_before(readings, a):
+        script_files.record_written(a, "written", cmd, word, readings)
+    elif a.unsure or a.loop_depth or depth:
+        script_files.record_written(a, "rewritable", cmd, word, readings)
+
+
+def written_before(readings, a):
+    """True when a write the reading has recorded so far -- a redirection or tee target, a git call's own write, a write
+    by argument, as bash_rule.written_targets reads them -- names a file `readings` names or a directory above one; any
+    write at all, for readings None."""
+    if not (a.redirects or a.git_writes or a.arg_writes):
+        return False
+    if readings is None:
+        return True
+    written = bash_rule.written_targets(a, arg_writes.written_paths(a.arg_writes)[0])
+    return script_files.rewritten(readings, written)
+
+
 def unsettled(word, a):
     """True when a script word -- a program operand, a sed -e, a -f file's name -- is one the line does not settle at all
     (SPD-260, module docstring): it holds an operand the line does not spell (xargs's input, find's path), or it is nothing
@@ -270,7 +312,7 @@ def script_word(cmd, word, a, kind=None):
     a.findings.append((kind, "%s %s" % (cmd, shown)))
 
 
-def sed_fragments(cmd, args, a):
+def sed_fragments(cmd, args, a, depth):
     """The groups of fragments sed reads as its script: each -e word and each -f file in the order they stand, else the
     first operand (sed(1): with either option given, every operand is a file).  A word the line cannot settle where an
     option may stand leaves the hook unable to place the script, and it reads none of them (arg_writes.hidden_option);
@@ -291,6 +333,9 @@ def sed_fragments(cmd, args, a):
     if not scripts and operands and unsettled(operands[0], a):
         script_word(cmd, operands[0], a)
         return []
+    for from_file, value in scripts:
+        if from_file:
+            written_script(cmd, value, a, depth)  # every -f file, before the first the hook cannot open stops the reading
     if arg_writes.hidden_option(args, values, longs):
         return []  # the hook cannot say which operand is the script, so it reads none of them
     given = []
@@ -307,7 +352,7 @@ def sed_fragments(cmd, args, a):
     return [[(operands[0], False)]] if operands else []
 
 
-def awk_fragments(cmd, args, a):
+def awk_fragments(cmd, args, a, depth):
     """The groups of fragments awk reads as its program: its -f files, which concatenate, else the first operand.  Only the
     first letter after a dash is the option (main.c), `--` ends them, and an unknown one is ignored.  A word the line
     cannot settle where an option may stand leaves the hook unable to say which operand is the program, and it reads
@@ -343,6 +388,9 @@ def awk_fragments(cmd, args, a):
         if unsettled(value, a):
             script_word(cmd, value, a)
             return []
+    for value in files:
+        written_script(cmd, value, a, depth)  # every -f file, before the first the hook cannot open stops the reading
+    for value in files:
         fragment = script_file(value, a)
         if fragment is None:
             return []

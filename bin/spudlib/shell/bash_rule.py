@@ -2,7 +2,7 @@
 
 import os
 
-from . import analyse, arg_writes, git_config, prepare, redirect_globs, runner_files, script_files, spud_calls, syntax
+from . import analyse, arg_writes, expansions, git_config, prepare, redirect_globs, runner_files, script_files, spud_calls, syntax
 from ..hooks import hookio, pathrule, worktrees
 from ..state import lookup
 
@@ -107,6 +107,12 @@ VAR_WORD_REASON = ("the word %s holds a parameter expansion, arithmetic or a sub
                    " line does not spell at all, where the command is read by name (a wrapper's options, git's options, verb and the"
                    " arguments it checks, a shell's or an interpreter's options and program, a spud call's words, the options of a command"
                    " that writes by argument); spell the words out")
+# ... and what it adds on a line that runs git, whose options a word starting with an expansion may become (SPD-089,
+# SPD-171): the respellings git itself takes.  Probed on git 2.54.0: after `--` ls-remote and fetch read a word as their
+# repository or a refspec and never an option (git_programs.GIT_OPTIONS_STOP_VERBS' note).
+GIT_VAR_WORD_NOTE = (" (where git still reads its options, spell the option itself, or end git's options with `--` before"
+                     " the word, so git reads it as a repository, a refspec or a path: `git fetch origin -- \"$B\"`,"
+                     " `git ls-remote -- \"$URL\"`)")
 # The reason for an awk program or a sed script the line does not settle at all (shell/script_text's "script-word" and
 # "script-input", SPD-260, SPD-265), read where "inline-word" is, last, so a write out of the same input keeps its own
 # reason.  A member alone.  The detail is one string, the command word and the script word as spelled.
@@ -144,6 +150,16 @@ GIT_INPUT_REASON = (
     " --batch`), or spell the words out; Spud commits, after the outcome is recorded")
 
 
+# A git call inside a trap's action (expansions.TrapDirs, SPD-122), refused a member after every reason the words as
+# spelled earn, so Law 7's verb check inside the action keeps its own reason.
+TRAP_GIT_REASON = (
+    "Law 7: this line runs git inside a trap's action (`trap '...' <signal>`), which the shell runs later -- on exit, on a"
+    " signal, around a command under DEBUG, ERR, ZERR or RETURN, as a subshell or a function ends -- in whichever directory"
+    " it stands in then, so the hook cannot tell which repository that git reads, nor whose hooks and config it runs"
+    " (post-index-change under `git status`). Nobody needs git in a trap: run git as its own command on the line, where"
+    " the hook reads the directory it runs in; Spud commits, after the outcome is recorded")
+
+
 # The reason for an (e) expansion whose text the hook cannot read (shell/reevaluation, SPD-189).
 EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs the command substitutions, the arithmetic and"
                     " the parameter expansions in it, and the hook cannot read the text it evaluates: a value the line does"
@@ -174,7 +190,7 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 # "assigned" an assignment whose name the reader cannot read -- an arithmetic evaluation's (`(( $N = 5 ))`) or an assigning
 #             builtin's (`read $N`, `printf -v "$N"`, zsh's `unset -m`) -- so it cannot tell which of the line's variables
 #             it changes (SPD-225, SPD-254); shown is (what assigns, the text).
-# "option"   an option Claude Code's shell snapshot sets that the reader does not model (held_text.line_options, SPD-263),
+# "option"   an option Claude Code's shell snapshot sets that the reader does not model (held_options.line_options, SPD-263),
 #             which may change how the shell reads every line; shown is the snapshot's line and its file.  No spelling of
 #             the line gets past it, so the respelling is the profile's.
 UNREAD_REASON = (
@@ -254,7 +270,7 @@ def unreadable_reason(cause):
     with nothing to escape and the text before it, shown as the line spells it (the hook's own marks taken off, a lifted
     body as `$(...)`, every run of blanks and newlines as one space) and cut to UNREADABLE_SHOWN characters."""
     what, text, where = cause
-    shown = " ".join(syntax.shown_operands(prepare.deglob(text)).replace(hookio.SUBST, "$(...)").split())
+    shown = " ".join(shown_word(text).split())
     if what == "\\":
         shown = shown if len(shown) <= UNREADABLE_SHOWN else "..." + shown[-UNREADABLE_SHOWN:]
         stop = "the backslash that ends `%s` has nothing to escape" % shown
@@ -296,6 +312,20 @@ def path_directories(kind, path):
     if directory or not os.path.lexists(p):
         return ("tree",)
     return ("remove",) if kind == "rm-tree" else (None,)
+
+
+def shown_word(detail):
+    """A word the reader holds, or a finding's detail of them, as a reason shows it (SPD-200): the sentinels restored, the
+    operand markers as syntax.shown_operands spells them, and a lifted `$( )` or backtick body's placeholder as `$(...)`
+    -- never the reader's own marks.  The file name a `<( )` hands its command (walk.PROCSUB_FILE) shows as `$(...)` too,
+    since shown_operands takes its mark off: its reason reads as the same line's with a `$( )` there does (SPD-190,
+    test_hooks_words.ProcessSubstitutionFileTest).  A tuple is shown word by word; anything but text (None, a flag)
+    stands as it is."""
+    if isinstance(detail, tuple):
+        return tuple(shown_word(d) for d in detail)
+    if not isinstance(detail, str):
+        return detail
+    return syntax.shown_operands(prepare.deglob(detail)).replace(hookio.SUBST, "$(...)")
 
 
 def shown_picked(text):
@@ -424,7 +454,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         if not strict:
             if kind == "spud" and detail["actor"] not in (None, "spud") and (detail["command"], detail["subcommand"]) in hookio.MEMBER_OWN_COMMANDS:
                 return ("Law 5: `--as %s` from Spud's own session would write a member's own sections (log, result, block, proposals) in its name;"
-                        " members record themselves (the SubagentStop hold sees to it), Spud records verdicts with `spud --as spud member finish`" % prepare.deglob(detail["actor"])), analysis
+                        " members record themselves (the SubagentStop hold sees to it), Spud records verdicts with `spud --as spud member finish`" % shown_word(detail["actor"])), analysis
             if plain and kind == "spud" and detail["actor"] == "spud" and spud_calls.spud_call_writes(detail) and (detail["command"], detail["subcommand"]) != ("session", "claim"):
                 what = " ".join(w for w in (detail["command"], detail["subcommand"]) if w)
                 return ("Law 6: this session is not Spud; /spud claims it. `spud --as spud %s` writes the ledger, and outside Spud's home a session"
@@ -438,16 +468,16 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                         " git answers to is Spud's -- the verbs that write the repository, the index, the object database or the working tree,"
                         " and git's own spellings and plumbing for them (commit, add, stage, checkout, switch, rebase, reset, push, merge,"
                         " cherry-pick, pull, init, init-db, read-tree, update-index, write-tree, checkout-index, hash-object, repack,"
-                        " pack-refs ...); Spud commits, after the outcome is recorded" % verb), analysis
+                        " pack-refs ...); Spud commits, after the outcome is recorded" % shown_word(verb)), analysis
         elif kind == "git-config":
             return ("Law 7: this git call takes config the hook cannot read (%s): an alias or include defined on the line, or a variable"
                     " that injects config or points git at a config file of its own (HOME and XDG_CONFIG_HOME move git's global config to"
                     " <dir>/.gitconfig or <dir>/git/config). git expands an alias into whatever command it names before it dispatches, and"
                     " such a file can also name a program git runs, so a write can run under a verb Law 7's table does not list. Run git"
                     " with no `-c`/`--config-env` alias or include and no GIT_CONFIG_*, HOME or XDG_CONFIG_HOME variable; Spud commits,"
-                    " after the outcome is recorded" % detail), analysis
+                    " after the outcome is recorded" % shown_word(detail)), analysis
         elif kind == "git-verb":
-            how, verb = detail
+            how, verb = shown_word(detail)
             if how == "unreadable":
                 return ("Law 7: the hook cannot read git's own command list (`git --list-cmds=main`), so it cannot tell whether `git %s` is"
                         " one of git's commands or an alias from a config file it cannot read, which git would expand into whatever command"
@@ -464,22 +494,22 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                 return ("Law 7: this git call points git at a repository the hook cannot resolve (%s): a path relative to a directory it"
                         " cannot follow, or a value it cannot read. git reads that repository's .git/config before it dispatches -- aliases"
                         " and the keys that name a program it runs -- so a write can run under a verb Law 7's table does not list. Use an"
-                        " absolute path inside the session's own checkout; Spud commits, after the outcome is recorded" % prepare.deglob(spelled)), analysis
+                        " absolute path inside the session's own checkout; Spud commits, after the outcome is recorded" % shown_word(spelled)), analysis
             if outside is not None:
                 return ("Law 7: this git call points git at %s (%s), outside every checkout the ledger knows (a registered project's root or"
                         " one of its worktrees). git reads that repository's .git/config before it dispatches -- aliases and the keys that"
                         " name a program it runs -- and a member can write such a file under its own deliverables, so a write can run under a"
                         " verb Law 7's table does not list. Run git in the session's own checkout; Spud commits, after the outcome is"
-                        " recorded" % (outside, prepare.deglob(spelled))), analysis
+                        " recorded" % (outside, shown_word(spelled))), analysis
         elif kind == "git-program":
             return ("Law 7: this git call runs a program git never checks (%s); git config, the environment and some options can name or"
                     " enable a program git runs -- a pager, editor, ssh or proxy command, diff or merge driver, hooks or exec path, credential"
                     " or askpass helper, the ext:: transport, --exec-path, or a verb option like --upload-pack -- under a verb Law 7's table"
                     " allows. A member may set only inert `-c`/`--config-env` keys (color.*, advice.*, i18n.*, core.quotepath, log.date,"
                     " safe.directory, and core.pager/pager.<cmd>=cat), no program-naming environment variable, and no such option; Spud"
-                    " commits, after the outcome is recorded" % detail), analysis
+                    " commits, after the outcome is recorded" % shown_word(detail)), analysis
         elif kind == "path":
-            var, name = detail
+            var, name = shown_word(detail)
             return ("Law 7: this line assigns %s and then runs `%s` by name, so the shell looks for it in a directory the"
                     " line chose and the program the hook checked is not the one that would run: a `%s` of the member's own"
                     " can do everything the name it borrows is allowed to do (zsh's `path` array is PATH under another"
@@ -491,51 +521,51 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                     " be able to read), so a later bare `%s` runs that file whatever PATH holds and the program the hook"
                     " checked is not the one that would run. Hash none of the names the hook reads (git, spud, python3.14,"
                     " sqlite3, tee, a shell, a wrapper), or spell the program's path out; Spud commits, after the outcome"
-                    " is recorded" % (detail, detail)), analysis
+                    " is recorded" % ((shown_word(detail),) * 2)), analysis
         elif kind == "function":
             return ("Law 7: this line defines a shell function `%s` (a definition, or an element of zsh's `functions`"
                     " parameter, whose name the hook may not be able to read), so a later bare `%s` runs that function and"
                     " not the program the hook checked (a shell function shadows a command of the same name in command"
                     " position). Define no function named for one of the names the hook reads (git, spud, python3.14,"
                     " sqlite3, tee, a shell, a wrapper), or reach the program past the function (`command %s`, an absolute"
-                    " path); Spud commits, after the outcome is recorded" % (detail, detail, detail)), analysis
+                    " path); Spud commits, after the outcome is recorded" % ((shown_word(detail),) * 3)), analysis
         elif kind == "env-function":
             return ("Law 7: this line puts `%s` in a program's environment (env, sudo, export, a prefix assignment, or"
                     " bash's `export -f`), and every bash or sh started under it, however far down, imports a shell"
                     " function from a BASH_FUNC_<name>%%%% variable that runs in place of the program the hook checked --"
                     " a child the hook never sees. A member has no reason to hand a program a function: set no BASH_FUNC_*"
-                    " variable and export no function; Spud commits, after the outcome is recorded" % detail), analysis
+                    " variable and export no function; Spud commits, after the outcome is recorded" % shown_word(detail)), analysis
         elif kind == "var":
-            return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % detail, analysis
+            return "the command word %s comes from a variable or a substitution the hook cannot resolve; spell the command out" % shown_word(detail), analysis
         elif kind == "var-word":
-            return VAR_WORD_REASON % detail, analysis
+            return VAR_WORD_REASON % shown_word(detail) + (GIT_VAR_WORD_NOTE if analysis.git_calls else ""), analysis
         elif kind == "git-input":
-            return GIT_INPUT_REASON % detail, analysis
+            return GIT_INPUT_REASON % shown_word(detail), analysis
         elif kind == "eval-flag":
-            return EVAL_FLAG_REASON % detail, analysis
+            return EVAL_FLAG_REASON % shown_word(detail), analysis
         elif kind == "unread":
             return unread_reason(detail), analysis
         elif kind == "var-doubt":
             return ("the variable %s may not hold the value this line assigned it (the assignment may not run or does not persist: a"
                     " condition, a compound command, a loop or function body, a pipeline, a background job, a subshell or substitution,"
                     " a command's prefix, or a builtin that assigns it), so the hook cannot resolve the words it becomes; spell them out"
-                    % detail), analysis
+                    % shown_word(detail)), analysis
         elif kind == "alias":
             return ("`eval` runs the command word %s, which this line defines as an alias the hook cannot resolve (an `alias`"
                     " line, or an element of zsh's `aliases` parameter): its name or its body holds an expansion or a"
                     " substitution, or the definition or an `unalias` may not have run (a branch, a subshell, a"
                     " pipeline, a background list, a loop or function body, a reading only one shell makes). A shell expands an"
                     " alias when it parses the text, so the command that runs is not the one written; spell the command out, or"
-                    " define no alias on the line" % detail), analysis
+                    " define no alias on the line" % shown_word(detail)), analysis
         elif kind == "shell-alias":
             return ("the command word %s is an alias your shell already defines whose body the hook cannot read (its quoting"
                     " does not close, or holds a `$'...'` escape zsh and bash decode apart, in Claude Code's snapshot of your"
                     " interactive shell, ~/.claude/shell-snapshots/). A shell"
                     " expands an alias when it parses the line, so the command that runs is not the one written; spell the"
-                    " command out" % detail), analysis
+                    " command out" % shown_word(detail)), analysis
         elif kind == "glob":
             return ("the word %s is a glob the shell expands before it runs the command, and it can become more than one command,"
-                    " option or verb the hook checks at once, or more than the hook reads; spell the words out" % detail), analysis
+                    " option or verb the hook checks at once, or more than the hook reads; spell the words out" % shown_word(detail)), analysis
         elif kind == "spud":
             call = detail
             if call["actor"] == "spud":
@@ -549,15 +579,19 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
             if call["actor"] is not None:
                 if caller_member is None:
                     return ("your agent_id %s is not bound to a member yet, so `--as %s` cannot be verified (a background spawn is bound right"
-                            " after launch by PostToolUse(Agent); a foreground spawn only at its stop)" % (caller_agent_id, call["actor"])), analysis
+                            " after launch by PostToolUse(Agent); a foreground spawn only at its stop)" % (caller_agent_id, shown_word(call["actor"]))), analysis
                 if not spud_calls.actor_is_self(con, call["actor"], caller_member, caller_agent_id):
                     return ("`--as %s` does not resolve to the caller's own member %s; use `--as %s`"
-                            % (prepare.deglob(call["actor"]), who, caller_agent_id)), analysis
+                            % (shown_word(call["actor"]), who, caller_agent_id)), analysis
     if strict:
         # The repository each git call reads must be a known checkout's own, and the config it sets for
         # itself, which git reads with nothing on the line, is held to the program allowlist; and it holds no hook
         # a member planted.  After the findings, so a refusal the words as spelled already earn (a write verb, a program
         # key, an unknown verb, a repository outside every known checkout) keeps its own reason.
+        # A git call inside a trap's action runs later, in whichever directory the line stands in then (SPD-122): refused
+        # outright, since nobody needs git in a trap.
+        if any(isinstance(target_cwds, expansions.TrapDirs) for _targets, target_cwds in analysis.git_calls):
+            return TRAP_GIT_REASON, analysis
         for targets, target_cwds in analysis.git_calls:
             reason = git_config.git_repository_reason(ctx, con, targets, target_cwds)
             if reason:
@@ -565,8 +599,10 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     elif not caller_agent_id and not plain:
         # Spud's own git call, which runs as Eric's, reads the same repository for what a member could have
         # planted there through a program the hook cannot read.  A plain session's calls and its own subagents never reach
-        # this: they keep the answers they had.
+        # this: they keep the answers they had.  One inside a trap's action is read in every directory it may run in.
         for targets, target_cwds in analysis.git_calls:
+            if isinstance(target_cwds, expansions.TrapDirs):
+                target_cwds = target_cwds.dirs()
             reason = git_config.git_spud_repository_reason(ctx, con, targets, target_cwds)
             if reason:
                 return reason, analysis
@@ -591,7 +627,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         the analysis recorded it, everything else as the line spells it -- the directories the shell may be in
         when it opens, and the directory kind, None for every write that is not a directory's making or removal)."""
         for named, target, target_cwds, directory in entries:
-            spelled = shown_picked(syntax.shown_operands(prepare.deglob(named if named else target)))
+            spelled = shown_picked(shown_word(named if named else target))
             if syntax.unknown_operand(target):  # an operand the line does not spell (xargs's input, find's {}, anywhere)
                 if strict:
                     return messages["anywhere" if syntax.ANY_PATH in target else "input"] % spelled
@@ -670,22 +706,22 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                     return reason, analysis
                 continue
             if kind == "inline":
-                return inline_program_reason(detail), analysis
+                return inline_program_reason(shown_word(detail)), analysis
             if kind == "inline-word":
                 # an interpreter's option position the hook cannot read at all, because an xargs reads it from an
                 # input the line does not spell (`cat f | xargs node`, where an `-e` may stand).  Read here rather than
                 # among the findings as spelled, for the same reason an inline program is: what the same input writes
                 # (`xargs perl -pi -e s/a/b/ < list`) keeps its own reason.
-                return VAR_WORD_REASON % detail, analysis
+                return VAR_WORD_REASON % shown_word(detail), analysis
             if kind in ("script-word", "script-input"):
                 # an awk program or a sed script the line does not settle at all (shell/script_text, SPD-260), read here
                 # for the same reason: what the same input writes (`xargs sed -n < list`, whose input may be -i) keeps
                 # its own reason.
-                return SCRIPT_WORD_REASON % detail, analysis
+                return SCRIPT_WORD_REASON % shown_word(detail), analysis
             if kind == "script-option":
                 # what xargs hands awk where it still reads its options after a -f file (SPD-266), the same way: a write
                 # the file itself makes keeps its own reason.
-                return SCRIPT_OPTION_REASON % detail, analysis
+                return SCRIPT_OPTION_REASON % shown_word(detail), analysis
     if analysis.unparseable:
         # Last of all, so a refusal the words the hook did read already earn keeps its own reason (a Law 7 verb before a
         # stray quote in an eval string), and then for every caller: a bound member, Spud, a plain session and its

@@ -21,6 +21,22 @@ def _lifted(word):
     return word.count(hookio.SUBST) - word.count(PROCSUB_FILE)
 
 
+def _assigned_words(header, words):
+    """The words of a complete header, `words`, whose names it assigns (ShellWalk.finish): a for's, a select's or a
+    foreach's names alone -- the first word, and for a for or a foreach each word after it zsh reads as one more name,
+    up to the `in` or the `( ... )` that opens the list (names_end) -- and never its list's, which the shell expands
+    before the loop runs, so a variable a list word spells keeps its value (SPD-269: `x=1; for w in x; do :; done; echo
+    $x` printed 1).  An assignment a list word's own expansion makes (`$((x=5))`, a glob qualifier's code) is read with
+    its words (consume), inside the loop's frame, which leaves it doubted, and `${x:=v}` with the line (analyse_command).
+    Every word of any other header: an arithmetic one's expressions may assign any name they spell as the loop runs."""
+    if header not in _NAMED_LOOPS or not words or words[0].startswith("(" + _ARITH_OPEN):
+        return words
+    end = 1
+    while header != "select" and end < len(words) and syntax.loop_name(words[end]):
+        end += 1
+    return words[:end]
+
+
 def _value_may_start_with_dash(word):
     """Whether a masked word, as the shell expands it, may start with `-`: spelled so, an expansion or an operand
     the line does not spell at its start, or a glob or brace list that may expand to such a word."""
@@ -102,8 +118,9 @@ class ShellFrame:
         self.arith, self.assigns = False, ()
         # the for loop's variable shell/loop_bindings bound for its body (SPD-146), unbound where the loop closes
         self.bound = None
-        # a case's form (ShellWalk.case_in): True where `in` follows its word, False otherwise -- zsh's brace form
-        # `case word { ... }` (SPD-185) among them -- and None until the walk has read that far
+        # a case's form (ShellWalk.case_in): "in" where `in` follows its word, "brace" for zsh's `case word { ... }`
+        # (SPD-185, ShellWalk.open_brace_case), whose closer is then `}`, False for neither, and None until the walk has
+        # read that far
         self.form = None
 
 
@@ -132,6 +149,9 @@ class ShellWalk:
     - zsh's `foreach name ... ( word ... )` (or `in word ... TERM`, or neither: the positional parameters) is a loop whose
       body is a `do ... done`, a `{ list }`, or a list of any length up to an `end` in command position, a `( list )`
       among its commands (SPD-180; see resolve_body and ends_foreach);
+    - zsh's brace form of case, `case word { pattern) list ;; ... }`, reads its patterns as `in ... esac` does and closes
+      at its `}`, after a body's words too; where a pattern would stand an `esac` or a `}` closes either form (SPD-185,
+      open_brace_case and read_word);
     - zsh's try-always form, `{ list } always { list }`, is one compound command holding both lists, so the always
       block runs where the try block left the shell and the compound ends at the always block's `}` (see close_brace);
     - zsh splits a brace off the word it is glued to: `{git push}` is the group `{ git push }` (see add_word).
@@ -283,9 +303,13 @@ class ShellWalk:
         self.closed = frame if frame.bare else None
         if frame.procsub and not self.in_pattern():
             # the file name `<( list )` hands the command: a word the line does not spell, which every reader of
-            # hookio.SUBST takes for one and consume pairs with no lifted body (SPD-190).  Not in a case's word or pattern
-            # (SPD-184), which no command reads: where the walk still takes a pattern's `|` for a pipe (the brace form,
-            # SPD-185; case_in), it reads the words before it as a command, which this word would name
+            # hookio.SUBST takes for one and consume pairs with no lifted body (SPD-190).  Not in a case's pattern
+            # (SPD-184), which no command reads: where the walk takes a pattern's `|` for a pipe (a form it cannot place;
+            # case_in), it reads the words before it as a command, which this word would name
+            self.words.append(PROCSUB_FILE)
+        elif frame.procsub and self.stack[-1].form is None and not self.words:
+            # ... but the case's own word, which the `in` or the `{` after it follows (SPD-185: `case <(true) { ... }`), is
+            # held as a word so the walk sees it read
             self.words.append(PROCSUB_FILE)
         self.a.cwds = after
         if after != frame.saved and self.conditional:
@@ -608,8 +632,10 @@ class ShellWalk:
         self.consume(self.words)
         self.words = []
 
-    def finish(self, unsure=False):
-        """Analyse the simple command read so far.  `unsure`: it runs in its own process (a pipeline element, a background job)."""
+    def finish(self, unsure=False, feeds_pipe=False):
+        """Analyse the simple command read so far.  `unsure`: it runs in its own process (a pipeline element, a background
+        job); `feeds_pipe`: a `|` or `|&` follows it, which zsh joins to a redirection of its standard output (SPD-214,
+        stdin_text.redirected_text)."""
         words, self.words = self.words, []
         skip, self.skip = self.skip, False
         header, self.header = self.header, None
@@ -635,8 +661,8 @@ class ShellWalk:
                     if w.startswith("(" + _ARITH_OPEN):
                         for part in prepare.deglob(w)[2:-2].split(";"):
                             expansions.read_arithmetic(a, part)
-            if header != "repeat":  # a for or select header assigns its name; a repeat count assigns nothing
-                for w in cleaned:
+            if header != "repeat":  # a for, select or foreach header assigns its names; a repeat count assigns nothing
+                for w in _assigned_words(header, cleaned):
                     names = syntax._NAME_RE.findall(prepare.deglob(w))
                     a.doubt.update(names)
                     loop_bindings.forget(a, names)  # a loop body's basename of any of them no longer holds (SPD-221)
@@ -666,10 +692,22 @@ class ShellWalk:
             a.func_depth -= 1
             a.loop_depth -= 1
             a.cwds = directories.union_dirs(before, a.cwds)
+        elif closed is not None and not directories.separate_redirects(cleaned)[0]:
+            # a compound command's own redirections, after its closer (SPD-214): the text it printed stands, less what a
+            # redirection of its standard output takes from the pipe -- in bash's reading, and in zsh's where no pipe
+            # follows (probed: `{ echo '...'; } 2>/dev/null | sh` ran the text in zsh 5.9 and bash 3.2.57, `{ echo '...'; } >
+            # /dev/null | sh` in zsh alone; tests/test_hooks_input.py CompoundOutputTest)
+            analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, self.piped_fed)
+            if closed.serial in self.found and closed.serial not in self.inputs:
+                # its own input, which this walk read none of inside it: what it printed is walk_line's next walk's to read
+                # (`{ cat; } <<'EOF' | sh`), and nothing here
+                self.printed = ""
+            else:
+                self.printed = stdin_text.redirected_text(self.printed, cleaned, feeds_pipe)
         else:
             # what this command adds to the text its pipeline element prints, which a shell after a `|` runs, read with
             # the values the line settled before it runs (SPD-148)
-            printed = stdin_text.printed_text(cleaned, stdin, a)
+            printed = stdin_text.printed_text(cleaned, stdin, a, feeds_pipe)
             analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, self.piped_fed)
             self.printed = stdin_text.joined(self.printed, printed)
         a.unsure -= unsure
@@ -686,24 +724,38 @@ class ShellWalk:
         return bool(self.stack) and self.stack[-1].kind == "case" and self.stack[-1].pattern
 
     def case_in(self, case):
-        """Whether this case reads `in ... esac`, where a top-level `|` in a pattern is an alternative, no pipe (SPD-187):
-        the word after its subject is `in`.  Settled once the walk holds both words, and at its first pattern's `)`; until
-        then, and for zsh's brace form (SPD-185, whose patterns the walk does not place yet) or a subject no word stands
-        for (a `<( )`), False, so the walk reads a `|` there as it always has, a pipe."""
+        """Whether this case places its patterns, where a top-level `|` in one is an alternative, no pipe (SPD-187): the
+        word after its subject is `in`, or it is zsh's brace form (SPD-185, open_brace_case).  Settled once the walk holds
+        both words, and at its first pattern's `)`; until then, and for any other second word, False, so the walk reads a
+        `|` there as it always has, a pipe."""
         if case.form is None and len(self.words) >= 2:
-            case.form = self.words[1] == "in" and self.words[0] != "{"
+            case.form = "in" if self.words[1] == "in" and self.words[0] != "{" else False
         return bool(case.form)
+
+    def open_brace_case(self, t):
+        """Whether `t`, read where a case's `in` would stand after its word, is zsh's brace form's `{` (SPD-185): the case
+        then reads its patterns as the `in` form does, and closes at its `}` (read_word, brace_closes).  A pattern glued to
+        the brace (`{x)`, which mark_zsh_patterns writes apart unless the line is one it passes whole) is add_word's to
+        read on.  Probed in zsh 5.9 -f and -f -o nobareglobqual: `case x { x) ( echo B1 );; }`, `case x {x) echo A11;; }`
+        and `case x<newline>{ x) echo A5;; }` ran their bodies, bash 3.2.57 rejected them (tests/test_hooks_groups.py
+        CaseBraceFormTest)."""
+        case = self.stack[-1] if self.stack and self.stack[-1].kind == "case" else None
+        if case is None or not case.pattern or case.form is not None or len(self.words) != 1 or t[:1] != "{":
+            return False
+        case.form, case.closer = "brace", "}"
+        self.discard()  # the case's word
+        return True
 
     def case_header_break(self, case, i):
         """The `;` at toks[i], which mark_zsh_patterns writes for a newline, stands in a case's header: after `case word
-        in`, or between the word and an `in` that follows it (probed: zsh 5.9 and bash 3.2 read the patterns after either,
-        SPD-187), so the words before it are no command."""
+        in`, or between the word and an `in` or a `{` that follows it (probed: zsh 5.9 and bash 3.2 read the patterns after
+        either, SPD-187, and zsh `case x<newline>{ x) echo A5;; }`, SPD-185), so the words before it are no command."""
         if len(self.words) == 2:
             return self.case_in(case)
         j = i + 1
         while j < len(self.toks) and self.toks[j] == ";":
             j += 1
-        return len(self.words) == 1 and self.words[0] != "{" and j < len(self.toks) and self.toks[j] == "in"
+        return len(self.words) == 1 and self.words[0] != "{" and j < len(self.toks) and (self.toks[j] == "in" or self.toks[j][:1] == "{")
 
     def define(self, words):
         """A function definition's header was read, `words` its name words: bind its names to a shell function
@@ -797,6 +849,10 @@ class ShellWalk:
         if self.skip and self.header in _NAMED_LOOPS and self.names_end(t):
             self.end_header()
             self.resolve_body(t)
+        if self.open_brace_case(t):  # zsh's `case word { ... }` (SPD-185)
+            if t == "{":
+                return
+            t = t[1:]  # its first pattern, glued to the brace
         while t[:1] == "{" and (t == "{" or (self.glued and not self.in_pattern())) and self.open_brace():
             if t == "{":
                 return
@@ -811,19 +867,25 @@ class ShellWalk:
 
     def read_word(self, t):
         """add_word's reading of a word once its braces are settled: a reserved word, a `}`, or one more word of the command."""
-        if t == "esac" and len(self.words) == 2 and self.in_pattern() and self.case_in(self.stack[-1]):
+        if t in ("esac", "}") and len(self.words) == 2 and self.in_pattern() and self.case_in(self.stack[-1]):
             # `case word in esac`, a case with no pattern, which closes there (probed: `case q in esac | echo e1` and `case
             # q in esac; echo e2` printed theirs in zsh 5.9 and bash 3.2): with a pattern's `|` an alternative (SPD-187),
-            # a walk still in its pattern would read no pipe after it
+            # a walk still in its pattern would read no pipe after it.  zsh's `}` closes it there too (SPD-185)
             self.discard()
         if not self.words and not self.skip:
             if t in ("}", "fi", "done", "esac") or t == "end" and self.ends_foreach():
                 self.close_sublists()
-                if self.stack and self.stack[-1].closer == t:
+                top = self.stack[-1] if self.stack else None
+                if top is not None and top.closer == t:
                     if t == "}":
                         self.close_brace()
                     else:
                         self.pop()
+                elif top is not None and top.kind == "case" and top.pattern and t in ("}", "esac"):
+                    # SPD-185: where a pattern would stand either closer ends either form (probed in zsh 5.9 -f and -f -o
+                    # nobareglobqual: `case x { x) echo A13 ;; esac` and `case x in x) echo A14;; }` ran; in a body only
+                    # the form's own did, `case x { x) echo B70; esac` failing near its esac)
+                    self.pop()
                 return
             if t in ("if", "while", "until"):
                 self.open_conditional(t)
@@ -879,7 +941,7 @@ class ShellWalk:
             case = self.stack[-1] if self.stack and self.stack[-1].kind == "case" else None
             if t == ")" and case:
                 if case.form is None:
-                    case.form = self.case_in(case)  # settled here at the latest: later patterns hold no subject
+                    case.form = self.case_in(case) and case.form  # settled here at the latest: later patterns hold no subject
                 self.discard()  # the end of a case pattern (with the subject and `in` before the first)
                 case.pattern = False
                 self.branch()
@@ -958,7 +1020,7 @@ class ShellWalk:
                 self.end_element()  # no pipe feeds what follows the operator
             elif t in ("|", "|&"):
                 self.reopen_condition()
-                self.finish(unsure=True)
+                self.finish(unsure=True, feeds_pipe=True)
                 self.a.cwds = self.pipeline_start  # that element ran in its own process
                 self.piped = True
                 self.end_element(into_pipe=True)  # the next element reads what this one printed

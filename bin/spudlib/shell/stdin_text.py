@@ -31,6 +31,12 @@ masked words tell `"$X"` from `$X` (syntax._QUOTED_NAME, SPD-167): a quoted valu
 one is passed whole by zsh and split at its blanks by bash, so the printer is read both ways and the text a shell reading
 it runs is what either prints (printed_text, _string_text, _either).
 
+What a command prints reaches a pipe after its own output redirections as each shell sends it (SPD-214,
+redirected_text): bash where the last of them points, and zsh, whose MULTIOS joins them to a pipe that follows the
+command, into the pipe as well -- `{ echo '...'; } > /dev/null | sh` runs the text in zsh alone.  A compound command's
+redirections after its closer are read so too (walk.ShellWalk.finish), where they once stood for a command of their own
+that printed nothing the hook could spell.
+
 A command's input redirections are read as each shell feeds them (SPD-209, command_input): zsh reads every one of them
 in turn, after the pipe into the command, and bash the last alone, so where the two differ the text is a MultiosText
 holding both, and a shell fed it reads each.
@@ -331,33 +337,79 @@ def _shell_options(words):
     return i, forced, False, files
 
 
-def printed_text(tokens, stdin, a=None):
+def printed_text(tokens, stdin, a=None, feeds_pipe=False):
     """The text the simple command `tokens` prints on standard output, or None where the hook cannot spell it.
 
     Only the commands that print what the line spells are read: echo, zsh's print, printf, a cat of its own input, and
-    tee, which passes its input on whatever files it also writes.  A command whose standard output a redirection takes
-    prints nothing into the pipe, and every other command prints text this module does not know.  `stdin`: the text the
-    command reads on standard input (command_input), which cat and tee print as it stands.
+    tee, which passes its input on whatever files it also writes; every other command prints text this module does not
+    know.  A redirection of the command's standard output takes that text from where it would go, as redirected_text
+    reads it (`feeds_pipe`: a pipe follows the command).  `stdin`: the text the command reads on standard input
+    (command_input), which cat and tee print as it stands.
 
     `a`, the line's analysis before this command runs: a `$NAME` the line settled is read as its value (SPD-148), the
     value the shells expand it to, since the command's own prefix assignments reach none of its words.  bash splits an
     unquoted expansion's value at its blanks where zsh never does, and neither splits a quoted one (SPD-167), so the
     command is read both ways (_readings) and its text is what either prints (_either): `X='git push'; echo $X` prints
     `git push` in both, `printf '%s\\n' "$X"` too, and `X='-n git push'; echo $X` prints it in bash alone."""
-    if _stdout_taken(tokens):
-        return None
     words = directories.separate_redirects(tokens)[0]
     if a is None or not any("$" in w for w in words):
         name = word_text(words[0]) if words else None
         if not _printer(name):
             return None
-        return _printed([name] + [word_text(w) for w in words[1:]], stdin)
+        return redirected_text(_printed([name] + [word_text(w) for w in words[1:]], stdin), tokens, feeds_pipe)
     if not _printer(word_text(words[0], a)):
         return None  # zsh's reading prints nothing this module reads, so bash's cannot agree with a text
     whole, fields = _readings(words, a)
     if not (fields and _printer(fields[0])):
         return None
-    return _either(_printed(whole, stdin), _printed(fields, stdin))
+    return redirected_text(_either(_printed(whole, stdin), _printed(fields, stdin)), tokens, feeds_pipe)
+
+
+def redirected_text(text, tokens, feeds_pipe=False):
+    """What reaches the command's own standard output of the `text` it printed, after its redirections `tokens` -- a simple
+    command's, or the words after a compound command's closer (SPD-214) -- or None where the hook cannot spell it.
+
+    Only a redirection of standard output changes it: an output operator with no descriptor or with 1 before it, `&>`
+    and `&>>`, and a `1<`, `1<&` or `1<>`; `2>`, `2>&1`, an input and a here-document leave the text where it was, and so
+    does `>&1`.  bash sends the text where the last of them points: into a file, which leaves nothing here; nowhere, for
+    `>&-`; or to another descriptor (`>&2`, a dup the hook cannot read), whose text it does not follow (None).  zsh's
+    MULTIOS option, on by default, joins every such redirection to the pipe that follows the command itself, so there it
+    reads the text whole, `>&-` apart; with no pipe after the command its reading is bash's.  Where the two differ the
+    text is a MultiosText.
+
+    Probed through tests/probes/shell_probe.py in zsh 5.9 -f and -f -o nobareglobqual and bash 3.2.57 (2026-09-24,
+    tests/test_hooks_input.py CompoundOutputTest): `echo 'touch M1' > /dev/null | sh`, `{ ...; } > /dev/null | sh`,
+    `&>`, `>>`, `>|`, `> a > b` and `>&2` before the pipe ran the text in zsh and not in bash; `2>/dev/null`, `2>&1`,
+    `2>&-`, `<`, `<>`, `<&0`, `4>&1`, `0>&1` and `>&1` ran it in both; `>&-` and `1>&-` in neither; and in neither where
+    the redirection stood on a command inside a compound the pipe follows, `{ echo '...' > /dev/null; } | sh`."""
+    if text is None:
+        return None
+    route, i = None, 0
+    while i < len(tokens):
+        t, fd = tokens[i], None
+        if _FD_RE.fullmatch(t) and i + 1 < len(tokens) and tokens[i + 1] in (syntax.OUT_REDIRECTS | syntax.IN_REDIRECTS):
+            fd, i, t = t, i + 1, tokens[i + 1]
+        if t not in syntax.OUT_REDIRECTS and t not in syntax.IN_REDIRECTS:
+            i += 1
+            continue
+        operand = tokens[i + 1] if i + 1 < len(tokens) else ""
+        i += 2
+        if not (fd == "1" or fd is None and t in syntax.OUT_REDIRECTS and t != "<>"):
+            continue  # another descriptor's, or standard input's
+        if directories.redirect_descriptor(t, operand) or t == "<&":
+            target = prepare.deglob(operand).lstrip("&")
+            if target == "-":
+                route = "closed"
+            elif target != "1":
+                route = "descriptor"
+        elif t in syntax.IN_REDIRECTS or t == ">&" and word_text(operand) is None:
+            route = "descriptor"  # `1< f` opens it for reading; `>&$fd` may name a descriptor once expanded
+        else:
+            route = "file"
+    if route is None:
+        return text
+    bash = "" if route in ("file", "closed") else None
+    return _paired(bash, _zsh(text) if feeds_pipe and route != "closed" else bash)
 
 
 def _printer(name):
@@ -418,17 +470,6 @@ def _whole_input(words, consumed):
                 return True
         elif t.startswith("-") and any(c in "0d" for c in t[1:]):
             return True
-    return False
-
-
-def _stdout_taken(tokens):
-    """Whether a redirection on this command takes its standard output, so what it prints never reaches the pipe: an
-    output operator with no descriptor or with 1 before it, and `&>`/`&>>`, which take both (`2>&1` does not)."""
-    for i, t in enumerate(tokens):
-        if t in syntax.OUT_REDIRECTS:
-            fd = tokens[i - 1] if i and _FD_RE.fullmatch(tokens[i - 1]) else None
-            if fd in (None, "1") or t in ("&>", "&>>"):
-                return True
     return False
 
 

@@ -142,6 +142,8 @@ A ticket that is important but deliberately not-now is parked: `spud --as spud t
 
 `EnterWorktree` with name `<ticket key>-<slug>` — the key lower-cased, the slug a few words of the title — creates `.claude/worktrees/<name>` on branch `worktree-<name>` from `origin/<default branch>` and moves the session there. Spudagents inherit that working directory, so their bare deliverable globs are relative to it, and they share it: never pass `isolation: worktree`. Code lives in a project's checkout and never on its default branch; the home holds no code and takes no branch.
 
+Once a session has entered a worktree, Claude Code's own worktree guard (not a `spud` hook) refuses git aimed at the main checkout, compound shell it cannot verify, and text piped or here-documented into a command when that text names git — whatever the command actually does with it, a `spud member new --brief @- <<'EOF' … EOF` whose brief's own Rules line says "no git commit" included. So a `spud` brief goes by `--brief @<file>` from a worktree session, never a heredoc or a pipe.
+
 The tool checkout's `main` is the running copy: every hook line and both LaunchAgents run `{{launcher}}`, so a merge into that `main` changes the CLI and every hook for every session at once. The full suite passes on the tree that merges before every merge, without exception, and `bin/` is never edited on `main`.
 
 One code ticket, one worktree and branch. A session already in a worktree stays there for its ticket; for a second code ticket it leaves with `ExitWorktree` (`keep`) and enters a new one, but only once no spudagent is working in the current worktree.

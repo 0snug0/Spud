@@ -2,7 +2,7 @@
 
 import functools
 
-from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
+from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_programs, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
 from ..core import lazy
 from ..hooks import hookio, snapshots
 
@@ -437,7 +437,11 @@ def variable_readings(a, name):
 def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fresh, wrapper_command=False):
     """Read words[i], a word the dispatch reads by name that holds an expansion.  A bare `$X` or `${X}` whose value the
     line assigned is read as the words the shells give it (variable_readings): one reading replaces it in place (_AGAIN), several
-    are each analysed from the start (_STOP), and a doubtful value adds a "var-doubt" finding.  Anything else is not resolved: an
+    are each analysed from the start (_STOP), and a doubtful value adds a "var-doubt" finding.  A bare reference past the
+    command word to a for loop's variable that shell/loop_bindings settled (bound_loop: every word of the list spelled or
+    settled by the line, none that may start with `-`, blank or glob) is read once per value, each the word it is in that
+    pass, as the write channels read it (SPD-269: `for r in origin upstream; do git fetch $r; done`, where git still reads
+    options, is two fetches of a spelled remote).  Anything else is not resolved: an
     operator form (`${X:-git}`), zsh's flags and modifiers (`${(L)X}`, `$~X`, `$X:t`), a subscript, a concatenation (`$X$Y`,
     `g$X`), arithmetic, a `$'...'` whose escapes the shells decode apart (prepare.ansi_c_quotes), a substitution, a variable the
     line did not assign, or an empty value outside the command word.
@@ -448,7 +452,10 @@ def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fres
     w = words[i]
     name = variable_reference(w, command=i == 0)
     readings = doubtful = None
-    if name and name in a.vars and budget[0] > 0:
+    looped = loop_bindings.bound_loop(name, a) if name and i > 0 and not wrapper_command else None
+    if looped is not None and budget[0] > 0:
+        readings, doubtful = [[value] for value in looped], False  # a settled for loop's variable, once per value (SPD-269)
+    elif name and name in a.vars and budget[0] > 0:
         readings, doubtful = variable_readings(a, name)
         if readings is not None and i > 0 and not all(readings):
             readings = None  # an empty value drops the word: read as spelled (a member is refused, Spud's reading is kept)
@@ -536,10 +543,17 @@ def verb_option_read_index(words, verb_at, start):
     git writes (git_writes.may_become_file_option: `git log --outp?t=<path>`, never `--grep=$P`); and on a verb of
     syntax.GIT_VERB_FILE_OPTIONS also a word that starts with its expansion (`git archive $OPT HEAD`), which may become
     any option at all.  The value a literal file option takes as the next word is a path, not an option, and is left
-    to the path rule (`git archive -o $T HEAD`)."""
+    to the path rule (`git archive -o $T HEAD`).
+    On a verb of syntax.GIT_VERB_PROGRAM_OPTIONS (git_programs.reads_leading_expansion) a word that starts with its
+    expansion is read too, where git still reads options (SPD-171): not as the value a spelled option takes as the next
+    word (`git fetch --depth $N r`, `git grep -e $P`), nor past the first word ls-remote or grep reads as no option
+    (`git ls-remote origin $REF`, `git grep foo $R`: git_programs.GIT_OPTIONS_STOP_VERBS)."""
     verb = words[verb_at]
     longs, shorts = git_writes.git_read_options(verb)
     program, table = verb in syntax.GIT_VERB_PROGRAM_OPTIONS, verb in syntax.GIT_VERB_FILE_OPTIONS
+    leading = git_programs.reads_leading_expansion(verb)
+    stops = leading and verb in git_programs.GIT_OPTIONS_STOP_VERBS
+    value = past = False  # the word is a spelled option's value; git reads no more options (a stopping verb)
     k = verb_at + 1
     while k < len(words):
         w = words[k]
@@ -547,10 +561,16 @@ def verb_option_read_index(words, verb_at, start):
             return None
         if active_read_word(w):
             dash = w.startswith("-")
-            if k >= start and ((program and dash) or ((dash or table) and git_writes.may_become_file_option(w, longs, shorts))):
+            opens = leading and not (dash or value or past) and expansion_word(w) and git_writes.literal_head(w) == ""
+            if k >= start and ((program and (dash or opens)) or ((dash or table) and git_writes.may_become_file_option(w, longs, shorts))):
                 return k
+            value = False
         elif (git_writes.file_option_spelling(w, longs, shorts) or (None, False))[1]:
             k += 1  # the path a spaced file option names
+            value = False
+        elif leading:
+            past = past or (stops and not value and not w.startswith("-"))
+            value = not value and w.startswith("-") and git_programs.takes_value(verb, w)
         k += 1
     return None
 
@@ -602,7 +622,8 @@ def analyse_trap(words, a, depth):
     EXIT action's `pwd` is the last directory of the line), so it is read with the directories unknown, as a sourced file
     is, and a relative redirection or tee inside it refuses a member.  The line's own directories and variables are
     restored afterwards: defining a trap changes nothing on the line, and the action's assignments run later, where
-    the expansion check's `a.all_doubt` after `trap` already doubts every variable.
+    the expansion check's `a.all_doubt` after `trap` already doubts every variable.  Each git call the action makes stays
+    among the line's, its directories a TrapDirs (SPD-122).
 
     Unless the action runs inside the line (trap_runs_in_line) and changes the directory of the shell it runs in -- a cd,
     a sourced file, a function's move, text the reading drops, whatever ShellAnalysis.dir_moves counts, a cd in a
@@ -617,14 +638,57 @@ def analyse_trap(words, a, depth):
         if a.dir_moves != moves:
             a.moving_traps.add(text)  # read once per starting state (analyse_isolated): a later reading of it knows too
         moved = moved or text in a.moving_traps
-        # The action's git calls are not scope-checked.  The hook reads the action with the directories unknown
-        # because it runs later, not because the line lost them, and `trap 'git status' EXIT` names no repository, so the
-        # unresolvable-directory refusal would fall on every trap that mentions git.  Its own findings still stand.
-        del a.git_calls[calls:]
+        # The action's git calls stay on the line, each with the directories it may run in standing in for the unknown
+        # ones the action was read at (TrapDirs, SPD-122): bash_rule refuses a member any of them and reads Spud's where
+        # the action may run.  Its own findings stand as they are.
+        a.git_calls[calls:] = [(targets, TrapDirs(a, text, cwds, found.action if isinstance(found, TrapDirs) else found))
+                               for targets, found in a.git_calls[calls:]]
+        for _targets, found in a.git_calls:
+            if isinstance(found, TrapDirs) and found.text == text and cwds not in found.starts:
+                found.starts.append(cwds)  # the same action set again elsewhere, whose reading analyse_isolated skipped
         a.cwds, a.vars = cwds, dict(variables)
     if moved and trap_runs_in_line(words, a):
         a.cwds = None
         a.dir_moves += 1
+
+
+# SPD-122: where a git call inside a trap's action runs.  SPD-063 dropped such calls from the repository check, and SPD-066's
+# and SPD-123's check of the repository a call reads inherited the drop, so `cd tests/fake; trap 'git status' EXIT` ran git
+# in a planted repository -- its hooks, its config -- unchecked.  Probed with tests/probes/shell_probe.py (zsh 5.9 -f -o
+# nobareglobqual, zsh 5.9 -f, bash 3.2.57), `pwd` in the action: an EXIT action ran in the line's last directory, one set in
+# a subshell at the subshell's end and, in zsh, one set in a function as the function returned, each in its own last
+# directory; DEBUG ran before each command where it stood, ZERR after a failing one.  So the action runs in some directory
+# the line passes through, which one the hook cannot say.  bash_rule refuses a member every such call (nobody needs git in a
+# trap) and holds Spud's to the repository check in each directory the reading saw the line stand in.
+class TrapDirs:
+    """The directories a git call inside a trap's action (`text`) may run in, standing in its ShellAnalysis.git_calls entry
+    for the unknown ones the action was read at: `action`, the call's own when the action settled them itself (an
+    absolute cd in it), and otherwise every directory the reading saw the line stand in -- where the trap was set
+    (`starts`, one per place the same action was set), where the line ends, and where each other git call and each write
+    of the line runs, read once the line is.  A signal's action may also run in a directory the line only passes through,
+    which the reading does not keep.  Compared by the directories it stands for, so two lines whose trap reaches the same
+    ones read alike (tests/hookcase.HOOK_READING)."""
+
+    def __init__(self, a, text, start, action):
+        self.a, self.text, self.starts, self.action = a, text, [start], action
+
+    def dirs(self):
+        """The directories, a frozenset, or None where the reading can place none of them."""
+        if self.action is not None:
+            return self.action
+        a = self.a
+        seen = self.starts + [a.cwds] + [found for _targets, found in a.git_calls if not isinstance(found, TrapDirs)]
+        seen += [found for _target, found in a.redirects] + [write[2] for write in a.git_writes + a.arg_writes]
+        return frozenset(d for found in seen if found for d in found) or None
+
+    def __eq__(self, other):
+        return isinstance(other, TrapDirs) and self.dirs() == other.dirs()
+
+    def __hash__(self):
+        return hash(self.dirs())
+
+    def __repr__(self):
+        return "TrapDirs(%r)" % (sorted(self.dirs() or ()),)
 
 
 # The traps whose action the shell reading the line runs before the line is over (SPD-252), probed in zsh 5.9 -f -o

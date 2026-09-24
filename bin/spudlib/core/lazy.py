@@ -1,4 +1,4 @@
-"""core/lazy: LazyModule, the standard-library modules no hook imports, and LazyPattern."""
+"""core/lazy: LazyModule, the standard-library modules no hook imports unless its line needs one, and LazyPattern."""
 
 import re
 import sys
@@ -35,6 +35,10 @@ tempfile = LazyModule("tempfile")
 urllib_error = LazyModule("urllib.error", "urllib_error")
 urllib_parse = LazyModule("urllib.parse", "urllib_parse")
 urllib_request = LazyModule("urllib.request", "urllib_request")
+# The archives the Bash hook lists (shell/archive_names, SPD-144), lazy because the hook is: tarfile and zipfile, with the
+# compression modules they import, would put several milliseconds on every hook run for a line that extracts nothing.
+tarfile = LazyModule("tarfile")
+zipfile = LazyModule("zipfile")
 
 
 class LazyPattern:

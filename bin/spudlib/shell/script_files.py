@@ -56,6 +56,28 @@ let through: the readable forms are the way.
 A script runner -- `npm run`, `npm test`, `deno task <name>`, `bun run`, `pnpm run`, `yarn <script>`, `make` -- runs a
 command a file of the project's holds: SPD-168's, the same shape with an allow-list of names (shell/script_runners).
 What stays open: an interpreter's program from a file (`python3 x.py`, `node x.js`) is SPD-150's rule and unchanged.
+
+SPD-151: a script file the hook does read, at hook time, is not always the file the command runs.  shell/script_text
+reads a sed or awk -f file from disk (SPD-139), but `echo 'w ledger/tickets/SPD-001.md' > p.sed && sed -f p.sed x` is one
+Bash call, and the hook read p.sed as it stood before the echo wrote it.  Two more "script" forms carry it, each with the
+-f name as spelled and the readings of the file (None where the hook cannot say which file it is, a glob or a name it
+cannot resolve, which any write may be):
+
+- "written": the line writes the file, or may (a directory above it, a glob matching it), before the command runs: a
+  command earlier on the line, the command's own redirection.  Refused a member outright.
+- "rewritable": the command may run beside or after a write the reading meets later -- in a pipeline, a background job
+  or after && or || (the reading's `unsure`), in a loop's or a function's body, which may run again after it (its
+  `loop_depth`), or in a nested reading, a `-c` string's or a substitution's, whose process the reading does not place
+  against the line around it.  Refused a member where any write of the line names the file (script_reason's `written`).
+
+Both earn WRITTEN_REASON, which names the two-call respelling; Spud is never refused them, as every "script" finding is
+read for a member alone.  The shell scripts above need neither: an allow-listed one runs only where the line writes none
+of it at all, in any order, and the hook opens no shell script, interpreter program or runner file but these -f files and
+the runner files shell/runner_files holds to the same `written`.  What refuses more than it must, on purpose: a line the
+reading walks twice (zsh's reading and bash's, a compound's own input, a function's calls) meets in its second walk the
+writes its first walk recorded after the command, a nested command or one after && reads every write of the line as
+possibly before it, and `sed -i -f p.sed p.sed` meets its own -i before its script.  Each is a member told to split the
+line in two.
 """
 
 import json
@@ -89,6 +111,15 @@ HOW = {
     "startup": "from a file of commands a shell runs as it starts (BASH_ENV, ENV and ZDOTDIR name one, and HOME holds"
                " a shell's own startup files)",
 }
+# SPD-151: a -f script file the hook read that the line may write before the command reads it ("written", "rewritable").
+WRITTEN_REASON = (
+    "`%s` runs the script file %s, which the hook reads before the line runs, and the line may write that file before"
+    " `%s` reads it: a redirection, a here-document, tee, a copy, move or link onto it, an earlier command, or one that may"
+    " run beside or after it (a pipeline, a background job, a command after && or ||, a loop's or a function's next pass, a"
+    " nested shell). The hook would read one script and the command run another, so the files it writes and the commands"
+    " it runs (sed's `w`, awk's `system()`, `print >` and `|`) could hide a git write (Law 7), a spud call (Law 6) or a"
+    " write outside your deliverables (Law 5). Write the script in one Bash call (or with the Write tool) and run it in the"
+    " next, where the hook reads the file the command runs")
 
 
 # ----------------------------------------------------------------------------
@@ -128,6 +159,20 @@ def read_shell(words, a, dash_c, string, xargs_input, stdin, fed):
         record_script(a, "startup", "HOME=...")
 
 
+def record_written(a, form, cmd, word, readings):
+    """Record a -f script file the line may write before `cmd` reads it (SPD-151, module docstring): `form` "written" or
+    "rewritable", `word` the -f name (masked), `readings` the absolute paths it may name, None for any file."""
+    shown = "`%s`" % syntax.shown_operands(prepare.deglob(word))
+    a.findings.append(("script", (form, syntax.shown_operands(cmd), shown, readings, a.cwds)))
+
+
+def rewritten(readings, written):
+    """True when the line writes a file `readings` names or a directory above one; any write, for readings None."""
+    if readings is None:
+        return bool(written)
+    return any(written_over(r, written) for r in readings)
+
+
 def read_path_word(a, word):
     """A command word, or a wrapper's, spelled as a path: the shell runs that file, never a program it looks up."""
     if "/" in prepare.deglob(word):
@@ -149,6 +194,10 @@ def script_reason(ctx, con, caller_agent_id, caller_member, cwd, mode, detail, w
     `written`: the absolute paths the line writes (bash_rule.written_targets), each a file or a directory above one.
     `allow`: a one-element list caching (the roots, the allow-listed paths) across a line's findings."""
     form, cmd, shown, target, cwds = detail
+    if form in ("written", "rewritable"):
+        if form == "rewritable" and not rewritten(target, written):
+            return None
+        return WRITTEN_REASON % (cmd, shown, cmd)
     if form in ("operand", "source", "exec") and target is not None:
         if allow is None:
             allow = []

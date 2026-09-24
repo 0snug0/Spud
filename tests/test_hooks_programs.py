@@ -189,6 +189,18 @@ class ScriptFileTest(ProjectCheckoutCase):
         self.assertFalse(m.written_over("/a/bc", ["/a/b"]))
         self.assertTrue(m.written_over("/a/b/c", ["/a/b/"]))
 
+    def test_an_allow_listed_script_the_line_writes_in_any_order_is_refused(self):
+        """SPD-151's shapes for an allow-listed script: the hook reads no shell script's text, but it lets one through only
+        where the line writes none of it, before the run or after, beside it in a pipeline or not -- stricter than the
+        -f files SPD-151 reads (tests/test_hooks_writes.py ScriptFileWrittenTest), and so already closed."""
+        self.allow("scripts/ok.sh")
+        for command in ("cp scripts/run.sh scripts/ok.sh && sh scripts/ok.sh", "tee scripts/ok.sh < x.sh | sh scripts/ok.sh",
+                        "cat > scripts/ok.sh <<'EOF'\ngit push\nEOF\nsh scripts/ok.sh", "sh scripts/ok.sh | tee scripts/ok.sh",
+                        "sh scripts/ok.sh; echo 'git push' > scripts/ok.sh", "ln -sf ../x.sh scripts/ok.sh; ./scripts/ok.sh"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables")
+        self.assertSilent("sh scripts/ok.sh | tee tests/out.txt")
+
     def test_an_unbound_agent_in_a_spud_session_has_no_allow_list(self):
         self.allow("scripts/ok.sh")
         for command in ("bash scripts/ok.sh", "./scripts/ok.sh"):

@@ -2,9 +2,12 @@
 recursive copy or an extraction write, spelled and scripted writes, and how a target resolves."""
 
 import importlib
+import io
 import os
 import re
+import tarfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -535,6 +538,7 @@ UNWALKED_WORDING = "could not read whole"  # SPD-126: a copied tree the walk for
 SCRIPT_WORD_WORDING = "runs a program or script the line does not spell"  # SPD-260: an awk program or sed script unread
 SCRIPT_OPTION_WORDING = "where awk still reads its options"  # SPD-266: xargs's input where awk may read one more -f
 SCRIPT_WORD_KINDS = ("script-word", "script-input", "script-option")  # SPD-260's finding, as SPD-265 and SPD-266 split it
+SCRIPT_WRITTEN_WORDING = "the line may write that file before"  # SPD-151: a -f file the hook read is not the one that runs
 
 
 class TreeWriteCase(BashHookCase):
@@ -554,8 +558,17 @@ class TreeWriteCase(BashHookCase):
         for d in ("out/tmp", "bin/sub", "vendor/plain/sub", "vendor/repo/src", "tests/out", "docs", "ledger/tickets"):
             (home / d).mkdir(parents=True, exist_ok=True)
         for f in ("out/tmp/a.pyc", "out/keep.txt", "bin/sub/x.py", "bin/x.py", "vendor/plain/a.txt", "vendor/plain/sub/b.txt",
-                  "vendor/repo/src/c.py", "docs/x.md", "ledger/tickets/SPD-001.md", "a.tar", "a.zip", "x.patch", "list"):
+                  "vendor/repo/src/c.py", "docs/x.md", "ledger/tickets/SPD-001.md", "list"):
             (home / f).write_text("a\n", encoding="utf-8")
+        # SPD-144: an archive and a patch the hook can list, each writing one file, f.txt, since the hook now reads the
+        # names an extraction writes and refuses a member one it cannot read
+        with tarfile.open(home / "a.tar", "w") as tf:
+            info = tarfile.TarInfo("f.txt")
+            info.size = 2
+            tf.addfile(info, io.BytesIO(b"a\n"))
+        with zipfile.ZipFile(home / "a.zip", "w") as zf:
+            zf.writestr("f.txt", b"a\n")
+        (home / "x.patch").write_text("--- f.txt\n+++ f.txt\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
         plant_git_dir(home / "vendor" / "repo" / ".git")
         plant_git_dir(home / "tests" / "fake" / ".git")
         (home / "bin" / "link").symlink_to(home / "bin" / "sub")
@@ -944,28 +957,45 @@ class ExtractionWriteTest(TreeWriteCase):
 
     def test_the_analysis_records_the_directory(self):
         m = self.module
-        for command, writes in (("tar -xf a.tar -C out", [("out", "tree")]), ("tar xzf a.tar -C out", [("out", "tree")]),
-                                ("tar -x -C out -C sub -f a.tar", [("out/sub", "tree")]), ("tar -xf a.tar -C /tmp/x", [("/tmp/x", "tree")]),
-                                ("tar -xf a.tar", [(".", "tree")]), ("tar -tf a.tar", []), ("tar -xOf a.tar", []),
+        numbered = ".~" + m.NAME_CHAR + m.NAME_MORE + "~"
+
+        def patched(directory):  # SPD-144: x.patch's one name, f.txt, with its backups and its reject file beside it
+            here = "./f.txt" if directory == "." else directory + "/./f.txt"
+            return [(directory + "/f.txt", None), (here + ".orig", None), (here + numbered, None), (here + ".rej", None)]
+
+        # SPD-144: after the tree, each name the archive or patch holds (a.tar, a.zip and x.patch write f.txt)
+        for command, writes in (("tar -xf a.tar -C out", [("out", "tree"), ("out/f.txt", None)]),
+                                ("tar xzf a.tar -C out", [("out", "tree"), ("out/f.txt", None)]),
+                                ("tar -x -C out -C sub -f a.tar", [("out/sub", "tree"), ("out/sub/f.txt", None)]),
+                                ("tar -xf a.tar -C /tmp/x", [("/tmp/x", "tree"), ("/tmp/x/f.txt", None)]),
+                                ("tar -xf a.tar", [(".", "tree"), ("./f.txt", None)]), ("tar -tf a.tar", []), ("tar -xOf a.tar", []),
                                 ("tar -xPf a.tar -C out", [(m.ANY_PATH, "tree")]),
                                 ("tar -cf out/a.tar docs", [("out/a.tar", None)]),  # SPD-126's second engineer: the archive
-                                ("unzip -q a.zip -d out", [("out", "tree")]), ("unzip -dout a.zip", [("out", "tree")]),
-                                ("unzip a.zip", [(".", "tree")]), ("unzip -l a.zip", []), ("unzip -: a.zip -d out", [(m.ANY_PATH, "tree")]),
-                                ("patch -p1 < x.patch", [(".", "tree")]), ("patch -d out -p1 -i x.patch", [("out", "tree")]),
+                                ("unzip -q a.zip -d out", [("out", "tree"), ("out/f.txt", None)]),
+                                ("unzip -dout a.zip", [("out", "tree"), ("out/f.txt", None)]),
+                                ("unzip a.zip", [(".", "tree"), ("./f.txt", None)]), ("unzip -l a.zip", []),
+                                ("unzip -: a.zip -d out", [(m.ANY_PATH, "tree")]),
+                                ("patch -p1 < x.patch", [(".", "tree")] + patched(".")),
+                                ("patch -d out -p1 -i x.patch", [("out", "tree")] + patched("out")),
                                 ("patch --dry-run -p1 < x.patch", []),
                                 # SPD-126's second engineer: a later patch in the file names its own file, so the tree
-                                # stays; the named file, its backups and its reject file beside it
+                                # stays; the named file, its backups and its reject file beside it.  With a file operand
+                                # alone, the patch is standard input, which nothing feeds here: no name of its own
                                 ("patch -o out/y x.patch", [(".", "tree"), ("out/y", None), ("out/y.orig", None),
-                                                            ("out/y.~" + m.NAME_CHAR + m.NAME_MORE + "~", None), ("out/y.rej", None)]),
+                                                            ("out/y" + numbered, None), ("out/y.rej", None)]),
                                 ("patch docs/x.md x.patch", [(".", "tree"), ("docs/x.md", None), ("docs/x.md.orig", None),
-                                                             ("docs/x.md.~" + m.NAME_CHAR + m.NAME_MORE + "~", None),
-                                                             ("docs/x.md.rej", None)]),
+                                                             ("docs/x.md" + numbered, None), ("docs/x.md.rej", None)] + patched(".")),
                                 ("curl -O https://example.com/x", [(".", "tree")]), ("curl -sSLO https://example.com/x", [(".", "tree")]),
                                 ("curl -O --output-dir out https://example.com/x", [("out", "tree")]),
                                 ("curl --remote-name-all https://example.com/x", [(".", "tree")]),
                                 ("curl -s https://example.com/x", []), ("curl -K cfg https://example.com/x", [(m.ANY_PATH, "tree")])):
             with self.subTest(command):
                 self.assertEqual(self.writes(command), writes)
+        # SPD-144: a patch fed by a pipe from a program is text the line does not spell, so after the tree its names are a
+        # write the line cannot place, refused a member; a `<` file the line names is read, above
+        (tree, kind), (unlisted, _) = self.writes("cat x.patch | patch -p1")
+        self.assertEqual((tree, kind), (".", "tree"))
+        self.assertTrue(unlisted.startswith(m.ANY_PATH) and "from standard input" in unlisted, unlisted)
 
     def test_into_the_members_own_subtree_is_silent(self):
         for command in ("tar -xf a.tar -C out", "tar xzf a.tar -C out", "tar -x -C out -f a.tar", "tar -xf a.tar --directory=out/x",
@@ -1120,14 +1150,21 @@ class SpelledWriteTest(TreeWriteCase):
             ("tar -czf out/a.tgz src", [("out/a.tgz", None)]), ("tar czf out/a.tgz src", [("out/a.tgz", None)]),
             ("tar -C src -cf out/a.tar .", [("out/a.tar", None)]), ("tar -uf out/a.tar src", [("out/a.tar", None)]),
             ("tar -cf - src", []), ("export TAPE=out/t; tar -c src", [("out/t", None)]),
+            # SPD-144: after the line's own names, x.patch's, f.txt, with what the same options put beside it
             ("patch -d out -r rej f x.patch", [("out", "tree"), ("out/f", None), ("out/f.orig", None), (p("out/f.~?*~"), None),
-                                              ("out/rej", None)]),
-            ("patch -d out -V none f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None)]),
-            ("patch -d out --posix f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None)]),
-            ("patch -d out -V simple -z .bak f x.patch", [("out", "tree"), ("out/f", None), ("out/f.bak", None), ("out/f.rej", None)]),
+                                              ("out/rej", None), ("out/f.txt", None), ("out/./f.txt.orig", None),
+                                              (p("out/./f.txt.~?*~"), None)]),
+            ("patch -d out -V none f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None), ("out/f.txt", None),
+                                                ("out/./f.txt.rej", None)]),
+            ("patch -d out --posix f x.patch", [("out", "tree"), ("out/f", None), ("out/f.rej", None), ("out/f.txt", None),
+                                                ("out/./f.txt.rej", None)]),
+            ("patch -d out -V simple -z .bak f x.patch", [("out", "tree"), ("out/f", None), ("out/f.bak", None), ("out/f.rej", None),
+                                                          ("out/f.txt", None), ("out/./f.txt.bak", None), ("out/./f.txt.rej", None)]),
             ("patch -d out -B bak/ f x.patch", [("out", "tree"), ("out/bak", "tree"), ("out/f", None), ("out/bak/f", None),
-                                                ("out/f.rej", None)]),
-            ("patch -d out -d sub -p1 < x.patch", [("out/sub", "tree")]),  # each -d from the one before it
+                                                ("out/f.rej", None), ("out/f.txt", None), ("out/bak/./f.txt", None),
+                                                ("out/./f.txt.rej", None)]),
+            ("patch -d out -d sub -p1 < x.patch", [("out/sub", "tree"), ("out/sub/f.txt", None), ("out/sub/./f.txt.orig", None),
+                                                    (p("out/sub/./f.txt.~?*~"), None), ("out/sub/./f.txt.rej", None)]),  # each -d from the one before it
             ("wget -O out/f https://x", [("out/f", None), ("~/.wget-hsts", None)]),
             ("wget --no-hsts -P out https://x", [("out", "tree")]), ("wget --no-hsts https://x", [(".", "tree")]),
             ("wget --no-hsts -O - https://x", []), ("wget --no-hsts -b -P out https://x", [(p("wget-log*"), None), ("out", "tree")]),
@@ -1761,6 +1798,104 @@ class ScriptOptionTest(TreeWriteCase):
                 self.assertSilent(command, agent_id=None)
 
 
+class ScriptFileWrittenTest(TreeWriteCase):
+    """SPD-151 (proposal by SPUD-139/Mario): SPD-139 reads a sed or awk -f script file from disk at hook time
+    (script_text.script_file), but the file the tool runs is not always that file: `echo 'w ledger/tickets/SPD-001.md' >
+    p.sed && sed -f p.sed x` is one Bash call, and the hook read p.sed as it stood before the echo wrote it -- missing, and
+    so unread, or holding a harmless script -- so a member ran a script the hook never read (Law 5 here, Law 7 through
+    awk's system()).  On this branch before the change each line in test_a_script_the_line_writes_first_is_refused was
+    silent for AGENT_G.
+
+    SPD-217's rule, as SPD-260 applied it: where the reader cannot read what will run, it refuses the member and names a
+    respelling.  A -f file the line may write before the command reads it -- a redirection (the command's own included), a
+    here-document, tee, cp, mv or ln onto it, an earlier command, a command beside it in a pipeline or a background job, a
+    loop's or a function's next pass, a nested reading's -- is refused a member, the reason naming the two-call respelling.
+    A script the line only reads, or writes after the command that runs it, reads as before; Spud is not refused.  SPD-145's
+    allow-listed shell scripts were already held against every write of the line (ScriptFileTest in
+    tests/test_hooks_programs.py), and the hook opens no interpreter's program file (SPD-150)."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "out" / "clean.sed").write_text("p\n", encoding="utf-8")
+        (self.home.path / "out" / "clean.awk").write_text("{n++} END{print n}\n", encoding="utf-8")
+
+    def forms(self, command):
+        """The forms of the "script" findings the line records."""
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def assertSpudUnchanged(self, command):
+        """Spud's own reading: never this refusal (he is refused a write into out/ by Law 1, as before, and nothing else)."""
+        r = self.bash(command, None, None)
+        self.assertEqual((r.code, r.stderr), (0, ""), (command, r))
+        if r.stdout:
+            self.assertIn("Spud never produces a deliverable", r.reason, (command, r))
+
+    def test_the_tickets_line_is_refused_naming_the_respelling(self):
+        for command in ("echo 'w ledger/tickets/SPD-001.md' > out/new.sed && sed -f out/new.sed out/keep.txt",
+                        "echo 'w ledger/tickets/SPD-001.md' > out/clean.sed && sed -f out/clean.sed out/keep.txt"):
+            with self.subTest(command):
+                r = self.assertRefused(command, SCRIPT_WRITTEN_WORDING, agent_id=AGENT_G)
+                self.assertIn("one Bash call", r.reason)  # the respelling: write it in one call, run it in the next
+                self.assertIn("`sed`", r.reason)
+                self.assertIn("out/", r.reason)
+                self.assertSpudUnchanged(command)
+                self.assertEqual(self.forms(command), ["written"])
+
+    def test_a_script_the_line_writes_first_is_refused(self):
+        for command in ("cat > out/new.awk <<'EOF'\nBEGIN{system(\"git push\")}\nEOF\nawk -f out/new.awk out/keep.txt",
+                        "tee out/new.sed < list | sed -f out/new.sed out/keep.txt",
+                        "cp out/clean.sed out/new.sed && sed -f out/new.sed out/keep.txt",
+                        "mv out/keep.txt out/clean.sed; sed -n -f out/clean.sed out/keep.txt",
+                        "ln -sf ../list out/clean.awk && awk -f out/clean.awk out/keep.txt",
+                        "printf 'p\\n' >> out/clean.sed; sed -e p -f out/clean.sed out/keep.txt",
+                        "cd out && echo 'w x' > clean.sed && sed -f clean.sed keep.txt",
+                        "echo p > out/clean.sed; sed -f ./out/clean.sed out/keep.txt",
+                        "echo p > out/cle*.sed; sed -f out/clean.sed out/keep.txt",
+                        "echo p > out/new.sed; sed -f out/ne*.sed out/keep.txt",
+                        "echo p > out/new.sed; sed -f out/missing.sed -f out/new.sed out/keep.txt",
+                        "echo p > out/new.awk; awk -f out/new.awk out/keep.txt",
+                        "echo p > out/new.sed; sh -c 'sed -f out/new.sed out/keep.txt'"):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WRITTEN_WORDING, agent_id=AGENT_G)
+                self.assertSpudUnchanged(command)
+
+    def test_a_script_the_line_may_write_while_the_command_runs_is_refused(self):
+        """A write that is later on the line but may land before the command reads its script: its own redirection, the
+        pipeline it runs in, a background job beside it, a loop's next pass, a function called again, a nested reading."""
+        for command in ("sed -f out/clean.sed out/keep.txt > out/clean.sed",
+                        "sed -f out/clean.sed out/keep.txt | tee out/clean.sed",
+                        "awk -f out/clean.awk out/keep.txt | cat > out/clean.awk",
+                        "sed -f out/clean.sed out/keep.txt & cp list out/clean.sed",
+                        "for i in 1 2; do sed -f out/clean.sed out/keep.txt; echo 'w x' > out/clean.sed; done",
+                        "f() { awk -f out/clean.awk out/keep.txt; }; f; echo x > out/clean.awk; f",
+                        "sh -c 'sed -f out/clean.sed out/keep.txt' | tee out/clean.sed"):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WRITTEN_WORDING, agent_id=AGENT_G)
+                self.assertSpudUnchanged(command)
+
+    def test_a_script_written_after_or_never_is_read_as_before(self):
+        for command in ("sed -f out/clean.sed out/keep.txt; echo 'w x' > out/clean.sed",
+                        "sed -f out/clean.sed out/keep.txt && cp list out/clean.sed",
+                        "awk -f out/clean.awk out/keep.txt > out/count.txt",
+                        "echo x > out/other.txt; sed -f out/clean.sed out/keep.txt",
+                        "sed -f out/clean.sed out/keep.txt | tee out/copy.txt",
+                        "cp out/keep.txt out/tmp/; awk -f out/clean.awk out/keep.txt",
+                        "sed -n -f out/clean.sed out/keep.txt", "awk -f out/clean.awk out/keep.txt",
+                        "sed -f out/missing.sed out/keep.txt"):
+            with self.subTest(command):
+                self.assertNotIn("written", self.forms(command))  # a pipeline's is "rewritable", held against its writes
+                self.assertSilent(command, agent_id=AGENT_G)
+                self.assertSpudUnchanged(command)
+
+    def test_an_earlier_reason_on_the_line_is_kept(self):
+        """Read last, as SPD-145's script shapes are: a write the path rule refuses and a git verb keep their own reasons."""
+        r = self.assertRefused("echo x > docs/y.txt; echo p > out/new.sed; sed -f out/new.sed out/keep.txt", "deliverables",
+                               agent_id=AGENT_G)
+        self.assertNotIn(SCRIPT_WRITTEN_WORDING, r.reason)
+        r = self.assertRefused("git push; echo p > out/new.sed; sed -f out/new.sed out/keep.txt", "Law 7", agent_id=AGENT_G)
+        self.assertNotIn(SCRIPT_WRITTEN_WORDING, r.reason)
+
+
 # SPD-265: profile functions whose own body runs a program the line does not settle, in the shape Claude Code's shell
 # snapshot prints them (tests/test_hooks_snapshots.py's SHELL_SNAPSHOT).
 PROFILE_SCRIPTS = """\
@@ -1836,7 +1971,7 @@ class ProfileScriptWordTest(TreeWriteCase):
 
 
 class UnreadFormsTest(unittest.TestCase):
-    """SPD-262 (SPUD-262/Charlotte): held_text.line_options records ("unread", ("option", shown)) for an option Claude Code's
+    """SPD-262 (SPUD-262/Charlotte): held_options.line_options records ("unread", ("option", shown)) for an option Claude Code's
     shell snapshot sets that the reader does not model, and bash_rule.UNREAD_MESSAGES had no "option", so a member's line
     under such an option failed with a KeyError instead of a reason.  Every form a module of the program records has its
     message."""

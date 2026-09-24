@@ -1446,6 +1446,96 @@ class GitVerbProgramOptionTest(BashHookCase):
             with self.subTest(ok):
                 self.assertSilent(ok)
 
+    # -- a word that starts with an expansion where git still reads options (SPD-171) ----------
+
+    def test_a_leading_expansion_where_git_reads_options_is_refused(self):
+        """`OPT=--upload-pack=sh; git ls-remote $OPT .` ran a program the hook never read: SPD-089 read a word that
+        starts with its expansion as a possible option only on GIT_VERB_FILE_OPTIONS' verbs.  Eric's call (2026-09-24):
+        on a verb of GIT_VERB_PROGRAM_OPTIONS such a word refuses a member where git still reads options, and Spud reads on.
+        Where that is, probed on git 2.54.0 (Apple Git-157) with an unknown option in its place: ls-remote reads options
+        up to its repository (`git ls-remote . --heads` printed nothing, the word a pattern), fetch and archive after it
+        too (`git fetch . --bogus-opt`, `git archive HEAD --bogus-opt`: unknown option), each up to `--`.  difftool,
+        send-email, web--browse and instaweb are refused a member whole already (SPD-087, SPD-047); they are pinned
+        so a later table change keeps them closed."""
+        for cmd in ("git ls-remote $OPT .", 'git ls-remote "$OPT" .', "git ls-remote ${OPT} .", "git ls-remote $URL",
+                    "git ls-remote $(printf -- --upload-pack=sh) .", "git ls-remote -q $OPT", "git ls-remote --sort refname $OPT",
+                    "git fetch $OPT r", "git fetch r $OPT", "git fetch --depth 1 r $B", "git fetch -q $OPT",
+                    "git difftool $OPT", "git archive $OPT HEAD", "git send-email $OPT p", "git web--browse $OPT u",
+                    "git instaweb $OPT"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, needle="")
+        for cmd in ("git ls-remote $OPT .", "git fetch r $OPT"):
+            with self.subTest(cmd):
+                r = self.assertRefused(cmd, "spell the words out")
+                self.assertIn("end git's options with `--` before the word", r.reason)
+
+    def test_a_value_the_line_settles_is_read_as_that_value(self):
+        for cmd in ("OPT=--upload-pack=sh; git ls-remote $OPT .", "B=--upload-pack=sh; git fetch r $B"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd)
+                self.assertIn("--upload-pack=sh", r.reason)
+        for ok in ("OPT=--tags; git fetch $OPT r", "R=origin; git fetch $R", "OPT=--heads; git ls-remote $OPT .",
+                   "U=host:r; git ls-remote $U", "for r in origin upstream; do git fetch -- $r; done"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+        # A loop whose words may be options binds no value (shell/loop_bindings reads none that may start with `-`), so
+        # its variable is unsettled where git's words are read, as on SPD-089's verbs, and refuses a member; `--` is the
+        # respelling the reason names.  A loop over spelled operands is read per value (test_269_...).
+        for cmd in ("for o in --tags --upload-pack=sh; do git fetch $o r; done", "for o in -o; do git archive $o HEAD; done",
+                    "for r in origin -o; do git fetch $r; done"):
+            with self.subTest(cmd):
+                r = self.refused_for_members(cmd, needle="spell the words out")
+                self.assertIn("end git's options with `--` before the word", r.reason)
+
+    def test_269_a_loop_over_spelled_operands_is_read_per_value(self):
+        """SPD-269, handed on by SPD-171: `for r in origin upstream; do git fetch $r; done` was refused a member, the loop's
+        variable read as an unsettled leading expansion where fetch reads options.  shell/loop_bindings settles a for
+        loop over spelled words to one value per word, none of which may start with `-` (loop_values), so the word is read
+        once per value (expansions.resolve_expansion), each the operand it is, as the write channels read it (SPD-146)."""
+        for ok in ("for r in origin upstream; do git fetch $r; done", 'for r in origin; do git fetch "$r"; done',
+                   "for r in origin upstream; do git fetch ${r} main; done", "for r in origin upstream; do git fetch -q $r; done",
+                   "for r in origin upstream; do git ls-remote $r; done", "for r in origin; do git archive $r; done",
+                   "R=--upload-pack=sh; for r in origin; do git fetch $r; done", "for r in origin; do git fetch $r; git fetch $r x; done"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, AGENT_C)
+                self.assertSilent(ok, agent_id=None)
+        # each value is read where it stands, as though spelled: the verb it names, and the option a spelled word beside it is
+        self.refused_for_members("for v in push; do git $v origin; done")
+        self.refused_for_members("for r in origin; do git fetch --upload-pack=sh $r; done")
+        # a word the loop does not settle, after the loop, or in a function body the loop defines, is read as before
+        for cmd in ("for r in $(cat remotes); do git fetch $r; done", "for r in origin $R; do git fetch $r; done",
+                    "for r in origin; do :; done; git fetch $r", "for r in origin; do f() { git fetch $r; }; done"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, needle="spell the words out")
+
+    def test_where_git_reads_no_option_the_word_is_left_as_spelled(self):
+        # After `--`, after ls-remote's repository, and as the value a spelled option takes as the next word (`git
+        # fetch -h`, `git ls-remote -h`: --depth <depth>, -j <n>, --sort <key>, -o <server-specific> ...); and --output on
+        # a verb with no entry of its own, which Eric's call leaves alone.
+        for ok in ("git ls-remote origin $REF", "git ls-remote -- $URL", "git ls-remote --sort $K origin", "git ls-remote -o $X r",
+                   "git fetch -- $R", "git fetch r -- $B", "git fetch --depth $N r", "git fetch -j $N r", "git fetch --dep $N r",
+                   "git fetch --negotiation-tip $T r", "git fetch --tags r", "git ls-remote --heads .",
+                   "git diff $A $B", "git log $OPT", "git diff $OPT", "git grep -e $P", "git grep -n foo $R"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+    def test_grep_s_pattern_may_become_its_pager_option(self):
+        """grep stops reading options at its pattern (`git grep x --bogus-opt`: "option '--bogus-opt' must come before
+        non-option arguments", git 2.54.0), so the pattern's own place is the one a leading expansion may become -O in
+        (`P=-Ovi` runs vi); Spud's decision on proposal 373 reads it like the other verbs' (SPD-171).  `-e` and `--` keep
+        the word a pattern: `git grep -- --bogus` matched the text --bogus."""
+        r = self.refused_for_members("git grep $P", needle="spell the words out")
+        self.assertIn("end git's options with `--` before the word", r.reason)
+        r = self.refused_for_members("P=-Ovi; git grep $P")
+        self.assertIn("grep -Ovi", r.reason)  # the value the line settles is read as the option it is
+        for ok in ('git grep -e "$P"', 'git grep -- "$P"', "git grep foo", "git grep -n foo $R", "P=foo; git grep $P"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
 
 # The GIT_TRACE* siblings, probed on git 2.54.0 (Apple Git-157) in the scratchpad, each set to an absolute path with a
 # plain `git status`: GIT_TRACE, GIT_TRACE_PERFORMANCE, GIT_TRACE_SETUP, GIT_TRACE_PACK_ACCESS, GIT_TRACE_REFS,
@@ -1759,7 +1849,9 @@ class GitFileWriteTest(BashHookCase):
         note = "%s/ledger/tickets/SPD-001.md" % self.home.path
         for line, long, short in self.FILE_OPTION_LINES:
             if line.startswith("git log"):
-                continue  # a verb with no entry: its words are read only where spelled with a leading `-` (below)
+                # --output on a verb with no entry of its own: Eric's call on SPD-171 (2026-09-24) reads a word there only
+                # where it is spelled with a leading `-` (below), so `git diff $A $B` and `git log $OPT` stay a member's
+                continue
             command = line.format(opt="$OPT")
             self.refused_to_members(command)
             # format-patch, bugreport and diagnose with no -o write where they run (SPD-093), and mailsplit with none writes

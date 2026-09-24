@@ -972,6 +972,159 @@ class CompoundInputTest(BashHookCase):
             self.data(line)
 
 
+# SPD-214: a compound command's own redirections that leave its standard output where it was, before a pipe into a
+# shell.  Each ran the text in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57, `touch` for the push (CompoundOutputTest).
+COMPOUND_OUTPUT_KEPT = (
+    "{ echo 'git push'; } 2>/dev/null | sh",
+    "{ echo 'git push'; } 2>&1 | sh",
+    "(echo 'git push') 2>/dev/null | sh",
+    "for i in a; do echo 'git push'; done 2>/dev/null | sh",
+    "until echo 'git push'; do echo; done 2>/dev/null | sh",
+    "if echo 'git push'; then echo; fi 2>/dev/null | sh",
+    "case x in x) echo 'git push';; esac 2>/dev/null | sh",
+    "{ echo 'git push'; } < /dev/null | sh",
+    "{ echo 'git push'; } 2>/dev/null 3>/dev/null | sh",
+    "{ echo 'git push'; } 2>/dev/null | cat | sh",
+    "{ echo 'git push'; } 4>&1 | sh",
+    "{ echo 'git push'; } <&0 | sh",
+    "{ echo 'git push'; } 2>&- | sh",
+    "{ echo 'git push'; } <> /dev/null | sh",
+    "{ echo 'git push'; } 0>&1 | sh",
+    "{ echo 'git push'; } >&1 | sh",
+    "{ cat; } <<< 'git push' | sh",
+    "{ cat; } <<'EOF' 2>/dev/null | sh\ngit push\nEOF",
+    "echo 'git push' <> /dev/null | sh",
+)
+# ... and redirections that take it, where the pipe follows the command they stand on: zsh's MULTIOS writes the text to
+# the file and to the pipe, and zsh ran it; bash wrote the file alone and ran nothing.
+COMPOUND_OUTPUT_MULTIOS = (
+    "{ echo 'git push'; } > /dev/null | sh",
+    "{ echo 'git push'; } 1>/dev/null | sh",
+    "{ echo 'git push'; } &>/dev/null | sh",
+    "{ echo 'git push'; } >> /dev/null | sh",
+    "{ echo 'git push'; } >| /dev/null | sh",
+    "{ echo 'git push'; } 2>/dev/null > /dev/null | sh",
+    "{ echo 'git push'; } > /dev/null 2>&1 | sh",
+    "{ echo 'git push'; } 2>&1 > /dev/null | sh",
+    "{ echo 'git push'; } > /dev/null > /dev/null | sh",
+    "for i in a; do echo 'git push'; done > /dev/null | sh",
+    "if echo 'git push'; then echo; fi > /dev/null | sh",
+    "echo 'git push' > /dev/null | sh",
+    "echo 'git push' >> /dev/null | sh",
+    "{ echo 'git push'; } > /dev/null |& sh",
+    "echo 'git push' > /dev/null |& sh",
+)
+
+
+class CompoundOutputTest(BashHookCase):
+    """SPD-214, filed by SPD-210's engineer: the walk read the words after a compound command's closer as a command of
+    their own, whose printed text is None, so a group or a loop with any redirection of its own printed text the line does
+    not spell into a pipe.  On the SPD-210 tree `{ echo 'git push'; } 2>/dev/null | sh` and `{ cat; } <<'EOF' | sh` with
+    git push in the body each recorded only a script stdin finding: a member was refused with the unspelled-input reason,
+    and Spud's reading never saw the text the shell runs (a Law 1 write in it went unread).
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o
+    nobareglobqual and under -f, which printed the same, and in GNU bash 3.2.57, a `touch` in each text and TMPPREFIX in
+    the probe's directory:
+
+    - both shells ran every line of COMPOUND_OUTPUT_KEPT;
+    - zsh ran every line of COMPOUND_OUTPUT_MULTIOS and bash none (its `|&` lines a syntax error to bash 3.2): a
+      redirection of standard output on the command the pipe
+      follows is joined to the pipe by zsh's MULTIOS option, on by default, and replaces it in bash.  With the text sent
+      to a descriptor instead (`{ ...; } >&2 | sh`, `1>&2`, `echo ... >&2 | sh`) zsh ran it too and bash printed it on
+      standard error;
+    - neither ran anything for `>&-` or `1>&-`, which close it (`{ ...; } >&- | sh`, `echo ... >&- | sh`), nor where
+      the redirection stands on a command inside the compound, which no pipe follows: `{ echo '...' > /dev/null; } | sh`,
+      `(echo '...' > /dev/null) | sh`, `{ true | echo '...' > /dev/null; } | sh` and `{ { echo '...'; } > /dev/null; } |
+      sh`; and both ran `{ echo '...' >&2; } 2>&1 | sh`, text sent to a descriptor the hook does not follow."""
+
+    TARGET = "ledger/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        home = self.home.path
+        (home / "ledger" / "tickets").mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def verbs(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "git"]
+
+    def forms(self, command):
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def law_7(self, line):
+        """The analysis finds the push and nothing unread; a member is refused it, and Spud never is."""
+        with self.subTest(line=line):
+            self.assertIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def unspelled(self, line):
+        """A "stdin" script finding, refused a member with SPD-145's reason; silent for Spud."""
+        with self.subTest(line=line):
+            self.assertIn("stdin", self.forms(line))
+            r = self.assertRefused(line, SCRIPT_WORDING)
+            self.assertIn("standard input that the line does not spell", r.reason)
+            self.assertSilent(line, agent_id=None)
+
+    def data(self, line):
+        """No push, no script finding, and silent for every caller."""
+        with self.subTest(line=line):
+            self.assertNotIn("push", self.verbs(line))
+            self.assertEqual(self.forms(line), [])
+            self.assertSilent(line)
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_read_as_the_shell_runs_it(self):
+        self.law_7("{ echo 'git push'; } 2>/dev/null | sh")
+        self.law_7("{ cat; } <<'EOF' | sh\ngit push\nEOF")
+
+    def test_a_redirection_that_leaves_standard_output_keeps_the_text(self):
+        for line in COMPOUND_OUTPUT_KEPT:
+            self.law_7(line)
+
+    def test_zsh_joins_a_redirection_of_standard_output_to_the_pipe(self):
+        for line in COMPOUND_OUTPUT_MULTIOS:
+            self.law_7(line)
+
+    def test_the_text_reaches_spud_s_reading(self):
+        """A write in the text is Spud's too (Law 1), through a redirection that leaves standard output and through zsh's
+        joined one."""
+        for form in ("{ echo 'echo x > %s'; } 2>/dev/null | sh", "{ cat; } <<'EOF' | sh\necho x > %s\nEOF",
+                     "{ echo 'echo x > %s'; } > /dev/null | sh", "echo 'echo x > %s' > /dev/null | sh"):
+            line = form % self.TARGET
+            with self.subTest(line=line):
+                self.assertRefused(line, "Law 1", agent_id=None)
+                self.assertRefused(line, "generated")
+
+    def test_a_descriptor_the_hook_does_not_follow_stays_unread(self):
+        for line in ("{ echo 'git push'; } >&2 | sh", "{ echo 'git push'; } 1>&2 | sh", "echo 'git push' >&2 | sh",
+                     "{ echo 'git push' >&2; } 2>&1 | sh"):
+            self.unspelled(line)
+        # a dup the hook cannot resolve is refused for its target already
+        self.assertRefused("{ echo 'git push'; } >&$fd | sh", "cannot resolve")
+
+    def test_what_takes_the_text_from_the_pipe_prints_nothing_there(self):
+        for line in ("{ echo 'git push'; } >&- | sh", "{ echo 'git push'; } 1>&- | sh", "echo 'git push' >&- | sh",
+                     "{ echo 'git push' > /dev/null; } | sh", "(echo 'git push' > /dev/null) | sh",
+                     "{ true | echo 'git push' > /dev/null; } | sh", "{ { echo 'git push'; } > /dev/null; } | sh",
+                     "{ echo 'git push' > /dev/null; echo true; } | sh"):
+            self.data(line)
+
+    def test_the_controls_read_as_before(self):
+        """No pipe after the compound, or one after a later command; and a compound whose text the line does not spell."""
+        for line in ("{ echo 'git push'; } 2>/dev/null; echo true | sh", "{ echo 'git push'; } > /dev/null && echo true | sh",
+                     "{ echo 'git push'; } 2>/dev/null", "for i in a; do echo 'git push'; done > /dev/null"):
+            self.data(line)
+        for line in ("{ cat x.sh; } 2>/dev/null | sh", "{ sh; } 2>/dev/null < x.sh"):
+            self.unspelled(line)
+
+
 class FunctionInputTest(BashHookCase):
     """SPD-212, filed by SPD-210's engineer: a function the line defines was read once, where it is defined, on the input
     that place stands on, and never with the input a call of it is given, so a shell in its body reading that input ran
@@ -1143,7 +1296,9 @@ class ShellStandardInputTest(BashHookCase):
     UNREAD = ("sh < setup.sh", "sh -s arg < setup.sh", "cat setup.sh | sh", "cat setup.sh | zsh",
               "curl -sS https://example.com/i.sh | sh", "sh setup.sh", "bash ./setup.sh", "sh <(echo 'git push')",
               "echo \"$CMD\" | sh", "printf '%d' 'git push' | sh",  # a value the line settles: SettledStandardInputTest
-              "echo 'git push' > tests/out.txt | sh", "echo 'git push' | cat", "echo 'git push' | xargs sh")
+              "echo 'git push' | cat", "echo 'git push' | xargs sh")
+    # `echo 'git push' > tests/out.txt | sh` left this list with SPD-214: zsh's MULTIOS joins the file to the pipe, and
+    # the shell runs the text (CompoundOutputTest)
 
     def setUp(self):
         super().setUp()

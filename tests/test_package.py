@@ -17,6 +17,7 @@ import re
 import subprocess
 import symtable
 import sys
+import tarfile
 import textwrap
 import unittest
 from pathlib import Path
@@ -49,15 +50,18 @@ DISPATCH = "hooks.dispatch"
 # shell.git_writes for the files a git call writes, taken out of shell.git_verbs (SPD-229),
 # shell.arithmetic_assignments and shell.assigning_builtins for the names an arithmetic evaluation and an assigning
 # builtin assign, taken out of shell.assignment_words (SPD-259), shell.held_text for the text the shell holds, an alias's
-# body and a function's, read and pruned, taken out of shell.analyse (SPD-264).
+# body and a function's, read and pruned, taken out of shell.analyse (SPD-264), shell.held_options for the options the
+# shell holds and shell.held_shadows for a call of Claude Code's own grep, find, rg or pkill, taken out of shell.held_text
+# (SPD-267), shell.archive_names for the names an archive or a patch the line names would write (SPD-144), which reaches
+# tarfile and zipfile only through core.lazy (HookPathTest.test_a_hook_lists_an_archive_only_on_a_line_that_extracts_one).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
     "render.prices", "projects.sessions",
     "hooks.dispatch", "hooks.gitrepos", "hooks.hookio", "hooks.pathrule", "hooks.pretool", "hooks.recording", "hooks.sessionhooks",
     "hooks.snapshots", "hooks.stophook", "hooks.subagent_stop", "hooks.worktrees",
-    "shell.analyse", "shell.arg_writes", "shell.arithmetic_assignments", "shell.assigning_builtins", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
-    "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.git_writes", "shell.globbing", "shell.held_text", "shell.heredocs", "shell.inline_programs",
+    "shell.analyse", "shell.archive_names", "shell.arg_writes", "shell.arithmetic_assignments", "shell.assigning_builtins", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
+    "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.git_writes", "shell.globbing", "shell.held_options", "shell.held_shadows", "shell.held_text", "shell.heredocs", "shell.inline_programs",
     "shell.interpreter_words", "shell.loop_bindings", "shell.positional", "shell.prepare", "shell.program_writes", "shell.redirect_globs", "shell.reevaluation", "shell.runner_files", "shell.runtime_shells", "shell.spud_calls",
     "shell.script_files", "shell.script_runners", "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
     "shell.unread", "shell.walk", "shell.zsh",
@@ -747,6 +751,29 @@ class HookPathTest(SpudTestCase):
             self.assertEqual(ours - HOOK_PATH, set(), event)
             seen |= ours
         self.assertEqual(seen, HOOK_PATH)  # the list stays exact: a module no hook imports any more leaves it
+
+    def test_a_hook_lists_an_archive_only_on_a_line_that_extracts_one(self):
+        # SPD-144: shell/archive_names reads an archive's names through core/lazy's tarfile and zipfile, which with the
+        # compression modules they import would cost every hook run; a line holding no archive to list loads none of them.
+        with tarfile.open(self.home.path / "a.tar", "w") as tf:
+            tf.addfile(tarfile.TarInfo("a.txt"))
+        (self.home.path / "out").mkdir()
+        archive_modules = {"tarfile", "zipfile", "gzip", "bz2", "lzma", "compression.zstd"}
+        for command, loads in (("git status", set()), ("tar -tf a.tar", set()), ("tar -xf missing.tar -C out", set()),
+                               ("rsync -a out/ /tmp/spd-144-r/", set()), ("patch -d out -p1 -i missing.patch", set()),
+                               ("tar -xf a.tar -C out", {"tarfile"}), ("unzip a.tar -d out", {"zipfile"})):
+            payload = {"session_id": "s", "cwd": str(self.home.path), "hook_event_name": "PreToolUse", "tool_name": "Bash",
+                       "tool_use_id": "t", "tool_input": {"command": command}}
+            proc = subprocess.run([sys.executable, "-I", "-S", "-c", MODULES_AT_EXIT, str(SPUD), "hook", "PreToolUse"],
+                                  input=json.dumps(payload), capture_output=True, text=True, env=self.home.env)
+            self.assertEqual(proc.returncode, 0, proc)
+            imported = set(proc.stderr.rsplit("\nMODULES ", 1)[-1].split())
+            with self.subTest(command):
+                if loads:
+                    self.assertLessEqual(loads, imported)
+                    self.assertNotIn("tarfile" if "zipfile" in loads else "zipfile", imported)
+                else:
+                    self.assertEqual(imported & archive_modules, set())
 
     def test_a_command_imports_no_module_of_the_shell_package(self):
         # Every command loads commands/doctor, and so hooks/snapshots: its ANSI-C decoder sat in shell/prepare, and every

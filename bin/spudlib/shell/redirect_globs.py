@@ -1,4 +1,8 @@
-"""shell/redirect_globs: The files a redirection glob opens."""
+"""shell/redirect_globs: The files a redirection glob opens.
+
+Kept whole past the size look-again point (SPD-179): one reading of a zsh or bash glob, from its braces and qualifiers
+through each segment's regex (groups, ranges, brackets and their classes) to the bounded scan, where a change to how zsh
+reads a pattern lands in one place."""
 
 import os
 import re
@@ -121,22 +125,82 @@ def numeric_range_regex(lo, hi):
     return "0*(?:%s)" % "|".join(spans)
 
 
-_GROUP_REGEX = {syntax.ZSH_OPEN: "(?:", syntax.ZSH_BAR: "|", syntax.ZSH_CLOSE: ")"}
+# The characters a bracket's POSIX class matches, as a regex set's body: the classes zsh 5.9 and bash 3.2 share, and zsh's
+# own IDENT, IFS, IFSSPACE and WORD (probed: `/bin/ec[[:alpha:]]o`, `[[:lower:]]`, `[![:digit:]]`, `[[:IDENT:]]` and
+# `[[:WORD:]]` ran echo).  A letter class also takes every character past ASCII, and WORD every printable one (its
+# WORDCHARS are the shell's to set): more names matched.  A name zsh has no class for matches nothing (`[[:bogus:]]`
+# matched no file), as INCOMPLETE and INVALID match no whole character.
+_WIDE = "\u0080-\U0010ffff"
+_POSIX_CLASSES = {
+    "alpha": "a-zA-Z" + _WIDE, "alnum": "a-zA-Z0-9" + _WIDE, "lower": "a-z" + _WIDE, "upper": "A-Z" + _WIDE,
+    "digit": "0-9", "xdigit": "0-9A-Fa-f", "blank": " \t", "space": " \t\n\r\f\v", "cntrl": "\x00-\x1f\x7f",
+    "punct": re.escape("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"), "graph": "!-~" + _WIDE, "print": " -~" + _WIDE,
+    "ascii": "\x00-\x7f", "IDENT": "a-zA-Z0-9_" + _WIDE, "WORD": "!-~" + _WIDE, "IFS": " \t\n\x00", "IFSSPACE": " \t\n",
+    "INCOMPLETE": "", "INVALID": "",
+}
+_NO_NAME = r"(?!)"  # a pattern zsh calls bad, which matches no file and so no name
+
+
+def _bracket_regex(seg, i):
+    """(the regex for the bracket expression opening at seg[i], the index after it), or None when no `]` closes it (a
+    literal `[`, as both shells read it, probed).  A `]` first, or first after `!` or `^`, is a member; `[:name:]` is a
+    class (_POSIX_CLASSES); a range whose ends are reversed matches nothing (zsh matched no file for `[z-a]`)."""
+    n, j = len(seg), i + 1
+    negate = j < n and seg[j] in "!^"
+    j += negate
+    items, first = [], True
+    while j < n and (seg[j] != "]" or first):
+        first = False
+        named = re.match(r"\[:(\w*):\]", seg[j : j + 16]) if seg.startswith("[:", j) else None
+        if named:
+            items.append(_POSIX_CLASSES.get(named.group(1), ""))
+            j += named.end()
+            continue
+        lo = syntax._SENTINEL_TEXT.get(seg[j], seg[j])
+        if j + 2 < n and seg[j + 1] == "-" and seg[j + 2] != "]":
+            hi = syntax._SENTINEL_TEXT.get(seg[j + 2], seg[j + 2])
+            if lo <= hi:
+                items.append(re.escape(lo) + "-" + re.escape(hi))
+            j += 3
+            continue
+        items.append(re.escape(lo))
+        j += 1
+    if j >= n:
+        return None
+    body = "".join(items)
+    if not body:
+        return ("[^/]" if negate else _NO_NAME), j + 1
+    return ("[^%s]" if negate else "[%s]") % body, j + 1
 
 
 def _segment_regex(seg):
     """A regex matching one filename against a masked glob segment: bare `*` `?` `[...]` glob, a zsh group is an alternation
     and a zsh range a number in range, a quoted sentinel or any other character is literal.  An unbalanced `[` is
-    a literal bracket, as the shells read it (probed).  A segment the regex engine rejects matches any name: more checked."""
-    out, i, n = [], 0, len(seg)
+    a literal bracket, as the shells read it (probed).  What zsh calls a bad pattern matches no name, as zsh opens no file
+    and runs no command for it (probed in 5.9, -f and -f -o nobareglobqual): a group left open or closed twice, or holding
+    a `/` outside a bracket (`time(ls /tmp)`, `e(1|/)`; `(e|[/])cho` is read, its bracket matching no name).  None when
+    the regex engine still cannot compile it (nesting too deep): what it matches is more than the reader can say."""
+    out, i, n, depth = [], 0, len(seg), 0
     while i < n:
         c = seg[i]
         if c in syntax._GLOB_UNSENTINEL:
             out.append(re.escape(syntax._GLOB_UNSENTINEL[c]))
             i += 1
-        elif c in _GROUP_REGEX:
-            out.append(_GROUP_REGEX[c])
+        elif c == syntax.ZSH_OPEN:
+            depth += 1
+            out.append("(?:")
             i += 1
+        elif c == syntax.ZSH_CLOSE:
+            if not depth:
+                return re.compile(_NO_NAME)
+            depth -= 1
+            out.append(")")
+            i += 1
+        elif c == syntax.ZSH_BAR:
+            out.append("|")
+            i += 1
+        elif c == "/" and depth:
+            return re.compile(_NO_NAME)
         elif c == syntax.ZSH_RANGE_OPEN and syntax.ZSH_RANGE_CLOSE in seg[i:]:
             end = seg.index(syntax.ZSH_RANGE_CLOSE, i)
             lo, _, hi = seg[i + 1 : end].partition("-")
@@ -152,36 +216,59 @@ def _segment_regex(seg):
             out.append("[^/]")
             i += 1
         elif c == "[":
-            j = i + 1
-            if j < n and seg[j] in "!^":
-                j += 1
-            if j < n and seg[j] == "]":
-                j += 1
-            while j < n and seg[j] != "]":
-                j += 1
-            if j >= n:
+            found = _bracket_regex(seg, i)
+            if found is None:
                 out.append(re.escape("["))
                 i += 1
             else:
-                inner = "".join(syntax._SENTINEL_TEXT.get(ch, ch) for ch in seg[i + 1:j])
-                if inner.startswith(("!", "^")):
-                    inner = "^" + inner[1:]
-                out.append("[" + inner.replace("\\", "\\\\") + "]")
-                i = j + 1
+                out.append(found[0])
+                i = found[1]
         else:
             out.append(re.escape(c))
             i += 1
+    if depth:
+        return re.compile(_NO_NAME)
     try:
-        return re.compile("".join(out) + r"\Z")
-    except (re.error, RecursionError, OverflowError):  # a group a bracket swallowed half of, or nesting too deep to compile
-        return re.compile(r"[^/]*\Z")
+        return re.compile("(?:" + "".join(out) + r")\Z")
+    except (re.error, RecursionError, OverflowError):  # nesting too deep to compile
+        return None
+
+
+def path_segments(pattern):
+    """A masked pattern's path segments, split where zsh splits it: at each `/` outside every group, a bracket's own
+    included (`d1[/]d2/f` matched nothing with d1/d2/f present), and inside a group at none, since a `/` in a group's
+    bracket is the bracket's (`echo x > d1/d2/(f|[/])` wrote d1/d2/f); None when a group holds a `/` outside a bracket, a
+    bad pattern zsh opens nothing for (probed)."""
+    if syntax.ZSH_OPEN not in pattern and syntax.ZSH_CLOSE not in pattern:
+        return pattern.split("/")
+    parts, depth, start, i, n = [], 0, 0, 0, len(pattern)
+    while i < n:
+        c = pattern[i]
+        if c == syntax.ZSH_OPEN:
+            depth += 1
+        elif c == syntax.ZSH_CLOSE:
+            depth -= 1
+        elif c == "[" and depth > 0:
+            found = _bracket_regex(pattern, i)
+            if found is not None:
+                i = found[1]
+                continue
+        elif c == "/":
+            if depth > 0:
+                return None
+            parts.append(pattern[start:i])
+            start = i + 1
+        i += 1
+    parts.append(pattern[start:])
+    return parts
 
 
 def bounded_glob(pattern):
     """The existing files a masked absolute glob pattern names, and whether the scan budget was reached.  `**` matches
     directories recursively; the scan is bounded by GLOB_SCAN_CAP entries and GLOB_MATCH_CAP matches so a recursive glob
     never walks a large tree without limit, and stops reporting the bound was hit instead.  A zsh group holding a
-    `/`, or one left open, is a bad pattern zsh opens nothing for (probed)."""
+    `/` outside a bracket, or one left open, is a bad pattern zsh opens nothing for (probed; path_segments).  A segment
+    the reader cannot compile (_segment_regex) is read as every name there, and the bound as reached."""
     depth = 0
     for c in pattern:
         if c == syntax.ZSH_OPEN:
@@ -190,13 +277,12 @@ def bounded_glob(pattern):
             depth -= 1
             if depth < 0:
                 return [], False
-        elif c == "/" and depth:
-            return [], False
-    if depth:
+    segments = path_segments(pattern)
+    if depth or segments is None:
         return [], False
-    parts = [p for p in pattern.split("/") if p != ""]
+    parts = [p for p in segments if p != ""]
     frontier = {"/" if pattern.startswith("/") else os.getcwd()}
-    scanned, capped = 0, False
+    scanned, capped, unreadable = 0, False, False
     for idx, part in enumerate(parts):
         if capped:
             break
@@ -226,6 +312,8 @@ def bounded_glob(pattern):
             frontier = seen
             continue
         rx = _segment_regex(part)
+        if rx is None:
+            rx, unreadable = re.compile(r"[^/]*\Z"), True
         nf = set()
         for d in frontier:
             if capped:
@@ -247,7 +335,7 @@ def bounded_glob(pattern):
     matches = sorted(m for m in frontier if os.path.lexists(m))
     if len(matches) > syntax.GLOB_MATCH_CAP:
         return matches[:syntax.GLOB_MATCH_CAP], True
-    return matches, capped
+    return matches, capped or unreadable
 
 
 def expand_redirect_target(target, cwds):

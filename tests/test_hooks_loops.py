@@ -1466,24 +1466,25 @@ class GluedReservedWordTest(BashHookCase):
     def member_payloads(self):
         """(command, the reason a member is refused for it, the directory it runs in): Law 7, Law 6, Law 5's --as, and Law 1
         through a redirection and through tee -- none holding a quote, so each fits between a qualifier's quotes.  The
-        writes run in the tickets directory, their targets holding no `/`: in a glued word's group a `/` is a bad pattern
-        to zsh (probed: `else(e:'echo x > sub/t':)` failed so under -f -o nobareglobqual, while -f ran the code), and the
-        hook's reading of a glob command word takes it for a directory's, the pattern after it naming any command, the
-        database's first -- refused all the same, but in the database's words rather than the path rule's."""
-        spud, tickets = self.spud_cli, str(self.home.path / "ledger" / "tickets")
+        writes name ledger/tickets/SPD-001.md from the home: in a glued word's group a `/` is a bad pattern to zsh (probed:
+        `else(e:'echo x > sub/t':)` failed so under -f -o nobareglobqual, while -f ran the code), and since SPD-179 the
+        hook's reading of the glob command word keeps that `/` in its last segment, which names no command, so the code's
+        write is refused in the path rule's words.  Before it the word was split inside the group, the pattern after the
+        `/` named any command, the database's first, and these writes ran in the tickets directory to hold no `/`."""
+        spud = self.spud_cli
         return (("git push", "Law 7", None),
                 ("%s ticket new --title x" % spud, "Law 6", None),
                 ("%s --as spud member log hi" % spud, "Law 6", None),
                 ("%s --as %s member log hi" % (spud, AGENT_B), "--as", None),
-                ("echo x > SPD-001.md", "generated", tickets),
-                ("echo x | tee SPD-001.md", "generated", tickets))
+                ("echo x > ledger/tickets/SPD-001.md", "generated", None),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated", None))
 
     def spud_payloads(self):
         """Spud is never refused for git; these are the checks that do apply to him."""
-        spud, tickets = self.spud_cli, str(self.home.path / "ledger" / "tickets")
+        spud = self.spud_cli
         return (("%s --as %s member log hi" % (spud, AGENT_A), "--as", None),
-                ("echo x > SPD-001.md", "Law 1", tickets),
-                ("echo x | tee SPD-001.md", "Law 1", tickets))
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1", None),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1", None))
 
     def every_payload(self, form):
         for command, needle, cwd in self.member_payloads():
@@ -1513,11 +1514,11 @@ class GluedReservedWordTest(BashHookCase):
         self.assertIn("git push", r.reason)
         self.assertRefused(line, "Law 7", AGENT_C)
         self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
-        # ... and a write there is held to the path rule (in the tickets directory: see member_payloads)
-        line = "if true; then :; else(e:'echo x > SPD-001.md':); fi"
-        tickets = str(self.home.path / "ledger" / "tickets")
-        self.assertRefused(line, "Law 1", None, tickets)
-        self.assertRefused(line, "generated", AGENT_C, tickets)
+        # ... and a write there is held to the path rule, in its own words (SPD-179: see member_payloads)
+        line = "if true; then :; else(e:'echo x > ledger/tickets/SPD-001.md':); fi"
+        self.assertNotIn("db", self.analysis(line).kinds)
+        self.assertRefused(line, "Law 1", None)
+        self.assertRefused(line, "generated", AGENT_C)
         line = "if true; then :; else(e:'echo x > k.txt':); fi"
         self.assertRefused(line, "deliverables", AGENT_A)  # AGENT_A plans tests/** and bin/spud
         self.assertSilent(line, AGENT_C)
@@ -1764,13 +1765,12 @@ class ForArithmeticBodyTest(BashHookCase):
         self.assertIn("git push", r.reason)
         self.assertRefused(line, "Law 7", AGENT_C)
         self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
-        # ... and a write there is held to the path rule, run in the tickets directory as GluedReservedWordTest runs its
-        # own, so the code holds no `/`
-        line = "for (( i=0; i<1; i++ )) ls (b|c)(e:'echo x > SPD-001.md':)"
-        tickets = str(self.home.path / "ledger" / "tickets")
-        self.assertRefused(line, "Law 1", None, tickets)
-        self.assertRefused(line, "generated", AGENT_C, tickets)
-        self.assertRefused(line, "generated", AGENT_A, tickets)
+        # ... and a write there is held to the path rule, from the home as GluedReservedWordTest runs its own since SPD-179
+        line = "for (( i=0; i<1; i++ )) ls (b|c)(e:'echo x > ledger/tickets/SPD-001.md':)"
+        self.assertNotIn("db", self.analysis(line).kinds)
+        self.assertRefused(line, "Law 1", None)
+        self.assertRefused(line, "generated", AGENT_C)
+        self.assertRefused(line, "generated", AGENT_A)
 
     def test_the_body_reads_as_the_command_does_alone(self):
         """The loop runs its body, and its header changes none of the body's words: every finding, redirection target and
@@ -2389,6 +2389,81 @@ class ForSelectHeaderTest(BashHookCase):
             with self.subTest(line=line):
                 self.assertRefused(line, "cannot resolve")
                 self.assertRefused(line, "cannot resolve", AGENT_C)
+
+    # -- SPD-269: a header assigns its names alone ---------------------------------------------------------------------
+    # Each spelling runs no command and has a variable x's name among its list's words.
+    LIST_SPELLS_X = ("for w in x; do :; done", "for w in x y; do true; done", "for w in x\ndo :; done", "for w (x) :",
+                     "for w ( x y ) true", "foreach w (x) true; end", "select w in x; do break; done", "select w (x) true",
+                     "for a b in x y; do :; done", "for a 1 (x y) :", "for in (x in) :", "for w in $x; do :; done",
+                     "for w in ${x} \"$x\" x.$x; do :; done", "for w in $(echo x); do :; done", "for w in; do :; done")
+
+    def test_a_list_word_leaves_the_variable_it_spells(self):
+        """SPD-269: ShellWalk.finish doubted every name any word of a for, select or foreach header spelled, the list's
+        words among them, so `x=note.txt; for w in x; do :; done; echo > $x` left `$x` unresolved, refused to every caller
+        (SPD-091), where the shells write note.txt: the list is expanded before the loop runs, and the header assigns only
+        its names (probed 2026-09-24 through tests/probes/shell_probe.py: `x=note.txt; for w in x; do :; done; echo $x` and
+        the same with `select w in x; do break; done` printed note.txt in zsh 5.9 -f, -f -o nobareglobqual and bash
+        3.2.57, and `for a b in x y` in both zsh).  The write is then held to the path rule as it is with no loop before it."""
+        for form in self.LIST_SPELLS_X:
+            line = "x=note.txt; %s; echo hi > $x" % form
+            with self.subTest(line=line):
+                self.assertEqual([t for t, _c in self.analysis(line).redirects], ["note.txt"])
+                self.assertNotIn("x", self.analysis(line).doubt)
+            self.path_rule(line)
+            line = "x=tests/zzone/k.py; %s; echo hi | tee $x" % form
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_the_loops_own_names_are_still_doubted(self):
+        """What a header does assign: its names, which hold the last word after the loop (`x=note.txt; for x in a b; do :;
+        done; echo $x` printed b in zsh 5.9 and bash 3.2.57), so a write naming one after the loop is unresolved, and in
+        the body it is read once per word as before (SPD-146)."""
+        for form in ("for x in a b; do :; done", "for x (a b) :", "foreach x (a b) true; end", "select x in a; do break; done",
+                     "for w x in a b; do :; done", "for x; do :; done", "for x do :; done", "for x in $(cat l); do :; done"):
+            line = "x=note.txt; %s; echo hi > $x" % form
+            with self.subTest(line=line):
+                self.assertIn("x", self.analysis(line).doubt)
+                self.assertEqual([t for t, _c in self.analysis(line).redirects], ["$x"])
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertRefused(line, "cannot resolve", agent_id)
+        line = "for f in note.txt tests/zzone/k.py; do echo hi > $f; done"
+        self.assertEqual([t for t, _c in self.analysis(line).redirects], ["note.txt", "tests/zzone/k.py"])
+        self.assertRefused(line, "deliverables")
+        self.assertSilent(line, AGENT_C)
+        self.assertSilent("for f in tests/zzone/a.py tests/zzone/b.py; do echo hi > $f; done")
+        # a list word the line does not settle leaves the name unknown in the body, as before
+        for line in ("for f in $(cat l); do echo hi > $f; done", "for f in $y a; do echo hi > $f; done"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertRefused(line, "cannot resolve", agent_id)
+
+    def test_a_list_words_own_assignment_is_read(self):
+        """A list word's expansion runs in the loop's shell before the loop, and what it assigns stands after it (`x=note.txt;
+        for f in $((x=5)); do :; done; echo $x` printed 5 in zsh 5.9 and bash 3.2.57): read as a command's words are, with
+        the loop's own assignments, which a compound command leaves doubted -- so no longer by the name the word spells,
+        and still a value the hook does not settle."""
+        for line in ("x=note.txt; for f in $((x=5)); do :; done; echo hi > $x", "x=note.txt; for f ($[x=5]) :; echo hi > $x",
+                     "x=note.txt; for f in $((y=x=5)); do :; done; echo hi > $x"):
+            with self.subTest(line=line):
+                self.assertIn("x", self.analysis(line).doubt)
+                self.assertRefused(line, "cannot resolve", AGENT_C)
+        line = "x=note.txt; for f in $((y=5)); do :; done; echo hi > $x"
+        self.assertEqual([t for t, _c in self.analysis(line).redirects], ["note.txt"])
+        # a list word's substitution is read as a command word's is, whatever that reading doubts
+        for body in ("$(x=7; echo q)", "$(echo x)", "`x=7`", "*(e:'x=7':)"):
+            with self.subTest(body=body):
+                self.assertEqual("x" in self.analysis("x=note.txt; for f in %s; do :; done" % body).doubt,
+                                 "x" in self.analysis("x=note.txt; echo %s" % body).doubt)
+        for line in ("x=note.txt; for f in ${x:=y}; do :; done; echo hi > $x",
+                     "x=note.txt; for f in ${x::=y}; do :; done; echo hi > $x"):
+            with self.subTest(line=line):
+                self.assertIn("x", self.analysis(line).doubt)
+                self.assertRefused(line, "cannot resolve", AGENT_C)
+        # an arithmetic header's expressions assign as the loop runs: its names stay doubted
+        line = "i=note.txt; for (( i=0; i<1; i++ )) true; echo hi > $i"
+        self.assertIn("i", self.analysis(line).doubt)
+        self.assertRefused(line, "cannot resolve", AGENT_C)
 
     # -- the loop model -----------------------------------------------------------------------------------------------
     def test_a_cd_in_the_body_is_read_as_a_loops(self):

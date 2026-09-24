@@ -712,6 +712,207 @@ class GlobCommandWordTest(BashHookCase):
         self.assertRefused("git push", "Law 7")
 
 
+class WrapperClusterGlobTest(BashHookCase):
+    """SPD-138: a glob inside a wrapper's option cluster is read as every cluster the wrapper's own getopt can take it for,
+    a value option included -- the letter that takes the rest of the word or the next word -- as a whole-word option glob
+    (`env -? ...`) already was.  env(1) and sudo(8) read a cluster with getopt: the first letter that takes a value ends it
+    (`env -iS 'echo hi'` split its string, probed with tests/probes/shell_probe.py).  A cluster whose letters the reader
+    cannot settle fails closed for a member (SPD-217); Spud's answers do not change.  AGENT_A plans tests/** and bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.planted = Path(tempfile.mkdtemp(prefix="spud-cluster-")).resolve()
+        self.addCleanup(shutil.rmtree, self.planted, True)
+        (self.planted / "-iS").write_text("", encoding="utf-8")  # the file zsh expands `-i?` to
+
+    def test_the_tickets_lines_are_refused_for_a_member(self):
+        lines = ("env -i? 'git push'", "env -v? 'git push'", "env -i? %s touch f" % self.out, "sudo -n? %s touch f" % self.out)
+        for cwd in (None, str(self.planted)):
+            for cmd in lines:
+                with self.subTest(cmd=cmd, cwd=cwd):
+                    self.assertRefused(cmd, "", AGENT_A, cwd)
+
+    def test_a_split_string_reached_through_a_cluster_names_the_push(self):
+        for cmd in ("env -i? 'git push'", "env -v? 'git push'", "env -i[S] 'git push'"):
+            with self.subTest(cmd):
+                self.assertIn("git push", self.assertRefused(cmd, "Law 7", AGENT_A).reason)
+
+    def test_spelled_clusters_and_a_whole_word_option_glob_read_as_today(self):
+        for ok in ("env -i ls", "env -iv ls", "env -i 'x'", "sudo -n ls", "nice -n 5 ls", "env -u X ls"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+        self.assertIn("git push", self.assertRefused("env -? 'git push'", "Law 7", AGENT_A).reason)
+        self.assertRefused("env -iS 'git push'", "Law 7", AGENT_A)
+
+    def test_spud_is_allowed_the_split_string_and_whole_word_lines(self):
+        # The git-push lines and the whole-word option glob read as before: Spud is never bound by a git finding.
+        for cmd in ("env -i? 'git push'", "env -v? 'git push'", "env -? 'git push'", "env -iS 'git push'"):
+            for cwd in (None, str(self.planted)):
+                with self.subTest(cmd=cmd, cwd=cwd):
+                    self.assertSilent(cmd, agent_id=None, cwd=cwd)
+
+    def test_arg_write_command_clusters_close_the_same_gap(self):
+        # Same kind, in scope: an arg-write command's getopt cluster (syntax.ARG_WRITE_COMMANDS' value letters) had the same
+        # gap.  `sed -n? '' f` can become `sed -ni '' f` (i=in-place, probed: BSD sed writes f), so a member is refused the
+        # in-place write it hid, while `sed -n '' f` (no in-place) stays silent.  Spud is not bound by an outside write.
+        target = "%s/x.txt" % self.out
+        self.assertRefused("sed -n? '' %s" % target, "write by argument", AGENT_A)
+        self.assertSilent("sed -n '' %s" % target)
+        for cwd in (None, str(self.planted)):
+            self.assertSilent("sed -n? '' %s" % target, agent_id=None, cwd=cwd)
+        self.assertSilent("sed -n? '' tests/keep.py")  # a deliverable in place: allowed
+
+    def test_spud_now_sees_the_write_the_cluster_hid(self):
+        # SPD-128's shape: `env -i? <dir> touch f` read <dir> as the command and recorded no write.  The cluster reading now
+        # reaches `env -iu <dir> touch f` (u=--unset), whose `touch f` runs in the cwd, so Spud earns Law 1 in the home for
+        # it (as `touch push` in the home already did) and is allowed where the cwd is outside every project.
+        for cmd in ("env -i? %s touch f" % self.out, "sudo -n? %s touch f" % self.out):
+            with self.subTest(cmd=cmd):
+                self.assertRefused(cmd, "Law 1", agent_id=None)  # cwd None: the home
+                self.assertSilent(cmd, agent_id=None, cwd=str(self.out))
+
+
+class GlobGroupSegmentTest(BashHookCase):
+    """SPD-179, filed by SPD-174's engineer: globbing.glob_readings split a command word at its last `/` even inside a zsh
+    group, and redirect_globs._segment_regex read a segment it could not compile -- the group's unbalanced close -- as
+    matching every name, the database's first: `time(ls /tmp)` and a write inside a glued word's qualifier code were
+    refused to members and Spud alike in the database's words, and Spud's harmless `else(e:'echo x > /tmp/k':)` too.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, and in GNU bash 3.2.57:
+
+    - a `/` in a group outside a bracket is a bad pattern in both zsh modes: `time(ls /tmp)` (-f: "number expected", its
+      group read as qualifiers), `else(e:'echo x > sub/t':)` under nobareglobqual (-f ran the code: sub/t written),
+      `echo e(1|/)`, `ech(o|/x) x`, `echo (a|b/c)d` and `/(bin/ec|x)ho x`; bash ran `time` and a subshell for the first;
+    - a `/` inside a bracket inside a group is not: `/bin/(e|[/])cho x` and `/bin/ec(h|[/])o x` ran echo, `echo d1/d(2|[/])/f`
+      printed d1/d2/f, and `echo x > d1/d2/(f|[/])` wrote d1/d2/f; a `/` inside a bracket outside every group still splits
+      the path (`echo d1[/]d2/f` matched nothing with d1/d2/f present); a group before a `/` is read as ever
+      (`/(bin|x)/echo x`, `/bin/(ech|x)o x` ran echo);
+    - a bracket's POSIX class matches as the class does, in both zsh modes and bash: `/bin/ec[[:alpha:]]o x`,
+      `[[:lower:]]`, `[![:digit:]]` and `[[:alpha:]-]` ran echo, and zsh's own `[[:IDENT:]]` and `[[:WORD:]]` too (bash
+      ran the word as spelled); a class zsh does not have (`[[:bogus:]]`) and a reversed range (`[z-a]`) match nothing in
+      zsh, and bash ran the word as spelled.  The regex read `[[:alpha:]]` as the set `[:alph` and a `]`, so `g[[:alpha:]]t
+      push` was read as no command at all, and `[z-a]` as a regex error, every name.
+
+    A command word is now split at its last `/` outside every group, a segment keeping a `/` inside a group matches no
+    name as zsh matches no file, a segment zsh calls a bad pattern matches none, a class matches as it does, and a segment
+    the reader still cannot compile makes the word a glob the hook cannot read.  AGENT_A plans tests/** and bin/spud;
+    AGENT_C plans **; Spud is never refused for git."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        for rel in ("ledger/tickets/SPD-001.md", "tests/keep.py", "docs/x.md"):
+            p = home / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+        self.out = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.m = load_spud_module()
+
+    def kinds(self, command):
+        return set(self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path))).kinds)
+
+    def assertNotDatabase(self, command, agent_id, cwd=None):
+        r = self.bash(command, agent_id, cwd)
+        self.assertNotIn("database", r.reason or "", (command, agent_id))
+        return r
+
+    def test_the_tickets_evidence(self):
+        for line in ("time(ls /tmp)", "else(e:'echo x > /tmp/k':)", "if true; then :; else(e:'echo x > /tmp/k':); fi"):
+            with self.subTest(line=line):
+                self.assertNotIn("db", self.kinds(line))
+                self.assertSilent(line, agent_id=None)
+                for agent_id in (AGENT_A, AGENT_C):
+                    self.assertNotDatabase(line, agent_id)
+        # zsh runs nothing for `time(ls /tmp)` and bash runs `time (ls /tmp)`: a member is refused for the word as spelled,
+        # a path run as a command, the one reading that runs a file
+        self.assertRefused("time(ls /tmp)", SCRIPT_WORDING, AGENT_C)
+        # a write in the code is the path rule's, in its own words
+        self.assertRefused("else(e:'echo x > %s/k':)" % self.out, "outside", AGENT_A)
+        self.assertSilent("else(e:'echo x > %s/k':)" % self.out, agent_id=None)
+        line = "if true; then :; else(e:'echo x > ledger/tickets/SPD-001.md':); fi"
+        self.assertNotIn("db", self.kinds(line))
+        self.assertRefused(line, "Law 1", agent_id=None)
+        self.assertRefused(line, "generated", AGENT_C)
+        self.assertRefused(line, "generated", AGENT_A)
+
+    def test_a_command_word_splits_at_its_last_slash_outside_a_group(self):
+        for cmd in ("/usr/bin/(g|[/])it push", "/usr/(bin|x)/g(i|x)t push", "/usr/bin/g(i|[/])t push", "g(i|[/])t push"):
+            with self.subTest(cmd):
+                self.assertNotIn("db", self.kinds(cmd))
+                r = self.assertRefused(cmd, "Law 7", AGENT_C)
+                self.assertIn("git push", r.reason)
+                self.assertSilent(cmd, agent_id=None)
+
+    def test_a_group_holding_a_slash_matches_no_command(self):
+        """zsh calls each a bad pattern and runs nothing, and bash rejects the `(`: no reading is the database or git."""
+        for cmd in ("g(i|/)t push", "/usr/bin/g(i|/x)t push", "/usr/(bin/g|x)it push", "/usr/bin/s(qlite3|/x)"):
+            with self.subTest(cmd):
+                kinds = self.kinds(cmd)
+                self.assertNotIn("db", kinds)
+                self.assertNotIn("git", kinds)
+                self.assertSilent(cmd, agent_id=None)
+                self.assertNotDatabase(cmd, AGENT_C)
+
+    def test_a_slash_in_a_bracket_inside_a_group_opens_its_files(self):
+        """`echo x > d1/d2/(f|[/])` wrote d1/d2/f in zsh: the bracket's `/` neither splits the path nor spoils the group."""
+        for target in ("ledger/tickets/SPD-00(1|[/]).md", "ledger/(tickets|[/])/SPD-001.md"):
+            with self.subTest(target):
+                self.assertRefused("echo x > %s" % target, "generated", AGENT_C)
+                self.assertRefused("echo x > %s" % target, "Law 1", agent_id=None)
+        self.assertRefused("echo x > (ledger/tickets|x)/SPD-001.md", "matches no file", AGENT_C)  # a bad pattern still
+
+    def test_a_posix_class_matches_as_the_class_does(self):
+        for cmd in ("g[[:alpha:]]t push", "/usr/bin/g[[:lower:]]t push", "gi[![:digit:]] push", "g[[:alnum:]-]t push",
+                    "g[[:IDENT:]]t push", "g[[:WORD:]]t push", "[[:alpha:]]it push"):
+            with self.subTest(cmd):
+                r = self.assertRefused(cmd, "Law 7", AGENT_C)
+                self.assertIn("git push", r.reason)
+                self.assertSilent(cmd, agent_id=None)
+        for target in ("ledger/tickets/SPD-00[[:digit:]].md", "ledger/tickets/SPD-[[:digit:]][[:digit:]][![:alpha:]].md"):
+            with self.subTest(target):
+                self.assertRefused("echo x > %s" % target, "generated", AGENT_C)
+                self.assertRefused("echo x > %s" % target, "Law 1", agent_id=None)
+        m = self.m
+        for pattern, yes, no in (("[[:alpha:]]", "aZ", "1_-"), ("[![:alpha:]]", "1_-", "aZ"), ("[[:digit:]x]", "0x", "ay"),
+                                 ("[[:space:]]", " \t", "a"), ("[[:punct:]]", "-_!", "a1"), ("[[:xdigit:]]", "0fA", "g"),
+                                 ("[[:upper:][:digit:]]", "A5", "a"), ("[[:bogus:]]", "", "a1-"), ("[z-a]", "", "amz"),
+                                 ("[a-c]", "abc", "d"), ("[]a]", "]a", "b"), ("[!]a]", "b", "]a")):
+            rx = m._segment_regex(pattern)
+            for name in yes:
+                self.assertTrue(rx.match(name), (pattern, name))
+            for name in no:
+                self.assertFalse(rx.match(name), (pattern, name))
+
+    def test_a_segment_zsh_calls_a_bad_pattern_matches_no_name(self):
+        m = self.m
+        for seg in ("tmp" + m.ZSH_CLOSE, m.ZSH_OPEN + "a", "a" + m.ZSH_OPEN + "b/c" + m.ZSH_CLOSE, "[z-a]"):
+            with self.subTest(seg=seg):
+                rx = m._segment_regex(seg)
+                self.assertIsNotNone(rx)
+                for name in ("tmp", "a", "sqlite3", "git", ""):
+                    self.assertFalse(rx.match(name), (seg, name))
+                self.assertEqual(m.glob_sample_matches(seg, True), frozenset())
+
+    def test_a_segment_the_reader_cannot_compile_is_an_unreadable_glob(self):
+        """Nesting deeper than the regex engine compiles: the command word is a glob the hook cannot read, never the
+        database; a redirection's segment is every name, checked, and a member is refused at the budget."""
+        m = self.m
+        deep = m.ZSH_OPEN * 2000 + "git" + m.ZSH_CLOSE * 2000
+        self.assertIsNone(m._segment_regex(deep))
+        self.assertTrue(m.bounded_glob(str(self.home.path / "ledger" / "tickets") + "/" + deep)[1])
+
+    def test_controls(self):
+        for ok in ("ls /tmp", "time ls /tmp", "time (ls /tmp)", "echo (a|b)/c", "ls tests/(keep|x).py", "ls tests/[[:alpha:]]*"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, agent_id=None)
+
+
 class ReadWriteRedirectTest(BashHookCase):
     """SPD-040: the read-write redirection `<>` opens its target O_RDWR|O_CREAT, so it writes or creates the file, and `1<>`
     lets the command overwrite it from the start without truncating.  Before, the hook read `<>` as an input redirection and
