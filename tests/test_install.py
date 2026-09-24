@@ -21,6 +21,12 @@ AGENT = "---\nname: spudagent\ndescription: A spudagent (test fixture).\n---\nYo
 EVENTS = {"PreToolUse": 1, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop": 1, "SessionStart": 1, "Stop": 1, "UserPromptSubmit": 1}
 
 
+def state_deny_rules(home):
+    """SPD-033: the Edit rules for the home's state directory, by the `//` absolute anchor, as test_settings spells them
+    (a scratch home's path holds none of the gitignore characters that would need escaping)."""
+    return ["Edit(/%s/.spud)" % home, "Edit(/%s/.spud/**)" % home]
+
+
 class InstallFixture(RepoMixin):
     """A repository shaped like BadTakes registered as project badtakes beside the scratch home, and what install writes."""
 
@@ -69,7 +75,10 @@ class InstallTest(InstallFixture, SpudTestCase):
         original = json.loads(BADTAKES_LOCAL)
         self.assertEqual((data["outputStyle"], data["disabledMcpjsonServers"]), (original["outputStyle"], original["disabledMcpjsonServers"]))
         self.assertNotIn("env", data)
-        self.assertNotIn("deny", data["permissions"])
+        # SPD-033: the home's state directory is out of every file tool's reach here too -- the home is an additional
+        # directory of this project, so a session here can edit it by absolute path -- and Law 3's Agent rules are not
+        # written: a session in a project is plain until claimed, and a plain session's spawns are Eric's.
+        self.assertEqual(data["permissions"]["deny"], state_deny_rules(self.home.path))
         self.assertEqual(data["permissions"]["additionalDirectories"], [str(self.home.path)])
         home = str(self.home.path)
         self.assertEqual(data["permissions"]["allow"], ["Bash(node -e ' *)", "Bash(python3.14 -I -S %s/bin/spud *)" % home, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, home)])
@@ -136,6 +145,27 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertIsNotNone(self.home.scalar("SELECT released_at FROM sessions WHERE session_id = ?", claim))
         self.assertIn("not installed", self.cli("project", "uninstall", "badtakes", actor="spud").stdout)
 
+    def test_uninstall_takes_back_only_the_state_directory_rules_install_added(self):
+        # SPD-033: a deny list of the user's own, holding one of this home's two rules already and a rule of the same
+        # shape for another home.  Install adds only the rule missing and drops neither of the others, since both were
+        # there before it; uninstall takes back the one it added and gives back the file's own bytes.  A rule the user
+        # adds after install stays through uninstall.
+        mine = state_deny_rules(self.home.path)
+        users = ["Bash(rm -rf *)", mine[1], "Edit(//elsewhere/home/.spud/**)"]
+        original = '{\n    "permissions": {"deny": %s},\n    "outputStyle": "Concise"\n}\n' % json.dumps(users)
+        self.local.write_text(original, encoding="utf-8")
+        self.install()
+        self.assertEqual(self.settings()["permissions"]["deny"], users + [mine[0]])
+        self.assertEqual(self.cli_json("project", "sync", "badtakes", actor="spud")["projects"][0]["written"], [])
+        self.cli("project", "uninstall", "badtakes", actor="spud")
+        self.assertEqual(self.local.read_text(encoding="utf-8"), original)
+        self.install()
+        data = self.settings()
+        data["permissions"]["deny"].append("Read(//secrets/**)")
+        self.local.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        self.cli("project", "uninstall", "badtakes", actor="spud")
+        self.assertEqual(self.settings()["permissions"]["deny"], users + ["Read(//secrets/**)"])
+
     def test_uninstall_removes_a_settings_file_install_created(self):
         bare = self.make_repo("fresh-")
         self.add_project(bare, "fresh", "FRS", "FRSS")
@@ -194,7 +224,7 @@ class InstallTest(InstallFixture, SpudTestCase):
         commands = [h["command"] for groups in out["settings"]["hooks"].values() for g in groups for h in g["hooks"]]
         self.assertEqual(len(commands), 7)
         self.assertTrue(all(not c.endswith("--project badtakes") and "--project" not in c for c in commands), commands)
-        self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
+        self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"] + state_deny_rules(self.home.path))
         self.assertIn("env", out["settings"])
 
     def test_sync_follows_the_homes_agent_and_doctor_checks_the_installation(self):
@@ -479,6 +509,9 @@ class QuotedPathInstallTest(InstallFixture, SpudTestCase):
         self.install()
         self.assertTrue(self.settings()["hooks"]["Stop"][0]["hooks"][0]["command"].endswith("'%s/bin/spud' hook Stop --project badtakes" % self.home.path))
         self.assert_one_line_per_event()
+        # SPD-033: the state directory's rules name the path raw, no shell quoting, the space and the `ü` as they are
+        self.assertEqual(self.settings()["permissions"]["deny"], state_deny_rules(self.home.path))
+        self.assertIn("/Sp üd/.spud/**)", self.settings()["permissions"]["deny"][1])
         self.assertEqual(self.cli_json("project", "install", "badtakes", actor="spud")["written"], [])
         self.assertEqual(self.cli_json("project", "sync", "badtakes", actor="spud")["projects"][0]["written"], [])
         synced = {r["project"]: r["written"] for r in self.cli_json("project", "sync", "--all", actor="spud")["projects"]}
