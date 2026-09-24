@@ -1,11 +1,14 @@
 """PreToolUse(Bash): writes by argument -- the files and directories a command names and writes, the trees find, xargs, a
 recursive copy or an extraction write, spelled and scripted writes, and how a target resolves."""
 
+import importlib
 import os
+import re
 import unittest
+from pathlib import Path
 from unittest import mock
 
-from helpers import load_spud_module
+from helpers import REPO, load_spud_module
 from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, DB_WORDING, GIT_DIR_WORDING, GIT_FILE_WORDING, INLINE_WORDING, OUTSIDE
 from hookcase import SESSION, VARIABLE_WORDING, WORD_WORDING, BashHookCase, plant_git_dir
 
@@ -529,6 +532,9 @@ INPUT_WORDING = "xargs reads from its input"  # SPD-126: a write whose file the 
 ANYWHERE_WORDING = "places files where the line cannot say"  # SPD-126: a command that may write anywhere
 CHECKOUT_WORDING = "the root of a checkout the ledger knows"  # SPD-126: a whole-subtree write at or above a checkout
 UNWALKED_WORDING = "could not read whole"  # SPD-126: a copied tree the walk for a git directory could not finish
+SCRIPT_WORD_WORDING = "runs a program or script the line does not spell"  # SPD-260: an awk program or sed script unread
+SCRIPT_OPTION_WORDING = "where awk still reads its options"  # SPD-266: xargs's input where awk may read one more -f
+SCRIPT_WORD_KINDS = ("script-word", "script-input", "script-option")  # SPD-260's finding, as SPD-265 and SPD-266 split it
 
 
 class TreeWriteCase(BashHookCase):
@@ -792,6 +798,39 @@ class XargsInputTest(TreeWriteCase):
                 r = self.bash(command, None)
                 self.assertNotIn(INPUT_WORDING, r.reason or "")
                 self.assertNotIn(ANYWHERE_WORDING, r.reason or "")
+
+    def test_268_input_after_a_spelled_double_dash_is_never_an_option(self):
+        """SPD-268 (proposal by SPUD-265/Milo): SPD-248 read every operand xargs appends to sed as a file it may edit in
+        place, since the first may be -i, and asked only whether the first operand was that input, not whether a `--` came
+        first; so `xargs sed -f p.sed -- < list`, where sed's getopt has stopped, was refused.  After a `--` the line spells
+        the input is operands to every getopt reader here (sed, install, rm, chmod and kin), never an option.  Probed
+        2026-09-24 through tests/probes/shell_probe.py (zsh 5.9 -f -o nobareglobqual and -f, bash 3.2.57, alike in all
+        three; this Mac's BSD sed, rm, chmod and xargs): `echo "-i '' s/a/b/ f" | xargs sed -n -f c.sed --` left f
+        unedited (sed: -i: No such file), `echo '-f e.sed f' | xargs sed -n -f c.sed --` ran not e.sed's `w` (it did
+        without `--`), `echo '-r d' | xargs rm --` said -r: No such file, `echo '-R 700 d' | xargs chmod --` said Invalid
+        file mode: -R; and `echo f | xargs sed -i '' -e s/a/d/ --` edited f, as `xargs sed -i '' s/d/e/ --` did."""
+        m = self.module
+        (self.home.path / "out" / "clean.sed").write_text("p\n", encoding="utf-8")
+        for command in ("xargs sed -f out/clean.sed -- < list", "xargs sed -n 's/a/b/p' -- < list", "xargs sed -n -e p -- < list",
+                        "cat list | xargs sed -n -f out/clean.sed --", "xargs -J % sed -n -e p -- % < list",
+                        "xargs -I{} sed -n -f out/clean.sed -- {} < list"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        # -i given on the line: the input after `--` is still files sed edits; without `--`, as SPD-248 read it
+        for command in ("xargs sed -i '' -e s/a/b/ -- < list", "xargs sed -i.bak -e s/a/b/ -- < list",
+                        "xargs sed -f out/clean.sed < list", "xargs sed -n -e p < list", "xargs rm -- < list",
+                        "xargs chmod -- < list", "xargs chmod -- 600 < list"):
+            with self.subTest(command):
+                self.assertRefused(command, INPUT_WORDING, agent_id=AGENT_G)
+        # after the script operand BSD getopt has stopped, so that `--` is itself a file sed edits (probed: it edited f
+        # after a file named `--`), refused as its own write before the input's
+        for command in ("xargs sed -i '' 's/a/b/' -- < list", "xargs chmod 600 -- < list"):
+            with self.subTest(command):
+                self.assertRefused(command, "home:--", agent_id=AGENT_G)
+                self.assertIn(m.INPUT_OPERAND, [w for w, _ in self.writes(command)])
+        self.assertEqual(self.writes("xargs sed -f out/clean.sed -- < list"), [])
+        self.assertEqual(self.writes("xargs rm -- < list"), [(m.INPUT_OPERAND, None)] * 2)  # no -r among them
+        self.assertEqual(self.writes("xargs rm < list"), [(m.INPUT_OPERAND, "rm-tree")] * 2)  # as before
 
 
 class RecursiveWriteTest(TreeWriteCase):
@@ -1523,9 +1562,12 @@ class ScriptTextTest(TreeWriteCase):
 
     def test_a_script_the_hook_cannot_spell_stays_unread(self):
         """A script word the hook cannot spell is the class of `sh script.sh`: unread for every caller, as on main.  A
-        member's `sed -n \"${n},$((n+3))p\" f`, which writes nothing, is silent as SPD-121 left it."""
+        member's `sed -n \"${n},$((n+3))p\" f`, which writes nothing, is silent as SPD-121 left it.  Since SPD-260 a script
+        that is wholly a value the line fills and does not settle (`sed -n \"$(cat out/p.sed)\" f`) refuses a member
+        (ScriptWordTest); an environment variable the line never touches stays the environment's, and a word that spells
+        part of the script stays unread."""
         for command in ('sed -n "$SCRIPT" a.tar', 'awk "$PROG" a.tar', 'sed -n "${n},$((n+3))p" a.tar',
-                        'sed -n "$(cat out/p.sed)" a.tar', 'awk -f "$PROG" a.tar', 'sed -n -f "$S" a.tar'):
+                        'awk -f "$PROG" a.tar', 'sed -n -f "$S" a.tar'):
             with self.subTest(command):
                 self.assertEqual(self.writes(command), [])
                 self.assertSilent(command, agent_id=AGENT_G)
@@ -1546,13 +1588,19 @@ class ScriptTextTest(TreeWriteCase):
     def test_a_word_the_line_cannot_settle_where_an_option_may_stand(self):
         """The hook cannot then say which operand is the script, and reads none of them: the same silence a script the
         line does not spell keeps.  Reading each operand as a script instead put a `w eb/app.js` in the file operand of a
-        member's `sed -n "$(grep -n x app.js | cut -d: -f1),+12p" web/app.js`, one of 27 the differential found."""
-        for command in ("awk $(echo -f) out/p.awk a.tar", "X=$(echo -v); awk $X '{print > \"docs/y.txt\"}' a.tar",
-                        "sed -n \"$(grep -n x a.tar | cut -d: -f1),+12p\" docs/x.md",
+        member's `sed -n "$(grep -n x app.js | cut -d: -f1),+12p" web/app.js`, one of 27 the differential found.  Where
+        that word is wholly a substitution or a variable the line fills from one, it stands where awk takes its program,
+        and SPD-260 refuses a member for the program the hook cannot read (ScriptWordTest)."""
+        for command in ("sed -n \"$(grep -n x a.tar | cut -d: -f1),+12p\" docs/x.md",
                         "for n in 1 2; do sed -n \"${n}p\" docs/x.md; done"):
             with self.subTest(command):
                 self.assertEqual(self.writes(command), [])
                 self.assertSilent(command, agent_id=AGENT_G)
+        for command in ("awk $(echo -f) out/p.awk a.tar", "X=$(echo -v); awk $X '{print > \"docs/y.txt\"}' a.tar"):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), [])
+                self.assertRefused(command, SCRIPT_WORD_WORDING, agent_id=AGENT_G)
+                self.assertSilent(command, agent_id=None)
 
     def test_spuds_answers(self):
         """Spud is held to Law 1 in a project and is free in his own files, as for a redirection; Law 7 binds members."""
@@ -1570,7 +1618,249 @@ class ScriptTextTest(TreeWriteCase):
         self.assertRefused("awk 'BEGIN{system(\"%s --as %s member log hi\")}'" % (self.spud_cli, AGENT_A), "Law 5", agent_id=None)
 
 
-PROBE = "/tmp/spd-127-probe"  # the scratch directory D of Spud's probe of zsh 5.9 -f and bash 3.2, 2026-09-18
+class ScriptWordTest(TreeWriteCase):
+    """SPD-260 (proposal by SPUD-258/Bertha): shell/script_text left a script the line does not spell unread for every
+    caller, and awk's program out of xargs's input fell in it, spelled or not: in process after SPD-258, `echo
+    'BEGIN{system("git push")}' | xargs awk`, `xargs awk < l` and `P=$(cat p); awk "$P" f` each recorded findings=[] and
+    no write.  SPD-248 read sed's and tar's options and tee's files from xargs's input; a program is not an option.
+
+    SPD-217's rule decides it: where the reader cannot read what a shell will run, it refuses the member and names a
+    respelling.  An awk program or a sed script -- the operand, a sed -e, a -f file -- that is a word the line does not
+    settle is refused a member: what xargs reads from its input (appended, or a -I or -J replstr, in the program's place or
+    inside it), a path find hands its command, a word that is wholly a substitution or a variable the line fills and does
+    not settle (from a substitution, a file, a loop it cannot read), or a -f file on standard input.  Spud is not refused,
+    as with every such fence; an environment variable the line never touches stays the environment's, and a word that
+    spells part of a script (`sed -n "${n},$((n+3))p" f`) stays unread as SPD-139 left it.  A -f file the line names is
+    read whatever the words xargs appends after it.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py (zsh 5.9 -f -o nobareglobqual and -f, bash 3.2.57; this Mac's
+    awk version 20200816, BSD sed, xargs and find), each in all three shells: `echo "'BEGIN{system(\\"touch o\\")}'" | xargs
+    awk`, `xargs awk < l` with that line in l, and `xargs -J% awk %` made o; `echo "'w o' f" | xargs sed -n` and `echo 'w
+    o' | xargs -I{} sed -n {} f` wrote o; `P=$(cat p); awk "$P" /dev/null`, `awk -f -` and `sed -n -f -` or `-f /dev/stdin`
+    fed a program, and `awk -f <(printf ...)` ran it; BSD find replaced a `{}` inside awk's program.  xargs takes its own
+    quotes off its input, so the ticket's literal `echo 'BEGIN{system("git push")}' | xargs awk` hands awk
+    `BEGIN{system(git push)}`, which runs nothing; the form is refused, since the hook cannot read what the input holds."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "out" / "p.sed").write_text("w docs/from-sed.txt\n", encoding="utf-8")
+        (self.home.path / "out" / "p.awk").write_text('BEGIN{print "x" > "docs/from-awk.txt"}\n', encoding="utf-8")
+        (self.home.path / "out" / "clean.awk").write_text('{n++} END{print n}\n', encoding="utf-8")
+
+    def script_words(self, command):
+        """The script-word findings the line records, of each of their kinds (SPD-265 split the ones no variable fills from
+        the rest, and SPD-266 added awk's option position)."""
+        return [detail for kind, detail in self.analysis(command).findings if kind in SCRIPT_WORD_KINDS]
+
+    def test_the_tickets_three_lines(self):
+        for command in ("echo 'BEGIN{system(\"git push\")}' | xargs awk", "xargs awk < list", 'P=$(cat list); awk "$P" out/keep.txt'):
+            with self.subTest(command):
+                self.assertTrue(self.script_words(command))
+                r = self.assertRefused(command, SCRIPT_WORD_WORDING, agent_id=AGENT_G)
+                self.assertIn("-f", r.reason)  # the respelling: the program on the line, or a file the hook reads
+                self.assertSilent(command, agent_id=None)
+
+    def test_every_awk_program_the_line_does_not_settle(self):
+        for command in ("cat list | xargs awk", "xargs -0 awk < list", "xargs awk -v x=1 < list", "xargs -I{} awk {} out/keep.txt < list",
+                        "xargs -J% awk % out/keep.txt < list", "xargs -I{} awk 'BEGIN{print \"{}\"}' < list",
+                        "find out -name keep.txt -exec awk '{print \"{}\"}' \\;",
+                        'awk "$(cat list)" out/keep.txt', "awk `cat list` out/keep.txt", "awk $(cat list) out/keep.txt",
+                        'read -r P < list; awk "$P" out/keep.txt', 'P=$(<list); awk "$P" out/keep.txt',
+                        'P=$(cat list); awk -F: "$P" out/keep.txt', 'for p in $(cat list); do awk "$p" out/keep.txt; done',
+                        'P=$(cat list); awk -f "$P" out/keep.txt', "xargs -I{} awk -f {} out/keep.txt < list",
+                        "awk -f <(cat list) out/keep.txt", "cat list | awk -f - out/keep.txt", "awk -f /dev/stdin out/keep.txt < list"):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WORD_WORDING, agent_id=AGENT_G)
+                self.assertSilent(command, agent_id=None)
+
+    def test_every_sed_script_the_line_does_not_settle(self):
+        """sed's script out of xargs's input is the same kind.  Where the input is appended it may be sed's -i too, and
+        SPD-248's write by argument keeps its own reason; the script is recorded all the same."""
+        for command in ("echo 'w ledger/x' | xargs sed -n", "xargs sed -n < list", "xargs -I{} sed -n {} out/keep.txt < list",
+                        "xargs -J% sed -n % out/keep.txt < list"):
+            with self.subTest(command):
+                self.assertTrue(self.script_words(command))
+                self.assertRefused(command, INPUT_WORDING, agent_id=AGENT_G)
+        for command in ('S=$(cat list); sed -n "$S" out/keep.txt','S=$(cat list); sed -n -e "$S" out/keep.txt',
+                        'sed -n "$(cat out/p.sed)" out/keep.txt', "xargs -I{} sed -n -f {} out/keep.txt < list",
+                        "cat list | sed -n -f - out/keep.txt", "sed -n -f /dev/stdin out/keep.txt < list"):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WORD_WORDING, agent_id=AGENT_G)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_program_the_line_spells_reads_as_before(self):
+        self.assertRefused("awk 'BEGIN{system(\"git push\")}'", "Law 7", agent_id=AGENT_G)
+        self.assertRefused("xargs awk 'BEGIN{system(\"git push\")}' < list", "Law 7", agent_id=AGENT_G)
+        for command in ("awk '{print $1}' out/keep.txt", "xargs awk '{print $1}' < list", "xargs -I{} awk '{print $1}' {} < list",
+                        "find out -name keep.txt -exec awk '{print $1}' {} \\;", "P='{print}'; awk \"$P\" out/keep.txt",
+                        'awk "$PROG" out/keep.txt', "xargs sed s/a/b/ < list",
+                        "xargs -I{} sed -n p {} < list", 'sed -n "${n},$((n+3))p" docs/x.md', "awk -f out/clean.awk out/keep.txt"):
+            with self.subTest(command):
+                self.assertEqual(self.script_words(command), [])
+                self.assertSilent(command, agent_id=AGENT_G)
+
+    def test_a_program_file_xargs_runs_is_read_as_the_file_is(self):
+        """`xargs awk -f p.awk --` reads p.awk as `awk -f p.awk f` does: the input after the `--` is awk's files.  A write
+        the file makes keeps its own reason, before the input's (ScriptOptionTest)."""
+        self.assertSilent("xargs awk -f out/clean.awk -- < list", agent_id=AGENT_G)
+        self.assertSilent("find out -name keep.txt -print0 | xargs -0 awk -f out/clean.awk --", agent_id=AGENT_G)
+        for command in ("awk -f out/p.awk out/keep.txt", "xargs awk -f out/p.awk < list", "xargs awk -f out/p.awk -- < list"):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", agent_id=AGENT_G)
+                self.assertIn("docs/from-awk.txt", r.reason)
+
+
+class ScriptOptionTest(TreeWriteCase):
+    """SPD-266 (proposal by SPUD-260/Charlotte): SPD-260 read `xargs awk -f p.awk` as `awk -f p.awk f`, the file whatever
+    xargs appends after it.  But awk reads options until its first operand, so what xargs appends there may be one more
+    `-f other.awk`, a program the hook never reads.  As SPD-230 did for git, a member's awk whose input from xargs stands
+    where awk still reads its options is refused with a reason naming the respelling, the `--` that ends them; after the
+    `--`, or where -I or -J puts the input after an operand the line spells, it is read as before.  sed reads one more -f
+    there too, and SPD-248 already refuses it: the input may be sed's -i.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py, zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and -f and
+    GNU bash 3.2.57, alike in all three; this Mac's awk version 20200816, BSD sed and xargs.  `echo '-f e.awk' | xargs awk
+    -f c.awk` ran e.awk (it made the file e.awk prints to), as did `echo '-fe.awk' | xargs -I{} awk -f c.awk {}` and `echo
+    '-f e.awk' | xargs -J% awk -f c.awk %`; with `--` after c.awk (and before -J's `%` or -I's `{}`), or an operand `f`
+    before the input, awk took `-f` or `-fe.awk` as a file it could not open.  `echo '-f e.sed' | xargs sed -n -f c.sed`
+    wrote the file e.sed names; with `--` sed took `-f` as a file."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "out" / "clean.awk").write_text('{n++} END{print n}\n', encoding="utf-8")
+        (self.home.path / "out" / "clean.sed").write_text('p\n', encoding="utf-8")
+
+    def test_input_where_awk_still_reads_its_options_is_refused_naming_the_double_dash(self):
+        for command in ("xargs awk -f out/clean.awk < list", "cat list | xargs awk -f out/clean.awk",
+                        "find out -name keep.txt -print0 | xargs -0 awk -f out/clean.awk", "xargs awk -F: -f out/clean.awk < list",
+                        "xargs awk -f out/clean.awk -v x=1 < list", "xargs -I{} awk -f out/clean.awk {} < list",
+                        "xargs -J% awk -f out/clean.awk % < list", "xargs -J% awk -f out/clean.awk % out/keep.txt < list",
+                        "xargs -n1 /usr/bin/awk -fout/clean.awk < list"):
+            with self.subTest(command):
+                r = self.assertRefused(command, SCRIPT_OPTION_WORDING, agent_id=AGENT_G)
+                self.assertIn("--", r.reason)
+                self.assertIn("-f prog.awk --", r.reason)  # the respelling
+                self.assertSilent(command, agent_id=None)
+
+    def test_input_after_the_options_is_read_as_the_file_is(self):
+        for command in ("xargs awk -f out/clean.awk -- < list", "xargs awk -f out/clean.awk out/keep.txt < list",
+                        "xargs -I{} awk -f out/clean.awk out/keep.txt {} < list", "xargs -I{} awk -f out/clean.awk -- {} < list",
+                        "xargs -J% awk -f out/clean.awk -- % < list", "xargs -I{} awk -f out/clean.awk x{} < list",
+                        "xargs -J% awk -f out/clean.awk -v %  out/keep.txt < list", "awk -f out/clean.awk out/keep.txt",
+                        "xargs awk '{print $1}' < list", "xargs awk -v x=1 '{print $1}' < list"):
+            with self.subTest(command):
+                self.assertEqual([f for f in self.analysis(command).findings if f[0] in SCRIPT_WORD_KINDS], [])
+                self.assertSilent(command, agent_id=AGENT_G)
+
+    def test_seds_extra_script_from_input_is_already_refused(self):
+        """sed's getopt reads one more -f or -e from what xargs appends as awk's does, and SPD-248 refuses that input
+        already, as it may be -i; its own reason stands."""
+        for command in ("xargs sed -n -f out/clean.sed < list", "xargs sed -f out/clean.sed < list", "xargs sed -n -e p < list"):
+            with self.subTest(command):
+                self.assertRefused(command, INPUT_WORDING, agent_id=AGENT_G)
+                self.assertSilent(command, agent_id=None)
+
+
+# SPD-265: profile functions whose own body runs a program the line does not settle, in the shape Claude Code's shell
+# snapshot prints them (tests/test_hooks_snapshots.py's SHELL_SNAPSHOT).
+PROFILE_SCRIPTS = """\
+# Snapshot file
+unalias -a 2>/dev/null || true
+# Functions
+awkf () {
+\tawk "$1" out/keep.txt
+}
+sedf () {
+\tsed -n -e "$1" out/keep.txt
+}
+awkp () {
+\tlocal prog="$(cat out/keep.txt)"
+\tawk "$prog" out/keep.txt
+}
+awkg () {
+\tawk "$AWKPROG" out/keep.txt
+}
+awkin () {
+\tawk -f - out/keep.txt
+}
+awkx () {
+\txargs awk -f out/clean.awk
+}
+# Aliases
+alias -- awka='awk "$1"'
+"""
+
+
+class ProfileScriptWordTest(TreeWriteCase):
+    """SPD-265 (proposal by SPUD-260/Charlotte): syntax.SHELL_TEXT_TOLERATED names the findings held_text drops from text
+    Claude Code's shell snapshot holds unless the member's words or variables fill them, and SPD-260's script-word was not
+    among them, so a profile function whose own body runs `awk "$1"` or `awk "$prog"` refused every member that called it,
+    even with no words.  A script word no variable of the member's fills is now dropped there as a var-word is, and kept
+    where the member fills it: the call's words, a variable the line assigned.  What xargs or standard input hands the body
+    is the member's too wherever the call's input is, and the hook cannot read it: those stay refused.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py (zsh 5.9 -f -o nobareglobqual and -f, bash 3.2.57): a function
+    `fn () { awk "$1" f; }` called with no words ran awk with an empty program and exited 0 in all three."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "out" / "clean.awk").write_text('{n++} END{print n}\n', encoding="utf-8")
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh").write_text(PROFILE_SCRIPTS, encoding="utf-8")
+
+    def test_a_script_word_of_the_profiles_own_is_dropped(self):
+        for command in ("awkf", "sedf", "awkp", "awkp out/keep.txt", "awkg", "AWKPROG='{print}'; awkg", "awka out/keep.txt"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_script_word_the_member_fills_is_kept(self):
+        self.assertRefused("awkf 'BEGIN{system(\"git push\")}'", "Law 7", agent_id=AGENT_G)
+        r = self.assertRefused("sedf 'w docs/from-sed.txt'", "deliverables", agent_id=AGENT_G)
+        self.assertIn("docs/from-sed.txt", r.reason)
+        for command in ('P=$(cat list); awkf "$P"', 'S=$(cat list); sedf "$S"', "awkf \"$(cat list)\"",
+                        "AWKPROG=$(cat list); awkg", 'read -r AWKPROG < list; awkg'):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WORD_WORDING, agent_id=AGENT_G)
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_program_from_the_calls_input_is_kept(self):
+        """What standard input or xargs hands the body is the member's wherever the call's input is, and the hook reads
+        none of it, so a profile's `awk -f -` or `xargs awk -f p.awk` refuses as it does on the line."""
+        for command, wording in (("awkin < list", SCRIPT_WORD_WORDING), ("cat list | awkin", SCRIPT_WORD_WORDING),
+                                 ("awkx < list", SCRIPT_OPTION_WORDING)):
+            with self.subTest(command):
+                self.assertRefused(command, wording, agent_id=AGENT_G)
+                self.assertSilent(command, agent_id=None)
+
+
+class UnreadFormsTest(unittest.TestCase):
+    """SPD-262 (SPUD-262/Charlotte): held_text.line_options records ("unread", ("option", shown)) for an option Claude Code's
+    shell snapshot sets that the reader does not model, and bash_rule.UNREAD_MESSAGES had no "option", so a member's line
+    under such an option failed with a KeyError instead of a reason.  Every form a module of the program records has its
+    message."""
+
+    def test_every_unread_form_the_program_records_has_a_message(self):
+        forms = set()
+        for path in (REPO / "bin" / "spudlib").rglob("*.py"):
+            text = path.read_text(encoding="utf-8")
+            forms.update(re.findall(r'record_unread\([^,]+, "([a-z-]+)"', text))
+            forms.update(re.findall(r'\("unread", \("([a-z-]+)"', text))
+        self.assertTrue({"option", "depth", "evaluated", "assigned"} <= forms, forms)  # the scan still finds each way of recording one
+        load_spud_module()
+        self.assertEqual(sorted(forms - set(importlib.import_module("spudlib.shell.bash_rule").UNREAD_MESSAGES)), [])
+
+    def test_the_option_reason(self):
+        load_spud_module()
+        reason = importlib.import_module("spudlib.shell.bash_rule").unread_reason(
+            ("option", "`setopt shwordsplit` (snapshot-zsh-1700000000000-aaaaaa.sh)"))
+        self.assertIn("`setopt shwordsplit` (snapshot-zsh-1700000000000-aaaaaa.sh)", reason)
+        self.assertIn("~/.claude/shell-snapshots/", reason)
+        self.assertIn("shell profile", reason)
+
+
+PROBE ="/tmp/spd-127-probe"  # the scratch directory D of Spud's probe of zsh 5.9 -f and bash 3.2, 2026-09-18
 NOBODY = "/Users/Nobody"  # a directory outside every registered project and every temp root, as OutsideProjectTest's
 
 

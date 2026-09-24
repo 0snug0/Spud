@@ -107,6 +107,27 @@ VAR_WORD_REASON = ("the word %s holds a parameter expansion, arithmetic or a sub
                    " line does not spell at all, where the command is read by name (a wrapper's options, git's options, verb and the"
                    " arguments it checks, a shell's or an interpreter's options and program, a spud call's words, the options of a command"
                    " that writes by argument); spell the words out")
+# The reason for an awk program or a sed script the line does not settle at all (shell/script_text's "script-word" and
+# "script-input", SPD-260, SPD-265), read where "inline-word" is, last, so a write out of the same input keeps its own
+# reason.  A member alone.  The detail is one string, the command word and the script word as spelled.
+SCRIPT_WORD_REASON = (
+    "`%s` runs a program or script the line does not spell: what xargs reads from its input, after the words the"
+    " line spells or where -I or -J puts it, a path find hands it as {}, a substitution or a variable the line fills from"
+    " one, a file or a loop and does not settle, or standard input as its -f file -- so the hook cannot read the files it"
+    " writes or the commands it runs (awk's `system()`, `print >` and `|`, sed's `w`), and a git write (Law 7), a spud"
+    " call (Law 6) or a write outside your deliverables (Law 5) could hide there. Spell the program on the line as one"
+    " quoted word (`awk '{print $1}' f`, `sed -n 's/a/b/p' f`), or write it to a file and name that file with -f (`awk -f"
+    " prog.awk f`, `sed -f prog.sed f`), which the hook reads; hand xargs only the files")
+# The reason for what xargs hands awk where it still reads its options after a -f file (shell/script_text's
+# "script-option", SPD-266): one more `-f` there is a program the hook never reads.  Read with the two above; a member
+# alone.  The respelling is the `--` that makes every word xargs adds a file awk reads, as GIT_INPUT_REASON's is for git.
+SCRIPT_OPTION_REASON = (
+    "`%s` takes words the line does not spell where awk still reads its options -- what xargs reads from its input, after"
+    " the words the line spells or where -I or -J puts it -- and one more `-f other.awk` among them is a program the hook"
+    " never reads, so it cannot read the files that program writes or the commands it runs, and a git write (Law 7), a"
+    " spud call (Law 6) or a write outside your deliverables (Law 5) could hide there. End awk's options with `--` after"
+    " its program file (`xargs awk -f prog.awk --`), so every word xargs adds is a file awk reads, or put the input after"
+    " a file the line names (`xargs -I{} awk -f prog.awk f {}`)")
 
 
 # The reason for a git call an xargs extends with words the line does not spell, where git reads its verb or an option
@@ -153,6 +174,9 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 # "assigned" an assignment whose name the reader cannot read -- an arithmetic evaluation's (`(( $N = 5 ))`) or an assigning
 #             builtin's (`read $N`, `printf -v "$N"`, zsh's `unset -m`) -- so it cannot tell which of the line's variables
 #             it changes (SPD-225, SPD-254); shown is (what assigns, the text).
+# "option"   an option Claude Code's shell snapshot sets that the reader does not model (held_text.line_options, SPD-263),
+#             which may change how the shell reads every line; shown is the snapshot's line and its file.  No spelling of
+#             the line gets past it, so the respelling is the profile's.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
@@ -188,6 +212,11 @@ UNREAD_MESSAGES = {
                      " one word",
                      "list the words without a process substitution, or read the list with `for name in <( ... )`, which"
                      " the hook reads"),
+    "option": ("the shell this line runs in first runs %s, an option line in Claude Code's snapshot of your interactive"
+               " shell (~/.claude/shell-snapshots/, which it sources before every Bash call), and that option may change"
+               " how the shell reads a line's words or runs its commands in a way the hook does not model",
+               "no spelling of the line gets past a profile's option: ask Spud to have it taken out of the shell profile;"
+               " the hook reads every snapshot in that directory, so the option counts until no snapshot there sets it"),
 }
 
 
@@ -648,6 +677,15 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                 # among the findings as spelled, for the same reason an inline program is: what the same input writes
                 # (`xargs perl -pi -e s/a/b/ < list`) keeps its own reason.
                 return VAR_WORD_REASON % detail, analysis
+            if kind in ("script-word", "script-input"):
+                # an awk program or a sed script the line does not settle at all (shell/script_text, SPD-260), read here
+                # for the same reason: what the same input writes (`xargs sed -n < list`, whose input may be -i) keeps
+                # its own reason.
+                return SCRIPT_WORD_REASON % detail, analysis
+            if kind == "script-option":
+                # what xargs hands awk where it still reads its options after a -f file (SPD-266), the same way: a write
+                # the file itself makes keeps its own reason.
+                return SCRIPT_OPTION_REASON % detail, analysis
     if analysis.unparseable:
         # Last of all, so a refusal the words the hook did read already earn keeps its own reason (a Law 7 verb before a
         # stray quote in an eval string), and then for every caller: a bound member, Spud, a plain session and its

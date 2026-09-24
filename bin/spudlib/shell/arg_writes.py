@@ -87,11 +87,17 @@ def scan(words, values, longs, is_option=None):
     first operand; in a cluster, the first letter that takes a value takes the rest of the word or the next one; a GNU long
     option takes the next word when it is in `longs` and has no `=`.  An option is (name, value or None, whether its value
     was the next word).  `is_option`: a test a word spelled with `-` must pass to be read as options (chmod's modes)."""
+    return scan_ended(words, values, longs, is_option)[:2]
+
+
+def scan_ended(words, values, longs, is_option=None):
+    """scan's (options, operands), and whether a `--` the words spell ended the options: every operand after it is one,
+    whatever the shell or xargs puts there (SPD-268, probed: `echo '-i f' | xargs sed -n -f c.sed --` took -i as a file)."""
     options, i = [], 0
     while i < len(words):
         w = words[i]
         if w == "--":
-            return options, words[i + 1 :]
+            return options, words[i + 1 :], True
         if len(w) < 2 or not w.startswith("-") or (is_option is not None and not is_option(w)):
             break
         if w.startswith("--"):
@@ -114,7 +120,7 @@ def scan(words, values, longs, is_option=None):
                 break
             options.append(("-" + w[k], None, False))
         i += 1
-    return options, words[i:]
+    return options, words[i:], False
 
 
 def chmod_option(word):
@@ -191,9 +197,10 @@ def hidden_option(args, values, longs):
     """True when the first operand begins with an expansion, so this Mac's getopt may still read it as an option and what
     the command writes is not what the words as spelled say: `sed "$X" s/a/b/ f` is `sed -i.bak` when X is `-i.bak`.  The
     line is then read both ways and each reading's files are checked, which leaves a `sed -n "${n},$((n+3))p" f` that
-    writes nothing silent while an in-place one behind the same word is not."""
-    operands = scan(args, values, longs)[1]
-    return bool(operands) and expansion_at_start(operands[0])
+    writes nothing silent while an in-place one behind the same word is not.  After a `--` the line spells, the first
+    operand is an operand whatever it expands to (SPD-268)."""
+    _, operands, ended = scan_ended(args, values, longs)
+    return not ended and bool(operands) and expansion_at_start(operands[0])
 
 
 def expansion_at_start(word):
@@ -229,19 +236,20 @@ def install_metadata(names):
                or (n.startswith("--") and len(n) > 2 and any(l.startswith(n) for l in INSTALL_METADATA_LONGS)) for n in names)
 
 
-def options_unknown(operands):
+def options_unknown(operands, ended):
     """True when the first operand this Mac's getopt would read is an operand the line does not spell (find's `{}`,
     xargs's input): what it holds may be options, so the command is read as if every option that widens what it writes
-    were given (rm -r, cp -R, chmod -R, install -m)."""
-    return bool(operands) and operands[0][:1] in (syntax.FIND_PATH, syntax.INPUT_OPERAND, syntax.ANY_PATH)
+    were given (rm -r, cp -R, chmod -R, install -m).  Never after a `--` the line spells (`ended`), which getopt reads as
+    the end of the options whatever follows (SPD-268, probed: `echo '-r d' | xargs rm --` took -r as a file)."""
+    return not ended and bool(operands) and operands[0][:1] in (syntax.FIND_PATH, syntax.INPUT_OPERAND, syntax.ANY_PATH)
 
 
 def operand_writes(base, shape, args, hidden=False):
     """The writes of a command whose operands are its files: every operand ("each"), or a destination (cp, install, mv, ln)."""
     shape_values, longs = syntax.ARG_WRITE_COMMANDS[base][1:]
-    options, operands = scan(args, shape_values, longs)
+    options, operands, ended = scan_ended(args, shape_values, longs)
     names = {n for n, _, _ in options}
-    if options_unknown(operands):
+    if options_unknown(operands, ended):
         names |= set(RM_TREE_OPTIONS) | set(CP_TREE_OPTIONS) | set(INSTALL_METADATA_OPTIONS)
     entries, suffix = [], None
     if base == "install":
@@ -293,7 +301,7 @@ def mode_writes(base, args):
     """chmod, chown, chgrp and chflags: every operand after the mode, owner or flags (none after GNU's --reference or chmod's
     -E, -C, -N, -i, -I; after a chmod ACL mode, also its index and entry)."""
     values, longs = syntax.ARG_WRITE_COMMANDS[base][1:]
-    options, operands = scan(args, values, longs, chmod_option if base == "chmod" else None)
+    options, operands, ended = scan_ended(args, values, longs, chmod_option if base == "chmod" else None)
     names = {n for n, _, _ in options}
     skip = 1
     if "--reference" in names or (base == "chmod" and any(n[1:] in CHMOD_NO_MODE for n in names if len(n) == 2)):
@@ -303,7 +311,7 @@ def mode_writes(base, args):
         skip = 1 + ("#" in mode) + (mode != "-a#")
     # -R changes every file under a directory operand, "file-tree"; an operand the line does not spell where the
     # mode stands may be -R, the mode and the files at once
-    unknown = options_unknown(operands)
+    unknown = options_unknown(operands, ended)
     kind = "file-tree" if unknown or any(n in names for n in MODE_TREE_OPTIONS) else None
     return [(w, (), "path", None, kind) for w in (operands if unknown else operands[skip:])]
 

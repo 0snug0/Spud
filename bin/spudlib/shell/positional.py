@@ -3,7 +3,7 @@
 A function receives its call's words as its positional parameters, so a body that hands them on -- this Mac's oh-my-zsh
 `__git_prompt_git () { GIT_OPTIONAL_LOCKS=0 command git "$@" }` -- runs whatever the member wrote after its name:
 `__git_prompt_git push` pushes.  Read as it stands, that body is `git $@`, a verb the hook cannot resolve, and the finding
-that says so is dropped from text the shell holds (analyse.analyse_shell_text), so the push passed Law 7.  The body is
+that says so is dropped from text the shell holds (held_text.analyse_shell_text), so the push passed Law 7.  The body is
 read instead as the shell runs it for this call: each reference to the parameters replaced by the call's own words,
 quoted again as the line spelled them (prepare.requoted), so `__git_prompt_git push` reads as `git push` and
 `__git_prompt_git status` as `git status`.
@@ -32,7 +32,7 @@ Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-d
   reading's (`sh -c '... "$1"' _ "$@"` printed `<m n>`).  A body with any of these is not substituted.
 
 `substituted` answers (the text, True) where every reference is one it sets soundly, and (the body as it stands, False)
-where one is not: analyse.analyse_shell_text then keeps every finding the body earns for a call that has words, since
+where one is not: held_text.analyse_shell_text then keeps every finding the body earns for a call that has words, since
 the member's words reach it in a way the hook does not follow.  `substitution` answers the same and, beside it, the text
 of every `$( )` it set words in (SPD-258): once set, `V=$(echo "$1")` is `V=$(echo push)`, a value holding no positional,
 so the reading could not tell the member's substitution from the body's own `V=$(echo status)` without it.
@@ -59,7 +59,7 @@ READS_RE = lazy.LazyPattern(r"\b(?:for|select|foreach)\s+(?!in\b)[A-Za-z_]\w*+(?
 MOVES_RE = lazy.LazyPattern(r"(?:^|[\s;&|({!])(?:shift|set)(?=[\s;&|)}]|\Z)"
                       r"|\bfunction\s|(?:^|[\s;&|({])[^\s;&|(){}<>'\"=$`]*\(\s*\)|<<(?!<)")
 # The most bodies of one function name a line reads with the words set, one per call's words and the state it starts in
-# (analyse.read_shell_name, SPD-252):
+# (held_text.read_shell_name, SPD-252):
 # a body that calls functions with words of its own reads each of those once per words, so a profile could multiply the
 # readings through every level of the analysis's depth.  Past it the body is read once more as it stands.  The same
 # bound holds the walks an analysis makes to read the bodies of the functions a line defines on their calls' inputs
