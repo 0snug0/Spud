@@ -97,7 +97,7 @@ def cmd_fleet(ctx, args):
     for r in rows:
         r["spawned"] = kernel.fm_minute(r["spawned_at"])
         r["finished"] = kernel.fm_minute(r["finished_at"])
-    return kernel.Result({"members": rows}, kernel.table(rows, [("ticket", "ticket"), ("id", "id"), ("name", "name"), ("persona", "persona"), ("model", "model"), ("status", "status"), ("parent", "parent"), ("spawned", "spawned"), ("finished", "finished")]))
+    return kernel.Result({"members": rows}, kernel.table(rows, [("ticket", "ticket"), ("id", "id"), ("name", "name"), ("persona", "persona"), ("model", "model"), ("effort", "effort"), ("status", "status"), ("parent", "parent"), ("spawned", "spawned"), ("finished", "finished")]))
 
 
 def team_tree(con, ticket, pricing=None):

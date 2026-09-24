@@ -24,7 +24,7 @@ from collections import namedtuple
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from helpers import EXIT_ERROR, SPUD, HookResult
+from helpers import EXIT_ERROR, SPUD, HookResult, spawn_type
 from test_hooks import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split
 from test_hooks import GIT_DIR_WORDING, GIT_HOOK_WORDING, GIT_NESTED_WORDING, GIT_SCOPE_WORDING, RUNNER_WORDING, SCRIPT_WORDING, SPUD_PLANTED_WORDING, plant_git_dir
 
@@ -237,11 +237,11 @@ class ProjectHookCase(HookCase):
         """PreToolUse(Agent) allow, SubagentStart and the background PostToolUse binding, all in session s."""
         tool_use_id = "toolu_" + agent_id
         description = self.bad_description(m)
-        pre = self.hook_in(s, "PreToolUse", self.agent_p(s, description, model=m["model"], subagent_type=m["agent_type"], tool_use_id=tool_use_id))
+        pre = self.hook_in(s, "PreToolUse", self.agent_p(s, description, model=m["model"], subagent_type=spawn_type(m), tool_use_id=tool_use_id))
         self.assertEqual((pre.code, pre.decision), (0, "allow"), pre)
-        start = self.hook_in(s, "SubagentStart", self.start_p(s, agent_id, m["agent_type"]))
+        start = self.hook_in(s, "SubagentStart", self.start_p(s, agent_id, spawn_type(m)))
         self.assertEqual(start.code, 0, start)
-        post = self.hook_in(s, "PostToolUse", self.post_p(s, tool_use_id, agent_id, description, m["agent_type"]))
+        post = self.hook_in(s, "PostToolUse", self.post_p(s, tool_use_id, agent_id, description, spawn_type(m)))
         self.assertEqual((post.code, post.stdout), (0, ""), post)
         return self.cli_json("member", "show", m["ref"])["member"]
 
@@ -454,6 +454,9 @@ class AgentHookProjectTest(ProjectHookCase):
         dict(description="Explore the render code", subagent_type="general-purpose", model=None, isolation="worktree"),
         dict(description="parallel-worktrees: build the feed", subagent_type="general-purpose", model="sonnet"),
         dict(description="Find the config loader", subagent_type="Explore", model=None),
+        # SPD-222: the effort variants are enumerated, not matched by prefix, so an agent of Eric's own that happens to
+        # start with the word is his own
+        dict(description="Tidy the notes", subagent_type="spudagent-helper", model="haiku"),
     )
 
     # -- PreToolUse(Agent) ---------------------------------------------------------------
@@ -474,7 +477,8 @@ class AgentHookProjectTest(ProjectHookCase):
             ("subagent_type spudagent, a free description", dict(description="Do a thing", subagent_type="spudagent", model="haiku")),
             ("a BADS description, another agent type", dict(description="%s-001/Nobody (01, scout)" % TEAM_PREFIX, subagent_type="general-purpose", model="haiku")),
             ("a BADS description with isolation", dict(description=exact, subagent_type="spudagent", model="haiku", isolation="worktree")),
-        )
+        ) + tuple(("subagent_type %s, a free description" % variant, dict(description="Do a thing", subagent_type=variant, model="opus"))
+                  for variant in ("spudagent-low", "spudagent-medium", "spudagent-high", "spudagent-xhigh", "spudagent-max"))  # SPD-222
         for n, (what, spawn) in enumerate(cases):
             spawn = dict(spawn)
             with self.subTest(what):

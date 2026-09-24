@@ -71,8 +71,10 @@ def render_member(con, m, pricing=None):
     pairs = [("id", ("quoted", m["lineage"])), ("name", ("plain", m["name"])), ("persona", ("plain", m["persona"]))]
     if contractor:
         pairs.append(("agent_type", ("plain", m["agent_type"])))
+    pairs.append(("model", ("plain", m["model"])))
+    if m["effort"]:  # SPD-222: the effort it was planned at; a row from before, a haiku one or a contractor's has none
+        pairs.append(("effort", ("plain", m["effort"])))
     pairs += [
-        ("model", ("plain", m["model"])),
         ("parent", ("quoted", parent)),
         ("ticket", ("quoted", "[[%s]]" % ticket["key"])),
         ("project", ("plain", lookup.project_key_of(con, ticket))),

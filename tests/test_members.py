@@ -9,8 +9,10 @@ import unittest
 from helpers import (
     EXIT_ERROR,
     EXIT_LIMIT,
+    EXIT_OK,
     EXIT_OWNERSHIP,
     EXIT_TRANSITION,
+    EXIT_USAGE,
     SpudTestCase,
     real_config,
 )
@@ -502,6 +504,202 @@ class MemberListTest(SpudTestCase):
         self.assertIn("list", text)
         self.assertIn("card", text)
         self.assertIn("fleet", text)
+
+
+class OpusFirstTest(SpudTestCase):
+    """SPD-222: researcher, architect and reviewer default to opus; every spudagent is planned at the effort its definition
+    sets, recorded on the row; and a member that returned failed or blocked on opus is re-planned once on fable."""
+
+    def plan(self, ticket, persona, model, *extra, actor="spud"):
+        return self.home.run("member", "new", "--ticket", ticket, "--persona", persona, "--model", model, "--brief", "x", *extra,
+                             actor=actor, check=False)
+
+    def test_researcher_architect_and_reviewer_default_to_opus(self):
+        for persona in ("researcher", "architect", "reviewer"):
+            with self.subTest(persona):
+                t = self.new_ticket("Tiers: " + persona)  # a ticket each, so root_fan_out never counts the three
+                self.assertIsNone(self.new_member(t["key"], persona=persona, model="opus")["tier_reason"])
+                proc = self.plan(t["key"], persona, "fable")
+                self.assertEqual(proc.returncode, EXIT_ERROR)
+                self.assertIn("%s defaults to opus; model fable needs --tier-reason" % persona, proc.stderr)
+        kept = self.new_member(t["key"], persona="reviewer", model="fable", tier_reason="review of the hook path")
+        self.assertEqual((kept["model"], kept["tier_reason"]), ("fable", "review of the hook path"))
+
+    def test_the_effort_is_the_personas_on_a_model_that_takes_one(self):
+        """SPD-222, as Eric asked it on 2026-09-23: effort is chosen per member at planning.  Without --effort it is the
+        persona's `effort` in spud.config.json; haiku takes none and a contractor's own definition sets its own, so both
+        record NULL and are spawned as their plain type."""
+        cases = [("engineer", "opus", {}, "high", "spudagent-high"),
+                 ("reviewer", "fable", {"tier_reason": "review of security"}, "high", "spudagent-high"),
+                 ("writer", "sonnet", {}, "medium", "spudagent-medium"), ("scout", "haiku", {}, None, "spudagent"),
+                 ("contractor", "sonnet", {"agent_type": "claude-code-guide"}, None, "claude-code-guide")]
+        for persona, model, extra, effort, spawn_as in cases:
+            with self.subTest(persona=persona, model=model):
+                t = self.new_ticket("Effort: " + persona)
+                m = self.new_member(t["key"], persona=persona, model=model, **extra)
+                self.assertEqual(m["effort"], effort)
+                shown = self.home.run("member", "show", m["ref"]).stdout.splitlines()
+                self.assertEqual([line for line in shown if line.startswith("effort: ")], ["effort: " + effort] if effort else [])
+                self.assertIn("subagent_type: " + spawn_as, shown)
+                planned = self.home.json("events", "--member", m["ref"])["events"][0]
+                self.assertEqual(planned["data"].get("effort"), effort)
+        fleet = [r["effort"] for r in self.home.json("fleet")["members"]]  # a name repeats across teams, so a list
+        self.assertEqual(sorted(fleet, key=str), sorted([c[3] for c in cases], key=str))
+        self.assertIn("effort", self.home.run("fleet").stdout.splitlines()[0])
+
+    def test_member_new_takes_an_effort_and_the_plan_line_names_the_spawn_type(self):
+        t = self.new_ticket("Chosen")
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            with self.subTest(effort):
+                out = self.home.json("member", "new", "--ticket", t["key"], "--persona", "engineer", "--model", "opus",
+                                     "--effort", effort, "--brief", "x", actor="spud")
+                self.assertEqual((out["member"]["effort"], out["subagent_type"]), (effort, "spudagent-" + effort))
+                self.assertNotIn("note", out)
+                self.home.json("member", "finish", out["member"]["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+        proc = self.plan(t["key"], "architect", "opus", "--effort", "xhigh")
+        self.assertEqual(proc.returncode, EXIT_OK)
+        m = self.home.json("member", "list", "--ticket", t["key"])["members"][-1]
+        self.assertEqual(proc.stdout.strip(), "planned %s (%s, architect, opus) on %s at xhigh effort: spawn it as subagent_type"
+                                              " spudagent-xhigh" % (m["ref"], m["lineage"], t["key"]))
+        proc = self.plan(t["key"], "engineer", "opus", "--effort", "extreme")
+        self.assertEqual(proc.returncode, EXIT_USAGE)
+        # a nested parent chooses its children's effort with the same flag
+        lead = self.new_member(t["key"], persona="engineer", model="opus")
+        child = self.new_member(t["key"], actor=lead["ref"], persona="researcher", model="opus", effort="low")
+        self.assertEqual((child["parent"], child["effort"]), (lead["ref"], "low"))
+
+    def test_haiku_and_a_contractor_record_no_effort_whatever_is_passed_and_say_so(self):
+        t = self.new_ticket("None")
+        out = self.home.json("member", "new", "--ticket", t["key"], "--persona", "scout", "--model", "haiku", "--effort", "max",
+                             "--brief", "x", actor="spud")
+        self.assertEqual((out["member"]["effort"], out["subagent_type"]), (None, "spudagent"))
+        self.assertEqual(out["note"], "haiku takes no effort, so --effort max is not recorded; it is spawned as subagent_type"
+                                      " spudagent, which sets none")
+        proc = self.plan(t["key"], "scout", "haiku", "--effort", "low")
+        self.assertIn("\nnote: haiku takes no effort, so --effort low is not recorded", proc.stdout)
+        self.assertIn(": spawn it as subagent_type spudagent\n", proc.stdout)
+        out = self.home.json("member", "new", "--ticket", t["key"], "--persona", "contractor", "--model", "sonnet", "--agent-type",
+                             "Explore", "--effort", "high", "--brief", "x", actor="spud")
+        self.assertEqual((out["member"]["effort"], out["subagent_type"]), (None, "Explore"))
+        self.assertIn("a contractor's effort is its own definition's, so --effort high is not recorded", out["note"])
+
+    def test_an_effort_variant_is_not_an_agent_type(self):
+        t = self.new_ticket("Variant")
+        proc = self.plan(t["key"], "engineer", "opus", "--agent-type", "spudagent-high")
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("spudagent-high is the spawn type of a spudagent planned at an effort, not an agent type to plan: plan it"
+                      " as a spudagent with --effort high", proc.stderr)
+        m = self.new_member(t["key"], persona="engineer", model="opus")
+        proc = self.home.run("member", "edit", m["ref"], "--agent-type", "spudagent-max", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM members WHERE agent_type != 'spudagent'"), 0)
+
+    def test_the_persona_default_falls_back_to_high_when_the_config_names_none(self):
+        # A home whose config predates SPD-222's persona `effort` keys (Eric's own, until he adds them), and a scout
+        # re-tiered onto a model that takes one: kernel.DEFAULT_EFFORT.
+        config = json.loads((self.home.path / "spud.config.json").read_text(encoding="utf-8"))
+        for spec in config["personas"].values():
+            spec.pop("effort", None)
+        (self.home.path / "spud.config.json").write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+        t = self.new_ticket("Old config")
+        self.assertEqual(self.new_member(t["key"], persona="writer", model="sonnet")["effort"], "high")
+        self.assertEqual(self.new_member(t["key"], persona="scout", model="sonnet", tier_reason="a long survey")["effort"], "high")
+
+    def test_member_edit_changes_a_planned_members_effort_and_a_model_change_keeps_it(self):
+        t = self.new_ticket("Edit")
+        m = self.new_member(t["key"], persona="engineer", model="opus")
+        edited = self.home.json("member", "edit", m["ref"], "--effort", "xhigh", actor="spud")
+        self.assertEqual((edited["member"]["effort"], edited["changed"], edited["subagent_type"]), ("xhigh", ["effort"], "spudagent-xhigh"))
+        self.assertIn("edited: effort; spawn it as subagent_type spudagent-low", self.home.run("member", "edit", m["ref"], "--effort", "low", actor="spud").stdout)
+        self.home.json("member", "edit", m["ref"], "--effort", "xhigh", actor="spud")
+        kept = self.home.json("member", "edit", m["ref"], "--model", "fable", "--tier-reason", "the schema", actor="spud")
+        self.assertEqual((kept["member"]["effort"], kept["changed"]), ("xhigh", ["model", "tier_reason"]))
+        cleared = self.home.json("member", "edit", m["ref"], "--model", "haiku", "--tier-reason", "a lookup after all", actor="spud")
+        self.assertEqual((cleared["member"]["effort"], cleared["changed"]), (None, ["effort", "model", "tier_reason"]))
+        back = self.home.json("member", "edit", m["ref"], "--model", "opus", actor="spud")
+        self.assertEqual(back["member"]["effort"], "high")  # the persona's again: haiku kept none to return to
+        brief = self.home.json("member", "edit", m["ref"], "--brief", "Again.", actor="spud")
+        self.assertEqual((brief["member"]["effort"], brief["changed"]), ("high", ["brief"]))
+        self.home.json("member", "start", m["ref"], actor="spud")
+        proc = self.home.run("member", "edit", m["ref"], "--effort", "max", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_TRANSITION)
+        self.assertIn("is active; its effort changes only while it is planned, before it is spawned", proc.stderr)
+        self.assertEqual(self.home.scalar("SELECT effort FROM members WHERE id = ?", m["id"]), "high")
+
+    def test_an_escalation_runs_at_the_failed_members_effort_or_higher(self):
+        t = self.new_ticket("Escalate at effort")
+        failed = self.new_member(t["key"], persona="engineer", model="opus", effort="xhigh")
+        self.home.json("member", "finish", failed["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", failed["ref"], "--effort", "high")
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("an escalation runs at the effort of the member it re-plans or higher, never lower: %s ran at xhigh, and"
+                      " --effort high is lower" % failed["ref"], proc.stderr)
+        again = self.new_member(t["key"], persona="engineer", model="fable", escalates=failed["ref"])
+        self.assertEqual(again["effort"], "xhigh")  # the default: the failed member's own level, not the persona's high
+        proc = self.home.run("member", "edit", again["ref"], "--effort", "medium", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("never lower", proc.stderr)
+        self.assertEqual(self.home.json("member", "edit", again["ref"], "--effort", "max", actor="spud")["member"]["effort"], "max")
+        other = self.new_member(t["key"], persona="engineer", model="opus")
+        self.home.json("member", "finish", other["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+        higher = self.new_member(t["key"], persona="engineer", model="fable", escalates=other["ref"], effort="max")
+        self.assertEqual(higher["effort"], "max")
+
+    def test_a_failed_opus_member_is_escalated_once_on_fable(self):
+        t = self.new_ticket("Escalate")
+        failed = self.new_member(t["key"], persona="engineer", model="opus", name="Russet")
+        self.home.json("member", "finish", failed["ref"], "--status", "failed", "--outcome", "could not build it", actor="spud")
+        again = self.new_member(t["key"], persona="engineer", model="fable", escalates=failed["ref"])
+        self.assertEqual((again["escalates"], again["tier_reason"], again["effort"]),
+                         (failed["ref"], "escalation after %s failed" % failed["ref"], "high"))
+        shown = self.home.run("member", "show", again["ref"]).stdout.splitlines()
+        self.assertIn("escalates: " + failed["ref"], shown)
+        self.assertIn("tier reason: escalation after %s failed" % failed["ref"], shown)
+        planned = self.home.json("events", "--member", again["ref"])["events"][0]
+        self.assertEqual(planned["data"]["escalates"], failed["ref"])
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", failed["ref"])
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("%s was escalated once already, by %s" % (failed["ref"], again["ref"]), proc.stderr)
+
+    def test_a_blocked_member_keeps_a_tier_reason_given_and_names_its_status(self):
+        t = self.new_ticket("Blocked")
+        m = self.new_member(t["key"], persona="architect", model="opus")
+        self.home.json("member", "start", m["ref"], actor="spud")
+        self.home.json("member", "finish", m["ref"], "--status", "blocked", "--outcome", "the design is beyond it", actor="spud")
+        filled = self.new_member(t["key"], persona="architect", model="fable", escalates=m["ref"])
+        self.assertEqual(filled["tier_reason"], "escalation after %s blocked" % m["ref"])
+        other = self.new_member(t["key"], persona="engineer", model="opus")
+        self.home.json("member", "finish", other["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+        given = self.new_member(t["key"], persona="engineer", model="fable", escalates=other["ref"], tier_reason="escalation: the schema")
+        self.assertEqual((given["tier_reason"], given["escalates"]), ("escalation: the schema", other["ref"]))
+
+    def test_what_an_escalation_refuses(self):
+        t = self.new_ticket("Refusals")
+        live = self.new_member(t["key"], persona="engineer", model="opus", name="Russet")
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", live["ref"])
+        self.assertEqual(proc.returncode, EXIT_TRANSITION)
+        self.assertIn("is planned; only a member that returned failed or blocked is escalated", proc.stderr)
+        self.home.json("member", "finish", live["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+        proc = self.plan(t["key"], "engineer", "opus", "--escalates", live["ref"])
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("the one escalation is opus to fable: %s ran on opus and this plan names opus" % live["ref"], proc.stderr)
+        on_fable = self.new_member(t["key"], persona="engineer", model="fable", tier_reason="the schema", name="Kestrel")
+        self.home.json("member", "finish", on_fable["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", on_fable["ref"])
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("%s ran on fable" % on_fable["ref"], proc.stderr)
+        elsewhere = self.new_ticket("Elsewhere")
+        proc = self.plan(elsewhere["key"], "engineer", "fable", "--escalates", live["ref"])
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("is not on %s" % elsewhere["key"], proc.stderr)
+        lead = self.new_member(t["key"], persona="engineer", model="opus")
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", live["ref"], actor=lead["ref"])
+        self.assertEqual(proc.returncode, EXIT_OWNERSHIP)
+        self.assertIn("%s is Spud's child; its own parent re-plans it" % live["ref"], proc.stderr)
+        proc = self.plan(t["key"], "engineer", "fable", "--escalates", "SPUD-001/Nobody")
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("no member SPUD-001/Nobody", proc.stderr)
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM members WHERE escalates_id IS NOT NULL"), 0)
 
 
 if __name__ == "__main__":

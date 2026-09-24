@@ -52,8 +52,8 @@ class MigrateProjectScriptsTest(unittest.TestCase):
         projects = self.home.rows("SELECT * FROM projects ORDER BY id")
         events = self.home.rows("SELECT * FROM events ORDER BY id")
         out = self.home.json("migrate")
-        self.assertEqual((out["applied"], out["user_version"]), (["0007_project_scripts", "0008_project_runners"], 8))
-        self.assertEqual(len(out["backups"]), 2)
+        self.assertEqual((out["applied"], out["user_version"]), (["0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9))
+        self.assertEqual(len(out["backups"]), 3)
         self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0007_project_scripts\.db$")
         backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
         try:

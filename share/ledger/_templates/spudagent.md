@@ -3,6 +3,7 @@ id: "01"
 name: Name
 persona: engineer
 model: opus
+effort: high
 parent: "[[Spud]]"
 ticket: "[[{{ticket_prefix}}-nnn]]"
 status: planned
@@ -16,7 +17,7 @@ tokens_cached: 0
 cost_usd: 0
 tags: [spudagent]
 ---
-<!-- the shape of a rendered member note: `spud render` writes ledger/teams/{{team_prefix}}-nnn/<Name>.md from the database; nobody edits the rendered file. The frontmatter is the parent's: id and name from `spud member new`, status and the timestamps from the hooks and `member finish`; duration_ms, tool_uses and tokens_out, tokens_in, tokens_cached come from the hooks' record of the run (the tokens only from the member's transcript sum), and cost_usd is that sum at the API list price, computed at render from spud.config.json `pricing`; each is left out until known -->
+<!-- the shape of a rendered member note: `spud render` writes ledger/teams/{{team_prefix}}-nnn/<Name>.md from the database; nobody edits the rendered file. The frontmatter is the parent's: id and name from `spud member new`, effort too (the level its parent planned it at, `member new --effort` or its persona's, which it is spawned as `spudagent-<effort>` to run at; left out for haiku, a contractor and a member planned before it was recorded), status and the timestamps from the hooks and `member finish`; duration_ms, tool_uses and tokens_out, tokens_in, tokens_cached come from the hooks' record of the run (the tokens only from the member's transcript sum), and cost_usd is that sum at the API list price, computed at render from spud.config.json `pricing`; each is left out until known -->
 # Name (01, engineer) — {{ticket_prefix}}-nnn
 
 ## Brief

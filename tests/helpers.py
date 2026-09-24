@@ -217,6 +217,15 @@ def seed_pycache(home):
             shutil.copyfile(os.path.join(root, rel), os.path.join(cache, rel))
 
 
+def spawn_type(m):
+    """The subagent_type the spawn check holds a planned member to (SPD-222), from its `member show --json` dict: the
+    effort variant `spudagent-<effort>` for a spudagent planned at one, else its planned agent type.  Spelled out here
+    rather than read from the program, so a test that spawns with it checks the program's own kernel.spawn_type."""
+    if m["agent_type"] == "spudagent" and m.get("effort"):
+        return "spudagent-%s" % m["effort"]
+    return m["agent_type"]
+
+
 def wall_clock(test):
     """Mark a test that asserts an upper bound on the wall time of work it does itself (SPD-102).  tests/suite.py runs such a
     test only after every other test is done, beside no other work but the other marked tests, so the bound it asserts is

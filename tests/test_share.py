@@ -82,7 +82,7 @@ CONFIG_BLOCK_READERS = {
     "identity": "core/shipped.marks (five marks), commands/homeinit",
     "owner": "core/shipped.marks (four marks, falling back to DEFAULT_OWNER), commands/homeinit, commands/doctor",
     "naming": "core/homeconf.Ctx.id_pad and config_problems, state/ledgerdb.sync_config_rows, state/ops (the pool)",
-    "personas": "core/homeconf.Ctx.persona_tier and Ctx.personas and config_problems, state/ops",
+    "personas": "core/homeconf.Ctx.persona_tier, Ctx.persona_effort and Ctx.personas and config_problems, state/ops",
     "limits": "core/homeconf.Ctx.limits and config_problems, commands/doctor",
     "tickets": "tickets.prefix: core/shipped.marks, state/ledgerdb.sync_config_rows, core/homeconf.config_problems, commands/doctor",
     "teams": "teams.prefix: core/shipped.marks, state/ledgerdb.sync_config_rows, core/homeconf.config_problems, commands/doctor",
@@ -406,6 +406,32 @@ class ShippedConfigTest(unittest.TestCase):
         # SPD-157: the person the home works for, beside the identity of the one working.
         self.assertEqual((config["owner"]["name"], config["owner"]["pronouns"]["possessive"]), ("Robin", "her"))
 
+    def test_the_persona_table_in_the_claude_md_is_the_config_s(self):
+        """SPD-222: a tier and an effort are written twice, in the config `member new` reads and in the table the home's
+        CLAUDE.md shows, and the two never disagree.  researcher, architect and reviewer default to opus since then; fable
+        is a tier reason.  A persona on haiku names no effort (the table says `none`), since haiku takes none."""
+        personas = json.loads((SHARE / "spud.config.json").read_text(encoding="utf-8"))["personas"]
+        rows = re.findall(r"^\| (\w+) \| (\w+) \| (\w+) \| (.+) \|$", (SHARE / "CLAUDE.md").read_text(encoding="utf-8"), re.M)
+        table = {persona: (tier, effort, role) for persona, tier, effort, role in rows if persona != "Persona"}
+        self.assertEqual(table, {persona: (spec["tier"], spec.get("effort", "none"), spec["role"]) for persona, spec in personas.items()})
+        self.assertEqual({persona: personas[persona]["tier"] for persona in ("researcher", "architect", "reviewer")},
+                         {"researcher": "opus", "architect": "opus", "reviewer": "opus"})
+        self.assertNotIn("fable", {spec["tier"] for spec in personas.values()})
+        self.assertEqual({persona: spec.get("effort") for persona, spec in personas.items()},
+                         {"researcher": "high", "architect": "high", "reviewer": "high", "engineer": "high", "designer": "high",
+                          "writer": "medium", "scout": None})
+        for persona, spec in personas.items():  # no effort where the tier takes none, and every level one Claude Code takes
+            self.assertEqual("effort" in spec, spec["tier"] in spud.EFFORT_MODELS, persona)
+            self.assertIn(spec.get("effort", "high"), spud.EFFORTS, persona)
+
+    def test_config_problems_names_a_persona_effort_that_is_not_a_level(self):
+        config = json.loads(spud.render((SHARE / "spud.config.json").read_text(encoding="utf-8"),
+                                        {"ticket_prefix": "ZZZ", "team_prefix": "ZZZS"}))
+        config["personas"]["writer"]["effort"] = "extreme"
+        self.assertIn("personas.writer.effort is not one of low, medium, high, xhigh, max", spud.config_problems(config))
+        del config["personas"]["writer"]["effort"]  # absent is allowed: kernel.DEFAULT_EFFORT then
+        self.assertEqual([p for p in spud.config_problems(config) if "effort" in p], [])
+
     def test_the_unrendered_template_is_json_and_is_not_a_config(self):
         # Deliberate (design 3.2): "{{ticket_prefix}}" is valid JSON and an invalid prefix, so every check above runs
         # against the rendered text and never against the file's bytes.
@@ -510,6 +536,28 @@ class ShippedSetTest(unittest.TestCase):
                              ["agents/spudagent.md", "skills/spud-reference/SKILL.md"])
         finally:
             home.cleanup()
+
+    def test_the_base_definition_sets_no_effort_and_each_variant_sets_its_own(self):
+        """SPD-222: effort is chosen per member at planning, and the Agent tool takes no effort, so it rides on the
+        definition: a definition's frontmatter `effort:` beats the spawning session's level (tests/probes/subagent_effort.py).
+        The shipped definition is the base and sets none, so a member planned at none (haiku) runs at the session's level;
+        each variant `projects/agentdef.variant_markdown` renders from it is the same file with its own name and one level,
+        the level `kernel.spawn_type` names it by -- so the variant a member is spawned as runs it at its planned effort."""
+        text = (SHARE / "agents" / "spudagent.md").read_text(encoding="utf-8")
+        fields = skill_frontmatter(text)
+        self.assertNotIn("effort", fields)
+        self.assertEqual(fields.get("model"), "inherit")  # the Agent call's explicit model decides it (Law 3)
+        self.assertEqual(spud.SPUDAGENT_TYPES, ("spudagent", "spudagent-low", "spudagent-medium", "spudagent-high",
+                                                "spudagent-xhigh", "spudagent-max"))
+        body = FRONTMATTER_RE.sub("", text)
+        for effort in spud.EFFORTS:
+            with self.subTest(effort):
+                variant = spud.variant_markdown(text, effort)
+                name = spud.spawn_type("spudagent", effort)
+                self.assertEqual(skill_frontmatter(variant), dict(fields, name=name, effort=effort))
+                self.assertEqual(list(skill_frontmatter(variant)), ["name", "description", "model", "effort", "color"])
+                self.assertEqual(FRONTMATTER_RE.sub("", variant), body)
+                self.assertIn(name, spud.SPUDAGENT_VARIANTS)
 
     def test_the_shipped_vault_holds_no_layout_no_plugin_code_and_no_note(self):
         # Design section 1: `workspace.json` and `workspace-mobile.json` are one person's window layout, `.DS_Store` is

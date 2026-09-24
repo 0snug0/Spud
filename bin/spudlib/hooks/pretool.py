@@ -22,6 +22,20 @@ def deny_and_record(con, at, payload, reason, caller_agent_id, caller_member, ti
     return hookio.pre_decision("deny", reason)
 
 
+def spawn_type_reason(ref, member, spawn_as, subagent_type):
+    """Why an Agent call's subagent_type is not the one the member is spawned as (kernel.spawn_type), naming the right one.
+    A spudagent's effort is planned the way its model is (SPD-222): the Agent tool takes no effort, so the effort rides
+    on the definition, `spudagent-<effort>`, and a call for another definition would run the member at another level."""
+    if member["agent_type"] != kernel.SPUDAGENT:
+        return "agent_type: %s is planned as %s, the call asks for subagent_type %s" % (ref, member["agent_type"], subagent_type)
+    if member["effort"]:
+        return ("Law 3: %s is planned at %s effort, so it is spawned as subagent_type %s, not %s (change the plan with"
+                " `spud member edit --effort` first, while it is planned)" % (ref, member["effort"], spawn_as, subagent_type))
+    why = "%s takes none" % member["model"] if member["model"] not in kernel.EFFORT_MODELS else "it was planned before effort was recorded"
+    return ("Law 3: %s is planned at no effort (%s), so it is spawned as subagent_type %s, the base definition, not %s"
+            % (ref, why, spawn_as, subagent_type))
+
+
 def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_member, mode="spud"):
     tool_use_id = payload.get("tool_use_id")
     description = tool_input.get("description") if isinstance(tool_input.get("description"), str) else ""
@@ -47,6 +61,7 @@ def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_
                 reason = "no planned member named %s on %s; plan it first with `spud member new` (Law 2: no brief, no spudagent)" % (name, team)
     if reason is None:
         ref = "%s/%s" % (ticket["team_key"], member["name"])
+        spawn_as = kernel.spawn_type(member["agent_type"], member["effort"])  # spudagent-<effort>, spudagent, a contractor's
         limits = ctx.limits
         pending = con.execute(
             "SELECT tool_use_id, at FROM spawn_requests WHERE member_id = ? AND decision = 'allow' AND agent_id IS NULL AND tool_use_id != ? ORDER BY at, rowid LIMIT 1",
@@ -74,7 +89,7 @@ def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_
         elif not (member["brief"] or "").strip():
             reason = "Law 2: %s has no brief; no brief, no spudagent" % ref
         elif subagent_type == "fork" or tool_input.get("fork"):
-            reason = "Law 3: a fork is refused (it inherits Spud's model and skips the depth cap); spawn subagent_type %s with an explicit model" % member["agent_type"]
+            reason = "Law 3: a fork is refused (it inherits Spud's model and skips the depth cap); spawn subagent_type %s with an explicit model" % spawn_as
         elif tool_input.get("isolation"):
             reason = "Law 3: isolation %r is refused; spudagents share the session's working tree so their ledger writes land in the one ledger" % tool_input.get("isolation")
         elif not model:
@@ -83,8 +98,8 @@ def hook_agent_spawn(ctx, con, at, payload, tool_input, caller_agent_id, caller_
             reason = "Law 3: model inherit is refused; name the tier (%s is planned on %s)" % (ref, member["model"])
         elif model != member["model"]:
             reason = "Law 3: model must equal the planned tier %s, not %s (change the plan with `spud member edit --model` first)" % (member["model"], model)
-        elif subagent_type != member["agent_type"]:
-            reason = "agent_type: %s is planned as %s, the call asks for subagent_type %s" % (ref, member["agent_type"], subagent_type)
+        elif subagent_type != spawn_as:
+            reason = spawn_type_reason(ref, member, spawn_as, subagent_type)
         elif caller_agent_id and caller_member is None:
             reason = "caller agent_id %s is not bound to a member; only a bound member (or Spud, with no agent_id) spawns" % caller_agent_id
         elif (caller_member["id"] if caller_member else None) != member["parent_id"]:

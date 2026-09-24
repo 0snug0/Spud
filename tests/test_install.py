@@ -44,6 +44,12 @@ class InstallTest(RepoMixin, SpudTestCase):
         this run names (SPUD_TOOL_DIR is the scratch home itself unless a test moves it)."""
         return text.replace("{{launcher}}", str((tool or self.home.path) / "bin" / "spud"))
 
+    def variant(self, effort, text=AGENT):
+        """What install writes as `spudagent-<effort>.md` from that source text (SPD-222), spelled out rather than rendered
+        by the program: the base's frontmatter with its own name and one effort line last, the fixture having no model."""
+        return self.rendered(text).replace("name: spudagent\n", "name: spudagent-%s\n" % effort, 1).replace(
+            "\n---\n", "\neffort: %s\n---\n" % effort, 1)
+
     def settings(self):
         return json.loads(self.local.read_text(encoding="utf-8"))
 
@@ -200,8 +206,10 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn("project sync --all", proc.stdout)
         out = self.cli_json("project", "sync", "--all", actor="spud")
-        self.assertEqual([(r["project"], len(r["written"])) for r in out["projects"]], [("badtakes", 1)])
+        # SPD-222: the base and its five effort variants, each rendered from the one source
+        self.assertEqual([(r["project"], len(r["written"])) for r in out["projects"]], [("badtakes", 6)])
         self.assertEqual((self.user / "agents" / "spudagent.md").read_text(encoding="utf-8"), self.rendered(AGENT + "A new rule.\n"))
+        self.assertEqual((self.user / "agents" / "spudagent-max.md").read_text(encoding="utf-8"), self.variant("max", AGENT + "A new rule.\n"))
         self.assertEqual(self.cli("doctor").returncode, EXIT_OK)
         (self.user / "skills" / "spud" / "SKILL.md").unlink()
         proc = self.cli("--json", "doctor", check=False)
@@ -323,7 +331,9 @@ class InstallTest(RepoMixin, SpudTestCase):
         env = {"SPUD_TOOL_DIR": str(moved)}
         proc = self.cli("--json", "doctor", check=False, env=env)
         self.assertEqual(proc.returncode, EXIT_ERROR)
-        self.assertIn("is not the spudagent definition this home installs from", proc.stdout)
+        # every one of the six names the launcher, so every one is stale, and doctor names them in one problem
+        self.assertIn("spudagent.md, spudagent-low.md, spudagent-medium.md, spudagent-high.md, spudagent-xhigh.md, spudagent-max.md"
+                      " in %s are not the spudagent definitions this home installs from" % (self.user / "agents"), proc.stdout)
         agent = self.user / "agents" / "spudagent.md"
         out = self.cli_json("project", "sync", "badtakes", actor="spud", env=env)
         self.assertIn(str(agent), out["projects"][0]["written"])
@@ -357,6 +367,71 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertEqual(self.home.scalar("SELECT count(*) FROM projects WHERE key = 'badtakes'"), 0)
         e = self.home.json("events", "--kind", "project.removed")["events"][0]
         self.assertTrue(e["data"]["uninstalled"])
+
+    def test_install_writes_one_variant_per_effort_and_uninstall_leaves_none_behind(self):
+        """SPD-222: the Agent tool takes no effort and a definition's `effort:` beats the session's, so beside the base
+        install writes `spudagent-<effort>.md` for each level, the definitions the spawn check holds a member planned at
+        that effort to.  Uninstall with the last project takes back every one still as install wrote it; one edited by hand
+        stays, with a warning, exactly as the base does."""
+        out = self.cli_json("project", "install", "badtakes", actor="spud")
+        agents = self.user / "agents"
+        self.assertEqual(sorted(p.name for p in agents.iterdir()),
+                         sorted(["spudagent.md", "spudagent-low.md", "spudagent-medium.md", "spudagent-high.md",
+                                 "spudagent-xhigh.md", "spudagent-max.md"]))
+        for effort in ("low", "medium", "high", "xhigh", "max"):
+            variant = agents / ("spudagent-%s.md" % effort)
+            self.assertIn(str(variant), out["written"])
+            self.assertEqual(variant.read_text(encoding="utf-8"), self.variant(effort))
+        record = json.loads(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))
+        self.assertEqual(record["variant_sha256"], {"spudagent-%s" % e: hashlib.sha256(self.variant(e).encode("utf-8")).hexdigest()
+                                                    for e in ("low", "medium", "high", "xhigh", "max")})
+        self.assertEqual(self.cli_json("project", "install", "badtakes", actor="spud")["written"], [])
+        self.cli("project", "uninstall", "badtakes", actor="spud")
+        self.assertEqual(sorted(agents.iterdir()), [])
+        self.install()
+        (agents / "spudagent-high.md").write_text(self.variant("high") + "Eric's own line.\n", encoding="utf-8")
+        out = self.cli_json("project", "uninstall", "badtakes", actor="spud")
+        self.assertEqual([p.name for p in agents.iterdir()], ["spudagent-high.md"])
+        self.assertEqual(out["warnings"], ["%s differs from what install wrote, so it is left in place" % (agents / "spudagent-high.md")])
+
+    def test_doctor_checks_every_variant_and_notes_a_project_scope_one(self):
+        self.install()
+        agents = self.user / "agents"
+        (agents / "spudagent-xhigh.md").unlink()
+        proc = self.cli("--json", "doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("no spudagent definition at %s; run `spud --as spud project sync --all`" % (agents / "spudagent-xhigh.md"), proc.stdout)
+        (agents / "spudagent-low.md").unlink()
+        self.assertIn("no spudagent definitions spudagent-low.md, spudagent-xhigh.md in %s;" % agents,
+                      self.cli("--json", "doctor", check=False).stdout)
+        self.cli_json("project", "sync", "--all", actor="spud")
+        self.assertEqual(self.cli_json("doctor")["problems"], [])
+        (agents / "spudagent-medium.md").write_text("---\nname: spudagent-medium\n---\nsomething else\n", encoding="utf-8")
+        self.assertIn("%s is not the spudagent definition this home installs from" % (agents / "spudagent-medium.md"),
+                      self.cli("--json", "doctor", check=False).stdout)
+        self.cli_json("project", "sync", "--all", actor="spud")
+        own = self.other / ".claude" / "agents" / "spudagent-high.md"
+        own.parent.mkdir(parents=True, exist_ok=True)
+        own.write_text(self.variant("high"), encoding="utf-8")
+        out = self.cli_json("doctor")
+        self.assertEqual(out["problems"], [])
+        self.assertEqual(next(p for p in out["projects"] if p["key"] == "badtakes")["project_scope_agent"], str(own))
+        self.assertIn("reads it and not %s" % (agents / "spudagent-high.md"), next(n for n in out["notes"] if str(own) in n))
+
+    def test_install_refuses_a_source_that_is_no_base_for_the_variants(self):
+        """The base sets no effort, so it runs at the spawning session's level; a source that sets one would make the base
+        run at it and give each variant two effort lines.  Refused before anything is written."""
+        self.source.write_text(AGENT.replace("name: spudagent\n", "name: spudagent\neffort: high\n"), encoding="utf-8")
+        proc = self.install(check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("is not a base spudagent definition the effort variants can be rendered from: its frontmatter sets an effort",
+                      proc.stderr)
+        self.assertFalse((self.user / "agents").exists())
+        self.assertIsNone(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))
+        self.source.write_text("You are a spudagent with no frontmatter.\n", encoding="utf-8")
+        self.assertIn("it has no --- frontmatter block", self.install(check=False).stderr)
+        self.source.write_text(AGENT.replace("name: spudagent\n", "name: helper\n"), encoding="utf-8")
+        self.assertIn("its frontmatter has no `name: spudagent` line", self.install(check=False).stderr)
 
     def test_the_install_record_keeps_what_uninstall_needs(self):
         self.install()

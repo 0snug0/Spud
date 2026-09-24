@@ -351,9 +351,10 @@ def init_steps(ctx, args, plan):
                "register no project (--no-project), leaving an empty registry that can hold no ticket until `project add`,"
                " and write one report entry")
     user = homeconf.user_claude_dir()
-    install_step = ("install project %s: %s, the .git/info/exclude line for it, %s and %s"
+    install_step = ("install project %s: %s, the .git/info/exclude line for it, %s with its %d effort variants (%s) and %s"
                     % (plan["project_key"], Path(plan["project_root"]) / install.SETTINGS_LOCAL,
-                       user / "agents" / "spudagent.md", user / "skills" / "spud" / "SKILL.md")
+                       user / "agents" / "spudagent.md", len(kernel.SPUDAGENT_VARIANTS),
+                       ", ".join(name + ".md" for name in kernel.SPUDAGENT_VARIANTS), user / "skills" / "spud" / "SKILL.md")
                     if plan["project_root"] else "install no project (--no-project)")
     if args.no_schedule or sys.platform != "darwin":
         schedule_step = ("install neither LaunchAgent (%s): %s and %s"

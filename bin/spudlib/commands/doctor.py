@@ -284,15 +284,22 @@ def doctor_pull_requests(ctx, problems, notes):
 
 SYNC_ALL = "run `spud --as spud project sync --all`"
 AGENT_ABSENT = "no spudagent definition at %s; " + SYNC_ALL
+AGENTS_ABSENT = "no spudagent definitions %s; " + SYNC_ALL  # several of the base and its effort variants (SPD-222)
 # A hand edit of the installed copy and a home whose launcher moved read the same way -- the copy is not what
 # install renders from the tool repository's template now -- and one sync settles both.
 AGENT_DIFFERS = "%s is not the spudagent definition this home installs from %s; " + SYNC_ALL
+AGENTS_DIFFER = "%s are not the spudagent definitions this home installs from %s; " + SYNC_ALL
 # Claude Code reads a project-scope agent definition in preference to the user-scope copy install writes, so a
 # `.claude/agents/spudagent.md` in a project's own checkout is the definition every session there actually reads -- which
 # is how the tool repository's own template, `{{launcher}}` and all, shadowed the installed copy until it moved under
 # share/.  Nothing in the installed files shows it, so doctor says it in as many words.
 AGENT_SHADOWED = ("%s exists, so a spudagent in that checkout reads it and not %s, the definition this home installs:"
                   " Claude Code prefers a project-scope agent definition to the user-scope one")
+
+
+def agent_files(paths):
+    """Several installed definitions in one phrase: `spudagent.md, spudagent-low.md in <the agents directory>`."""
+    return "%s in %s" % (", ".join(path.name for path in paths), paths[0].parent)
 
 
 def doctor_projects(ctx, problems, notes):
@@ -315,11 +322,13 @@ def doctor_projects(ctx, problems, notes):
     # The tool repository's copy is the source, a template under share/ whose launcher is filled in per machine: the
     # installed copy is compared with what this home renders from it now, never with the source's bytes, which name no
     # machine's launcher.
+    # Every definition install writes is checked: the base and each effort variant (SPD-222), which the spawn check names
+    # as the subagent_type of a member planned at that effort, so a variant missing here is a spawn the harness refuses.
     source_agent = agentdef.agent_source(ctx)
     try:
-        expected_agent, agent_gone = agentdef.agent_markdown(ctx), None
+        expected_agents, agent_gone = dict(agentdef.definitions(ctx)), None
     except kernel.SpudError as e:
-        expected_agent, agent_gone = None, e.message
+        expected_agents, agent_gone = None, e.message
     for p in rows:
         root, checks, bad, project_agent = p["root_path"], [], [], None
         if not os.path.isdir(root):
@@ -348,22 +357,27 @@ def doctor_projects(ctx, problems, notes):
                 bad.append("%s is not ignored by git in %s" % (install.SETTINGS_LOCAL, root))
             if agent_gone is not None:
                 bad.append(agent_gone)
-            elif not files["agent"].is_file():
-                bad.append(AGENT_ABSENT % files["agent"])
-            elif files["agent"].read_bytes() == expected_agent.encode("utf-8"):
-                checks.append("agent")
             else:
-                bad.append(AGENT_DIFFERS % (files["agent"], source_agent))
+                absent = [path for path in files["agents"].values() if not path.is_file()]
+                differ = [path for name, path in files["agents"].items()
+                          if path.is_file() and path.read_bytes() != expected_agents[name].encode("utf-8")]
+                if absent:
+                    bad.append(AGENT_ABSENT % absent[0] if len(absent) == 1 else AGENTS_ABSENT % agent_files(absent))
+                if differ:
+                    bad.append(AGENT_DIFFERS % (differ[0], source_agent) if len(differ) == 1 else AGENTS_DIFFER % (agent_files(differ), source_agent))
+                if not absent and not differ:
+                    checks.append("agent")
             if files["skill"].is_file():
                 checks.append("skill")
             else:
                 bad.append("no /spud skill at %s; run `spud --as spud project sync %s`" % (files["skill"], p["key"]))
             if not files["pointer"].is_file():
                 notes.append("no home pointer at %s (a launcher copied outside every checkout cannot find the home)" % files["pointer"])
-            own = agentdef.project_scope_agent(root)
-            if own.is_file():  # it wins over files["agent"], so say so; the report carries the answer either way
-                project_agent = str(own)
-                notes.append(AGENT_SHADOWED % (project_agent, files["agent"]))
+            for name, installed in files["agents"].items():
+                own = agentdef.project_scope_agent(root, name)
+                if own.is_file():  # it wins over the installed copy, so say so; the report carries the answer either way
+                    project_agent = project_agent or str(own)
+                    notes.append(AGENT_SHADOWED % (own, installed))
         else:
             checks.append("not installed")
         problems.extend("project %s: %s" % (p["key"], b) for b in bad)

@@ -297,6 +297,13 @@ def build_parser():
     q.add_argument("--model", required=True, choices=kernel.MODELS)
     q.add_argument("--name", help="a pool name instead of a random draw")
     q.add_argument("--tier-reason", type=text_arg, help="required when the model is not the persona's default tier")
+    q.add_argument("--escalates", metavar="SPUD-nnn/<Name>",
+                   help="re-plan on fable, once, a sibling that returned failed or blocked on opus: records the link and, without"
+                        " --tier-reason, fills it as `escalation after SPUD-nnn/<Name> <status>`")
+    q.add_argument("--effort", choices=kernel.EFFORTS,
+                   help="the effort it runs at, spawned as subagent_type spudagent-<effort>; default the persona's `effort` in"
+                        " spud.config.json, else high (an escalation: the re-planned member's, never lower); haiku and a"
+                        " contractor record none")
     q.add_argument("--agent-type", help="native agent type (required for a contractor)")
     q.add_argument("--brief", type=text_arg, help="the brief, required and non-empty (no brief, no spudagent); @file or @- accepted")
     q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable): bare for the ticket's project, in the worktree the ticket"
@@ -321,12 +328,13 @@ def build_parser():
     q.add_argument("--summary", type=text_arg, help="one paragraph for the card")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry a root member's finish writes: SPD-nnn: <Name> (<lineage>, <persona>, <model>) <status>, then its summary; refused for a nested member")
     q.set_defaults(func=membercmds.cmd_member_finish)
-    q = ps.add_parser("edit", help="edit brief, deliverables, model, summary (the parent's); new deliverables bind and refuse as member new's do")
+    q = ps.add_parser("edit", help="edit brief, deliverables, model, effort, summary (the parent's); new deliverables bind and refuse as member new's do")
     q.add_argument("ref")
     q.add_argument("--brief", type=text_arg)
     q.add_argument("--deliverable", action="append")
     q.add_argument("--summary", type=text_arg)
     q.add_argument("--model", choices=kernel.MODELS)
+    q.add_argument("--effort", choices=kernel.EFFORTS, help="change a planned member's effort before it is spawned (a model change keeps it)")
     q.add_argument("--tier-reason", type=text_arg)
     q.add_argument("--agent-type")
     q.set_defaults(func=membercmds.cmd_member_edit)
