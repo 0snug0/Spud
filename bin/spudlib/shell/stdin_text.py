@@ -36,8 +36,10 @@ redirected_text): bash where the last of them points, and zsh, whose MULTIOS joi
 command, into the pipe as well -- `{ echo '...'; } > /dev/null | sh` runs the text in zsh alone.  A compound command's
 redirections after its closer are read so too (walk.ShellWalk.finish), where they once stood for a command of their own
 that printed nothing the hook could spell.  So are the commands that print nothing at all, a condition's `true` or
-`test` and a loop's `break` (SPD-273, printed_text), which once left a compound's whole text unread; and a printer's
-name the shell runs a function or an alias for prints that body's text, not the printer's (SPD-272, _shadowed).
+`test` and a loop's `break` (SPD-273, printed_text), which once left a compound's whole text unread.  A call of a
+function the line defines prints what the call's reading of its body prints, from the state and on the input the call
+has (SPD-272, LineCall, walk.read_call), and a printer's name the shell runs another body for -- an alias, a function
+of the snapshot's or one whose name the hook cannot read -- prints text this module does not follow (_shadowed).
 
 A command's input redirections are read as each shell feeds them (SPD-209, command_input): zsh reads every one of them
 in turn, after the pipe into the command, and bash the last alone, so where the two differ the text is a MultiosText
@@ -101,6 +103,8 @@ _BUILTINS = frozenset({"echo", "print", "printf"}) | (_SILENT - {"[["})
 _PROGRAMS = frozenset({"cat", "tee"})
 # What the words of an arithmetic command, `(( ... ))`, open with as the walk hands them on
 _ARITHMETIC_COMMAND = syntax._ARITH_SENTINELS["("]
+# LineCall.own for a call no command of the function's name can answer: a definition surely ran before it (SPD-272)
+_CERTAIN = object()
 
 
 class MultiosText(str):
@@ -359,10 +363,13 @@ def printed_text(tokens, stdin, a=None, feeds_pipe=False):
     tee, which passes its input on whatever files it also writes; and the ones that print nothing (_SILENT, `(( ... ))`
     and a pipeline's `!` before any of these, SPD-273), so the text of a compound around them -- `if true; then echo
     ...; fi`, `while ...; do ...; break; done` -- is the text its printers print.  Every other command prints text this
-    module does not know, and so does a name the shell runs a function or an alias for (_shadowed, SPD-272), unless
-    `builtin` or `command` runs the shell's own (_command).  A redirection of the command's standard output takes that
-    text from where it would go, as redirected_text reads it (`feeds_pipe`: a pipe follows the command).  `stdin`: the
-    text the command reads on standard input (command_input), which cat and tee print as it stands.
+    module does not know, and so does a name the shell runs an alias or another function for (_shadowed, SPD-272), unless
+    `builtin` or `command` runs the shell's own (_command).  A call of a function the line defines, whatever its name,
+    is a LineCall, whose text walk.ShellWalk.finish takes from the call's own reading of the body once it is read, with
+    the command's own text beside it where no definition surely ran first.  A redirection of the command's standard
+    output takes that text from where it would go, as redirected_text reads it (`feeds_pipe`: a pipe follows the
+    command).  `stdin`: the text the command reads on standard input (command_input), which cat and tee print as it
+    stands.
 
     `a`, the line's analysis before this command runs: a `$NAME` the line settled is read as its value (SPD-148), the
     value the shells expand it to, since the command's own prefix assignments reach none of its words.  bash splits an
@@ -374,23 +381,92 @@ def printed_text(tokens, stdin, a=None, feeds_pipe=False):
         words = words[1:]  # `! cmd` prints what cmd prints (probed: `! echo hi` printed hi)
     if words and words[0].startswith(_ARITHMETIC_COMMAND):
         return redirected_text("", tokens, feeds_pipe)  # an arithmetic command prints nothing (probed: `(( 1 + 1 ))`)
-    words, own = _command(words, a)
+    name = word_text(words[0]) if words else None
+    bodies = _line_bodies(name, a)
+    if bodies:
+        # a call of a function the line defines: the text its body prints where the call runs it (SPD-272), and, where no
+        # definition surely ran before it, the text the command of that name prints as well, either being what runs
+        certain = any(body.certain for body in bodies)
+        return LineCall(name, tokens, feeds_pipe, _CERTAIN if certain else _command_text(words, tokens, stdin, a, feeds_pipe, name))
+    return _command_text(words, tokens, stdin, a, feeds_pipe)
+
+
+def _command_text(words, tokens, stdin, a, feeds_pipe, called=None):
+    """printed_text's reading of the command `words`, `tokens` with its redirections: the shell's own printer, a silent
+    command, or a program by those names, or None for text it does not know.  `called`: a function the line defines
+    under the command's name, which _shadowed leaves aside, since the call's own reading of its body stands beside this."""
+    words, own = _command(words, a, called)
     if words is None:
         return None
     if a is None or not any("$" in w for w in words):
         name = word_text(words[0]) if words else None
-        if not _reads(name, a, own):
+        if not _reads(name, a, own, called):
             return None
         return redirected_text(_printed([name] + [word_text(w) for w in words[1:]], stdin), tokens, feeds_pipe)
-    if not _reads(word_text(words[0], a), a, own):
+    if not _reads(word_text(words[0], a), a, own, called):
         return None  # zsh's reading prints nothing this module reads, so bash's cannot agree with a text
     whole, fields = _readings(words, a)
-    if not (fields and _reads(fields[0], a, own)):
+    if not (fields and _reads(fields[0], a, own, called)):
         return None
     return redirected_text(_either(_printed(whole, stdin), _printed(fields, stdin)), tokens, feeds_pipe)
 
 
-def _command(words, a):
+class LineCall:
+    """printed_text's answer for a call of a function the line defines (SPD-272): the text is the one the call's reading of
+    the body prints, which walk.read_call leaves in ShellAnalysis.call_printed once ShellWalk.finish has had the command
+    read (analyse_segment), where it asks `output` for it.  `name`, the function's; `tokens` and `feeds_pipe`, the call's
+    own redirections and whether a pipe follows it, as redirected_text reads them; `own`, _CERTAIN where a definition
+    surely ran before the call, else the text the command of that name prints (None: text the hook cannot spell), which
+    runs where none did."""
+
+    __slots__ = ("name", "tokens", "feeds_pipe", "own")
+
+    def __init__(self, name, tokens, feeds_pipe, own):
+        self.name, self.tokens, self.feeds_pipe, self.own = name, tokens, feeds_pipe, own
+
+    def output(self, called):
+        """The text the call prints, from `called`, walk.read_call's (the name, the text where the call's output goes, the
+        text where a pipe follows the call), or None where no call of this name was read: the body's text where a pipe
+        follows the call is the one zsh joins the definition's own output redirections to (ShellWalk.body_piped), and the
+        call's own redirections take from either as a command's do."""
+        text = None
+        if called is not None and called[0] == self.name:
+            text = redirected_text(called[2] if self.feeds_pipe else called[1], self.tokens, self.feeds_pipe)
+        return text if self.own is _CERTAIN else either_text([text, self.own])
+
+
+def either_text(texts):
+    """The text a shell reading any one of `texts` runs, where the hook cannot say which one is printed (SPD-272: the
+    bodies of one name, or a body and the command of its name): the one text where they agree, else each after the other,
+    as _either reads two shells' readings, so every command any of them would run is read.  None where one of them is text
+    the hook cannot spell, and where they differ and one is a MultiosText, whose two readings a join would lose."""
+    if not texts or None in texts:
+        return None
+    first = texts[0]
+    if all(text == first and _zsh(text) == _zsh(first) for text in texts[1:]):
+        return first
+    if any(isinstance(text, MultiosText) for text in texts):
+        return None
+    joined_text = first
+    for text in texts[1:]:
+        if text != joined_text:
+            joined_text = _either(joined_text, text)
+    return joined_text
+
+
+def _line_bodies(name, a):
+    """The bodies a call of `name` reads where the line defines it (walk.read_call, SPD-277), when nothing else the shell
+    could run under the name stands beside them (_shadowed's other shadows: a function whose name the hook cannot read, a
+    hashed program, an alias, the snapshot's own); else none, and the name reads as a shadowed one does."""
+    if a is None or not name:
+        return []
+    bodies = [body for body in a.function_bodies.get(name, ()) if body.complete()]
+    if not bodies or _shadowed(name, a, name):
+        return []
+    return bodies
+
+
+def _command(words, a, called=None):
     """(the words from the command's name on, the precommand that runs it as the shell's own or None) for printed_text,
     or (None, None) where that is not a command it reads.
 
@@ -401,7 +477,7 @@ def _command(words, a):
     first = word_text(words[0]) if words else None
     if first not in ("builtin", "command"):
         return words, None
-    if _shadowed(first, a):
+    if _shadowed(first, a, called):
         return None, None  # a function named builtin or command runs in its place (probed)
     rest = words[1:]
     while first == "command" and rest:
@@ -417,21 +493,21 @@ def _command(words, a):
     return (rest, first) if rest else (None, None)
 
 
-def _reads(name, a, own):
+def _reads(name, a, own, called=None):
     """Whether printed_text reads the command `name` as a printer or as a command that prints nothing: its own name, a
     printer's by a path too, which the shell runs as itself.  `own`: the precommand that runs it, `builtin` (the shell's
     own alone) or `command` (the shell's own or the program), or None, where a name the shell runs a function or an
-    alias for is text of its own (_shadowed)."""
+    alias for is text of its own (_shadowed; `called`, a function of the line's it leaves aside)."""
     if not name or not (name in _SILENT or _printer(name)):
         return False
     if own == "builtin":
         return name in _BUILTINS
     if own == "command":
         return name in _BUILTINS or _printer(name) and not _hashed(name, a)
-    return not _shadowed(name, a)
+    return not _shadowed(name, a, called)
 
 
-def _shadowed(name, a):
+def _shadowed(name, a, called=None):
     """Whether the shell runs something other than its own `name` or the program on PATH for it (SPD-272): a function the
     line defines under that name, or one it cannot name (ShellAnalysis.functions: a definition, zsh's `functions` table),
     a program it hashed there (cat and tee alone, which the shell looks up), an alias of the line's where `eval` reads it
@@ -440,10 +516,12 @@ def _shadowed(name, a):
     does not follow: unread, as input the line does not spell (probed through tests/probes/shell_probe.py in zsh 5.9 -f
     and -f -o nobareglobqual and bash 3.2.57, 2026-09-24, tests/test_hooks_input.py PrinterShadowTest: `echo() { printf
     ...; }; echo hi | sh` ran the function's text, and so did a function named printf, print, cat, tee, true, `:`, test,
-    builtin or command, one defined inside an `if` too, while one defined in a subshell did not reach a call after it)."""
+    builtin or command, one defined inside an `if` too, while one defined in a subshell did not reach a call after it).
+    A function the line defines is read for the text its body prints where a call runs it (LineCall, SPD-272), so
+    `called` names one this leaves aside: the command's reading beside the call's, or whether anything else shadows it."""
     if a is None:
         return False
-    if name in a.functions or syntax.UNKNOWN_NAME in a.functions or _hashed(name, a):
+    if name in a.functions and name != called or syntax.UNKNOWN_NAME in a.functions or _hashed(name, a):
         return True
     if a.alias_scope:
         body, doubtful = expansions.alias_substitution(name, a)

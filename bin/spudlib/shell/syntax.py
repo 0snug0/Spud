@@ -764,6 +764,13 @@ class ShellAnalysis:
         # call's input the whole analysis has made, which positional.READINGS_PER_NAME bounds (SPD-212); `body_serial`,
         # how many bodies the analysis has numbered, the order a call reads several bodies of one name in.
         self.function_bodies, self.walking, self.walks, self.body_walks, self.body_serial = {}, set(), [], 0, 0
+        # SPD-272: the text such a body prints where a call runs it, which a shell after the call's pipe runs.
+        # `body_printed`, each reading of a body held_text.read_function made (its LineBody and its key) -> a pair of texts:
+        # where the call's standard output goes, and where a pipe follows the call, which zsh joins the definition's own
+        # output redirections to (MULTIOS); either None where the hook cannot spell it.  `read_printed`, the pair of the
+        # reading walk.read_line_body made last, and `call_printed`, (the name, its bodies' pair) of the call walk.read_call
+        # read last: the channels ShellWalk.finish reads a call's text through (stdin_text.LineCall).
+        self.body_printed, self.read_printed, self.call_printed = {}, None, None
         # SPD-276: `hook_names`, each name a zshexit_functions, chpwd_functions or zsh_directory_name_functions array on
         # the line lists, or an action a shell runs later calls -> whether zsh may run it inside the line (UNKNOWN_NAME for
         # an element the hook cannot read), whose body is read as a trap's action is (expansions.read_deferred_body);

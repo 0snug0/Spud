@@ -87,10 +87,12 @@ class LineBody:
     put back where it stood when the walk ends (ShellWalk.settle_definitions) unless a call read the body (`called`) --
     and `marks` and `caches`, those lists' lengths and the reading's caches as the definition began, put back with it; all
     three None for a definition inside another's body, whose reading in place is that one's.  `readings` and `active`: how
-    many readings of it calls have made, and how many are under way (held_text.read_function)."""
+    many readings of it calls have made, and how many are under way (held_text.read_function).  `certain`: the definition
+    surely runs before any call after it on the line (ShellWalk.certain_definition), so a call runs this body or another
+    the line defines under the name and never the command of that name (stdin_text.printed_text, SPD-272)."""
 
     __slots__ = ("names", "line", "serial", "start", "consumed", "tokens", "inner", "docs", "expanded", "glued", "into",
-                 "text", "pending", "marks", "caches", "called", "readings", "active")
+                 "text", "pending", "marks", "caches", "called", "readings", "active", "certain")
 
     def __init__(self, names, line, a):
         self.names, self.line = tuple(names), line
@@ -99,7 +101,7 @@ class LineBody:
         self.start, self.consumed, self.tokens, self.text = 0, (0, 0), None, None
         self.inner, self.docs, self.expanded, self.glued, self.into = (), (), (), True, False
         self.pending = self.marks = self.caches = None
-        self.called, self.readings, self.active = False, 0, 0
+        self.called, self.readings, self.active, self.certain = False, 0, 0, False
 
     def complete(self):
         """Whether the walk has read the body to its end, so a call can read it: not while its own reading in place is
@@ -130,7 +132,7 @@ class ShellFrame:
     `do ... done` (resolve_body)."""
 
     __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints",
-                 "procsub", "serial", "bare", "defines", "arith", "bound", "form", "locals", "assigns")
+                 "procsub", "serial", "bare", "defines", "arith", "bound", "form", "locals", "assigns", "element_mark")
 
     def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
@@ -174,6 +176,8 @@ class ShellFrame:
         # it opens a command, no word before it, so that the words after its closer are its own redirections: not so for
         # a process substitution, nor for a `(` after words.
         self.serial, self.bare = 0, False
+        # the walk's element_mark and list_defined where it opened, put back when it closes (SPD-272)
+        self.element_mark = (0, 0)
         # this `( ... )` frame is the subshell mark_zsh_patterns leaves for an arithmetic command `(( ... ))` (its outer
         # parenthesis kept, its inside marked), so its close ends a condition it stands at the end of (SPD-177); and the
         # names that arithmetic assigned where the command stands (SPD-225, ShellWalk.pop), which a pipe after it doubts
@@ -265,6 +269,10 @@ class ShellWalk:
         # to a hook array handed the command being read, for finish to read after it (SPD-278, SPD-276).
         self.defined, self.pending_body, self.capturing, self.source, self.queued = [], None, [], None, []
         self.line = line
+        # a call's reading of a compound body (SPD-212): and, once its own output redirections are read (finish), the text
+        # it prints where a pipe follows the call, which zsh joins them to (SPD-272, read_line_body); None where that is
+        # the text the walk printed
+        self.into, self.body_piped = into, None
         self.start_list()
         self.pipe_feeds = into  # a call's input, a pipe into the compound body (SPD-212)
 
@@ -273,6 +281,7 @@ class ShellWalk:
         self.list_start = self.list_seen = self.pipeline_start = self.a.cwds
         self.uncertain = self.conditional = self.piped = False
         self.list_mark = len(self.a.assigned)  # the assignments before this and-or list
+        self.list_defined = len(self.defined)  # ... and the definitions (uncertain_element)
         self.end_element()  # no pipe feeds the first element of a new list
 
     def end_element(self, into_pipe=False):
@@ -287,6 +296,14 @@ class ShellWalk:
             self.piped_text, self.piped_fed = self.frame_stdin, self.frame_stdin_fed
         self.pipe_feeds = into_pipe
         self.printed = ""
+        self.element_mark = len(self.defined)  # the definitions the element read from here on (uncertain_element)
+
+    def uncertain_element(self, background=False):
+        """The pipeline element read so far runs in a process of its own, a `|` after it -- or, `background`, the whole
+        and-or list, a `&` after it: no definition in it reaches a call after it in the line's shell (LineBody.certain,
+        SPD-272)."""
+        for body in self.defined[self.list_defined if background else self.element_mark :]:
+            body.certain = False
 
     def end_pipeline(self):
         if self.piped:
@@ -319,7 +336,7 @@ class ShellWalk:
         # input that element was given is the input every list inside it starts from -- with the compound's own input
         # redirections, where an earlier walk of the line found any after its closer, read as a simple command's are,
         # zsh's reading and bash's (stdin_text.command_input, SPD-209 and SPD-210)
-        frame.printed, frame.earlier = self.printed, self.frame_printed
+        frame.printed, frame.earlier, frame.element_mark = self.printed, self.frame_printed, (self.element_mark, self.list_defined)
         frame.stdin = (self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed, self.pipe_feeds)
         self.printed, self.frame_printed = "", ""
         self.frame_stdin, self.frame_stdin_fed = self.piped_text, self.piped_fed
@@ -345,7 +362,7 @@ class ShellWalk:
         frame = self.stack.pop()
         # the compound command's own output stands where it opened, in the element that holds it
         self.printed = stdin_text.joined(frame.printed, self.frame_printed) if frame.prints else frame.printed
-        self.frame_printed = frame.earlier
+        self.frame_printed, (self.element_mark, self.list_defined) = frame.earlier, frame.element_mark
         self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed, self.pipe_feeds = frame.stdin
         if frame.kind == "sub":
             self.a.functions, self.a.function_bodies = frame.funcs  # a function defined in a subshell does not reach a call after it
@@ -774,12 +791,24 @@ class ShellWalk:
                 # (`{ cat; } <<'EOF' | sh`), and nothing here
                 self.printed = ""
             else:
+                if self.into and not self.stack and closed.kind != "sub":
+                    # a call's reading of a compound body, whose own output redirections these are: where a pipe follows
+                    # the call, zsh joins them to it (SPD-272, probed: `f() { echo '...'; } > /dev/null; f | sh` ran the
+                    # text in zsh 5.9 and not in bash 3.2.57; `s() ( echo '...' ) > /dev/null; s | sh` in neither)
+                    self.body_piped = stdin_text.joined(self.frame_printed,
+                                                        stdin_text.redirected_text(self.printed, cleaned, True))
                 self.printed = stdin_text.redirected_text(self.printed, cleaned, feeds_pipe)
         else:
             # what this command adds to the text its pipeline element prints, which a shell after a `|` runs, read with
-            # the values the line settled before it runs (SPD-148)
+            # the values the line settled before it runs (SPD-148) -- a call of a function the line defines prints what the
+            # call's reading of its body printed, known once analyse_segment has read it (SPD-272, stdin_text.LineCall)
             printed = stdin_text.printed_text(cleaned, stdin, a, feeds_pipe)
+            call = printed if isinstance(printed, stdin_text.LineCall) else None
+            if call is not None:
+                a.call_printed = None
             analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, self.piped_fed)
+            if call is not None:
+                printed = call.output(a.call_printed)
             self.printed = stdin_text.joined(self.printed, printed)
         a.unsure -= unsure
         a.body_loop = body_loop
@@ -809,9 +838,19 @@ class ShellWalk:
         if self.source is None:
             self.source = list(self.toks)  # close_brace may write a token over (a glued always block)
         body = self.bind(names)
-        body.start = start
+        body.start, body.certain = start, self.certain_definition()
         self.pending_body = body
         return body
+
+    def certain_definition(self):
+        """Whether a definition read here surely runs before whatever follows it in the same shell (LineBody.certain,
+        SPD-272): in the line's own walk, not the text of an eval, a body or a string it reads, which may not run; not after
+        `&&` or `||`, nor in a pipeline element after a `|`; and inside no compound command but a group or a subshell that
+        no such operator precedes, since a condition, a loop, a case or a function body may not run it.  A `|` or a `&`
+        read after it takes it back (uncertain_element): that element ran in a process of its own."""
+        outer_ok = all(frame.kind in ("group", "sub") and frame.defines is None and not frame.procsub
+                       and not (frame.outer[4] or frame.outer[5]) for frame in self.stack)
+        return outer_ok and len(self.a.walks) == 1 and not (self.conditional or self.piped)
 
     def bind(self, names):
         """A LineBody for these names, bound to them and to this walk's reading of the line."""
@@ -1221,10 +1260,12 @@ class ShellWalk:
                 self.finish(unsure=True, feeds_pipe=True)
                 self.a.cwds = self.pipeline_start  # that element ran in its own process
                 self.piped = True
+                self.uncertain_element()
                 self.end_element(into_pipe=True)  # the next element reads what this one printed
             elif t == "&":
                 self.reopen_condition()
                 self.finish(unsure=True)
+                self.uncertain_element(background=True)
                 self.close_sublists()  # `repeat 2 git push &`: the `&` ends the body's sublist, and the loop with it
                 self.a.doubt.update(self.a.assigned[self.list_mark :])  # a background list assigns in its own process
                 loop_bindings.forget(self.a, self.a.assigned[self.list_mark :])
@@ -1309,7 +1350,7 @@ def read_call(a, name, depth, stdin, fed):
     found = sorted((body for body in a.function_bodies.get(name, ()) if body.complete()), key=lambda body: body.serial)
     if not found:
         return NO_BODY
-    before, after = a.cwds, NO_BODY
+    before, after, texts = a.cwds, NO_BODY, []
     for body in found:
         a.cwds, given, given_fed = before, stdin, fed
         if body.line in a.walking:
@@ -1318,19 +1359,31 @@ def read_call(a, name, depth, stdin, fed):
             if fed:
                 script_files.record_script(a, "function", name)
             given, given_fed = None, False
-        moved = held_text.read_function(a, name, body, depth, given, given_fed)
+        moved, printed = held_text.read_function(a, name, body, depth, given, given_fed)
         after = moved if after is NO_BODY else directories.union_dirs(after, moved)
+        texts.append(printed or (None, None))
+    # the text the call prints, either body's where the line defines more than one (SPD-272): set once every reading
+    # under this call is over, for the ShellWalk.finish that reads the call (stdin_text.LineCall)
+    a.call_printed = (name,) + tuple(stdin_text.either_text(list(each)) for each in zip(*texts))
     return after
 
 
 def read_line_body(a, body, depth, stdin, fed):
     """analyse_command's reading of a LineBody: its tokens walked as the line's own are, on the input a call hands it, or
     the text zsh's `functions` parameter was handed, read as any text is (SPD-278), a level down from the line's own so
-    the reading of the raw line (held options, markers) is not made again."""
+    the reading of the raw line (held options, markers) is not made again.
+
+    The text the reading prints (SPD-272) is left in ShellAnalysis.read_printed for held_text.read_function: the walk's,
+    and the one it prints where a pipe follows the call (ShellWalk.body_piped); None for a `functions` body's text, whose
+    readings (zsh's and bash's) this does not follow."""
     if body.text is not None:
-        return analyse.analyse_command(body.text, a, max(depth, 1), stdin, fed)
-    walk_line(a, list(body.tokens), body.inner, body.docs, body.expanded, depth, reading_start(a), body.glued, stdin, fed,
-              body.into)
+        analyse.analyse_command(body.text, a, max(depth, 1), stdin, fed)
+        a.read_printed = None
+        return a
+    shell_walk = walk_line(a, list(body.tokens), body.inner, body.docs, body.expanded, depth, reading_start(a), body.glued,
+                           stdin, fed, body.into)
+    printed = shell_walk.frame_printed
+    a.read_printed = (printed, printed if shell_walk.body_piped is None else shell_walk.body_piped)
     return a
 
 

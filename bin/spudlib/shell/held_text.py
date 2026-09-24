@@ -175,7 +175,11 @@ def read_function(a, cmd, body, depth, stdin, fed):
     read as input the line does not spell, refused a member a shell or an interpreter reading it; and a body read from
     that many states reads a call from any other once more, from directories the hook cannot follow, and gives every later
     one that reading.  A call inside the body's own reading, from another state, is read a level deeper, so a body that
-    calls itself from ever other states stops at analyse.READING_DEPTH."""
+    calls itself from ever other states stops at analyse.READING_DEPTH.
+
+    Returns (the directories, the pair of texts that reading printed, SPD-272: ShellAnalysis.body_printed), the texts
+    kept per reading as the directories are, so a call that reads exactly as one read before prints what it printed,
+    and one inside its own reading from where that reading started prints text the hook cannot spell (None)."""
     before, counted = a.cwds, False
     if fed and a.body_walks >= positional.READINGS_PER_NAME:
         stdin = None  # past the bound: input the line does not spell (SPD-212)
@@ -198,16 +202,19 @@ def read_function(a, cmd, body, depth, stdin, fed):
             a.dir_moves += 1
         body.active += 1
         marks = [len(getattr(a, field)) for field in _PRUNED] if a.shell_reading else None
+        a.read_printed = None  # a reading past analyse.READING_DEPTH walks nothing, and prints text the hook cannot spell
         try:
             read_body(a, body, depth + (body.active > 1), stdin, fed)
         finally:
             body.active -= 1
+        a.body_printed[body, read] = a.read_printed
         if marks is not None:
             # called from the shell's own text (a snapshot function's body): what the member's body earns is the member's,
             # which analyse_shell_text's prune keeps
             a.shell_own.update(id(entry) for field, mark in zip(_PRUNED, marks) for entry in getattr(a, field)[mark:])
 
-    return read_once(a, body, read, before, run)
+    after = read_once(a, body, read, before, run)
+    return after, a.body_printed.get((body, read))
 
 
 # The analysis's lists analyse_shell_text prunes of what falls on a member for text it did not write
