@@ -198,7 +198,7 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 #             which may change how the shell reads every line; shown is the snapshot's line and its file.  No spelling of
 #             the line gets past it, so the respelling is the profile's.
 # "function-body" a function body zsh's `functions` parameter is handed that the line does not spell -- a variable, a
-#             substitution, text appended to a body (walk.assign_function, SPD-278); shown is the assignment.
+#             substitution, text appended to a body (line_functions.assign_function, SPD-278); shown is the assignment.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"

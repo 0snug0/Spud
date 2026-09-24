@@ -640,11 +640,11 @@ def analyse_trap(words, a, depth):
 
 def read_action(a, action, depth, in_line):
     """Read one action a shell runs later, wherever the line stands then -- a trap's text, or a function body zsh runs by
-    itself (a walk.LineBody, read_deferred_body) -- with the directories unknown, in a process of its own as far as the
-    line's directories and variables go, and say whether it changes the directory of the shell it runs in (analyse_trap).
+    itself (a line_functions.LineBody, read_deferred_body) -- with the directories unknown, in a process of its own as far
+    as the line's directories and variables go, and say whether it changes the directory of the shell it runs in (analyse_trap).
     `in_line`: whether it may run before the line is over.  A function it calls that the line has not defined yet may be
-    defined by the time it runs (`trap cleanup EXIT; cleanup () { ... }`): its name is kept with the hook arrays' (walk.read_call,
-    ShellAnalysis.deferring), so a later definition's body is read as this action is (SPD-276)."""
+    defined by the time it runs (`trap cleanup EXIT; cleanup () { ... }`): its name is kept with the hook arrays'
+    (line_functions.read_call, ShellAnalysis.deferring), so a later definition's body is read as this action is (SPD-276)."""
     cwds, variables = a.cwds, dict(a.vars)
     a.cwds = None
     calls, moves = len(a.git_calls), a.dir_moves
@@ -676,8 +676,8 @@ def read_action(a, action, depth, in_line):
 # the line passes through, which one the hook cannot say.  bash_rule refuses a member every such call (nobody needs git in a
 # trap) and holds Spud's to the repository check in each directory the reading saw the line stand in.
 class TrapDirs:
-    """The directories a git call inside a trap's action (`text`: its text, or the walk.LineBody of a function zsh runs by
-    itself, SPD-276) may run in, standing in its ShellAnalysis.git_calls entry for the unknown ones the action was read
+    """The directories a git call inside a trap's action (`text`: its text, or the line_functions.LineBody of a function zsh
+    runs by itself, SPD-276) may run in, standing in its ShellAnalysis.git_calls entry for the unknown ones the action was read
     at: `action`, the call's own when the action settled them itself (an absolute cd in it), and otherwise every
     directory the reading saw the line stand in -- where the trap was set (`starts`, one per place the same action was
     set), where the line ends, where each command of the line runs (ShellAnalysis.stood: a signal's action may run in a

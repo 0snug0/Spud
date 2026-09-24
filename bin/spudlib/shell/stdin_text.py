@@ -38,8 +38,8 @@ redirections after its closer are read so too (walk.ShellWalk.finish), where the
 that printed nothing the hook could spell.  So are the commands that print nothing at all, a condition's `true` or
 `test` and a loop's `break` (SPD-273, printed_text), which once left a compound's whole text unread.  A call of a
 function the line defines prints what the call's reading of its body prints, from the state and on the input the call
-has (SPD-272, LineCall, walk.read_call), and a printer's name the shell runs another body for -- an alias, a function
-of the snapshot's or one whose name the hook cannot read -- prints text this module does not follow (_shadowed).
+has (SPD-272, LineCall, line_functions.read_call), and a printer's name the shell runs another body for -- an alias, a
+function of the snapshot's or one whose name the hook cannot read -- prints text this module does not follow (_shadowed).
 
 A command's input redirections are read as each shell feeds them (SPD-209, command_input): zsh reads every one of them
 in turn, after the pipe into the command, and bash the last alone, so where the two differ the text is a MultiosText
@@ -413,8 +413,8 @@ def _command_text(words, tokens, stdin, a, feeds_pipe, called=None):
 
 class LineCall:
     """printed_text's answer for a call of a function the line defines (SPD-272): the text is the one the call's reading of
-    the body prints, which walk.read_call leaves in ShellAnalysis.call_printed once ShellWalk.finish has had the command
-    read (analyse_segment), where it asks `output` for it.  `name`, the function's; `tokens` and `feeds_pipe`, the call's
+    the body prints, which line_functions.read_call leaves in ShellAnalysis.call_printed once ShellWalk.finish has had the
+    command read (analyse_segment), where it asks `output` for it.  `name`, the function's; `tokens` and `feeds_pipe`, the call's
     own redirections and whether a pipe follows it, as redirected_text reads them; `own`, _CERTAIN where a definition
     surely ran before the call, else the text the command of that name prints (None: text the hook cannot spell), which
     runs where none did."""
@@ -425,8 +425,8 @@ class LineCall:
         self.name, self.tokens, self.feeds_pipe, self.own = name, tokens, feeds_pipe, own
 
     def output(self, called):
-        """The text the call prints, from `called`, walk.read_call's (the name, the text where the call's output goes, the
-        text where a pipe follows the call), or None where no call of this name was read: the body's text where a pipe
+        """The text the call prints, from `called`, line_functions.read_call's (the name, the text where the call's output
+        goes, the text where a pipe follows the call), or None where no call of this name was read: the body's text where a pipe
         follows the call is the one zsh joins the definition's own output redirections to (ShellWalk.body_piped), and the
         call's own redirections take from either as a command's do."""
         text = None
@@ -455,8 +455,8 @@ def either_text(texts):
 
 
 def _line_bodies(name, a):
-    """The bodies a call of `name` reads where the line defines it (walk.read_call, SPD-277), when nothing else the shell
-    could run under the name stands beside them (_shadowed's other shadows: a function whose name the hook cannot read, a
+    """The bodies a call of `name` reads where the line defines it (line_functions.read_call, SPD-277), when nothing else
+    the shell could run under the name stands beside them (_shadowed's other shadows: a function whose name the hook cannot read, a
     hashed program, an alias, the snapshot's own); else none, and the name reads as a shadowed one does."""
     if a is None or not name:
         return []

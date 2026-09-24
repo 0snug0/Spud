@@ -27,11 +27,11 @@ the shell may be in):
   the command around the shell: a `-c` string, eval, a group, a subshell, a loop, a conditional (`sh -c sh < x.sh`,
   `{ sh; } < x.sh`, `(sh) < x.sh`), and a command substitution in their commands' words.  Since SPD-212 so does the
   input a call hands a function the line defines (`f() { sh; }; f < x.sh`), which each call reads the body on, where
-  it runs (walk.read_call, SPD-277).
+  it runs (line_functions.read_call, SPD-277).
 - "xargs": a shell's `-c` string an xargs reads from input the line does not spell (`cat f | xargs -0 sh -c`).
 - "function": a call given input of a function the line defines in text whose reading is over before the call -- an
   `eval` string's (`eval 'f() { sh; }'; f < x.sh`) -- whose body the call reads without that input (SPD-212,
-  walk.read_call); a function the line defines anywhere else is read at each call, on that call's input (SPD-277).
+  line_functions.read_call); a function the line defines anywhere else is read at each call, on that call's input (SPD-277).
 - "startup": a variable that names a file of commands a shell runs when it starts -- BASH_ENV (any non-interactive
   bash, a script's `#!/bin/bash` included), ENV and ZDOTDIR -- assigned anywhere on the line, and HOME assigned on a line
   that starts a shell, whose ~/.zshenv (and an interactive shell's rc files) then come from the line's own directory.

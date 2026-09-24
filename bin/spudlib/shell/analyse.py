@@ -6,7 +6,7 @@ and the options it holds, which a line starts from, shell/held_options (SPD-267)
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, git_writes, globbing, held_options, held_text, heredocs, inline_programs, interpreter_words, loop_bindings, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, git_writes, globbing, held_options, held_text, heredocs, inline_programs, interpreter_words, line_functions, loop_bindings, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
 from ..hooks import hookio
 
 
@@ -30,10 +30,10 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         a.cwds = None
         a.dir_moves += 1
         return a
-    if isinstance(command, walk.LineBody):
+    if isinstance(command, line_functions.LineBody):
         # a function body the line defines, read where a call or a trap runs it (SPD-277, SPD-276): its tokens, as the
         # walk that read the definition had them
-        return walk.read_line_body(a, command, depth, stdin, fed)
+        return line_functions.read_line_body(a, command, depth, stdin, fed)
     if depth == 0:
         held_options.line_options(a)  # the options the shell's snapshot set before the line (SPD-263)
     if depth == 0 and not command.isascii() and unread.has_marker(command):
@@ -101,7 +101,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
                    False, stdin, fed)
     if zsh_locals is not None:  # a name is surely local only where both readings declared it so (SPD-246)
         a.body_locals[-1] = {name: before for name, before in a.body_locals[-1].items() if name in zsh_locals}
-    for name, found in zsh_bodies.items():  # a function body either reading defines (SPD-212, walk.read_call)
+    for name, found in zsh_bodies.items():  # a function body either reading defines (SPD-212, line_functions.read_call)
         a.function_bodies.setdefault(name, set()).update(found)
     a.cwds = directories.union_dirs(zsh_cwds, a.cwds)
     a.doubt.update(set(zsh_vars) ^ set(a.vars))  # a variable only one reading assigns
@@ -721,9 +721,9 @@ def record_assignment(a, found):
     that reads the variable as a plain assignment does -- PATH and zsh's `path` for shadowed_name, CDPATH, GIT_*.
     An element of zsh's `functions`, `commands` or `aliases` binds the name it keys as a definition, a `hash` or an `alias`
     line would, a name the hook cannot read standing for all of them -- and a `functions` element's body is read as a
-    definition's is, where the line spells it (walk.assign_function, SPD-278); an element of zshexit_functions or
-    chpwd_functions names a function zsh runs by itself (walk.hook_functions, SPD-276); and a BASH_FUNC_ variable is
-    refused outright.
+    definition's is, where the line spells it (line_functions.assign_function, SPD-278); an element of zshexit_functions
+    or chpwd_functions names a function zsh runs by itself (line_functions.hook_functions, SPD-276); and a BASH_FUNC_
+    variable is refused outright.
 
     SPD-225: a subscript is arithmetic, which the shells evaluate before they assign (`arr[X=1]=q` and `declare
     arr2[X=1]=q` assigned X in zsh 5.9 and bash 3.2.57, probed), and so is the value a name with the integer or float
@@ -747,10 +747,10 @@ def record_assignment(a, found):
             names = a.functions if table == "function" else a.hashed
             names.update([syntax.UNKNOWN_NAME] if pairs is None else [prepare.deglob(key) for key, _ in pairs])
             if table == "function":
-                walk.assign_function(a, found)  # ... and the body it spells, read as a definition's is (SPD-278)
+                line_functions.assign_function(a, found)  # ... and the body it spells, read as a definition's is (SPD-278)
     if name in expansions.HOOK_ARRAYS:
         # zshexit_functions, chpwd_functions: functions zsh runs by itself, read as a trap's action is (SPD-276)
-        walk.hook_functions(a, assignment_words.listed_names(value), expansions.HOOK_ARRAYS[name])
+        line_functions.hook_functions(a, assignment_words.listed_names(value), expansions.HOOK_ARRAYS[name])
     if name in a.typed:
         expansions.read_arithmetic(a, prepare.deglob(value), doubtful=bool(append or subscript is not None))
         expansions.assign_unknown(a, name)
