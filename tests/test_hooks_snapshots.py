@@ -2724,7 +2724,7 @@ class SnapshotOptionsTest(ShellSnapshotCase):
 # (snapshot-zsh-1790263809802-78wrv5.sh, the four before it alike), the harness's comment lines and rg's `if` included, with
 # the Mac's claude path spelled as a scratch one: the text hooks/snapshots.HARNESS_SHADOWS recognizes.  HARNESS_SHADOWS above
 # spells pkill's dash `--` where the harness writes `—`, so its pkill is other text, read in full; its find, grep and rg
-# are the harness's, which every test using it now reads through held_text.read_shadow.
+# are the harness's, which every test using it now reads through held_shadows.read_shadow.
 SCRATCH_CLAUDE = "/Users/Someone/.local/bin/claude"
 THIS_MACS_SHADOWS = """\
 # Check for rg availability
@@ -2799,7 +2799,7 @@ function pkill {
 }
 """
 SHADOWS = ("find", "grep", "rg", "pkill")
-# The words a call hands a shadow, one of each kind the reading tells apart (held_text.read_shadow): literal ones, quoted
+# The words a call hands a shadow, one of each kind the reading tells apart (held_shadows.read_shadow): literal ones, quoted
 # ones whose sentinels it takes off, a dash that keeps grep's loop from being dashless, names the words spell and the
 # bodies' own, the primaries find acts on, and what expands -- read in full, and compared all the same
 SHADOW_WORDS = ("x", "-rn", "-v", "--color=auto", "--", "-", "-Z", "-9", "-KILL", "--signal", ".", "/tmp", "src/a.py", "~/x",
@@ -2854,7 +2854,7 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
     """SPD-247 (proposal 349 by SPUD-134/Billie): Claude Code writes its own grep, find, rg and pkill into every shell
     snapshot, in a fixed shape (THIS_MACS_SHADOWS), and each hands the call's words on through `${1+"$@"}`, so SPD-134's judge
     of inert bodies could never pass them over: each call's body was read in full, at 0.8 to 1.5 ms of the Bash hook a call.
-    held_text.read_shadow now records for a body that is byte for byte the harness's (hooks/snapshots.harness_shadow) what
+    held_shadows.read_shadow now records for a body that is byte for byte the harness's (hooks/snapshots.harness_shadow) what
     the full reading of it records, without reading it, and reads any other text, or a call whose line the fixed record
     does not fit, in full.
 
@@ -2863,7 +2863,7 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
     apart, the CLAUDE_CODE_EXECPATH lines of SPD-253 and SPD-258 among them; a changed byte is read in full; and proposal
     348's leak (a shadow's locals counted as the line's), fixed by SPD-246, stays fixed on both readings.  The fixed record
     was measured on the reader as it stands: a change to it that moves what a harness body records fails here, and
-    held_text._SHADOW_READINGS is measured again.  AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; the home is the cwd."""
+    held_shadows._SHADOW_READINGS is measured again.  AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; the home is the cwd."""
 
     def setUp(self):
         super().setUp()
@@ -2872,6 +2872,7 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
         os.utime(path, (newest, newest))
         self.m = load_spud_module()
         self.held_text = importlib.import_module("spudlib.shell.held_text")
+        self.held_shadows = importlib.import_module("spudlib.shell.held_shadows")
 
     def full(self):
         """The full reading, forced: no body is the harness's text."""
@@ -2884,12 +2885,12 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
     def spied(self):
         """read_shadow, spied: `self.fast` holds its answer for each call it was asked about, True where it recorded the
         body without reading it."""
-        real, self.fast = self.held_text.read_shadow, []
+        real, self.fast = self.held_shadows.read_shadow, []
 
         def spy(*args):
             self.fast.append(real(*args))
             return self.fast[-1]
-        return mock.patch("spudlib.shell.held_text.read_shadow", side_effect=spy)
+        return mock.patch("spudlib.shell.held_shadows.read_shadow", side_effect=spy)
 
     def analysis(self, command):
         env = dict(os.environ)
@@ -3015,7 +3016,7 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
                 self.assertReadInFull(line)
 
     def test_a_profile_that_holds_a_word_the_bodies_look_up_is_read_in_full(self):
-        """Any of the words a shadow's body looks up (held_text._SHADOW_LOOKUPS, and the claude binary where the body runs
+        """Any of the words a shadow's body looks up (held_shadows._SHADOW_LOOKUPS, and the claude binary where the body runs
         it), defined by the profile, is read as the profile defines it, so the body is read in full."""
         for number, word in enumerate(("local", "[[", "[", "command", "return", "exec", "printf", "continue", SCRATCH_CLAUDE)):
             self.with_profile("# Functions\n%s () {\n\t:\n}\n" % word, number)

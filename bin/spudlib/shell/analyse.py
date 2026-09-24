@@ -1,11 +1,12 @@
 """shell/analyse: analyse_command and analyse_words.
 
 Past 250 lines as one function and its way in: dispatch_words, reached through analyse_command, analyse_segment and
-analyse_words.  The reading of the text the shell holds, an alias's body and a function's, is shell/held_text (SPD-264)."""
+analyse_words.  The reading of the text the shell holds, an alias's body and a function's, is shell/held_text (SPD-264),
+and the options it holds, which a line starts from, shell/held_options (SPD-267)."""
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, git_writes, globbing, held_text, heredocs, inline_programs, interpreter_words, loop_bindings, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, git_writes, globbing, held_options, held_text, heredocs, inline_programs, interpreter_words, loop_bindings, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
 from ..hooks import hookio
 
 
@@ -30,7 +31,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         a.dir_moves += 1
         return a
     if depth == 0:
-        held_text.line_options(a)  # the options the shell's snapshot set before the line (SPD-263)
+        held_options.line_options(a)  # the options the shell's snapshot set before the line (SPD-263)
     if depth == 0 and not command.isascii() and unread.has_marker(command):
         # SPD-199: a private-use marker the member typed into the reading's own alphabet, on the raw line before any pass
         # writes one; recorded and read on, so a refusal the readable words earn keeps its own reason.
