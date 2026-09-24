@@ -11,7 +11,9 @@ the text with why it cannot tell a form from the command it holds.
 run_main answers as a process only while no table a run changes outlives it but what fresh_process empties (hookcase's
 leak guard).  InProcessLeakTest runs that guard over every hook event but the Bash and edit hooks' (InProcessParityTest
 covers those) and over the CLI commands the in-process test classes call, read from their source, and shows the guard
-names a table a command or a hook leaves behind (SPD-241).
+names a table a command or a hook leaves behind (SPD-241).  It also walks the pull-request reader's own path -- pr
+reconcile, board and doctor with helpers.GhMixin's fake gh on, which cli_samples runs only with SPUD_GH off -- and shows
+the guard names a table planted there (SPD-255).
 """
 
 import argparse
@@ -25,7 +27,7 @@ import time
 import unittest
 from unittest import mock
 
-from helpers import REPO
+from helpers import REPO, GhMixin
 from hookcase import AGENT_A, AGENT_B, HOOK_CACHES, HOOK_READING, LEAK_ALLOWED, SESSION, HookCase, common, program_tables, run_main, tables_changed
 
 SPUDLIB = REPO / "bin" / "spudlib"
@@ -263,13 +265,28 @@ def in_process_commands(groups):
     return found
 
 
-class InProcessLeakTest(HookCase):
+# One recorded pull request per way the gh reader's answer ends, by the answer GhMixin.answer_pr gives it (SPD-255).
+GH_ANSWERS = {
+    "merged": dict(state="MERGED", merged_at="2026-09-16T17:12:00Z", number=361),
+    "closed": dict(state="CLOSED", number=362),
+    "open": dict(state="OPEN", number=363),
+    "failed": dict(error="gh: HTTP 403: API rate limit exceeded"),
+    "unparseable": dict(unparseable=True),
+    "draft": dict(state="DRAFT", number=366),
+    "unknown": None,  # never answered: the fake answers as GitHub does for a URL it does not know
+}
+
+
+class InProcessLeakTest(GhMixin, HookCase):
     """hookcase's leak guard (tables_changed) past the Bash and edit hooks, which InProcessParityTest walks: every other hook
     event and every CLI command an in-process test class calls runs in this process, between two readings of every table
     the program holds, and nothing may change but what fresh_process empties or PURE_TABLES names.  A table added later on
     any of these paths -- a memo in a command, a cache in a recording hook -- fails here until hookcase resets it, and the
     last test shows the guard names one.  gitrepos' caches (SPD-131's findings cache and SPD-238's settled scopes cache)
-    are read and written under a clock an hour ahead, so the samples reach both caches' writes and reads."""
+    are read and written under a clock an hour ahead, so the samples reach both caches' writes and reads.  cli_samples
+    runs pr reconcile, board and doctor with SPUD_GH off, as a Home starts; reader_samples runs them again with GhMixin's
+    fake gh on, so the walk goes through the gh run, its answer parsed and the stored check as the in-process
+    test_pull_requests classes reach them (SPD-255)."""
 
     in_process = True
 
@@ -401,6 +418,43 @@ class InProcessLeakTest(HookCase):
             self.assertEqual(code, 0, err)
             ran.append(argv)
 
+    def record_prs(self):
+        """With the fake gh set up, one pull request recorded on the ticket per GH_ANSWERS entry, each answered as named:
+        {name: its URL}."""
+        urls = {}
+        for n, (name, answer) in enumerate(GH_ANSWERS.items()):
+            urls[name] = url = "https://github.com/o/r/pull/%d" % (361 + n)
+            self.home.run("pr", "record", "--ticket", self.t["key"], "--url", url, "--branch", "feat/%s" % name,
+                          "--worktree", "/tmp/wt-%s" % name, actor="spud")
+            if answer is not None:
+                self.answer_pr(url, **answer)
+        return urls
+
+    def reader_samples(self, urls, ran):
+        """pr reconcile, board and doctor with the reader on: the full board's reconcile reads every unread pull request
+        (settled merged or closed, still open, failed, unparseable, a state nobody knows, a URL GitHub does not know), pr
+        reconcile in text and JSON, for one ticket and skipped as fresh, a read that clears a stored failure and one that
+        settles an open pull request, doctor over the failed checks, and the brief board, the card and pr list after."""
+        def cli(*args, check=True):
+            proc = self.home.run(*args, actor="spud", check=check)
+            ran.append([str(a) for a in args])
+            return proc
+
+        key = self.t["key"]
+        cli("board")
+        cli("--json", "board")
+        cli("pr", "reconcile")
+        cli("--json", "pr", "reconcile", "--ticket", key)
+        cli("pr", "reconcile", "--ticket", key, "--stale", "600")
+        self.answer_pr(urls["failed"], state="OPEN", number=364)
+        self.answer_pr(urls["open"], state="MERGED", merged_at="2026-09-17T09:00:00Z", number=363)
+        cli("pr", "reconcile")
+        self.assertNotEqual(cli("doctor", check=False).returncode, 0)  # the unparseable, draft and unknown reads failed
+        cli("--json", "doctor", check=False)
+        cli("board", "--brief")
+        cli("card", key)
+        cli("pr", "list")
+
     # -- the tests ------------------------------------------------------------------------------------------------------
     def test_no_hook_event_leaves_a_table_behind(self):
         ran = []
@@ -481,6 +535,48 @@ class InProcessLeakTest(HookCase):
         self.assertEqual(tables_changed(board_and_session_start, prepare=plant) - LEAK_ALLOWED,
                          {(name, "_PLANTED") for name in planted})
         self.assertEqual(tables_changed(lambda: self.home.run("member", "show", self.lead["ref"]), prepare=plant) - LEAK_ALLOWED, set())
+
+    def test_the_gh_reader_s_path_leaves_no_table_behind(self):
+        self.setup_gh()
+        urls, ran = self.record_prs(), []
+        self.assertNoLeak(lambda: self.reader_samples(urls, ran))
+        read = [c["args"][2] for c in self.gh_calls()]
+        self.assertEqual(set(read), set(urls.values()), "the samples do not read every recorded pull request")
+        self.assertEqual((read.count(urls["merged"]), read.count(urls["closed"])), (1, 1), "a settled pull request was read again")
+        prs = {p["url"]: p for p in self.home.json("pr", "list")["pull_requests"]}
+        self.assertEqual({name: prs[url]["state"] for name, url in urls.items()},
+                         {"merged": "merged", "closed": "closed", "open": "merged", "failed": "open", "unparseable": "open",
+                          "draft": "open", "unknown": "open"})
+        self.assertIsNone(prs[urls["failed"]]["check_error"])  # cleared by the read that succeeded
+        self.assertTrue(all(prs[urls[name]]["check_error"] for name in ("unparseable", "draft", "unknown")))
+
+    def test_the_guard_names_a_table_the_gh_reader_leaves_behind(self):
+        """A module-level dict planted, empty, in commands/ghread and written by pr_view, which only a read with the reader
+        on reaches: pr reconcile, board and doctor as cli_samples runs them, with SPUD_GH off, leave it unnamed over the
+        same recorded pull requests, and reader_samples, with the fake gh on, makes the guard name it and nothing else."""
+        name = "spudlib.commands.ghread"
+
+        def plant():
+            module = importlib.import_module(name)
+            module._PLANTED = {}
+
+            def remembering(url, *args, module=module, fn=module.pr_view, **kwargs):
+                module._PLANTED[url] = True
+                return fn(url, *args, **kwargs)
+            module.pr_view = remembering
+
+        def reader_off():
+            for view in (("pr", "reconcile"), ("board",), ("doctor",)):
+                self.home.run(*view, check=False)
+
+        self.setup_gh()
+        urls = self.record_prs()
+        self.home.env["SPUD_GH"] = "off"
+        self.assertEqual(tables_changed(reader_off, prepare=plant) - LEAK_ALLOWED, set())
+        self.assertEqual(self.gh_calls(), [])
+        self.home.env["SPUD_GH"] = str(self.gh)
+        self.assertEqual(tables_changed(lambda: self.reader_samples(urls, []), prepare=plant) - LEAK_ALLOWED,
+                         {(name, "_PLANTED")})
 
 
 if __name__ == "__main__":
