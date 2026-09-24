@@ -18,7 +18,7 @@ BADTAKES_LOCAL = ('{\n    "permissions": {"allow": ["Bash(node -e \' *)"]},\n   
 # The spudagent source is a template project install renders for the machine it installs on (SPW-002), so the fixture
 # carries the placeholder the shipped definition carries, and what install writes is `rendered()` of it, never its bytes.
 AGENT = "---\nname: spudagent\ndescription: A spudagent (test fixture).\n---\nYou are a spudagent, run `python3.14 -I -S {{launcher}}`.\n"
-EVENTS = {"PreToolUse": 3, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop": 1, "SessionStart": 1, "Stop": 1, "UserPromptSubmit": 1}
+EVENTS = {"PreToolUse": 1, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop": 1, "SessionStart": 1, "Stop": 1, "UserPromptSubmit": 1}
 
 
 class InstallTest(RepoMixin, SpudTestCase):
@@ -64,7 +64,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         home = str(self.home.path)
         self.assertEqual(data["permissions"]["allow"], ["Bash(node -e ' *)", "Bash(python3.14 -I -S %s/bin/spud *)" % home, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, home)])
         commands = [(event, h["command"]) for event, groups in data["hooks"].items() for g in groups for h in g["hooks"]]
-        self.assertEqual(len(commands), 9)
+        self.assertEqual(len(commands), 7)
         self.assertEqual({e: sum(1 for x, _ in commands if x == e) for e in EVENTS}, EVENTS)
         for event, command in commands:
             self.assertEqual(command, "SPUD_HOME=%s %s -I -S %s/bin/spud hook %s --project badtakes" % (home, sys.executable, home, event))
@@ -182,7 +182,7 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.install()
         out = self.home.json("settings", "sync", "--path", self.home.path / "s.json")
         commands = [h["command"] for groups in out["settings"]["hooks"].values() for g in groups for h in g["hooks"]]
-        self.assertEqual(len(commands), 9)
+        self.assertEqual(len(commands), 7)
         self.assertTrue(all(not c.endswith("--project badtakes") and "--project" not in c for c in commands), commands)
         self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
         self.assertIn("env", out["settings"])
