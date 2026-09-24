@@ -405,10 +405,12 @@ class GroupNewlineTest(BashHookCase):
         self.assertEqual([t for t in self.m.shell_tokens(marked) if t == ";"], [";", ";"])
         self.assertEqual(self.m.deglob(marked), "echo a ; echo (b|\nc) ; (echo d)")
         self.assertEqual(other, "echo a ; echo (b| ; c) ; (echo d)")
-        for text in ("echo a\ngit push", "a\n\nb", "a # c\nb"):  # no group: the text as the walk always read it
+        for text in ("echo a\ngit push", "a\n\nb"):  # no group: the text as the walk always read it
             prepared = self.m.newlines_as_separators(text)
             with self.subTest(text=text):
                 self.assertEqual(self.m.mark_zsh_patterns(prepared), (prepared.replace(self.m.LINE_BREAK, ";"),) * 2)
+        # ... but a comment, written as its `#` alone since SPD-186 (CaseCommentTest), its newline the `;` it was
+        self.assertEqual(self.m.mark_zsh_patterns(self.m.newlines_as_separators("a # c\nb")), ("a #; b",) * 2)
 
     def test_a_spelled_semicolon_still_ends_the_word(self):
         """zsh's lexer ends a word at a spelled `;` even inside a group, so the text after it is a command, run when the
@@ -747,8 +749,8 @@ class CasePatternAlternativeTest(BashHookCase):
     echo m5;; esac | cat; echo after5` printed both; `case q in<newline>  a|b) ... ;;<newline>  *) echo star6 ;;<newline>esac`,
     `a | q )`, `(a|q)` and `case q<newline>in a|q)` matched in all three shells.
 
-    zsh's brace form, `case word { ... }` (SPD-185), is read as before: the walk stays in a pattern after it, and reads what
-    follows as it did."""
+    zsh's brace form, `case word { ... }`, places its patterns since SPD-185 (CaseBraceFormTest): a `|` in one is an
+    alternative there too, and the case closes at its `}`."""
 
     def setUp(self):
         super().setUp()
@@ -814,17 +816,300 @@ class CasePatternAlternativeTest(BashHookCase):
                      "(case x in esac) | git push", "case $1 in esac; case $2 in a|b) echo;; esac | git push"):
             self.law_7(line)
 
-    def test_the_brace_form_is_read_as_before(self):
-        # SPD-185 is queued: after `case word { ... }` the walk stays in a pattern, and a `|` there still ends a command
+    def test_the_brace_form_places_its_patterns(self):
+        # SPD-185: `case word { ... }` closes at its `}`, and what follows it is read as commands; a `|` in its patterns
+        # is an alternative, no pipe, the case's word no command
         for line in ("case x { x) ;; }; echo a | git push", "case x { x|y) ;; }; echo a | git push",
                      "case x { in) ;; }; echo a | git push", "case <(true) { in|y) ;; }; echo a | git push"):
             self.law_7(line)
+        for line in ("case $1 { a|b) echo;; }", "case x { a) ;; git|b) echo;; }", "case <(true) { git|b) echo;; }"):
+            with self.subTest(line=line):
+                found = self.findings(line)
+                self.assertNotIn(("var", "$1"), found)
+                self.assertEqual([f for f in found if f[0] == "git"], [])
+                self.assertSilent(line)
 
     def test_a_pattern_the_reader_cannot_place_stays_refused(self):
         # a case pattern's `)` inside a `$( )` ends the substitution for split_substitutions: unread, refused to a member
         for line in ("x=$(case $1 in a|b) echo;; esac)", "echo $(case x in a|b) echo;; esac)"):
             with self.subTest(line=line):
                 self.assertEqual(self.bash(line).decision, "deny")
+
+
+# SPD-185: zsh's brace form of case, `%s` an arm's body.  With `( echo <label> )` or `echo <label>` in the slot each
+# printed its label in zsh 5.9 -f and -f -o nobareglobqual (tests/probes/shell_probe.py, 2026-09-24), and bash 3.2.57
+# rejected every one near its `{`.  The `{` is the case's `in` -- glued to the first pattern too (`{x)`, `{(x)`) and after
+# a newline -- and the `}` its esac: a body may end at it with no `;;` (`x) echo B3 }`, and glued, `x) echo A24}`), and at a
+# pattern's place either closer ends either form (`case x { x) echo A13 ;; esac` and `case x in x) echo A14;; }` ran).
+CASE_BRACE_FORMS = (
+    "case x { x) %s;; }",
+    "case x { ((x)) %s;; }",
+    "case x { x) %s }",
+    "case x { y) true;; x) %s }",
+    "case x { x) %s;; y) true;; }",
+    "case x {\n  x) %s ;;\n}",
+    "case x\n{ x) %s;; }",
+    "case x {\n  x) %s\n}",
+    "case x { x|y) %s;; }",
+    "case x { (x) %s;; }",
+    "case x { x) true;& y) %s;; }",
+    "case x { x) true;| x) %s;; }",
+    "case x {x) %s;; }",
+    "case x {(x) %s;; }",
+    "case x {x|y) %s;; }",
+    "case x { x) %s;;}",
+    "case x { x) %s; }",
+    "case {x} { {x}) %s;; }",
+    "case x { in) true;; x) %s;; }",
+    "case x { x) %s;; esac",
+    "case x in x) %s;; }",
+    "{ case x { x) %s;; } }",
+    "case x { x) case y { y) %s;; };; }",
+    "echo in | case x { x) %s;; }",
+    "case x { x) %s;; } | cat",
+    "case x { x) %s } && true",
+)
+# ... and what follows such a case, `%s` the command after it: each ran (`case x { x) ;; }; ( echo SUB3 )`, `case x { y)
+# echo NO;; } ; ( echo SUB61 )`, `case x { x) echo A64 ;;<newline>}; (echo SUB64)`, `case x { x) echo A26 } && echo
+# after26`, `case x { x) echo A56 } | cat; echo after56`).
+CASE_BRACE_AFTER = (
+    "case x { x) ;; }; %s",
+    "case x { y) true;; } ; %s",
+    "case x { x) true ;;\n}; %s",
+    "case x { x) true ;;\n}\n%s",
+    "case x { x) true } && %s",
+    "case x { x) true } | cat; %s",
+    "case x { }; %s",
+    "case x {}; %s",
+    "case x { x) }; %s",
+    "case x in x) true;; }; %s",
+)
+
+
+class CaseBraceFormTest(BashHookCase):
+    """SPD-185, filed by SPD-181's engineer: zsh takes `{ ... }` in place of `in ... esac`, and mark_zsh_patterns waited for
+    an `in` that never came, so it read no pattern and no body, while ShellWalk's case frame waited for an esac.  A
+    subshell body there was one glob word in zsh's reading, and after such a case the walk stayed in a pattern, taking a
+    later `( ... )` for a pattern's parentheses.  The proposer's evidence, on main and the SPD-181 tree: `case x { x) (
+    {git push} );; }` and `case x { x) ;; }; (git push)` recorded no finding (Law 7 for members).
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same for every line, and in GNU bash 3.2.57, which rejected every brace form near its
+    `{` (CASE_BRACE_FORMS and CASE_BRACE_AFTER have the lines that ran).  Beside those: `case x { x) echo A28 } echo
+    after28`, `case x { x) ;; } ( echo SUB62 )` and `case x { x) ( echo B36 );; } always { echo AL36 }` are parse errors,
+    so the case ends at its `}`; in a body only the form's own closer ends it (`case x { x) echo B70; esac` and `case x in
+    x) echo B71; }` failed near the closer, `case x { x) echo A41 esac }` printed `A41 esac`, and `case x in x) echo A40 }`
+    failed), while at a pattern's place either does (`case x { x) echo B73;; esac }` failed near its `}`, `{ case x in x)
+    echo A45;; } }` ran and `{ case x in x) echo A46;; }` failed); a comment's `}` closes nothing (`case x {<newline># (x)
+    comment }<newline>x) ( echo B85 ) ;;<newline>}` ran B85)."""
+
+    TARGET = "(ledger|x)/tickets/SPD-001.md"
+
+    def setUp(self):
+        super().setUp()
+        home = self.home.path
+        (home / "ledger" / "tickets").mkdir(parents=True, exist_ok=True)
+        (home / "ledger" / "tickets" / "SPD-001.md").write_text("orig\n", encoding="utf-8")
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def law_7(self, line):
+        """A member is refused the push, and the analysis finds it; Spud is never refused git."""
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def refused_everywhere(self, line):
+        """Refused to a member for the ledger file, named as the line spells it, and to Spud on Law 1."""
+        with self.subTest(line=line):
+            self.assertIn(self.TARGET, [self.m.deglob(t) for t, _c in self.analysis(line).redirects])
+            r = self.assertRefused(line, "generated")
+            self.assertIn(self.TARGET, r.reason)
+            self.assertRefused(line, "Law 1", agent_id=None)
+
+    # -- the ticket's evidence ----------------------------------------------------------------------------------------
+    def test_the_tickets_evidence_is_read_as_zsh_runs_it(self):
+        for line in ("case x { x) ( {git push} );; }", "case x { x) ;; }; (git push)", "case x { ((x)) ( {git push} );; }",
+                     "case x { x) git push }"):
+            self.law_7(line)
+        # the subshell's parentheses stay the shell's, and the case's braces stand apart
+        marked, _other = self.m.mark_zsh_patterns("case x { x) ( {git push} );; }")
+        self.assertEqual((marked.count("("), marked.count(")")), (1, 2))
+        self.assertEqual(self.m.mark_zsh_patterns("case x {x) ( {git push} );; }")[0].split()[:4], ["case", "x", "{", "x)"])
+
+    # -- the hole -----------------------------------------------------------------------------------------------------
+    def test_every_form_reads_its_body(self):
+        for form in CASE_BRACE_FORMS:
+            for body in ("( {%s} )", "{( %s )}", "( %s )", "%s"):
+                self.law_7(form % (body % "git push"))
+            self.refused_everywhere(form % ("echo x | tee " + self.TARGET))
+
+    def test_what_follows_the_case_is_read(self):
+        for form in CASE_BRACE_AFTER:
+            for command in ("( {git push} )", "(git push)", "{( git push )}", "git push"):
+                self.law_7(form % command)
+            self.refused_everywhere(form % ("echo x | tee " + self.TARGET))
+
+    def test_a_group_in_a_body_closes_before_the_case(self):
+        """A `{ list }` in an arm's body closes at its own `}`, and the case at the next (probed: `case x { x) { echo A15 }
+        ;; }` and `case x { x) { echo A37 };; }` ran)."""
+        for line in ("case y { x) { true } ;; y) ( {git push} );; }", "case x { x) { true }; ( {git push} ) }",
+                     "case x { x) {true} } ; ( {git push} )", "case x { x) f() { true }; ( {git push} ) }",
+                     "case x { x) if true; then { true }; fi; ( {git push} ) }", "case x { x) { { true } } ;; }; (git push)"):
+            self.law_7(line)
+
+    # -- controls -----------------------------------------------------------------------------------------------------
+    def test_a_pattern_runs_nothing(self):
+        for line in ("case x { (git push)) true;; }", "case x { git|push) true;; }", "case x { x) ;; (git push)) true;; }",
+                     "case x {(git push)) true;; }", "case x { x(e:'git push':)) true;; }"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).findings, [])
+                self.assertSilent(line)
+
+    def test_the_posix_form_keeps_its_reading(self):
+        for line in ("case x in x) echo a;; esac", "case x in (x) echo a;; esac", "case x in x|y) true;; esac"):
+            with self.subTest(line=line):
+                self.assertEqual(self.m.mark_zsh_patterns(line), (line, line))
+                self.assertEqual(self.analysis(line).findings, [])
+                self.assertSilent(line)
+        for line in ("case x in x) git push;; esac", "case x in {x) git push;; esac", "case x in x) { git push } ;; esac"):
+            self.law_7(line)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("case x { " + "x) true;; " * 2000 + "x) ( {git push} );; }",
+                     "case x { x) " + "{ " * 2000 + "true" + " }" * 2000 + ";; }; ( {git push} )",
+                     "case x { x) " * 1000 + "( {git push} )" + " }" * 1000,
+                     "case x {\n" + "x) true;;\n" * 2000 + "}; ( {git push} )",
+                     "case x {" + "{" * 3000 + "x) ( {git push} );; }"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), a.findings, line[:40])
+
+
+# SPD-186: a comment in a case statement, `%s` an arm's body.  Each ran its body (`( echo <label> )` or `echo <label>` in
+# the slot) in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57 (tests/probes/shell_probe.py, 2026-09-24), the brace forms
+# in zsh alone: a word that starts with `#` after a blank, a newline, `;`, `|`, `&`, `(`, `)` or `>` is a comment to the end
+# of its line, and its words are no pattern, no closer and no command.
+CASE_COMMENTS = (
+    "case x in\n  a) true ;;  # (see below)\n  x) %s ;;\nesac",
+    "case x in\n  a) true ;;\n  # (a) or (b)\n  x) %s ;;\nesac",
+    "case x in # (y)\n x) %s;; esac",
+    "case x # (y)\nin x) %s;; esac",
+    "case x in x) %s # )\n;; esac",
+    "case x in\n#c (x)\nx) %s;; esac",
+    "case x in x)#c (y)\n %s;; esac",
+    "case x in y) true;;#c (y)\nx) %s;; esac",
+    "case x in # esac\nx) %s;; esac",
+    "case x in y) true ;; # esac\nx) %s;; esac",
+    "case x in x) %s # ;;\n;; esac",
+    "case x in x) %s # esac\n;; esac",
+    "case x { x) %s ;; # }\n}",
+    "case x {\n# (x) comment }\nx) %s ;;\n}",
+)
+# ... and a comment that spells a case, a closer or a group outside one, `%s` the command on the next line: each ran it.
+COMMENT_LINES = (
+    "echo a # ; case x in\n%s",
+    "echo a # ; case x {\n%s",
+    "{ echo a # }\n%s; }",
+    "if true; then %s # ; fi\nfi",
+    "echo a;#b (\n%s",
+    "(#c (\n%s)",
+    "echo a|#b (\n%s",
+    "echo a&#b (\n%s",
+    "x=1 # (\n%s",
+    "case x in x) true;; esac # (\n%s",
+    "echo a # )\n%s",
+)
+
+
+class CaseCommentTest(BashHookCase):
+    """SPD-186, filed by SPD-181's engineer: newlines_as_separators keeps a comment's words, and mark_zsh_patterns and
+    ShellWalk read them as the line's own: in a case statement a comment holding a parenthesised word ended the pattern
+    early, the real pattern after it was read as a body, and the arm's own body stood outside command position, so a
+    subshell there was one glob word in zsh's reading.  The proposer's evidence, on main and the SPD-181 tree: with `a)
+    true ;;  # (see below)`, or `# (a) or (b)`, on the line before `b) ( {git push} ) ;;` no finding.  The same reading
+    reached past case statements: `echo a # ; case x in` opened a case on a comment's words, so a `( {git push} )` on the
+    next line was a pattern, and `case x in x) git push # )` ended the arm's pattern at the comment's `)`, discarding
+    the push.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
+    and under -f, which printed the same, and in GNU bash 3.2.57: CASE_COMMENTS and COMMENT_LINES ran their bodies;
+    `echo a #b ; echo NO12` printed a alone, `echo a#b; echo C13` printed `a#b` and C13; `case x in x|#y) echo C7;;
+    esac` and `echo a >#b` failed in both at the end of the line, the `#` opening a comment there too; and zsh read `case x
+    in (#c<newline>x) echo C19;; esac` as a pattern, with no error and no C19, where bash failed near the newline."""
+
+    def setUp(self):
+        super().setUp()
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def law_7(self, line):
+        with self.subTest(line=line):
+            self.assertIn(("git", ("push", "push")), self.analysis(line).findings)
+            self.assertRefused(line, "Law 7")
+            self.assertSilent(line, agent_id=None)
+
+    def silent(self, line):
+        with self.subTest(line=line):
+            self.assertNotIn("git", [kind for kind, _d in self.analysis(line).findings])
+            self.assertSilent(line)
+            self.assertSilent(line, agent_id=None)
+
+    def test_the_tickets_evidence_is_read_as_zsh_runs_it(self):
+        for line in ("case b in\n  a) true ;;  # (see below)\n  b) ( {git push} ) ;;\nesac",
+                     "case b in\n  a) true ;;\n  # (a) or (b)\n  b) ( {git push} ) ;;\nesac"):
+            self.law_7(line)
+
+    def test_every_comment_in_a_case(self):
+        for form in CASE_COMMENTS:
+            for body in ("( {%s} )", "{( %s )}", "%s"):
+                self.law_7(form % (body % "git push"))
+
+    def test_a_comment_outside_a_case(self):
+        for form in COMMENT_LINES:
+            for command in ("( {git push} )", "{( git push )}", "git push"):
+                self.law_7(form % command)
+
+    def test_a_comment_runs_nothing(self):
+        """zsh and bash ignore what a comment holds, operators and all (`echo a #b ; echo NO12` printed a alone)."""
+        for line in ("echo a # ; git push", "echo a #b ; git push", "true;# git push", "# ( {git push} )",
+                     "case x in x) true;; # ( {git push} )\nesac", "case x { x) true;; # ; git push\n}",
+                     "echo a # | sh", "echo 'git push' # | sh"):
+            self.silent(line)
+
+    def test_what_is_no_comment_is_read(self):
+        """A `#` inside a word, and zsh's `(#` in a case pattern, open no comment (probed: `echo a#b; echo C13` and
+        `case x in (#c<newline>x) echo C19;; esac`, which zsh read as a pattern); a substitution in a comment is read as
+        before, which runs nothing and fails closed."""
+        for line in ("echo a#b; git push", "echo ${x#y}; git push", "case x in (#c\nx) git push;; esac",
+                     "setopt extendedglob; case X in (#i)x) ( {git push} );; esac", "echo a # $(git push)"):
+            self.law_7(line)
+        # zsh's `(#i)` in `[[ ... ]]` is a pattern's (`setopt extendedglob; [[ x == (#i)X ]] && echo L6` printed L6); a
+        # group zsh's lexer reads on in, which the reading cannot place, keeps what follows read as before (both lines a
+        # parse error to zsh's eval, which ran nothing); and `{#c` is read as the words it spells (zsh ran `{#c<newline>echo
+        # L10 }` as a group, bash ran a command named `{#c`)
+        for line in ("[[ x == (#i)X ]] && git push", "setopt extendedglob; [[ x == (#i)X ]] # ; git push\ngit push",
+                     "echo (a #b ; git push\n)", "echo (a|#b ; git push\n)", "echo a(#b ; git push\n)", "{#c\ngit push }"):
+            self.law_7(line)
+
+    @wall_clock
+    def test_bounded_on_pathological_input(self):
+        for line in ("case x in " + "# (x)\n" * 3000 + "x) ( {git push} );; esac",
+                     "echo a # " + "(" * 5000 + "\n( {git push} )",
+                     "case x in x) true;; " + "#c (\n" * 3000 + "x) ( {git push} );; esac"):
+            with self.subTest(line=line[:40]):
+                started = time.monotonic()
+                a = self.analysis(line)
+                self.assertLess(time.monotonic() - started, 5.0)
+                self.assertIn(("git", ("push", "push")), a.findings, line[:40])
 
 
 class NamedCoprocTest(BashHookCase):

@@ -4,6 +4,7 @@ import bisect
 import re
 
 from . import assignment_words, syntax
+from ..hooks import hookio
 
 
 # Reserved words after which zsh is still in command position, so `(` opens a subshell (zsh's lexer: a word turns command
@@ -66,6 +67,11 @@ _FLAG_MARKS = str.maketrans({c: syntax._PUNCT_SENTINELS[c] for c in "()"})
 # opened inside that list: a subshell, a for loop's word list, a nested substitution) and "group" (a group opened there
 # that _zsh_group does not take: one holding a `<( )`, or a parse error), each closed by its own `)`.
 _CASE_WORD_STATES = ("subject", "in", "pattern")
+# What a `#` that opens a comment follows, in the text mark_zsh_patterns reads (SPD-186): a blank, a newline
+# (syntax.LINE_BREAK), or a list or pipeline operator's last character, a pattern's `)` among them -- and a subshell's `(`,
+# which mark_zsh_patterns tells apart from a group's.  prepare.newlines_as_separators, and heredocs, find one after those
+# and after any `(`, `<` or `>`.
+_BEFORE_COMMENT = " \t;&|)" + syntax.LINE_BREAK
 
 
 def _scan_pairs(text):
@@ -363,6 +369,20 @@ def mark_zsh_patterns(text):
       `)` never ends the pattern (the case stack's "proc", "inner" and "group" states, _CASE_WORD_STATES), and the
       pattern goes on after it.  A `=` anywhere else in a pattern is the pattern's text (CaseSubstitutionTest has the
       probes);
+    - zsh's brace form of case, `case word { pattern) body ;; ... }` (SPD-185): the `{` after the word is its `in`, glued
+      to the first pattern too (`{x)`, which both readings write `{ x)`, so the walk reads the brace alone), and its
+      patterns are read as the `in` form's are.  A `}` or an `esac` where a pattern would stand closes a case of either
+      form, and in a brace form's body the `}` that closes no `{ list }` opened in it -- a sole one, or one zsh splits off
+      a word, after a command's words too, with no `;;` -- closes the case (tests/test_hooks_groups.py CaseBraceFormTest has
+      the probes).  bash rejects the form, and the other reading is written the same;
+    - a comment (SPD-186): a word that starts with `#` after a blank, a newline, a list or pipeline operator or a
+      subshell's `(`, to the end of its line, is no word of the line to either shell -- no pattern, no closer, no
+      command -- so it is written as `#` alone, which the walk reads as newlines_as_separators always left it, a command
+      no rule reads, and a lifted substitution's placeholder in it is kept after it, so the walk still pairs every lifted
+      body in order (it runs nothing, and is read as before).  A group's `#` is the group's (SPD-183), a case pattern's
+      `(#` too (`case x in (#c<newline>x) ...` was a pattern, where bash failed), and so is one in `[[ ... ]]`; where a
+      group failed to read whole, the plain reading stands in for a word zsh's lexer is still in, and the rest of the
+      text keeps its comments' words as before.  tests/test_hooks_groups.py CaseCommentTest has the probes;
     - a newline, which newlines_as_separators writes as syntax.LINE_BREAK, is part of the pattern inside a group, in any
       word (SPD-183: `echo x | tee (l|<newline>x)/t` wrote l/t, and _zsh_group has the probes), and everywhere else the `;`
       it ends a command with, as the walk always read it; bash rejects such a group, and the other reading, restoring
@@ -380,7 +400,7 @@ def mark_zsh_patterns(text):
     to 2 and `]`.
 
     Both texts are the input, each LINE_BREAK a `;`, when it holds none of these."""
-    if "(" not in text and "<" not in text and "$[" not in text:
+    if "(" not in text and "<" not in text and "$[" not in text and "#" not in text:
         text = text.replace(syntax.LINE_BREAK, ";")
         return text, text
     scan = _scan_pairs(text)
@@ -400,6 +420,10 @@ def mark_zsh_patterns(text):
     # per open case command: "subject", "in", "pattern" or "body"; above those, per parenthesis open in a case's word or
     # pattern, "proc", "inner" or "group" (_CASE_WORD_STATES, SPD-184)
     cases = []
+    # the brace form's cases (SPD-185): the index in `cases` of each -> the `{ list }` groups open in its body
+    brace_cases = {}
+    # SPD-186: whether a `#` may still open a comment, and where the last subshell's `(` stands, after which one may
+    comments, subshell = True, -1
     while i < n:
         c = text[i]
         if c in " \t":
@@ -410,6 +434,33 @@ def mark_zsh_patterns(text):
         top = cases[-1] if cases else None
         in_pattern = top == "pattern"
         pattern_text = in_pattern or top == "group"  # a pattern's text, a group the scan did not take included
+        if c == "#" and (i == 0 or text[i - 1] in _BEFORE_COMMENT or i - 1 == subshell) and comments \
+                and target is None and not (cond or heredoc):
+            # SPD-186: a comment, to the end of its line, which both shells ignore (probed in zsh 5.9 -f, -f -o
+            # nobareglobqual and bash 3.2.57: `echo a #b ; echo NO12` printed a alone, and a comment's `(`, `)`, `;;`,
+            # `esac` or `}` in a case statement ended nothing, CaseCommentTest).  Not in `[[ ... ]]`, where zsh reads
+            # `(#i)` as a pattern's (`[[ x == (#i)X ]]` held under extendedglob), not where a redirection's word or a
+            # here-document's delimiter is due, and not once a group zsh reads as part of a word has failed to read whole
+            # (`comments`), where the plain reading of it stands in for words zsh's lexer is still in: the text is read
+            # as newlines_as_separators left it, its words commands no rule reads, as before.
+            end = text.find(syntax.LINE_BREAK, i)
+            end = n if end < 0 else end
+            comment = "#" + (" " + hookio.SUBST) * text.count(hookio.SUBST, i, end)
+            out.append(comment)
+            other.append(comment)
+            i = end
+            continue
+        if c == "{" and top == "in" and not punctuation_next:
+            # SPD-185: zsh's brace form, `case word { ... }`, whose `{` is the case's `in` (probed in zsh 5.9 -f and -f -o
+            # nobareglobqual: `case x { x) ( echo B1 );; }` and `case x {x) echo A11;; }` ran their bodies; bash 3.2.57
+            # rejected both).  Written apart from a pattern glued to it, so the walk reads the brace alone.
+            i += 1
+            out.append("{" if i >= n or text[i] in " \t" else "{ ")
+            other.append(out[-1])
+            cases[-1], command, target, arith_next = "pattern", False, None, False
+            for_list, repeat_count, closed, more_names = 0, False, False, False
+            brace_cases[len(cases) - 1] = 0
+            continue
         if c == "=" and top in _CASE_WORD_STATES and text.startswith("=(", i) and not punctuation_next:
             # SPD-184: a `=( ... )` opening the case's word or a top-level alternative of a pattern is a process
             # substitution, its list parsed as commands, and its `)` is the list's, never the pattern's (probed in zsh 5.9
@@ -454,7 +505,9 @@ def mark_zsh_patterns(text):
                 word_start = False
             else:
                 # a case pattern stands outside command position (SPD-181), so a group opens its word there as anywhere else
-                word_start = not (command or cond or heredoc or text.startswith("()", i)) and _zsh_group(text, i, scan, pattern_text) is not None
+                grouped = not (command or cond or heredoc or text.startswith("()", i))
+                word_start = grouped and _zsh_group(text, i, scan, pattern_text) is not None
+                comments = comments and word_start == grouped  # a group zsh's lexer reads on in, unread (SPD-186)
         else:
             word_start = c == "<" and not (cond or heredoc) and syntax.ZSH_RANGE_RE.match(text, i) is not None
         punctuation_next = False
@@ -478,6 +531,8 @@ def mark_zsh_patterns(text):
                     # r112)) in` made theirs, `(x|<(tou|ch r102)))` ran `tou` and `ch`); its `)` is the list's
                     cases.append("proc")
             elif op in ("(", "()"):  # a subshell, or a function's header: a command follows (zsh's INOUTPAR)
+                if op == "(" and command and top not in _CASE_WORD_STATES + ("group",):
+                    subshell = pos  # a `#` after it opens a comment (probed: `(#c<newline>echo C10)` printed C10)
                 command = True
                 if op == "(" and top in ("proc", "inner"):
                     cases.append("inner")  # counted, so the substitution's list ends at its own `)`
@@ -584,6 +639,7 @@ def mark_zsh_patterns(text):
                     group = None
                     if not (cond or heredoc or brace_run or array or text.startswith("()", j)):
                         group = _zsh_group(text, j, scan, pattern_text)
+                        comments = comments and group is not None  # SPD-186, as for a group opening a word
                     if group is None:
                         punctuation_next = True  # the walk reads this parenthesis in the plain reading
                         break
@@ -647,6 +703,12 @@ def mark_zsh_patterns(text):
         before = _before_close(w, command)
         if before is not None:
             w = before
+        # SPD-185: in a brace-form case's body, the `{ list }` groups this word opens -- a sole `{`, or each brace zsh splits
+        # off one in command position -- whose `}` closes the group and not the case (probed: `case x { x) { echo A15 } ;;
+        # }` and `case x { x) {true} } ; ( echo L3 )` ran)
+        body_case = len(cases) - 1 if top == "body" and len(cases) - 1 in brace_cases else None
+        plain = body_case is not None and target is None and not (cond or heredoc)
+        opens = (braced - start if command and c == "{" else int(w == "{")) if plain else 0
         if heredoc:
             heredoc = False
         if target is not None:
@@ -663,14 +725,16 @@ def mark_zsh_patterns(text):
         elif cases and cases[-1] == "in":
             cases[-1], before = ("pattern" if w == "in" else "in"), None
         elif pattern_text:
-            if in_pattern and w == "esac":
+            if in_pattern and w in ("esac", "}"):
+                # where a pattern would stand either closer ends either form (SPD-185, probed: `case x { x) echo A13 ;;
+                # esac` and `case x in x) echo A14;; }` ran, and `{ case x in x) echo A46;; }` failed near its `}`)
                 cases.pop()
                 command = True
-            else:
-                before = None
+            before = None
         elif command:
             if w == "case":
                 cases.append("subject")
+                brace_cases.pop(len(cases) - 1, None)  # a brace form's that stood here before is closed
                 command = False
             elif w == "esac" and cases and top not in ("proc", "inner"):  # a substitution's list closes no case
                 cases.pop()
@@ -686,6 +750,14 @@ def mark_zsh_patterns(text):
                 pass  # zsh's try-always form, `{ a } always { b }` (SPD-124): its block follows in command position
             else:
                 command = False
+        if plain and len(cases) > body_case:
+            depth = brace_cases[body_case] + opens
+            if before is not None and not depth:
+                # the case's own `}`, after a word too and with no `;;` before it (probed: `case x { x) echo B3 }`,
+                # `case x { x) echo A24}` and `case x { x) echo A30; }` ran), where the walk closes it (ShellWalk.brace_closes)
+                cases.pop()
+            else:
+                brace_cases[body_case] = depth - (before is not None)
         if before is not None:
             command, closed = True, True
         if was_name and not for_list:
