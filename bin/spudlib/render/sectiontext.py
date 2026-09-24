@@ -49,6 +49,9 @@ def handoff_party(con, member_id):
 
 
 def render_handoff_rows(con, ticket, after=0):
+    """One dated line a handoff; a `what` holding newlines carries its later lines under it with the two-space
+    continuation indent a Log entry and a proposal's Why and Evidence carry, so an import reads the row back whole
+    (bulkimport.import_handoffs, SPD-078).  A row with no newline renders as it always has."""
     rows = con.execute("SELECT * FROM handoffs WHERE ticket_id = ? AND id > ? ORDER BY id", (ticket["id"], after)).fetchall()
     lines = []
     for h in rows:
@@ -58,7 +61,8 @@ def render_handoff_rows(con, ticket, after=0):
         what = h["what"]
         if h["path"]:
             what = "%s (`%s`)" % (what, h["path"])
-        lines.append("- %s — %s → %s: %s" % (kernel.fm_date(h["at"]), handoff_party(con, h["from_member_id"]), handoff_party(con, h["to_member_id"]), what))
+        lines.append("- %s — %s → %s: %s" % (kernel.fm_date(h["at"]), handoff_party(con, h["from_member_id"]),
+                                             handoff_party(con, h["to_member_id"]), what.replace("\n", "\n  ")))
     return "\n".join(lines)
 
 

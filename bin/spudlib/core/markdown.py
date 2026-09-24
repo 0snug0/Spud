@@ -242,15 +242,48 @@ def split_document(text, owned=None):
 LOG_ENTRY = re.compile(r"^(?:- )?(\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2})?)(?:\s*[—–:-])?\s+(.*)$")
 
 
-def parse_log_entries(text):
-    """Dated Log lines -> [(at, body)]; continuation lines join their entry verbatim;
-    the comment and anything before the first dated line is not an entry."""
-    entries = []
+def continued_rows(text, opens):
+    """A section written one row a line -> [(line, more)]: `line` a row's first line, `more` the lines that continue it.
+
+    The render writes a row's later lines under it with a two-space indent: a Log entry's, a handoff's, a proposal's
+    Why and Evidence.  So a line indented two spaces under a line `opens` accepts continues that row, and `more` keeps
+    it verbatim, indent and all, for the caller to strip (joined_row) or keep.  An empty line between such a row and
+    its next indented line is a blank line of the row, "" in `more` (an editor may have trimmed the render's `  `); any
+    other blank line only separates rows.  Every other line is a row of its own, with no `more`.  The one rule the Log
+    (parse_log_entries, SPD-236) and the handoffs (bulkimport.handoff_rows, SPD-078) read by."""
+    rows = []
+    more = None  # the open row's continuation lines; None while no row is open
+    blanks = 0  # empty lines since the open row's last line
     for line in text.split("\n"):
+        if more is not None and line.startswith("  "):
+            more.extend([""] * blanks + [line])
+            blanks = 0
+        elif not line.strip():
+            blanks += more is not None
+        else:
+            more, blanks = ([] if opens(line) else None), 0
+            rows.append((line, [] if more is None else more))
+    return rows
+
+
+def joined_row(first, more):
+    """A row's text: its first line's text, then each continuation line with the two-space indent removed."""
+    return "\n".join([first] + [line[2:] for line in more])
+
+
+def parse_log_entries(text):
+    """Dated Log lines -> [(at, body)]; the comment and anything before the first dated line is not an entry.
+
+    An entry's lines are read back by continued_rows, as render_log_rows writes them: a line indented two spaces under
+    a dated line joins its entry with the indent removed, and so does a markdown-v0 log's written by hand, whose
+    continuation lines carry the same indent (SPD-236).  A line the render never writes, unindented under an entry, and
+    the lines indented under it, join the entry above as written."""
+    entries = []
+    for line, more in continued_rows(text, LOG_ENTRY.match):
         m = LOG_ENTRY.match(line)
         if m:
-            entries.append([m.group(1), m.group(2)])
-        elif line.strip() and entries:
+            entries.append([m.group(1), joined_row(m.group(2), more)])
+        elif entries:
             entries[-1][1] += "\n" + line
     return [(at, body) for at, body in entries]
 
