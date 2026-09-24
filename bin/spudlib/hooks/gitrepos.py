@@ -36,10 +36,15 @@ from ..core import homeconf, lazy
 GIT_CONFIG_SCOPES_CACHE = "git-config-scopes.json"
 GIT_OWN_SCOPES = ("local", "worktree")  # the scopes a repository sets for itself; `system`, `global` and `unknown` are Eric's
 GIT_CONFIG_SCOPES_KEPT = 64  # repositories kept in the cache file
-GIT_CONFIG_INCLUDE_FILES = 8  # config files followed through include.path/includeIf.<c>.path when fingerprinting
-GIT_CONFIG_READ_LIMIT = 1 << 18  # bytes read from one config file when looking for its includes
+GIT_CONFIG_INCLUDE_FILES = 16  # config files followed through include.path/includeIf.<c>.path; a set past it is never kept
+GIT_CONFIG_READ_LIMIT = 1 << 18  # characters read from one config file for its includes; a longer file's set is never kept
 GIT_WALK_LIMIT = 64  # directories walked up from a candidate looking for a repository
-_GIT_INCLUDE_PATH = r"^[ \t]*path[ \t]*=[ \t]*(.+?)[ \t]*$"  # read with re.findall, so nothing compiles until a config is read
+# A `path` key's line, its section header before it on the same line or not (git reads `[include] path = x`), and its raw
+# value; read with re.findall, so nothing compiles until a config is read.  It matches a `path` key in any section, which
+# only ever stamps a file too many.
+_GIT_INCLUDE_PATH = r"^[ \t]*(?:\[.*\][ \t]*)?path[ \t]*=(.*)$"
+_GIT_BLANKS = " \t\r\v\f"  # what git's config parser skips as blank in a value (its isspace, less the newline)
+SETTLED_NS = 2 * 10**9  # how old every mtime an entry of either cache is kept under must be before it is written
 # The inert allowlist, which shell/git_programs reads for a `-c` key on the line and git_config_key_names_program for a key
 # in a repository's own config.  Sections whose every documented key is inert:
 GIT_INERT_CONFIG_SECTIONS = {
@@ -164,30 +169,92 @@ def git_repository_dirs(directory, as_git_dir=False):
     return None, None, None
 
 
-def git_scope_config_files(gitdir, commondir):
-    """Every file git reads at the local and worktree scopes of one repository: <commondir>/config (the local scope),
-    <gitdir>/config.worktree (the worktree scope, with extensions.worktreeConfig), the git directory's own config where it
-    is the common one, and the files any `include.path`/`includeIf.<c>.path` in them names.  An included file's keys are
-    reported at the including file's scope, so the listing already covers them; they are here so that editing one changes
-    the fingerprint the answer is cached under."""
-    files, queue = [], [os.path.join(commondir, "config"), os.path.join(gitdir, "config"),
-                        os.path.join(gitdir, "config.worktree"), os.path.join(commondir, "config.worktree")]
-    while queue and len(files) < GIT_CONFIG_INCLUDE_FILES:
-        path = os.path.normpath(queue.pop(0))
-        if path in files:
+def git_include_value(raw):
+    """The path an include's raw value names, read as git's config parser reads a value: blanks around it dropped, a
+    double quote opening or closing a quoted run, a `;` or `#` outside one starting a comment.  None when this reading
+    cannot be sure of it -- a backslash (an escape, or the line continued on the next), a quote left open, a path git
+    expands itself (`%(prefix)/`, `:(optional)`) -- and '' for no path at all."""
+    named, blanks, quoted = "", 0, False
+    for ch in raw:
+        if ch == "\\":
+            return None
+        if not quoted and ch in _GIT_BLANKS:
+            blanks += 1 if named else 0  # git keeps a blank inside the value as a space, and drops those around it
             continue
-        files.append(path)
+        if not quoted and ch in ";#":
+            break
+        named += " " * blanks
+        blanks = 0
+        if ch == '"':
+            quoted = not quoted
+        else:
+            named += ch
+    if quoted or named.startswith(("%(", ":(")):
+        return None
+    return named
+
+
+def git_scope_stamps(gitdir, commondir):
+    """(stamps, complete) for the config one repository sets for itself: git_config_fingerprint's stamp of every file git
+    reads at its local and worktree scopes, each taken before the file is opened -- <commondir>/config (the local scope),
+    <gitdir>/config.worktree (the worktree scope, with extensions.worktreeConfig), the git directory's own config where it
+    is the common one, and every file an `include.path` or `includeIf.<c>.path` in them names, whatever its condition.  An
+    included file's keys are reported at the including file's scope, so the listing already covers them; they are stamped
+    so that editing one changes the fingerprint an answer is kept under.
+
+    Which included files are in force is not read from those files alone: an `includeIf "onbranch:<b>"` holds while HEAD
+    names that branch, so wherever one is written (a subsection's backslash escapes removed, which only ever finds one
+    too many) <gitdir>/HEAD is stamped, and the reftable stack a reftable repository keeps HEAD in (SPD-238).  The other
+    conditions are read from what is stamped already: `gitdir:` from the git directory the answer is kept by, and
+    `hasconfig:remote.*.url:` from these files and from Eric's own scopes, which no member can write.
+
+    `complete` is False when the stamps may be short of what git reads -- more than GIT_CONFIG_INCLUDE_FILES files, a file
+    longer than GIT_CONFIG_READ_LIMIT or one the hook cannot open, a value git_include_value cannot be sure of -- and an
+    answer is never kept under such a set: git is run for it each time."""
+    stamps, seen, complete, branch = [], set(), True, False
+    queue = [os.path.join(commondir, "config"), os.path.join(gitdir, "config"),
+             os.path.join(gitdir, "config.worktree"), os.path.join(commondir, "config.worktree")]
+    while queue:
+        path = os.path.normpath(queue.pop(0))
+        if path in seen:
+            continue
+        if len(seen) >= GIT_CONFIG_INCLUDE_FILES:
+            complete = False
+            break
+        seen.add(path)
+        stamp = git_file_stamp(path)
+        stamps.append(stamp)
+        if stamp[1] is None:
+            continue  # absent: git reads nothing there, and one that appears is a change of stamp
         try:
             with open(path, encoding="utf-8", errors="replace") as f:
-                text = f.read(GIT_CONFIG_READ_LIMIT)
+                text = f.read(GIT_CONFIG_READ_LIMIT + 1)
         except OSError:
+            complete = False
             continue
-        for named in re.findall(_GIT_INCLUDE_PATH, text, re.MULTILINE | re.IGNORECASE):
-            named = named.strip().strip('"')
-            if named:
+        if len(text) > GIT_CONFIG_READ_LIMIT:
+            complete = False
+        if not branch:
+            branch = "onbranch:" in (text.replace("\\", "") if "\\" in text else text)
+        for raw in re.findall(_GIT_INCLUDE_PATH, text, re.MULTILINE | re.IGNORECASE):
+            named = git_include_value(raw)
+            if named is None:
+                complete = False
+            elif named:
                 queue.append(os.path.expanduser(named) if named.startswith("~") else
                              (named if os.path.isabs(named) else os.path.join(os.path.dirname(path), named)))
-    return files
+    if branch:
+        stamps += git_config_fingerprint([os.path.join(gitdir, "HEAD"), os.path.join(gitdir, "reftable", "tables.list")])
+    return stamps, complete
+
+
+def git_file_stamp(path):
+    """[path, mtime, size, inode, ctime] as os.stat reads them now, or [path, None, None, None, None] when it cannot."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return [path, None, None, None, None]
+    return [path, st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns]
 
 
 def git_config_fingerprint(files):
@@ -196,14 +263,14 @@ def git_config_fingerprint(files):
     file that is not there is recorded as absent, so one that appears later is a change too.  The ctime is in it because a
     program can put an mtime back (os.utime) after writing the same number of bytes in place, and nothing but the kernel
     sets a ctime: utime itself moves it (SPD-131)."""
-    out = []
-    for path in files:
-        try:
-            st = os.stat(path)
-            out.append([path, st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns])
-        except OSError:
-            out.append([path, None, None, None, None])
-    return out
+    return [git_file_stamp(path) for path in files]
+
+
+def stamps_settled(stamps, now):
+    """True when every mtime in `stamps` is SETTLED_NS old at `now` (an absent file has none): a change made in the same
+    clock tick as a stamp read leaves the stamp as it was (APFS stamps are nanoseconds, but HFS+ keeps seconds and FAT
+    two), so neither cache keeps an entry before then.  An mtime in the future is never settled."""
+    return all(s[1] is None or now - s[1] >= SETTLED_NS for s in stamps)
 
 
 def git_run_config_scopes(where):
@@ -257,15 +324,16 @@ def git_own_config_keys(home, where, gitdir, commondir):
     """[[scope, key]] in force at one repository's own scopes (`local` and `worktree`), [] when it sets nothing there, or
     None when the hook could not read them, which fails closed.
 
-    Kept in <home>/.spud/git-config-scopes.json under the stat fingerprint of the files git reads at those scopes, so a hook
-    runs git only after one of them changes: the Bash hook runs on every command line, and subprocess stays off its
-    path, where importing it costs every run milliseconds.  A repository that sets nothing for itself costs no git run at all.  The cache lives in the state directory, which
-    the edit and Bash hooks refuse to everyone, so nothing a member writes can widen what passes."""
-    files = git_scope_config_files(gitdir, commondir)
-    if not any(os.path.lexists(f) for f in files):
+    Kept in <home>/.spud/git-config-scopes.json under git_scope_stamps' fingerprint of what git reads at those scopes, so a
+    hook runs git only after one of them changes: the Bash hook runs on every command line, and subprocess stays off its
+    path, where importing it costs every run milliseconds.  A repository that sets nothing for itself costs no git run at
+    all.  An answer is kept only under a complete set of stamps, every one of them settled (stamps_settled), as the
+    findings cache keeps its own (SPD-238).  The cache lives in the state directory, which the edit and Bash hooks refuse
+    to everyone, so nothing a member writes can widen what passes."""
+    fingerprint, complete = git_scope_stamps(gitdir, commondir)
+    if not any(os.path.lexists(s[0]) for s in fingerprint):
         return []  # no local or worktree scope: nothing for the repository to say, and nothing to run git for
-    fingerprint = git_config_fingerprint(files)
-    state = os.path.join(str(home), hookio.STATE_DIR) if home else None
+    state = os.path.join(str(home), hookio.STATE_DIR) if home and complete else None
     cache = os.path.join(state, GIT_CONFIG_SCOPES_CACHE) if state else None
     stored = {}
     if cache:
@@ -277,7 +345,7 @@ def git_own_config_keys(home, where, gitdir, commondir):
     if listed is None:
         return None
     keys = [[scope, key] for scope, key in listed if scope in GIT_OWN_SCOPES]
-    if cache and os.path.isdir(state):
+    if cache and stamps_settled(fingerprint, time.time_ns()) and os.path.isdir(state):
         git_cache_write(cache, stored, {gitdir: {"fingerprint": fingerprint, "keys": keys}})
     return keys
 
@@ -435,8 +503,9 @@ def own_findings(home, where, gitdir, commondir, hooks):
 # includes, the scopes cache consulted and its hooks directory listed -- linear in the checkouts, and at five to seven of
 # them the largest cost SessionStart carried.  So those two keep, per checkout, in <home>/.spud/git-checkout-findings.json,
 # which repository it is and its own findings (its program keys and its hooks), under the stat of everything that answer
-# was read from: <root>/.git, <gitdir>/commondir, each config file git_scope_config_files names (the includes it followed
-# were found in those files, so none can change without one of them changing) and the common directory's hooks/.  A hit is
+# was read from: <root>/.git, <gitdir>/commondir, git_scope_stamps' files (the config files, the includes it followed,
+# which were found in those files, so none can change without one of them changing, and HEAD where an include depends on
+# the branch, SPD-238) and the common directory's hooks/.  A hit is
 # a few stats per checkout; whether that repository is a known checkout's own is still asked anew (checkout_identities,
 # read from every registered root's .git on each run).
 #
@@ -453,14 +522,13 @@ def own_findings(home, where, gitdir, commondir, hooks):
 #   which nothing but the kernel sets.
 # - Each stamp is read before the file it covers, so a change after the read moves it; the commondir file, read inside
 #   git_repository_dirs, is read again after its stamp and the entry kept only when both readings agree.
-# - An entry is written only when every mtime it is kept under is SETTLED_NS old: a change made in the same clock tick as
-#   the stamp read would leave the stamp unchanged (APFS stamps are nanoseconds, but HFS+ keeps seconds and FAT two).
+# - An entry is written only when every mtime it is kept under is SETTLED_NS old (stamps_settled), and only under a set of
+#   stamps git_scope_stamps calls complete: one short of what git reads could not see a change to the rest.
 # - An entry is trusted only whole: read for this checkout, its stamps covering at least .git, the commondir file, the four
 #   base config files and hooks/, every finding a key or a hook.  Anything else, and a cache that is missing, unreadable
 #   or not JSON, is a miss, which reads the repository.  A foreign repository, or a reading that failed, is never kept.
 #   The state directory is refused to every tool, so nothing a member writes can plant an entry.
 GIT_FINDINGS_CACHE = "git-checkout-findings.json"
-SETTLED_NS = 2 * 10**9
 _CACHED_KINDS = ("key", "hook")
 
 
@@ -520,13 +588,12 @@ def checkout_kept(home, known, root, dot, where, gitdir, commondir, fresh):
     # The stamps before the reading they are kept with, and hooks/ listed anew after them, never the listing another
     # checkout of this common directory took earlier in the run: a hook added between that listing and these stamps
     # would be kept as absent under stamps that already show it.
-    stamps = git_config_fingerprint([os.path.join(gitdir, "commondir")] + git_scope_config_files(gitdir, commondir)
-                                    + [os.path.join(commondir, "hooks")])
+    scope, complete = git_scope_stamps(gitdir, commondir)
+    stamps = [git_file_stamp(os.path.join(gitdir, "commondir"))] + scope + [git_file_stamp(os.path.join(commondir, "hooks"))]
     found, keep = own_findings(home, where, gitdir, commondir, None)
     now = time.time_ns()
-    if (keep and dot is not None and where == os.path.abspath(root) and git_repo_common_dir(gitdir) == commondir
-            and (dot[0] == "dir" or now - dot[1] >= SETTLED_NS)
-            and all(s[1] is None or now - s[1] >= SETTLED_NS for s in stamps)):
+    if (keep and complete and dot is not None and where == os.path.abspath(root) and git_repo_common_dir(gitdir) == commondir
+            and (dot[0] == "dir" or now - dot[1] >= SETTLED_NS) and stamps_settled(stamps, now)):
         fresh[root] = {"where": where, "gitdir": gitdir, "commondir": commondir, "dot": dot, "fingerprint": stamps,
                        "findings": found}
     return found

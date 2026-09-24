@@ -1,6 +1,7 @@
 """PreToolUse(Bash) and the path rule on git: config aliases and the programs git runs, git's own config files and
 directories, the repository a call reads, nested repositories, the files git writes, and the verb allowlist."""
 
+import contextlib
 import json
 import os
 import re
@@ -8,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -795,6 +797,23 @@ class GitLocalConfigTest(BashHookCase):
     def plant(self, text, name="config"):
         (self.repo / ".git" / name).write_text(text, encoding="utf-8")
 
+    def settle(self):
+        """Every file in the git directory an hour old by mtime (its ctime stays now: nothing but the kernel sets it).  The
+        scopes cache keeps an entry only once every stamp it is kept under is SETTLED_NS old (SPD-238), as SPD-131's
+        findings cache does, so a test that wants a warm entry settles what it planted first."""
+        then = time.time() - 3600
+        for path in (self.repo / ".git").iterdir():
+            if path.is_file():
+                os.utime(path, (then, then))
+
+    def scopes(self):
+        """The scopes cache's entry for the home's repository, or None."""
+        try:
+            stored = json.loads((self.home.path / STATE / "git-config-scopes.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        return stored.get(str(self.repo / ".git"))
+
     def calls(self):
         return ("git -C %s status" % self.repo, "cd %s && git status" % self.repo, "git -C %s log --oneline" % self.repo,
                 "git --git-dir=%s/.git status" % self.repo, "cd %s && git diff" % self.repo)
@@ -872,6 +891,7 @@ class GitLocalConfigTest(BashHookCase):
 
     def test_the_answer_is_cached_and_a_config_edit_invalidates_it(self):
         cache = self.home.path / STATE / "git-config-scopes.json"
+        self.settle()
         self.assertSilent("git -C %s status" % self.repo)
         self.assertTrue(cache.exists(), "the first call writes the cache")
         stored = json.loads(cache.read_text(encoding="utf-8"))
@@ -884,6 +904,7 @@ class GitLocalConfigTest(BashHookCase):
 
     def test_a_cache_hit_imports_no_subprocess(self):
         """The Bash hook runs on every command line; SPD-016 keeps subprocess off its path, so only a miss may pay for it."""
+        self.settle()
         cold = self.imports_of("git -C %s status" % self.repo)
         self.assertIn("subprocess", cold)
         self.assertNotIn("subprocess", self.imports_of("git -C %s status" % self.repo))
@@ -894,6 +915,139 @@ class GitLocalConfigTest(BashHookCase):
                               input=json.dumps(payload), capture_output=True, text=True, env=self.home.env)
         self.assertEqual(proc.returncode, 0, proc)
         return {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines() if line.startswith("import time:")}
+
+    # -- SPD-238: what the scopes cache is kept under ------------------------------------------------------------------
+    def stamped(self):
+        entry = self.scopes()
+        self.assertIsNotNone(entry, "a settled read keeps an entry")
+        return [s[0] for s in entry["fingerprint"]]
+
+    def test_an_entry_is_kept_only_once_its_stamps_have_settled(self):
+        """A change made in the same clock tick as the stamp read leaves the stamp as it was (HFS+ keeps seconds, FAT two),
+        so an entry written then could answer for a file that changed after it: none is kept until every stamp is
+        SETTLED_NS old, and the hook runs git again until then."""
+        cmd = "git -C %s status" % self.repo
+        self.assertSilent(cmd)
+        self.assertIsNone(self.scopes(), "the config was written this second: nothing is kept yet")
+        self.settle()
+        self.assertSilent(cmd)
+        self.assertIn(str(self.repo / ".git" / "config"), self.stamped())
+        with mock.patch("spudlib.hooks.gitrepos.git_run_config_scopes", return_value=None):
+            self.assertSilent(cmd)  # a hit: git is not run (a run that failed would refuse the call)
+
+    def test_a_branch_switch_is_seen_where_an_include_depends_on_the_branch(self):
+        """An includeIf "onbranch:<b>" puts the file it names in force only while HEAD names that branch, so the keys in
+        force change with a checkout that edits no config file: HEAD is stamped wherever such a condition is written, a
+        subsection's backslash escape included."""
+        cmd = "git -C %s status" % self.repo
+        for header in ('[includeIf "onbranch:feature"]', '[includeIf "on\\branch:feature"]', '[includeIf "onb\\ranch:feature"]',
+                       '[includeIf "onbranch:feat*"]'):
+            with self.subTest(header):
+                self.plant("ref: refs/heads/main\n", name="HEAD")
+                self.plant("[core]\n\tpager = /bin/echo\n", name="extra")
+                self.plant("[core]\n\trepositoryformatversion = 0\n%s\n\tpath = extra\n" % header)
+                self.settle()
+                self.assertSilent(cmd)  # on main the include is not in force
+                self.assertIn(str(self.repo / ".git" / "HEAD"), self.stamped())
+                self.plant("ref: refs/heads/feature\n", name="HEAD")
+                self.assertRefused(cmd, "core.pager")
+                self.settle()
+                self.assertRefused(cmd, "core.pager")
+                self.plant("ref: refs/heads/main\n", name="HEAD")
+                self.assertSilent(cmd)
+
+    def test_a_branch_switch_at_the_same_size_with_its_mtime_put_back_is_seen_by_its_ctime(self):
+        cmd = "git -C %s status" % self.repo
+        self.plant("ref: refs/heads/feat1\n", name="HEAD")
+        self.plant("[core]\n\tpager = /bin/echo\n", name="extra")
+        self.plant('[core]\n\trepositoryformatversion = 0\n[includeIf "onbranch:feat2"]\n\tpath = extra\n')
+        self.settle()
+        self.assertSilent(cmd)
+        self.assertIn(str(self.repo / ".git" / "HEAD"), self.stamped())
+        head = self.repo / ".git" / "HEAD"
+        before = os.stat(head)
+        with open(head, "r+", encoding="utf-8") as f:  # in place: the same inode and the same size
+            f.write("ref: refs/heads/feat2\n")
+        os.utime(head, ns=(before.st_atime_ns, before.st_mtime_ns))
+        after = os.stat(head)
+        self.assertEqual((after.st_ino, after.st_size, after.st_mtime_ns), (before.st_ino, before.st_size, before.st_mtime_ns))
+        self.assertRefused(cmd, "core.pager")
+
+    def test_head_is_stamped_only_where_an_include_depends_on_the_branch(self):
+        """A repository with no branch condition keeps its entry across a checkout, which changes nothing git reads at
+        its own scopes; one with a condition is stamped by HEAD and by the reftable stack a reftable repository keeps
+        HEAD in."""
+        cmd = "git -C %s status" % self.repo
+        self.settle()
+        self.assertSilent(cmd)
+        self.assertNotIn(str(self.repo / ".git" / "HEAD"), self.stamped())
+        self.plant("ref: refs/heads/other\n", name="HEAD")
+        with mock.patch("spudlib.hooks.gitrepos.git_run_config_scopes", return_value=None):
+            self.assertSilent(cmd)  # still a hit
+        self.plant('[core]\n\trepositoryformatversion = 0\n[includeIf "onbranch:x"]\n\tpath = extra\n')
+        self.settle()
+        self.assertSilent(cmd)
+        stamped = self.stamped()
+        for name in ("HEAD", os.path.join("reftable", "tables.list")):
+            self.assertIn(str(self.repo / ".git" / name), stamped)
+
+    def test_the_board_line_sees_a_branch_switch_too(self):
+        """SPD-131's findings cache keeps a checkout's program keys under the same stamps as the scopes cache."""
+        self.plant("[core]\n\tpager = /bin/echo\n", name="extra")
+        self.plant('[core]\n\trepositoryformatversion = 0\n[includeIf "onbranch:feature"]\n\tpath = extra\n')
+        self.settle()
+        board = self.home.run("board", "--brief").stdout
+        self.assertNotIn("repository check:", board)
+        kept = json.loads((self.home.path / STATE / "git-checkout-findings.json").read_text(encoding="utf-8"))
+        self.assertIn(str(self.repo / ".git" / "HEAD"), [s[0] for s in kept[str(self.repo)]["fingerprint"]])
+        self.plant("ref: refs/heads/feature\n", name="HEAD")
+        self.assertIn("repository check:", self.home.run("board", "--brief").stdout)
+
+    def assertIncludeSeen(self, config, included="extra", kept=True):
+        """The config (after its core section) includes `included`, in the git directory: while that file is inert the
+        answer is kept stamped by it (`kept`) or never kept at all, and a program key written into it after is seen."""
+        cmd = "git -C %s status" % self.repo
+        with contextlib.suppress(FileNotFoundError):
+            (self.home.path / STATE / "git-config-scopes.json").unlink()
+        target = self.repo / ".git" / included
+        target.write_text("[color]\n\tui = auto\n", encoding="utf-8")
+        self.plant("[core]\n\trepositoryformatversion = 0\n" + config)
+        self.settle()
+        self.assertSilent(cmd)
+        if kept:
+            self.assertIn(str(target), self.stamped())
+        else:
+            self.assertIsNone(self.scopes(), "an include set the hook cannot be sure of is never kept")
+        target.write_text("[core]\n\tpager = /bin/echo\n", encoding="utf-8")
+        self.assertRefused(cmd, "core.pager")
+
+    def test_an_include_value_is_read_as_git_reads_it(self):
+        """The path an include names is its value as git's config parser reads it: a comment after it, a quoted value
+        holding a comment character, a key on its section header's line; a value with a backslash (an escape, a line
+        continued) the hook does not unescape, and never keeps."""
+        for config, included, kept in (("[include]\n\tpath = extra ; a note\n", "extra", True),
+                                        ("[include]\n\tpath = extra # a note\n", "extra", True),
+                                        ('[include]\n\tpath = "ex#tra" # a note\n', "ex#tra", True),
+                                        ('[include]\n\tpath = "ex;tra"\n', "ex;tra", True),
+                                        ("[include] path = extra\n", "extra", True),
+                                        ('[includeIf "gitdir:/"] path = extra\n', "extra", True),
+                                        ("[include]\n\tpath = ext\\\nra\n", "extra", False),
+                                        ('[include]\n\tpath = "ex\\\\tra"\n', "ex\\tra", False)):
+            with self.subTest(config):
+                self.assertIncludeSeen(config, included, kept)
+
+    def test_an_include_past_the_file_limit_is_never_kept(self):
+        """The hook follows a bounded number of included files; git follows every one, so a set past the bound is never
+        kept, and a program key in its last file is seen."""
+        many = 40  # side by side: git refuses includes nested more than ten deep
+        for n in range(1, many):
+            self.plant("[color]\n\tui = auto\n", name="inc%d" % n)
+        self.assertIncludeSeen("[include]\n" + "".join("\tpath = inc%d\n" % n for n in range(1, many + 1)), "inc%d" % many,
+                               kept=False)
+
+    def test_an_include_past_the_read_limit_is_never_kept(self):
+        """The hook reads a bounded prefix of each config file looking for its includes; git reads it all."""
+        self.assertIncludeSeen("#" * (1 << 20) + "\n[include]\n\tpath = extra\n", kept=False)
 
     def test_a_repository_outside_every_known_checkout_keeps_its_own_reason(self):
         outside = Path(tempfile.mkdtemp(prefix="spud-outside-")).resolve()
@@ -1053,6 +1207,10 @@ class NestedRepositoryTest(BashHookCase):
         """The nested repository is refused from what SPD-063 already computes (the one walk up to it): no git run, no cache
         entry for it, no subprocess import once the checkout's own caches are warm."""
         self.plant_program_key(self.nested / ".git" / "config")
+        then = time.time() - 3600  # the checkout's config settled, so its scopes are kept (SPD-238)
+        for path in (self.home.path / ".git").iterdir():
+            if path.is_file():
+                os.utime(path, (then, then))
         self.assertSilent("git status")  # warms the worktree list, git's command list and the checkout's config scopes
         r = self.assertRefused("git -C %s status" % self.nested, GIT_NESTED_WORDING)
         self.assertNotIn(GIT_SCOPE_WORDING, r.reason)  # the repository is refused before its keys are read
