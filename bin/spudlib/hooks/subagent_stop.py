@@ -14,10 +14,12 @@ RESULT_HOLD = ("record your Result with `spud --as %s member result '<what you p
 
 
 def last_resume(con, member):
-    """The event id of the member's last resume, None when it was never resumed: the start that
-    superseded a return, which hook_subagent_start marks."""
-    row = con.execute("SELECT MAX(id) AS id FROM events WHERE member_id = ? AND kind = ?"
-                      " AND json_extract(data, '$.resumed') = 1", (member["id"], recording.RESUME_KIND)).fetchone()
+    """The event id of the member's last resume, None when it was never resumed: the RESUME_KIND event
+    hook_subagent_start writes beside a start that superseded a return, or, for a resume recorded before
+    migration 0010_member_resumed, the member.started it rode on, marked by data resumed."""
+    row = con.execute("SELECT MAX(id) AS id FROM events WHERE member_id = ? AND (kind = ?"
+                      " OR (kind = ? AND json_extract(data, '$.resumed') = 1))",
+                      (member["id"], recording.RESUME_KIND, recording.RESUME_KIND_BEFORE_0010)).fetchone()
     return None if row is None else row["id"]
 
 

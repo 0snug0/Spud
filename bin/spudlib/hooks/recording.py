@@ -109,10 +109,14 @@ def hook_post_tool_use(ctx, payload):
 # nothing else; no PreToolUse or PostToolUse names SendMessage.  So the resume is read from the row, not the payload.
 # Before this the return stood through the whole second round: Spud's Stop held with Law 9 and named a member that was
 # running again, the board read `returned HH:MM, unrecorded`, and the first round's Result answered for the second
-# return's hold.  The resume rides on the member.started event rather than a kind of its own: events.kind is a CHECK
-# list, so a `member.resumed` kind is a migration, a user_version bump and a line in core/kernel.py's EVENT_KINDS (for
-# the `--kind` choices), none of which this ticket's member owns; RESUME_KIND is the one place that would change.
-RESUME_KIND = "member.started"
+# return's hold.  A resume has a kind of its own (SPD-082): the SubagentStart writes the plain member.started every start
+# writes and, beside it, a RESUME_KIND event carrying the stop it superseded and whether it cleared it, so member.started
+# keeps meaning one SubagentStart and the SubagentStop hold (subagent_stop.last_resume) keys on a kind.  Before migration
+# 0010_member_resumed the resume rode on that member.started, marked by data `resumed` (SPD-050: a kind of its own was a
+# migration of the append-only table); the migration copies those rows as they were written, so last_resume reads that
+# shape too.
+RESUME_KIND = "member.resumed"
+RESUME_KIND_BEFORE_0010 = "member.started"  # with data resumed: a resume recorded before 0010_member_resumed
 
 
 def resume_member(con, member):
@@ -144,14 +148,14 @@ def hook_subagent_start(ctx, payload):
             if member is None and not sessions.pending_spawn(con, payload.get("session_id")) and sessions.session_mode(ctx, con, payload)[0] == "plain":
                 return hookio.SILENT  # Eric's own subagent in a session that is not Spud
             member, was_stopped, cleared = resume_member(con, member)
-            body = "subagent %s started (%s)" % (agent_id, payload.get("agent_type"))
-            data = {"agent_type": payload.get("agent_type"), "session_id": payload.get("session_id"), "cwd": payload.get("cwd")}
+            ticket_id, member_id = (member["ticket_id"], member["id"]) if member else (None, None)
+            ledgerdb.write_event(con, at, "hook:SubagentStart", "member.started", "subagent %s started (%s)" % (agent_id, payload.get("agent_type")),
+                        ticket_id=ticket_id, member_id=member_id, agent_id=agent_id,
+                        data={"agent_type": payload.get("agent_type"), "session_id": payload.get("session_id"), "cwd": payload.get("cwd")})
             if was_stopped:
-                body = "subagent %s resumed (%s) after returning at %s" % (agent_id, payload.get("agent_type"), was_stopped)
-                data.update(resumed=True, was_stopped_at=was_stopped, cleared=cleared)
-            ledgerdb.write_event(con, at, "hook:SubagentStart", RESUME_KIND if was_stopped else "member.started", body,
-                        ticket_id=member["ticket_id"] if member else None, member_id=member["id"] if member else None, agent_id=agent_id,
-                        data=data)
+                ledgerdb.write_event(con, at, "hook:SubagentStart", RESUME_KIND,
+                            "subagent %s resumed (%s) after returning at %s" % (agent_id, payload.get("agent_type"), was_stopped),
+                            ticket_id=ticket_id, member_id=member_id, agent_id=agent_id, data={"was_stopped_at": was_stopped, "cleared": cleared})
             context = "Ledger: your agent_id is `%s`; every `spud` command you run takes `--as %s`." % (agent_id, agent_id)
             named = member
             if named is None:
