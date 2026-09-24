@@ -1479,13 +1479,36 @@ class GitVerbProgramOptionTest(BashHookCase):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)
-        # A loop's binding is not settled where git's words are read (expansions.glued_word), as on SPD-089's verbs
-        # (`for o in -o; do git archive $o HEAD; done`), so it refuses a member; `--` is the respelling the reason names.
-        for cmd in ("for r in origin upstream; do git fetch $r; done", "for o in --tags --upload-pack=sh; do git fetch $o r; done",
-                    "for o in -o; do git archive $o HEAD; done"):
+        # A loop whose words may be options binds no value (shell/loop_bindings reads none that may start with `-`), so
+        # its variable is unsettled where git's words are read, as on SPD-089's verbs, and refuses a member; `--` is the
+        # respelling the reason names.  A loop over spelled operands is read per value (test_269_...).
+        for cmd in ("for o in --tags --upload-pack=sh; do git fetch $o r; done", "for o in -o; do git archive $o HEAD; done",
+                    "for r in origin -o; do git fetch $r; done"):
             with self.subTest(cmd):
                 r = self.refused_for_members(cmd, needle="spell the words out")
                 self.assertIn("end git's options with `--` before the word", r.reason)
+
+    def test_269_a_loop_over_spelled_operands_is_read_per_value(self):
+        """SPD-269, handed on by SPD-171: `for r in origin upstream; do git fetch $r; done` was refused a member, the loop's
+        variable read as an unsettled leading expansion where fetch reads options.  shell/loop_bindings settles a for
+        loop over spelled words to one value per word, none of which may start with `-` (loop_values), so the word is read
+        once per value (expansions.resolve_expansion), each the operand it is, as the write channels read it (SPD-146)."""
+        for ok in ("for r in origin upstream; do git fetch $r; done", 'for r in origin; do git fetch "$r"; done',
+                   "for r in origin upstream; do git fetch ${r} main; done", "for r in origin upstream; do git fetch -q $r; done",
+                   "for r in origin upstream; do git ls-remote $r; done", "for r in origin; do git archive $r; done",
+                   "R=--upload-pack=sh; for r in origin; do git fetch $r; done", "for r in origin; do git fetch $r; git fetch $r x; done"):
+            with self.subTest(ok):
+                self.assertSilent(ok)
+                self.assertSilent(ok, AGENT_C)
+                self.assertSilent(ok, agent_id=None)
+        # each value is read where it stands, as though spelled: the verb it names, and the option a spelled word beside it is
+        self.refused_for_members("for v in push; do git $v origin; done")
+        self.refused_for_members("for r in origin; do git fetch --upload-pack=sh $r; done")
+        # a word the loop does not settle, after the loop, or in a function body the loop defines, is read as before
+        for cmd in ("for r in $(cat remotes); do git fetch $r; done", "for r in origin $R; do git fetch $r; done",
+                    "for r in origin; do :; done; git fetch $r", "for r in origin; do f() { git fetch $r; }; done"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, needle="spell the words out")
 
     def test_where_git_reads_no_option_the_word_is_left_as_spelled(self):
         # After `--`, after ls-remote's repository, and as the value a spelled option takes as the next word (`git

@@ -437,7 +437,11 @@ def variable_readings(a, name):
 def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fresh, wrapper_command=False):
     """Read words[i], a word the dispatch reads by name that holds an expansion.  A bare `$X` or `${X}` whose value the
     line assigned is read as the words the shells give it (variable_readings): one reading replaces it in place (_AGAIN), several
-    are each analysed from the start (_STOP), and a doubtful value adds a "var-doubt" finding.  Anything else is not resolved: an
+    are each analysed from the start (_STOP), and a doubtful value adds a "var-doubt" finding.  A bare reference past the
+    command word to a for loop's variable that shell/loop_bindings settled (bound_loop: every word of the list spelled or
+    settled by the line, none that may start with `-`, blank or glob) is read once per value, each the word it is in that
+    pass, as the write channels read it (SPD-269: `for r in origin upstream; do git fetch $r; done`, where git still reads
+    options, is two fetches of a spelled remote).  Anything else is not resolved: an
     operator form (`${X:-git}`), zsh's flags and modifiers (`${(L)X}`, `$~X`, `$X:t`), a subscript, a concatenation (`$X$Y`,
     `g$X`), arithmetic, a `$'...'` whose escapes the shells decode apart (prepare.ansi_c_quotes), a substitution, a variable the
     line did not assign, or an empty value outside the command word.
@@ -448,7 +452,10 @@ def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fres
     w = words[i]
     name = variable_reference(w, command=i == 0)
     readings = doubtful = None
-    if name and name in a.vars and budget[0] > 0:
+    looped = loop_bindings.bound_loop(name, a) if name and i > 0 and not wrapper_command else None
+    if looped is not None and budget[0] > 0:
+        readings, doubtful = [[value] for value in looped], False  # a settled for loop's variable, once per value (SPD-269)
+    elif name and name in a.vars and budget[0] > 0:
         readings, doubtful = variable_readings(a, name)
         if readings is not None and i > 0 and not all(readings):
             readings = None  # an empty value drops the word: read as spelled (a member is refused, Spud's reading is kept)

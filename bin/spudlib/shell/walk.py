@@ -21,6 +21,22 @@ def _lifted(word):
     return word.count(hookio.SUBST) - word.count(PROCSUB_FILE)
 
 
+def _assigned_words(header, words):
+    """The words of a complete header, `words`, whose names it assigns (ShellWalk.finish): a for's, a select's or a
+    foreach's names alone -- the first word, and for a for or a foreach each word after it zsh reads as one more name,
+    up to the `in` or the `( ... )` that opens the list (names_end) -- and never its list's, which the shell expands
+    before the loop runs, so a variable a list word spells keeps its value (SPD-269: `x=1; for w in x; do :; done; echo
+    $x` printed 1).  An assignment a list word's own expansion makes (`$((x=5))`, a glob qualifier's code) is read with
+    its words (consume), inside the loop's frame, which leaves it doubted, and `${x:=v}` with the line (analyse_command).
+    Every word of any other header: an arithmetic one's expressions may assign any name they spell as the loop runs."""
+    if header not in _NAMED_LOOPS or not words or words[0].startswith("(" + _ARITH_OPEN):
+        return words
+    end = 1
+    while header != "select" and end < len(words) and syntax.loop_name(words[end]):
+        end += 1
+    return words[:end]
+
+
 def _value_may_start_with_dash(word):
     """Whether a masked word, as the shell expands it, may start with `-`: spelled so, an expansion or an operand
     the line does not spell at its start, or a glob or brace list that may expand to such a word."""
@@ -645,8 +661,8 @@ class ShellWalk:
                     if w.startswith("(" + _ARITH_OPEN):
                         for part in prepare.deglob(w)[2:-2].split(";"):
                             expansions.read_arithmetic(a, part)
-            if header != "repeat":  # a for or select header assigns its name; a repeat count assigns nothing
-                for w in cleaned:
+            if header != "repeat":  # a for, select or foreach header assigns its names; a repeat count assigns nothing
+                for w in _assigned_words(header, cleaned):
                     names = syntax._NAME_RE.findall(prepare.deglob(w))
                     a.doubt.update(names)
                     loop_bindings.forget(a, names)  # a loop body's basename of any of them no longer holds (SPD-221)

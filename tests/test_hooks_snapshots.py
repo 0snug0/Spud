@@ -1597,21 +1597,31 @@ class ReaderFailsClosedTest(ShellSnapshotCase):
         read, but a variable the member's words fill on the way -- a for-loop over `$@`, or one the line assigned before
         the function's text -- was still pruned as the body's own, so a profile function of these shapes carried a git
         write past Law 7.  A dropped finding is never a pass: the finding is kept and refuses the member on doubt (a read
-        verb too, since the hook cannot resolve the loop variable).  None is a git write this Mac's profile defines."""
+        verb too, where the hook cannot resolve the loop variable).  None is a git write this Mac's profile defines.
+        SPD-269: a loop over words the call spells, none that may be an option, is read once per word, each the word it
+        is (expansions.resolve_expansion), so `loopgit push` is refused as `git push` is and `loopgit status` is the read
+        it runs; a word that may be an option (`-m`) settles no loop, and its variable is refused on doubt as before."""
         self.write_snapshot("snapshot-zsh-1700000000009-999999.sh",
             "loopgit () {\n\tfor a in \"$@\"; do git $a; done\n}\nglobalgit () {\n\tgit $GITVERB\n}\n")
-        for line in ("loopgit push", "loopgit status", "GITVERB=$(echo push); globalgit", "loopgit commit -m x"):
+        for line, needle in (("GITVERB=$(echo push); globalgit", "cannot resolve"), ("loopgit commit -m x", "cannot resolve"),
+                             ("loopgit $(echo status)", "cannot resolve"), ("loopgit push", "Law 7"), ("loopgit status push", "Law 7")):
             with self.subTest(line=line):
-                self.refused_for_members(line, "cannot resolve")  # the member-filled variable is refused on doubt
+                self.refused_for_members(line, needle)  # the member-filled variable is refused on doubt, or read as spelled
                 self.assertSilent(line, agent_id=None)
+        self.silent_for_everyone("loopgit status")
 
     def test_205_a_body_s_own_variable_stays_pruned(self):
         """A variable the body itself fills, not from the member's words, is still the body's own and stays dropped, so a
-        member is not refused a profile function it did not fill: a loop over a literal list, a call with no words."""
+        member is not refused a profile function it did not fill: a loop over a literal list, a call with no words.
+        SPD-269: that literal list is read once per word, so the verbs the body runs are read as spelled -- the reads it
+        runs pass, and a write the body's own loop hides (`pushloop`, which the prune passed unread) is refused (Law 7)."""
         self.write_snapshot("snapshot-zsh-1700000000009-999999.sh",
-            "ownloop () {\n\tfor a in one two; do git $a; done\n}\nglobalgit () {\n\tgit $GITVERB\n}\n")
-        for line in ("ownloop", "globalgit"):  # no member words fill the loop, and no line assigns GITVERB
+            "ownloop () {\n\tfor a in status log; do git $a; done\n}\nglobalgit () {\n\tgit $GITVERB\n}\n"
+            "unknownloop () {\n\tfor a in $(git config x); do git $a; done\n}\npushloop () {\n\tfor a in status push; do git $a; done\n}\n")
+        for line in ("ownloop", "globalgit", "unknownloop"):  # no member words fill the loop, and no line assigns GITVERB
             self.silent_for_everyone(line)
+        self.refused_for_members("pushloop")
+        self.assertSilent("pushloop", agent_id=None)
 
     # -- SPD-193: a line of many conditional relative cds is read in bounded time, its writes refused ---------------
     def test_193_many_conditional_cds_bound_the_directory_set(self):
@@ -3093,6 +3103,33 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
                         self.assertTrue({"_cc_bin", "_cc_a"}.isdisjoint(a.line_assigned), a.line_assigned)
                         self.assertNotIn("_cc_bin", a.vars)
                         self.silent_for_everyone(line)
+
+    def test_269_a_loop_over_the_call_s_words_leaves_the_line_s_variables(self):
+        """SPD-269 (proposal 371 by SPUD-247/Garfield): grep's and pkill's bodies loop over the call's words (`for _cc_a in
+        ${1+"$@"}`), and ShellWalk.finish doubted every name a word of a for header spelled, the list's words among them,
+        so a line variable a word of the call happened to spell was doubted after it: `f=note.txt; grep -c f file; echo hi
+        > $f` left `$f` unresolved, refused to every caller (SPD-091), where `ls f` in grep's place wrote note.txt.  The
+        header assigns `_cc_a` alone now, on the fast reading and the full one, and the write is held to the path rule as
+        the control's is: refused outside a member's deliverables, allowed inside them."""
+        for call in ("grep -c f file", "grep -rn f .", "grep -e f -e in file", "pkill -f f", "pkill f"):
+            for target in ("note.txt", "tests/k.py"):
+                line = "f=%s; %s; echo hi > $f" % (target, call)
+                control = "f=%s; ls f; echo hi > $f" % target
+                for reading in ("fast", "full"):
+                    with self.subTest(line=line, reading=reading), \
+                            self.full() if reading == "full" else contextlib.nullcontext():
+                        a = self.analysis(line)
+                        self.assertEqual([t for t, _c in a.redirects if t != "/dev/null"], [target])
+                        self.assertTrue({"f", "in"}.isdisjoint(a.doubt), a.doubt)
+                        for caller in (AGENT_A, AGENT_B, None):
+                            # the answer, less the note naming what the snapshot defines the command word as
+                            got, want = [(r.code, r.stdout.split("  (The shell this command")[0], r.stderr)
+                                         for r in (self.bash(line, caller), self.bash(control, caller))]
+                            self.assertEqual(got, want)
+        self.assertRefused("f=note.txt; grep -c f file; echo hi > $f", "deliverables")
+        self.assertRefused("f=note.txt; pkill -f f; echo hi > $f", "deliverables", AGENT_B)
+        self.assertSilent("f=tests/k.py; grep -c f file; echo hi > $f")
+        self.assertSilent("f=tests/k.py; pkill -f f; echo hi > $f", AGENT_B)
 
 
 if __name__ == "__main__":

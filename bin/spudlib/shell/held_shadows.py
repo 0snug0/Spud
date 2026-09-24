@@ -28,11 +28,11 @@ _SHADOW_READINGS = {
              "names": _RUNS_CLAUDE_NAMES, "sticky": (), "line_assigned": ("ARGV0",), "redirects": (), "fills": None},
     "rg": {"others": 12, "assigned": _RUNS_CLAUDE_ASSIGNED, "values": (("ARGV0", "rg"),), "doubted": ("ARGV0",),
            "names": _RUNS_CLAUDE_NAMES, "sticky": (), "line_assigned": ("ARGV0",), "redirects": (), "fills": None},
-    "grep": {"others": 15, "assigned": _RUNS_CLAUDE_ASSIGNED, "values": (("ARGV0", "ugrep"),), "doubted": ("ARGV0", "in"),
+    "grep": {"others": 15, "assigned": _RUNS_CLAUDE_ASSIGNED, "values": (("ARGV0", "ugrep"),), "doubted": ("ARGV0",),
              "names": _RUNS_CLAUDE_NAMES + ("_cc_a",), "sticky": (), "line_assigned": ("ARGV0",), "redirects": (),
              "fills": ("_cc_a",)},
     "pkill": {"others": 11, "assigned": ("_cc_skip", "_cc_probe", "_cc_skip", "_cc_skip", "_cc_probe", "_cc_probe"),
-              "values": (("_cc_probe", hookio.SUBST), ("_cc_skip", "1")), "doubted": ("_cc_skip", "_cc_a", "_cc_probe", "a", "in"),
+              "values": (("_cc_probe", hookio.SUBST), ("_cc_skip", "1")), "doubted": ("_cc_skip", "_cc_a", "_cc_probe", "a"),
               "names": ("IFS", "CLAUDE_PID", "_cc_skip", "_cc_a", "_cc_probe"), "sticky": ("_cc_probe", "_cc_skip"),
               "line_assigned": (), "redirects": ("/dev/null",), "fills": ("_cc_a", "_cc_probe")},
 }
@@ -62,9 +62,10 @@ def read_shadow(a, name, claude, words, depth):
     left: ARGV0 and grep's `_cc_a` among the dashless loops.  The call's words reach the body only where the full
     reading records them in that one way: each is literal (no substitution, glob, operand the line does not spell, or
     reference to a variable or parameter), none names a variable of the body, and none is a primary find acts on
-    (find_xargs.read_find records nothing then).  A for loop over them (grep's, pkill's) doubts every name they spell
-    (walk.ShellWalk.finish), keeps `_cc_a` dashless while no word may start with `-` (loop_header_word), and fills the
-    member's names where a word, its sentinels taken off, is one of the call's own (fill_loop).
+    (find_xargs.read_find records nothing then).  A for loop over them (grep's, pkill's) doubts its own name alone, never
+    one a word spells (walk.ShellWalk.finish, SPD-269), keeps `_cc_a` dashless while no word may start with `-`
+    (loop_header_word), and fills the member's names where a word, its sentinels taken off, is one of the call's own
+    (fill_loop).
 
     Proved against the full reading, field by field of the analysis and the hook's answer, in tests/test_hooks_snapshots.py
     HarnessShadowReadingTest: a change to the reader that moves what a body records fails there."""
@@ -113,7 +114,6 @@ def read_shadow(a, name, claude, words, depth):
     a.sticky.update(record["sticky"])
     a.line_assigned.update(record["line_assigned"])
     if record["fills"] is not None:
-        a.doubt.update(spelled)
         if any(walk._value_may_start_with_dash(w) for w in words):
             a.dashless_loops.discard("_cc_a")
         else:

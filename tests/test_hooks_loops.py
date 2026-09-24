@@ -2390,6 +2390,81 @@ class ForSelectHeaderTest(BashHookCase):
                 self.assertRefused(line, "cannot resolve")
                 self.assertRefused(line, "cannot resolve", AGENT_C)
 
+    # -- SPD-269: a header assigns its names alone ---------------------------------------------------------------------
+    # Each spelling runs no command and has a variable x's name among its list's words.
+    LIST_SPELLS_X = ("for w in x; do :; done", "for w in x y; do true; done", "for w in x\ndo :; done", "for w (x) :",
+                     "for w ( x y ) true", "foreach w (x) true; end", "select w in x; do break; done", "select w (x) true",
+                     "for a b in x y; do :; done", "for a 1 (x y) :", "for in (x in) :", "for w in $x; do :; done",
+                     "for w in ${x} \"$x\" x.$x; do :; done", "for w in $(echo x); do :; done", "for w in; do :; done")
+
+    def test_a_list_word_leaves_the_variable_it_spells(self):
+        """SPD-269: ShellWalk.finish doubted every name any word of a for, select or foreach header spelled, the list's
+        words among them, so `x=note.txt; for w in x; do :; done; echo > $x` left `$x` unresolved, refused to every caller
+        (SPD-091), where the shells write note.txt: the list is expanded before the loop runs, and the header assigns only
+        its names (probed 2026-09-24 through tests/probes/shell_probe.py: `x=note.txt; for w in x; do :; done; echo $x` and
+        the same with `select w in x; do break; done` printed note.txt in zsh 5.9 -f, -f -o nobareglobqual and bash
+        3.2.57, and `for a b in x y` in both zsh).  The write is then held to the path rule as it is with no loop before it."""
+        for form in self.LIST_SPELLS_X:
+            line = "x=note.txt; %s; echo hi > $x" % form
+            with self.subTest(line=line):
+                self.assertEqual([t for t, _c in self.analysis(line).redirects], ["note.txt"])
+                self.assertNotIn("x", self.analysis(line).doubt)
+            self.path_rule(line)
+            line = "x=tests/zzone/k.py; %s; echo hi | tee $x" % form
+            with self.subTest(line=line):
+                self.assertSilent(line)
+                self.assertSilent(line, AGENT_C)
+
+    def test_the_loops_own_names_are_still_doubted(self):
+        """What a header does assign: its names, which hold the last word after the loop (`x=note.txt; for x in a b; do :;
+        done; echo $x` printed b in zsh 5.9 and bash 3.2.57), so a write naming one after the loop is unresolved, and in
+        the body it is read once per word as before (SPD-146)."""
+        for form in ("for x in a b; do :; done", "for x (a b) :", "foreach x (a b) true; end", "select x in a; do break; done",
+                     "for w x in a b; do :; done", "for x; do :; done", "for x do :; done", "for x in $(cat l); do :; done"):
+            line = "x=note.txt; %s; echo hi > $x" % form
+            with self.subTest(line=line):
+                self.assertIn("x", self.analysis(line).doubt)
+                self.assertEqual([t for t, _c in self.analysis(line).redirects], ["$x"])
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertRefused(line, "cannot resolve", agent_id)
+        line = "for f in note.txt tests/zzone/k.py; do echo hi > $f; done"
+        self.assertEqual([t for t, _c in self.analysis(line).redirects], ["note.txt", "tests/zzone/k.py"])
+        self.assertRefused(line, "deliverables")
+        self.assertSilent(line, AGENT_C)
+        self.assertSilent("for f in tests/zzone/a.py tests/zzone/b.py; do echo hi > $f; done")
+        # a list word the line does not settle leaves the name unknown in the body, as before
+        for line in ("for f in $(cat l); do echo hi > $f; done", "for f in $y a; do echo hi > $f; done"):
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_C, None):
+                    self.assertRefused(line, "cannot resolve", agent_id)
+
+    def test_a_list_words_own_assignment_is_read(self):
+        """A list word's expansion runs in the loop's shell before the loop, and what it assigns stands after it (`x=note.txt;
+        for f in $((x=5)); do :; done; echo $x` printed 5 in zsh 5.9 and bash 3.2.57): read as a command's words are, with
+        the loop's own assignments, which a compound command leaves doubted -- so no longer by the name the word spells,
+        and still a value the hook does not settle."""
+        for line in ("x=note.txt; for f in $((x=5)); do :; done; echo hi > $x", "x=note.txt; for f ($[x=5]) :; echo hi > $x",
+                     "x=note.txt; for f in $((y=x=5)); do :; done; echo hi > $x"):
+            with self.subTest(line=line):
+                self.assertIn("x", self.analysis(line).doubt)
+                self.assertRefused(line, "cannot resolve", AGENT_C)
+        line = "x=note.txt; for f in $((y=5)); do :; done; echo hi > $x"
+        self.assertEqual([t for t, _c in self.analysis(line).redirects], ["note.txt"])
+        # a list word's substitution is read as a command word's is, whatever that reading doubts
+        for body in ("$(x=7; echo q)", "$(echo x)", "`x=7`", "*(e:'x=7':)"):
+            with self.subTest(body=body):
+                self.assertEqual("x" in self.analysis("x=note.txt; for f in %s; do :; done" % body).doubt,
+                                 "x" in self.analysis("x=note.txt; echo %s" % body).doubt)
+        for line in ("x=note.txt; for f in ${x:=y}; do :; done; echo hi > $x",
+                     "x=note.txt; for f in ${x::=y}; do :; done; echo hi > $x"):
+            with self.subTest(line=line):
+                self.assertIn("x", self.analysis(line).doubt)
+                self.assertRefused(line, "cannot resolve", AGENT_C)
+        # an arithmetic header's expressions assign as the loop runs: its names stay doubted
+        line = "i=note.txt; for (( i=0; i<1; i++ )) true; echo hi > $i"
+        self.assertIn("i", self.analysis(line).doubt)
+        self.assertRefused(line, "cannot resolve", AGENT_C)
+
     # -- the loop model -----------------------------------------------------------------------------------------------
     def test_a_cd_in_the_body_is_read_as_a_loops(self):
         """A relative cd may repeat, so it is unfollowable; an absolute one leaves the union of before and after; a
