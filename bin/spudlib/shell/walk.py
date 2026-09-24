@@ -943,10 +943,12 @@ class ShellWalk:
             j += 1
         return len(self.words) == 1 and self.words[0] != "{" and j < len(self.toks) and (self.toks[j] == "in" or self.toks[j][:1] == "{")
 
-    def open_brace(self):
+    def open_brace(self, lone=True):
         """Open the `{ list }` a `{` read now begins, and say whether it did: in command position a group, or a function's
         body after `name ()` and zsh's anonymous `()`; after `function name` a function's body; after only `coproc`,
-        `time` and `!` a prefixed group; after a lone `always` a group.  Anywhere else the `{` is a word."""
+        `time` and `!` a prefixed group; after those and a literal name, bash's named coproc, when the `{` is a word of
+        its own (`lone`; bash reads `{git` as a word, and zsh has no named form); after a lone `always` a group.  Anywhere
+        else the `{` is a word."""
         if not self.words and not self.skip:
             self.push("func" if self.function_next else "group", "}")
             self.function_next = False
@@ -972,6 +974,15 @@ class ShellWalk:
             forked = "coproc" in self.words  # read before discard takes the prefix words away
             self.discard()
             self.push("sub" if forked else "group", "}")
+            return True
+        if (lone and len(self.words) > 1 and "coproc" in self.words[:-1] and syntax.IDENTIFIER_RE.match(self.words[-1])
+                and hookio.SUBST not in self.words[-1] and all(w in syntax.LOOP_PREFIX_WORDS for w in self.words[:-1])):
+            # bash 4+'s named form, `coproc NAME { list }` (SPD-060), runs the group in the same forked shell, so it opens
+            # the same frame and its cd moves the group's later commands and redirections, never the line (SPD-125).  A
+            # name spelled by an expansion (`$N`, a lifted `$( )`) keeps SPD-060's flattened reading, which resolves or
+            # refuses it.
+            self.discard()
+            self.push("sub", "}")
             return True
         if self.words[-1] == "always" and directories.separate_redirects(self.words)[0] == ["always"]:
             # an `always` in command position before a `{` -- after a terminator or a newline (`{ a }; always
@@ -1028,7 +1039,7 @@ class ShellWalk:
             if t == "{":
                 return
             t = t[1:]  # its first pattern, glued to the brace
-        while t[:1] == "{" and (t == "{" or (self.glued and not self.in_pattern())) and self.open_brace():
+        while t[:1] == "{" and (t == "{" or (self.glued and not self.in_pattern())) and self.open_brace(t == "{"):
             if t == "{":
                 return
             t, self.split_brace = t[1:], True

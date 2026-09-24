@@ -1181,7 +1181,11 @@ class NamedCoprocTest(BashHookCase):
 
     def test_the_payloads_inside_a_named_group(self):
         spud, home = self.spud_cli, self.home.path
-        self.refused_for_members("coproc NAME { %s ticket new --title x; }" % spud, "Law 6")
+        for agent_id in (AGENT_C, AGENT_A):
+            self.assertRefused("coproc NAME { %s ticket new --title x; }" % spud, "Law 6", agent_id)
+        # Spud's own call inside the group is answered as it is inside the unnamed form's (SPD-125)
+        self.assertEqual(self.bash("coproc NAME { %s ticket new --title x; }" % spud, agent_id=None).decision,
+                         self.bash("coproc { %s ticket new --title x; }" % spud, agent_id=None).decision)
         self.assertRefused("coproc NAME { %s --as %s member log hi; }" % (spud, AGENT_B), "--as", AGENT_A)
         self.assertRefused("coproc NAME { %s --as %s member log hi; }" % (spud, AGENT_A), "Law 5", agent_id=None)
         for agent_id in (AGENT_C, AGENT_A, None):  # the database is refused to everyone, Spud included
@@ -1198,6 +1202,23 @@ class NamedCoprocTest(BashHookCase):
             with self.subTest(cmd):
                 self.assertEqual(self.analysis(cmd).cwds, frozenset([str(self.home.path)]))
         self.assertSilent("coproc NAME { cd /tmp; }; echo x > tests/keep.py")
+
+    def test_the_named_group_is_walked_as_the_unnamed_one(self):
+        """SPD-125: the group after a valid name opens SPD-081's frame, so a cd inside it moves the commands after it in the
+        group, and a redirection target is placed where bash 4+ opens it, as the unnamed form's already was."""
+        home = str(self.home.path)
+        for line in ("coproc { cd /tmp; echo x > out.txt; }", "coproc NAME { cd /tmp; echo x > out.txt; }",
+                     "coproc _n1 { cd /tmp; echo x > out.txt }"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).redirects, [("out.txt", frozenset(["/tmp"]))], line)
+                self.assertEqual(self.analysis(line).cwds, frozenset([home]), line)
+        self.assertEqual(self.analysis("time coproc NAME { cd /tmp; echo x > out.txt; }").redirects,
+                         [("out.txt", frozenset(["/tmp"]))])
+        for form in ("coproc { %s; }", "coproc NAME { %s; }"):
+            with self.subTest(form=form):
+                self.assertSilent(form % "cd tests; echo x > keep.py")  # tests/keep.py, inside AGENT_A's tests/**
+                self.assertRefused(form % "cd docs; echo x > keep.py", "deliverables")  # docs/keep.py, outside
+                self.assertSilent(form % "cd docs; echo x > keep.py", AGENT_C)
 
     def test_a_simple_command_named_by_the_word_is_read_as_before(self):
         """`coproc word args` is a command named `word` in every shell, and an invalid identifier runs nothing anywhere."""
