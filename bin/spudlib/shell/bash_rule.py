@@ -107,6 +107,16 @@ VAR_WORD_REASON = ("the word %s holds a parameter expansion, arithmetic or a sub
                    " line does not spell at all, where the command is read by name (a wrapper's options, git's options, verb and the"
                    " arguments it checks, a shell's or an interpreter's options and program, a spud call's words, the options of a command"
                    " that writes by argument); spell the words out")
+# The reason for an awk program or a sed script the line does not settle at all (shell/script_text's "script-word",
+# SPD-260), read where "inline-word" is, last, so a write out of the same input keeps its own reason.  A member alone.
+SCRIPT_WORD_REASON = (
+    "`%s` runs a program or script the line does not spell (%s): what xargs reads from its input, after the words the"
+    " line spells or where -I or -J puts it, a path find hands it as {}, a substitution or a variable the line fills from"
+    " one, a file or a loop and does not settle, or standard input as its -f file -- so the hook cannot read the files it"
+    " writes or the commands it runs (awk's `system()`, `print >` and `|`, sed's `w`), and a git write (Law 7), a spud"
+    " call (Law 6) or a write outside your deliverables (Law 5) could hide there. Spell the program on the line as one"
+    " quoted word (`awk '{print $1}' f`, `sed -n 's/a/b/p' f`), or write it to a file and name that file with -f (`awk -f"
+    " prog.awk f`, `sed -f prog.sed f`), which the hook reads; hand xargs only the files")
 
 
 # The reason for a git call an xargs extends with words the line does not spell, where git reads its verb or an option
@@ -648,6 +658,11 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                 # among the findings as spelled, for the same reason an inline program is: what the same input writes
                 # (`xargs perl -pi -e s/a/b/ < list`) keeps its own reason.
                 return VAR_WORD_REASON % detail, analysis
+            if kind == "script-word":
+                # an awk program or a sed script the line does not settle at all (shell/script_text, SPD-260), read here
+                # for the same reason: what the same input writes (`xargs sed -n < list`, whose input may be -i) keeps
+                # its own reason.
+                return SCRIPT_WORD_REASON % detail, analysis
     if analysis.unparseable:
         # Last of all, so a refusal the words the hook did read already earn keeps its own reason (a Law 7 verb before a
         # stray quote in an eval string), and then for every caller: a bound member, Spud, a plain session and its
