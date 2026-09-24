@@ -172,7 +172,10 @@ def read_tar(cmd, args, a, depth):
     a program tar runs, read as a command.  c, r and u modes write the archive -f names (or TAPE,
     set on the line, when -f is not given; `-` is standard output), relative to the line's own directory: tar opens it
     before it adds a file, and -C "changes the directory before adding the following files" (tar(1)), so a -C before -f
-    moves only what goes into the archive."""
+    moves only what goes into the archive.  A first word, or a first operand where tar still reads options, that holds a
+    value the member controls (hidden_word) may be the mode itself with -P or -f beside it (`echo '-xPf a.tar' | xargs tar`,
+    `X=$(...); tar $X a.tar`, SPD-248), so with no mode the line spells the archive may land anywhere."""
+    anywhere = bool(args) and hidden_word(args[0], a)
     bundle = []
     if args and not prepare.deglob(args[0]).startswith("-"):
         letters, rest = prepare.deglob(args[0]), args[1:]
@@ -189,6 +192,9 @@ def read_tar(cmd, args, a, depth):
         if name == "--use-compress-program" and value:
             analyse.analyse_new_shell(a, prepare.deglob(value), depth + 1)
     mode = next((TAR_MODES[n] for n, _ in reversed(options) if n in TAR_MODES), None)
+    if anywhere or (mode is None and hidden):
+        record(a, cmd, syntax.ANY_PATH)
+        return
     names = names_of(options)
     if mode in TAR_ARCHIVE_MODES:
         archive = last_value(options, ("-f", "--file"))

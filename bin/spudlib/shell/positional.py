@@ -33,7 +33,9 @@ Probed 2026-09-23 through tests/probes/shell_probe.py, in zsh 5.9 (arm64-apple-d
 
 `substituted` answers (the text, True) where every reference is one it sets soundly, and (the body as it stands, False)
 where one is not: analyse.analyse_shell_text then keeps every finding the body earns for a call that has words, since
-the member's words reach it in a way the hook does not follow.
+the member's words reach it in a way the hook does not follow.  `substitution` answers the same and, beside it, the text
+of every `$( )` it set words in (SPD-258): once set, `V=$(echo "$1")` is `V=$(echo push)`, a value holding no positional,
+so the reading could not tell the member's substitution from the body's own `V=$(echo status)` without it.
 
 A module of its own, off the analyse cycle (it reads prepare and syntax alone), and kept whole past the ~250-line mark
 (the spudlib-modules size rule): one scanner of a body's quoting, whose parts each read the others' spans."""
@@ -56,7 +58,8 @@ READS_RE = lazy.LazyPattern(r"\b(?:for|select|foreach)\s+(?!in\b)[A-Za-z_]\w*+(?
 # `set`, a function defined inside the body (whose own call's they are there), and a here-document.
 MOVES_RE = lazy.LazyPattern(r"(?:^|[\s;&|({!])(?:shift|set)(?=[\s;&|)}]|\Z)"
                       r"|\bfunction\s|(?:^|[\s;&|({])[^\s;&|(){}<>'\"=$`]*\(\s*\)|<<(?!<)")
-# The most bodies of one function name a line reads with the words set, one per call's words (analyse.read_shell_name):
+# The most bodies of one function name a line reads with the words set, one per call's words and the state it starts in
+# (analyse.read_shell_name, SPD-252):
 # a body that calls functions with words of its own reads each of those once per words, so a profile could multiply the
 # readings through every level of the analysis's depth.  Past it the body is read once more as it stands.  The same
 # bound holds the walks an analysis makes to read the bodies of the functions a line defines on their calls' inputs
@@ -83,16 +86,24 @@ def substituted(body, words):
     """(the body with `words` -- the call's own, masked as the line's reading tokenized them -- set where it reads its
     positional parameters, True), or (the body as it stands, False) where a reference is one the substitution does not
     read or the body moves the parameters before it reads them."""
+    return substitution(body, words)[:2]
+
+
+def substitution(body, words):
+    """substituted's (text, sound), and the text of each `$( )` in that text that held a reference the words were set in,
+    as prepare.split_substitutions lifts it (SPD-258): a value such a substitution fills is the member's.  A `$( )` inside
+    another yields both texts, the outer one holding the inner as set."""
     if READS_RE.search(body) is not None:
-        return body, False
+        return body, False, ()
     if REFERENCE_RE.search(body) is None:
-        return body, True
+        return body, True, ()
     if MOVES_RE.search(body) is not None:
-        return body, False
+        return body, False, ()
+    call = _Call(list(words))
     try:
-        return _Call(list(words)).text(body), True
+        return call.text(body), True, tuple(call.filled)
     except Unreadable:
-        return body, False
+        return body, False, ()
 
 
 def _splits(word):
@@ -113,6 +124,7 @@ class _Call:
 
     def __init__(self, words):
         self.words = words
+        self.filled = []  # the text of each `$( )` a reference in it was set in (substitution)
 
     def text(self, t):
         """Shell text read unquoted, with every reference in it set."""
@@ -241,7 +253,10 @@ class _Call:
                 if any(m.group() not in ("$#", "${#}") for m in REFERENCE_RE.finditer(span)):
                     raise Unreadable(span)
                 return "raw", _COUNT_RE.sub(str(len(self.words)), span), j + 1
-            return "raw", "$(" + self.text(t[i + 2 : j]) + ")", j + 1  # its own quoting, as split_substitutions lifts it
+            inner = self.text(t[i + 2 : j])  # its own quoting, as split_substitutions lifts it
+            if REFERENCE_RE.search(t, i + 2, j) is not None:
+                self.filled.append(inner)
+            return "raw", "$(" + inner + ")", j + 1
         if nxt == "'" and not quoted:
             j = prepare.ansi_c_end(t, i + 2)
             if j >= n:

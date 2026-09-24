@@ -2,7 +2,8 @@
 
 import functools
 
-from . import analyse, arg_writes, assignment_words, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
+from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
+from ..core import lazy
 from ..hooks import hookio, snapshots
 
 
@@ -38,15 +39,16 @@ def active_read_word(word):
     return expansion_word(word) or globbing.active_glob_word(word)
 
 
-def assign_variable(a, name, value, append=False):
+def assign_variable(a, name, value, append=False, spelled=True):
     """Record `name=value` (or `name+=value`) where the shell runs it.  An appended value is not known (CDPATH's reads as
     `$`, which cd_target does not follow; any other as a substitution).  The value is certain unless the assignment may not run
     or persist here (a.unsure) or runs in a loop or function body, which may assign again later (sticky); a certain assignment
-    settles an earlier doubt."""
+    settles an earlier doubt.  `spelled`: the value is the text the line assigns, which may carry what the member supplies
+    (fill_from); assign_unknown's stands for a value the hook does not read, whose caller reads its source itself."""
+    if spelled:
+        fill_from(a, (name,), value, value_bodies(a, name, value))  # before the value changes: `V=$(echo $V)` reads the old
     a.vars[name] = ("$" if name in ("CDPATH", "cdpath") else hookio.SUBST) if append else value
     loop_bindings.loop_assigned(a, name, value, append)  # a loop's binding of the name ends; `name=$(basename ...)` kept (SPD-146)
-    if not append and syntax.POSITIONAL_RE.search(prepare.deglob(value)) is not None:
-        a.fill_members((name,))  # a value holding a positional fills the name with the call's words (SPD-205)
     a.assigned.append(name)
     a.line_assigned.update(a.reaching((name,)))  # the line's variable, unless a function body's local (SPD-246)
     if a.unsure or a.loop_depth:
@@ -68,7 +70,68 @@ def assign_unknown(a, name):
     """Record an assignment of a value the hook does not read -- a builtin's (`read X`, `printf -v X`, `unset X`), an
     arithmetic evaluation's that is no literal -- as an appended value is recorded: unknown, the name's loop binding and
     basename gone, doubted where the assignment may not run or persist."""
-    assign_variable(a, name, hookio.SUBST, append=True)
+    assign_variable(a, name, hookio.SUBST, append=True, spelled=False)
+
+
+def fill_from(a, names, text, bodies=(), arithmetic=False):
+    """Record `names`, just assigned from `text` -- a value, a for or select list's word, an arithmetic expression, an
+    assigning builtin's words -- as filled by what the member supplies wherever that text can carry it, so a finding naming
+    one of them is not pruned as a function body's own (analyse.analyse_shell_text).  `bodies`: the substitutions the text
+    holds, as the command lifted them (value_bodies); None for one the hook cannot pair with its text.
+
+    The call's words (a.member_vars, SPD-205): a positional in the text or a substitution's; a substitution shell/positional
+    set the words in (a.filled_texts, SPD-258: `V=$(echo "$1")` read as `V=$(echo push)`); a variable they fill; a variable
+    holding one of the words as it stands (`V="$1"` read as `V=push`, then `W=$(echo $V)`); and in `arithmetic`, which reads
+    a name bare, a word of the call's among its names and numbers (`(( N = $1 ))` read as `(( N = push ))`, which reads the
+    variable push).  The line's own variables (a.line_filled, SPD-253): a variable the line assigned before the shell's text,
+    or one such a variable fills (`_cc_bin="${CLAUDE_CODE_EXECPATH:-}"`).  A substitution the hook cannot pair counts as
+    both, fail closed.  Outside the shell's text only the positional counts: the line's own text is the member's already."""
+    plain = prepare.deglob(text)
+    known = [b for b in bodies if b is not None]
+    if syntax.POSITIONAL_RE.search(plain) is not None or any(b in a.filled_texts or syntax.POSITIONAL_RE.search(b) for b in known):
+        a.fill_members(names)
+    if not a.shell_reading:
+        return
+    unpaired = len(known) < len(bodies)
+    read = {name for source in [plain] + known for name in syntax.READ_NAME_RE.findall(source)}
+    if arithmetic:
+        read.update(_ARITHMETIC_NAME_RE.findall(plain))
+    if unpaired or not read.isdisjoint(a.shell_line_vars) or not read.isdisjoint(a.line_filled):
+        a.line_filled.update(names)
+    if unpaired or not read.isdisjoint(a.member_vars):
+        a.fill_members(names)
+        return
+    if not (read or arithmetic) or not a.shell_words:
+        return  # a literal list word or value reads no variable: a long loop list stays linear
+    words = {prepare.deglob(w) for w in a.shell_words if w}
+    if any(held_word(a, name, words) for name in read) \
+            or (arithmetic and not words.isdisjoint(_ARITHMETIC_TOKEN_RE.findall(plain))):
+        a.fill_members(names)
+
+
+_ARITHMETIC_NAME_RE = lazy.LazyPattern(r"(?<![\w$#])[A-Za-z_][A-Za-z0-9_]*")  # a name arithmetic reads with no `$`
+_ARITHMETIC_TOKEN_RE = lazy.LazyPattern(r"[A-Za-z0-9_]+")  # the names and numbers an arithmetic expression spells
+
+
+def held_word(a, name, words):
+    """Whether the variable `name` holds, as the line reads it here, one of the call's own words (`words`, as fill_from
+    reads them): the value shell/positional set there, which no reference marks any more."""
+    value = a.vars.get(name)
+    return value is not None and hookio.SUBST not in value and prepare.deglob(value) in words
+
+
+def value_bodies(a, name, value):
+    """The bodies of the substitutions an assignment's value holds, as the command being read lifted them (a.subst_words,
+    ShellWalk.consume): its own word's, `name=value` or `name+=value`; else every substitution of the command, one it cannot
+    tell apart among them; and None for each the hook cannot pair at all."""
+    count = value.count(hookio.SUBST) - value.count(hookio.SUBST + syntax.PROCSUB_MARK)  # a `<( )`'s file lifted no body
+    if count <= 0:
+        return ()
+    own = a.subst_words.get(name + "=" + value) or a.subst_words.get(name + "+=" + value)
+    if own is not None:
+        return own
+    found = [b for bodies in a.subst_words.values() for b in (bodies or (None,))]
+    return tuple(found) if found else (None,) * count
 
 
 def settled_text(a, name):
@@ -85,12 +148,12 @@ def settled_text(a, name):
 
 def read_arithmetic(a, text, doubtful=False):
     """Record what an arithmetic expression, spelled as the shells read it, assigns (SPD-225): each name with the literal
-    assignment_words.arithmetic_names reads for it where the evaluation surely runs and persists -- not `doubtful` (a
-    command's prefix, a here-document's body, a `[[ ]]` operand, a subscript), not after an option that may change how
+    arithmetic_assignments.arithmetic_names reads for it where the evaluation surely runs and persists -- not `doubtful`
+    (a command's prefix, a here-document's body, a `[[ ]]` operand, a subscript), not after an option that may change how
     the shells read a number (a.arith_opaque), and not a name with the integer or float attribute (a.typed), whose value
     the shells format their own way (`typeset -i 16 X; X=255` printed 16#FF in zsh) -- else a value the hook does not
     know.  A name the hook cannot read refuses a member unread (SPD-217)."""
-    record_arithmetic(a, assignment_words.arithmetic_names(text, functools.partial(settled_text, a), doubtful), text)
+    record_arithmetic(a, arithmetic_assignments.arithmetic_names(text, functools.partial(settled_text, a), doubtful), text)
 
 
 def record_arithmetic(a, found, shown, doubtful=False):
@@ -98,6 +161,8 @@ def record_arithmetic(a, found, shown, doubtful=False):
     if found is None:
         unread.record_unread(a, "assigned", ("an arithmetic evaluation", unread.unread_shown(shown)))
         return
+    if found:  # arithmetic over what the member supplies fills the names it assigns (SPD-258); a substitution in it, unpaired
+        fill_from(a, [name for name, _ in found], shown, (None,) if hookio.SUBST in shown else (), arithmetic=True)
     for name, value in found:
         if value is None or doubtful or a.arith_opaque or name in a.typed:
             assign_unknown(a, name)
@@ -123,7 +188,7 @@ def read_word_arithmetic(words, a, bodies=()):
     if expanding:
         prefix, targets = _word_roles(words)
         for k in [k for k in expanding if k not in prefix] + [k for k in expanding if k in prefix]:
-            found = assignment_words.word_arithmetic(words[k], settle)
+            found = arithmetic_assignments.word_arithmetic(words[k], settle)
             record_arithmetic(a, found, words[k], doubtful=k in prefix or k in targets)
     if "[[" in words:
         for k, w in enumerate(words):
@@ -132,7 +197,7 @@ def read_word_arithmetic(words, a, bodies=()):
                     read_arithmetic(a, prepare.deglob(operand), doubtful=True)
     for body in bodies:
         if "$" in body:
-            record_arithmetic(a, assignment_words.word_arithmetic(body, settle, raw=True), body, doubtful=True)
+            record_arithmetic(a, arithmetic_assignments.word_arithmetic(body, settle, raw=True), body, doubtful=True)
 
 
 def _word_roles(words):
@@ -156,13 +221,15 @@ def read_assigning_builtin(words, a, effect):
     """Record what an assigning builtin assigns (SPD-254; syntax.ASSIGNING_COMMANDS), read by its own grammar: `let`'s
     words as arithmetic (SPD-225), zsh's `integer`, `float` and `private` as declarations -- the first two giving the
     integer or float attribute, so what they and later assignments give the name is arithmetic -- and every other
-    builtin's name operands as assignment_words.builtin_names reads them, each assigned a value the hook does not know.
+    builtin's name operands as assigning_builtins.builtin_names reads them, each assigned a value the hook does not know.
     A name the line settles is the name it spells (`N=X; read $N` reads X); one the hook cannot read refuses a member
     unread (SPD-217), and so does code the builtin is handed to run.  `effect`: where the builtin runs -- in the shell, in
     either (`command read`: zsh's external, bash's builtin) or in a fork, where what it assigns may not reach the line.
     Inside a function body the shell holds, with the call's words, a name a builtin assigns may hold them: the member's
-    own (SPD-205's member_vars)."""
+    own (SPD-205's member_vars); and where its words name the line's own variable, as spelled before the line's values
+    are put in them, what it assigns is the line's (fill_from, SPD-253)."""
     cmd = prepare.deglob(words[0])
+    spelled = " ".join(words[1:])
     words = [words[0]] + [arg_writes.resolved(w, a) for w in words[1:]]
     maybe = effect != "shell"
     a.unsure += maybe
@@ -172,13 +239,14 @@ def read_assigning_builtin(words, a, effect):
     elif cmd in ("integer", "float", "private"):
         _read_zsh_declaration(words, a)
     else:
-        names, subscripts, unreadable, evaluated = assignment_words.builtin_names(words, functools.partial(settled_text, a))
+        names, subscripts, unreadable, evaluated = assigning_builtins.builtin_names(words, functools.partial(settled_text, a))
         if evaluated is not None:
             unread.record_unread(a, "evaluated", "`%s` %s" % (cmd, unread.unread_shown(evaluated)))
         if unreadable is not None:
             unread.record_unread(a, "assigned", ("`%s`" % cmd, unread.unread_shown(" ".join(words))))
         for subscript in subscripts:
             read_arithmetic(a, prepare.deglob(subscript), doubtful=True)
+        fill_from(a, names, spelled)
         for name in dict.fromkeys(names):
             assign_unknown(a, name)
         if a.shell_reading:
@@ -334,7 +402,7 @@ def shell_aliased(words, a):
 def shell_function(name, a):
     """The shell text a function the shell already defines runs for this command word, or None; an alias of the same name
     is expanded first, as the shell does it (shell_aliased runs before this).  analyse.read_shell_name reads it once per
-    call's words, so a body that calls itself with them reads it no further."""
+    call's words and starting state, so a body that calls itself with them from where it started reads it no further."""
     found = snapshots.shell_table(a.home)
     return found.body(name) if name in found.functions else None
 
@@ -534,17 +602,57 @@ def analyse_trap(words, a, depth):
     EXIT action's `pwd` is the last directory of the line), so it is read with the directories unknown, as a sourced file
     is, and a relative redirection or tee inside it refuses a member.  The line's own directories and variables are
     restored afterwards: defining a trap changes nothing on the line, and the action's assignments run later, where
-    the expansion check's `a.all_doubt` after `trap` already doubts every variable."""
-    cwds, variables = a.cwds, dict(a.vars)
+    the expansion check's `a.all_doubt` after `trap` already doubts every variable.
+
+    Unless the action runs inside the line (trap_runs_in_line) and changes the directory of the shell it runs in -- a cd,
+    a sourced file, a function's move, text the reading drops, whatever ShellAnalysis.dir_moves counts, a cd in a
+    substitution of the action's among them, read on the safe side -- which leaves the line's directory unknown from the
+    trap on, since the action may run before any later command (SPD-252).  An action that moves nothing leaves it."""
+    cwds, variables, moved = a.cwds, dict(a.vars), False
     for k in trap_action_indices(words):
+        text = prepare.deglob(words[k])
         a.cwds = None
-        calls = len(a.git_calls)
-        analyse.analyse_isolated(a, prepare.deglob(words[k]), depth + 1)
+        calls, moves = len(a.git_calls), a.dir_moves
+        analyse.analyse_isolated(a, text, depth + 1)
+        if a.dir_moves != moves:
+            a.moving_traps.add(text)  # read once per starting state (analyse_isolated): a later reading of it knows too
+        moved = moved or text in a.moving_traps
         # The action's git calls are not scope-checked.  The hook reads the action with the directories unknown
         # because it runs later, not because the line lost them, and `trap 'git status' EXIT` names no repository, so the
         # unresolvable-directory refusal would fall on every trap that mentions git.  Its own findings still stand.
         del a.git_calls[calls:]
         a.cwds, a.vars = cwds, dict(variables)
+    if moved and trap_runs_in_line(words, a):
+        a.cwds = None
+        a.dir_moves += 1
+
+
+# The traps whose action the shell reading the line runs before the line is over (SPD-252), probed in zsh 5.9 -f -o
+# nobareglobqual and -f and bash 3.2.57 (tests/test_hooks_writes.py MovedBetweenCommandsTest): DEBUG before each
+# command, ERR and zsh's ZERR after a failing one, bash's RETURN when the function that set it returns -- and EXIT or 0
+# set inside a function, which zsh runs as that function returns.  EXIT at the line's own level runs after the line,
+# and a signal the line does not raise never.  Read as either shell names them: bash took `debug`, zsh `SIGDEBUG`.
+LINE_TRAPS = frozenset({"DEBUG", "ERR", "ZERR", "RETURN"})
+FUNCTION_TRAPS = frozenset({"EXIT", "0"})
+
+
+def trap_runs_in_line(words, a):
+    """Whether a `trap` line may set an action its own shell runs before the line is over: a signal word, read
+    case-folded with any SIG prefix taken off, in LINE_TRAPS, or in FUNCTION_TRAPS inside a function body (the line's own,
+    or one the shell holds), or a signal word the hook does not read (an expansion, a glob).  The action words
+    (trap_action_indices) and options are not signals."""
+    actions = trap_action_indices(words)
+    in_function = a.func_depth > 0 or a.body_locals is not None
+    for k, word in enumerate(words[1:], 1):
+        if k in actions or word.startswith("-"):
+            continue
+        if expansion_word(word) or globbing.active_glob_word(word):
+            return True
+        name = prepare.deglob(word).upper()
+        name = name[3:] if name.startswith("SIG") else name
+        if name in LINE_TRAPS or (in_function and name in FUNCTION_TRAPS):
+            return True
+    return False
 
 
 def python_read_index(words, a, start=1):

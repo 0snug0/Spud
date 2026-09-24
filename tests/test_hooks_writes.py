@@ -761,6 +761,38 @@ class XargsInputTest(TreeWriteCase):
                 self.assertNotIn(INPUT_WORDING, r.reason or "")
         self.assertRefused("xargs -J % cp % docs/ < list", "Law 1", agent_id=None)
 
+    def test_248_what_xargs_hands_sed_tar_or_tee_may_be_their_options_and_files(self):
+        """SPD-248 (2) (proposal by SPUD-134/Billie): the words xargs appends may be sed's -i with its script and files,
+        tar's mode with -P or -f, or the files tee writes, and the hook read them as none of these: `echo '-i s/a/b/ f' |
+        xargs sed` and `echo '-xPf a.tar' | xargs tar` recorded no write, where `echo f | xargs sed -i s/a/b/` did.  Read now
+        as SPD-230 read git's: where the input may stand for sed's options every operand may be a file it edits in place,
+        where it may stand for tar's mode the archive may land anywhere, and each word it hands tee is a file tee writes.
+        Probed 2026-09-24 through tests/probes/shell_probe.py (zsh 5.9 -f -o nobareglobqual and -f, bash 3.2.57, this Mac's
+        BSD sed, bsdtar and xargs): `echo "-i '' s/a/b/ f" | xargs sed` edited f, `echo '-i.bak s/a/b/ g' | xargs sed`
+        edited g and left g.bak, `echo '-xf a.tar -C out' | xargs tar` extracted into out, and `echo teefile | xargs tee`
+        made teefile."""
+        m = self.module
+        self.assertEqual(self.writes("echo '-i s/a/b/ f' | xargs sed"), [(m.INPUT_OPERAND, None)] * 2)
+        self.assertEqual(self.writes("echo '-xPf a.tar' | xargs tar"), [(m.ANY_PATH, "tree")])
+        for command in ("echo '-i s/a/b/ f' | xargs sed", "xargs sed < list", "xargs sed -n < list", "xargs sed -e s/a/b/ < list",
+                        "xargs -J % sed % out/x < list", "xargs tee < list", "xargs tee -a < list", "xargs -I% tee out/% < list"):
+            with self.subTest(command):
+                self.assertRefused(command, INPUT_WORDING, agent_id=AGENT_G)
+        for command in ("echo '-xPf a.tar' | xargs tar", "xargs tar < list", "xargs bsdtar < list", "xargs -J % tar % < list",
+                        "xargs tar -C out < list", "X=$(echo -xPf); tar $X a.tar", "X=$(echo xPf); tar $X a.tar"):
+            with self.subTest(command):
+                self.assertRefused(command, ANYWHERE_WORDING, agent_id=AGENT_G)
+        # a script the line spells first, or options that leave the input no place to be one, read as before
+        for command in ("xargs sed s/a/b/ < list", "xargs sed -n 1p < list", "xargs tar -tf < list", "xargs tar -tvf a.tar < list",
+                        "tar -tf a.tar", "tar $TAPE_OPTS -tf a.tar", "sed -n p list"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command in ("xargs sed < list", "xargs tar < list", "xargs tee < list"):
+            with self.subTest(command):
+                r = self.bash(command, None)
+                self.assertNotIn(INPUT_WORDING, r.reason or "")
+                self.assertNotIn(ANYWHERE_WORDING, r.reason or "")
+
 
 class RecursiveWriteTest(TreeWriteCase):
     """SPD-126: what a recursive removal, copy or move carries under the directory it names.  Main (08c344e) read `rm -rf
@@ -2001,6 +2033,88 @@ class LoopWordTargetTest(BashHookCase):
         self.assertSilent('S=%s; out=$(basename "$F"); curl -sSfL https://example.com/c -o "$S/$out"' % s)
         self.assertRefused('for who in juno hana; do curl -sS -o "docs/$who.html" https://example.com/u/$who; done',
                            "deliverables")
+
+
+class MovedBetweenCommandsTest(BashHookCase):
+    """SPD-252's adjacent gaps: the shell's directory moved between two of the line's commands by text the reading put
+    back or never read, so a relative write after it was read where the line stood before.
+
+    - A trap whose action runs inside the line, in the line's shell (expansions.analyse_trap): DEBUG before each command,
+      ERR and zsh's ZERR after a failing one, bash's RETURN set in a function when it returns, and EXIT (or 0) set in a
+      function when it returns in zsh.  Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o
+      nobareglobqual and -f and bash 3.2.57, each in a subshell: after `trap 'cd b' DEBUG` (and `trap -- ...`) `pwd`
+      printed b in all three, after `false` under an ERR trap b in all three, under ZERR b in zsh; `f () { trap 'cd b'
+      EXIT; }; f` and its `0` form b in zsh and not in bash, `g () { trap 'cd b' RETURN; }; g` b in bash (zsh has no
+      RETURN); `SIGDEBUG` moved zsh, `debug` bash.  EXIT and 0 at the line's own level, INT (never raised), CHLD after a
+      child, and ERR with no failure moved nothing.  The action is still read with the directories unknown, as before; a
+      trap on one of those whose action changes the directory leaves the rest of the line's directory unknown, and one
+      whose action changes nothing leaves it as it was.
+    - Text the reading drops past its depth bound (analyse.READING_DEPTH, SPD-195) where it runs in the line's shell -- an
+      eval nested seven deep -- may change the directory, so the rest of the line's is unknown after it; a member is
+      refused the dropped text itself, and Spud the relative write after it.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud, and every line here runs in tests/, a member's own."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "tests").mkdir(exist_ok=True)
+        self.tests = str(self.home.path / "tests")
+
+    def test_a_trap_that_runs_inside_the_line_and_moves_it(self):
+        home = self.home.path
+        for line in ("trap 'cd %s' DEBUG; echo hi > note.txt", "trap -- 'cd %s' DEBUG; echo hi > note.txt",
+                     "trap 'cd %s' ERR; false; echo hi > note.txt", "trap 'cd %s' ZERR; false; echo hi > note.txt",
+                     "trap 'cd %s' SIGDEBUG; echo hi > note.txt", "trap 'cd %s' debug; echo hi > note.txt",
+                     "trap 'cd %s' INT DEBUG; echo hi > note.txt", "trap 'eval cd %s' DEBUG; echo hi > note.txt",
+                     "trap 'cd %s' $SIG; echo hi > note.txt", "trap 'cd %s' ERR; false; cp x note.txt",
+                     "f () { trap 'cd %s' EXIT; }; f; echo hi > note.txt", "f () { trap 'cd %s' 0; }; f; echo hi > note.txt",
+                     "g () { trap 'cd %s' RETURN; }; g; echo hi > note.txt", "trap 'cd sub' DEBUG; echo hi > note.txt"):
+            line = line.replace("%s", str(home))
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, AGENT_B, None):
+                    self.assertRefused(line, "cannot follow", agent_id, self.tests)
+
+    def test_a_trap_that_moves_nothing_on_the_line_reads_as_before(self):
+        home = self.home.path
+        for line in ("trap 'echo done' DEBUG; echo hi > note.txt", "trap 'cd %s' EXIT; echo hi > note.txt",
+                     "trap 'cd %s' 0; echo hi > note.txt", "trap 'cd %s' INT; echo hi > note.txt",
+                     "trap 'cd %s' CHLD; sleep 0; echo hi > note.txt", "echo hi > note.txt; trap 'cd %s' DEBUG",
+                     "trap - DEBUG; echo hi > note.txt", "trap 'echo x' ERR; false; echo hi > note.txt"):
+            line = line.replace("%s", str(home))
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A, self.tests)
+                self.assertSilent(line, AGENT_B, self.tests)
+
+    def test_an_option_that_reads_a_cd_into_a_name_as_a_variable(self):
+        """zsh's CDABLE_VARS and bash's cdable_vars: a cd into a relative name that is no directory goes where the variable
+        of that name points (probed in zsh 5.9 -f -o nobareglobqual and -f and bash 3.2.57: after `setopt cdablevars` and
+        `shopt -s cdable_vars`, set on the line or in a function the line called, `cd dest` with dest=<dir> printed <dir>,
+        and without them the directory stayed).  After an option builtin the hook does not read, such a cd leaves the
+        directory unknown; one into a directory that exists reads as before."""
+        home = self.home.path
+        for line in ("setopt cdablevars; D=%s; cd D; echo hi > note.txt", "shopt -s cdable_vars; D=%s; cd D; echo hi > note.txt",
+                     "set -o cdablevars; D=%s; cd D && echo hi > note.txt", "f () { setopt cdablevars; }; f; D=%s; cd D; echo hi > note.txt"):
+            line = line.replace("%s", str(home))
+            with self.subTest(line=line):
+                for agent_id in (AGENT_A, None):
+                    self.assertRefused(line, "cannot follow", agent_id, self.tests)
+        (home / "tests" / "sub").mkdir(exist_ok=True)
+        for line in ("setopt cdablevars; cd sub; echo hi > note.txt", "D=%s; cd D; echo hi > note.txt" % home,
+                     "setopt cdablevars; cd %s; echo hi > tests/note.txt" % home):
+            with self.subTest(line=line):
+                self.assertSilent(line, AGENT_A, self.tests)
+
+    def test_text_dropped_past_the_depth_bound_leaves_the_directory_unknown(self):
+        deep = "cd %s" % self.tests
+        for _ in range(7):
+            deep = "eval '%s'" % deep.replace("'", "'\\''")
+        self.assertRefused(deep + "; echo hi > CLAUDE.md", "cannot follow", agent_id=None, cwd=str(self.home.path))
+        self.assertRefused(deep + "; echo hi > CLAUDE.md", "", AGENT_A, str(self.home.path))
+        shallow = "cd %s" % self.tests
+        for _ in range(5):
+            shallow = "eval '%s'" % shallow.replace("'", "'\\''")
+        self.assertRefused(shallow + "; echo hi > CLAUDE.md", "Law 1", agent_id=None, cwd=str(self.home.path))
+        self.assertSilent(shallow + "; echo hi > note.txt", AGENT_A, str(self.home.path))
 
 
 if __name__ == "__main__":

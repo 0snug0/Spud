@@ -313,12 +313,16 @@ def sed_writes(args, hidden=False):
     without them.  BSD's -i always takes the next word unless its suffix is attached (probed: `sed -i -e X f` backed f up to
     f-e), and a suffix holding `/` fails there, BSD appending it to each file's name (rename: Not a directory), so such a
     word is also read as GNU reads a bare -i: the script, with the files after it.  `hidden`: the first operand begins with
-    an expansion, so it may be the in-place option itself, and the words after the script it would leave are read as files."""
+    an expansion, so it may be the in-place option itself, and the words after the script it would leave are read as files.
+    Where that operand is what an xargs reads from its input, it may be any number of words -- `-i`, a script and the files
+    (`echo '-i s/a/b/ f' | xargs sed`, SPD-248) -- so every operand may be a file sed edits, that one among them."""
     shape_values, longs = syntax.ARG_WRITE_COMMANDS["sed"][1:]
     options, operands = scan(args, shape_values, longs)
     in_place = [(v or "", spaced) for n, v, spaced in options if n in ("-i", "-I", "--in-place")]
     script_given = any(n in ("-e", "-f", "--expression", "--file") for n, _, _ in options)
     if not in_place:
+        if hidden and operands[0].startswith(syntax.INPUT_OPERAND):
+            return [(f, (), "path", None, None) for f in operands]
         return [(f, (), "path", None, None) for f in (operands[1:] if script_given else operands[2:])] if hidden else []
     suffix, spaced = in_place[-1]  # the last in-place option is the one sed keeps
     files = operands if script_given else operands[1:]
