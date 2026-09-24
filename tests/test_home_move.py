@@ -1,7 +1,9 @@
 """SPD-097: `spud --as spud home move --to <dir>`: --dry-run, each precondition, and a full move between scratch directories
 with the zero-write render.  SPD-233: the homes here are the suite's own, today's shape -- a home beside the tool checkout
 that init registered as project spud -- and the transition window's scenarios (a home that was also the tool repository,
-its tracked settings stripped by the move, and the rollback to it) went with the cutover they served."""
+its tracked settings stripped by the move, and the rollback to it) went with the cutover they served.  SPD-261: the move
+is a split home's, from one directory to another, so it leaves the tool repository's tracked settings alone and its text
+names no removal commit."""
 
 import json
 import unittest
@@ -42,6 +44,8 @@ class PreconditionsTest(RepoMixin, SpudTestCase):
         self.assertIn(str(self.target / ".spud"), out["steps"][1])
         self.assertIn("set project spud's sessions to claim", out["steps"][4])
         self.assertIn("rename %s" % (self.home.path / ".spud"), out["steps"][7])
+        tracked = str(self.home.tool / ".claude" / "settings.json")
+        self.assertFalse([s for s in out["steps"] if tracked in s or "strip" in s], out["steps"])  # SPD-261
         self.assertEqual(list(self.target.iterdir()), [])
         self.assertTrue((self.home.path / ".spud" / "ledger.db").is_file())
 
@@ -185,9 +189,10 @@ class InstalledProjectsMoveTest(LaunchdMixin, RepoMixin, SpudTestCase):
             self.assertTrue(all(c.startswith("SPUD_HOME=%s " % old) for c in self.hook_commands(self.local_settings(key))))
         proc = self.cli("home", "move", "--to", new, actor="spud")
         self.assertIn("5a. project spud: sessions claim", proc.stdout)
-        self.assertIn("5d. project spud: ", proc.stdout)
-        self.assertIn("5d. project badtakes: ", proc.stdout)
-        self.assertNotIn("5d. project bare", proc.stdout)
+        self.assertIn("5c. project spud: ", proc.stdout)
+        self.assertIn("5c. project badtakes: ", proc.stdout)
+        self.assertNotIn("5c. project bare", proc.stdout)
+        self.assertNotIn("5d.", proc.stdout)
         # 5a: project spud claims now, and the move says it changed it
         project = json.loads(self.cli("--json", "project", "show", "spud", env=self.new_env()).stdout)["project"]
         self.assertEqual((project["sessions"], project["root"], project["installed"]), ("claim", str(self.home.tool), True))
@@ -223,6 +228,22 @@ class InstalledProjectsMoveTest(LaunchdMixin, RepoMixin, SpudTestCase):
         self.assertEqual([p for p in doctor["problems"] if not p.startswith("the render watcher ")], [])
         self.assertEqual([(p["key"], p["installed"], p["problems"]) for p in doctor["projects"]],
                          [("spud", True, []), ("badtakes", True, []), ("bare", False, [])])
+
+    def test_the_move_leaves_the_tools_tracked_settings_alone_and_names_no_removal_commit(self):
+        """SPD-261: a split home's move has no tool-repository cutover.  The tool's tracked .claude/settings.json, here
+        holding the very hooks settings sync wrote for the home (what the old step 5c stripped), is left byte for byte, and
+        what the move prints by hand names neither a removal commit nor that file."""
+        tracked = self.home.tool / ".claude" / "settings.json"
+        tracked.parent.mkdir(exist_ok=True)
+        text = (self.home.path / ".claude" / "settings.json").read_text(encoding="utf-8")
+        tracked.write_text(text, encoding="utf-8")
+        self.assertTrue(spud.settings_hold_hooks(spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.tool), tracked))
+        out = json.loads(self.cli("--json", "home", "move", "--to", self.target, actor="spud").stdout)
+        self.assertEqual(tracked.read_text(encoding="utf-8"), text)
+        self.assertFalse([line for line in out["done"] if str(tracked) in line or "removal commit" in line], out["done"])
+        self.assertNotIn("removal commit", out["by_hand"])
+        self.assertNotIn(str(tracked), out["by_hand"])
+        self.assertIn("rollback", out["by_hand"])
 
     def test_the_move_keeps_the_users_own_directories_and_uninstall_after_it_leaves_neither_home(self):
         """SPD-245: badtakes' file holds directories of the user's own around install's entry -- one added after install,

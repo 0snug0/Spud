@@ -167,17 +167,18 @@ headed `==> <path> <==`.  `spud doctor` names this command when the watcher is d
 """
 
 HOME_MOVE_DESCRIPTION = """\
-Move Spud's home to a plain directory.  Refused while any member is planned or active, when
---to exists and is not empty, lies inside a git work tree or inside the current home, when a rendered file is hand-edited
-(spud doctor lists them with the commands that settle each), when an earlier move left .spud-moved behind, and when the
-running bin/spud sits in a linked worktree.  Then, each step reported: a checked backup; the database copied with
-SQLite's online backup, integrity-checked and compared row by row; ledger/, reports/, docs/, .obsidian/, the config,
-CLAUDE.md, the two .claude settings files and the backups copied, and the copied vault checked against the copied
-database (zero files to render); ~/.config/spud/home re-pointed; project spud set to sessions claim, the new home's
-.claude/settings.json synced, the ledger's entries stripped from the tool's tracked .claude/settings.json (left
-uncommitted for the removal commit), project spud installed and every installed project re-synced; both LaunchAgents
-reinstalled; a render and spud doctor in the new home; the old .spud renamed .spud-moved.  Ends by printing what is
-left by hand and how to roll back until the removal commit.  --dry-run checks the preconditions and prints the steps.
+Move Spud's home from one plain directory to another.  The home is its own directory, never
+inside a project's checkout, so --to is refused when it lies inside any git work tree; it is also refused when it
+exists and is not empty or lies inside the current home, while any member is planned or active, when a rendered file is
+hand-edited (spud doctor lists them with the commands that settle each), when an earlier move left .spud-moved behind,
+and when the running bin/spud sits in a linked worktree.  Then, each step reported: a checked backup; the database
+copied with SQLite's online backup, integrity-checked and compared row by row; ledger/, reports/, docs/, .obsidian/,
+the config, CLAUDE.md, the two .claude settings files and the backups copied, and the copied vault checked against the
+copied database (zero files to render); ~/.config/spud/home re-pointed; project spud set to sessions claim, the new
+home's .claude/settings.json synced, project spud installed and every installed project re-synced; both LaunchAgents
+reinstalled; a render and spud doctor in the new home; the old .spud renamed .spud-moved.  No file a project's git
+tracks is touched.  Ends by printing what is left by hand and how to roll back while the old home is kept.  --dry-run
+checks the preconditions and prints the steps.
 """
 
 HOME_SYNC_DESCRIPTION = """\
