@@ -35,7 +35,9 @@ What a command prints reaches a pipe after its own output redirections as each s
 redirected_text): bash where the last of them points, and zsh, whose MULTIOS joins them to a pipe that follows the
 command, into the pipe as well -- `{ echo '...'; } > /dev/null | sh` runs the text in zsh alone.  A compound command's
 redirections after its closer are read so too (walk.ShellWalk.finish), where they once stood for a command of their own
-that printed nothing the hook could spell.
+that printed nothing the hook could spell.  So are the commands that print nothing at all, a condition's `true` or
+`test` and a loop's `break` (SPD-273, printed_text), which once left a compound's whole text unread; and a printer's
+name the shell runs a function or an alias for prints that body's text, not the printer's (SPD-272, _shadowed).
 
 A command's input redirections are read as each shell feeds them (SPD-209, command_input): zsh reads every one of them
 in turn, after the pipe into the command, and bash the last alone, so where the two differ the text is a MultiosText
@@ -67,6 +69,7 @@ import os
 import re
 
 from . import arg_writes, directories, expansions, globbing, heredocs, prepare, syntax
+from ..hooks import snapshots
 
 # The operands that name the standard input the line gave the shell rather than a script file of its own (probed:
 # `bash /dev/stdin <<< 'vcs a'` and `bash - <<< 'vcs a'` both ran it).
@@ -86,6 +89,18 @@ _WHOLE_INPUT_OPTIONS = ("--null", "--delimiter")
 # Where bash's reading of an unquoted expansion splits its value, in word_fields: no shell variable can hold a NUL.
 _FIELD = "\0"
 _PRINTERS = frozenset({"echo", "print", "printf", "cat", "tee"})
+# The commands that print nothing on standard output whatever their words (SPD-273): the conditions and the loop and
+# function controls, by their own names alone (a path is a program, whose options may print).  Probed through
+# tests/probes/shell_probe.py in zsh 5.9 -f and -f -o nobareglobqual and bash 3.2.57 (2026-09-24,
+# tests/test_hooks_input.py SilentCommandOutputTest): each printed no byte there, alone, with `--help` and with `-v x`.
+_SILENT = frozenset({"true", "false", ":", "test", "[", "[[", "break", "continue", "return", "exit"})
+# The shell's own among the printers and the silent commands, which `builtin NAME` and `command NAME` run whatever
+# function or alias shares the name (SPD-272); cat and tee are programs, which `command` finds on PATH, and `[[` a word
+# of the grammar, which neither runs.
+_BUILTINS = frozenset({"echo", "print", "printf"}) | (_SILENT - {"[["})
+_PROGRAMS = frozenset({"cat", "tee"})
+# What the words of an arithmetic command, `(( ... ))`, open with as the walk hands them on
+_ARITHMETIC_COMMAND = syntax._ARITH_SENTINELS["("]
 
 
 class MultiosText(str):
@@ -341,10 +356,13 @@ def printed_text(tokens, stdin, a=None, feeds_pipe=False):
     """The text the simple command `tokens` prints on standard output, or None where the hook cannot spell it.
 
     Only the commands that print what the line spells are read: echo, zsh's print, printf, a cat of its own input, and
-    tee, which passes its input on whatever files it also writes; every other command prints text this module does not
-    know.  A redirection of the command's standard output takes that text from where it would go, as redirected_text
-    reads it (`feeds_pipe`: a pipe follows the command).  `stdin`: the text the command reads on standard input
-    (command_input), which cat and tee print as it stands.
+    tee, which passes its input on whatever files it also writes; and the ones that print nothing (_SILENT, `(( ... ))`
+    and a pipeline's `!` before any of these, SPD-273), so the text of a compound around them -- `if true; then echo
+    ...; fi`, `while ...; do ...; break; done` -- is the text its printers print.  Every other command prints text this
+    module does not know, and so does a name the shell runs a function or an alias for (_shadowed, SPD-272), unless
+    `builtin` or `command` runs the shell's own (_command).  A redirection of the command's standard output takes that
+    text from where it would go, as redirected_text reads it (`feeds_pipe`: a pipe follows the command).  `stdin`: the
+    text the command reads on standard input (command_input), which cat and tee print as it stands.
 
     `a`, the line's analysis before this command runs: a `$NAME` the line settled is read as its value (SPD-148), the
     value the shells expand it to, since the command's own prefix assignments reach none of its words.  bash splits an
@@ -352,17 +370,92 @@ def printed_text(tokens, stdin, a=None, feeds_pipe=False):
     command is read both ways (_readings) and its text is what either prints (_either): `X='git push'; echo $X` prints
     `git push` in both, `printf '%s\\n' "$X"` too, and `X='-n git push'; echo $X` prints it in bash alone."""
     words = directories.separate_redirects(tokens)[0]
+    while words and words[0] == "!":
+        words = words[1:]  # `! cmd` prints what cmd prints (probed: `! echo hi` printed hi)
+    if words and words[0].startswith(_ARITHMETIC_COMMAND):
+        return redirected_text("", tokens, feeds_pipe)  # an arithmetic command prints nothing (probed: `(( 1 + 1 ))`)
+    words, own = _command(words, a)
+    if words is None:
+        return None
     if a is None or not any("$" in w for w in words):
         name = word_text(words[0]) if words else None
-        if not _printer(name):
+        if not _reads(name, a, own):
             return None
         return redirected_text(_printed([name] + [word_text(w) for w in words[1:]], stdin), tokens, feeds_pipe)
-    if not _printer(word_text(words[0], a)):
+    if not _reads(word_text(words[0], a), a, own):
         return None  # zsh's reading prints nothing this module reads, so bash's cannot agree with a text
     whole, fields = _readings(words, a)
-    if not (fields and _printer(fields[0])):
+    if not (fields and _reads(fields[0], a, own)):
         return None
     return redirected_text(_either(_printed(whole, stdin), _printed(fields, stdin)), tokens, feeds_pipe)
+
+
+def _command(words, a):
+    """(the words from the command's name on, the precommand that runs it as the shell's own or None) for printed_text,
+    or (None, None) where that is not a command it reads.
+
+    `builtin NAME` runs the shell's own NAME and `command NAME` its own or the program on PATH, whatever function or alias
+    shares the name (probed through tests/probes/shell_probe.py in zsh 5.9 -f and -f -o nobareglobqual and bash 3.2.57,
+    2026-09-24, tests/test_hooks_input.py PrinterShadowTest: with a function echo defined, `builtin echo`, `command echo`
+    and `command -p echo` ran the echo); `command -v` and `-V` print what the name is instead, text of their own."""
+    first = word_text(words[0]) if words else None
+    if first not in ("builtin", "command"):
+        return words, None
+    if _shadowed(first, a):
+        return None, None  # a function named builtin or command runs in its place (probed)
+    rest = words[1:]
+    while first == "command" and rest:
+        option = word_text(rest[0])
+        if option == "--":
+            rest = rest[1:]
+            break
+        if option is None or not option.startswith("-") or len(option) == 1:
+            break
+        if option.strip("p") != "-":
+            return None, None
+        rest = rest[1:]
+    return (rest, first) if rest else (None, None)
+
+
+def _reads(name, a, own):
+    """Whether printed_text reads the command `name` as a printer or as a command that prints nothing: its own name, a
+    printer's by a path too, which the shell runs as itself.  `own`: the precommand that runs it, `builtin` (the shell's
+    own alone) or `command` (the shell's own or the program), or None, where a name the shell runs a function or an
+    alias for is text of its own (_shadowed)."""
+    if not name or not (name in _SILENT or _printer(name)):
+        return False
+    if own == "builtin":
+        return name in _BUILTINS
+    if own == "command":
+        return name in _BUILTINS or _printer(name) and not _hashed(name, a)
+    return not _shadowed(name, a)
+
+
+def _shadowed(name, a):
+    """Whether the shell runs something other than its own `name` or the program on PATH for it (SPD-272): a function the
+    line defines under that name, or one it cannot name (ShellAnalysis.functions: a definition, zsh's `functions` table),
+    a program it hashed there (cat and tee alone, which the shell looks up), an alias of the line's where `eval` reads it
+    again (expansions.alias_substitution), or an alias or a function the shell's snapshot defines (hooks/snapshots), an
+    alias not while its own expansion is read.  The shell runs that body in place of the command, whose text this reading
+    does not follow: unread, as input the line does not spell (probed through tests/probes/shell_probe.py in zsh 5.9 -f
+    and -f -o nobareglobqual and bash 3.2.57, 2026-09-24, tests/test_hooks_input.py PrinterShadowTest: `echo() { printf
+    ...; }; echo hi | sh` ran the function's text, and so did a function named printf, print, cat, tee, true, `:`, test,
+    builtin or command, one defined inside an `if` too, while one defined in a subshell did not reach a call after it)."""
+    if a is None:
+        return False
+    if name in a.functions or syntax.UNKNOWN_NAME in a.functions or _hashed(name, a):
+        return True
+    if a.alias_scope:
+        body, doubtful = expansions.alias_substitution(name, a)
+        if body is not None or doubtful:
+            return True
+    table = snapshots.shell_table(a.home)
+    return name in table.functions or name in table.aliases and name not in a.expanding
+
+
+def _hashed(name, a):
+    """Whether the line hashed this program's name to a file of its own (ShellAnalysis.hashed), which the shell then runs."""
+    return a is not None and name in _PROGRAMS and (name in a.hashed or syntax.UNKNOWN_NAME in a.hashed)
 
 
 def redirected_text(text, tokens, feeds_pipe=False):
@@ -419,6 +512,8 @@ def _printer(name):
 def _printed(texts, stdin):
     """printed_text's reading of one list of words as a shell passes them, `texts`, None for one the hook cannot say;
     the first is a printer's name.  `stdin`: the text the command reads, a MultiosText kept whole."""
+    if texts[0] in _SILENT:
+        return ""
     base, args = os.path.basename(texts[0]).casefold(), texts[1:]
     if base == "echo":
         return _echo_text(args)
