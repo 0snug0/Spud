@@ -133,9 +133,6 @@ def install_project(ctx, con, p):
     root = Path(worktrees.project_root(ctx, p))
     if not root.is_dir():
         raise kernel.SpudError(kernel.EXIT_ERROR, "project %s's root %s is not a directory; `spud --as spud project edit %s --root <path>`" % (p["key"], root, p["key"]))
-    if worktrees.file_identity(root) is not None and worktrees.file_identity(root) == worktrees.file_identity(ctx.home):
-        raise kernel.SpudError(kernel.EXIT_ERROR, "project %s's root is the home %s; the home's hooks are `spud --as spud settings sync`'s until"
-                               " `spud --as spud home move` separates the two" % (p["key"], root))
     files = install_files(ctx, p)
     # Rendered from Ctx before anything is written: it refuses when the source is gone or is no base for the variants.
     agent_texts = dict(agentdef.definitions(ctx))

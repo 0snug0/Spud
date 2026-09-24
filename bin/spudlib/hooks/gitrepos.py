@@ -399,13 +399,13 @@ def git_checkout_repository(known, where, gitdir, commondir):
     return ident(gitdir) in own
 
 
-def in_known_checkout(home, known, path):
+def in_known_checkout(known, path):
     """True when `path` lies in a checkout the ledger knows (`known` is checkout_identities'): a root or listed worktree
     itself, or a path below one by its lexical or its real reading (worktrees.map_into_checkouts)."""
     if worktrees.file_identity(path) in known["roots"]:
         return True
     p = os.path.abspath(path)
-    return any(worktrees.map_into_checkouts(known["checkouts"], c, str(home)) for c in (os.path.normpath(p), os.path.realpath(p)))
+    return any(worktrees.map_into_checkouts(known["checkouts"], c) for c in (os.path.normpath(p), os.path.realpath(p)))
 
 
 # -- what git would run from it --------------------------------------------------------------------------------------
@@ -620,7 +620,7 @@ def checkout_findings(ctx, con, cached=False):
             if mine in seen:
                 continue
             seen.add(mine)
-            if not in_known_checkout(ctx.home, known, where):
+            if not in_known_checkout(known, where):
                 continue
             read.append(root)
             if held is not None:

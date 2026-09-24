@@ -287,20 +287,18 @@ OUTSIDE_GONE_WORKTREE_TAIL = ("That worktree is gone, so no checkout is open to 
 
 
 def path_reason(rel, member, ref, fold=False, project_key=kernel.HOME_KEY, ticket_project_key=None, home=True, elsewhere=None, directory=None):
-    """None when the actor may write the repository path `rel` of project `project_key`, else the reason.  The
-    generated roots are the home's alone and are matched whatever the case (a case variant is refused on every
-    filesystem), case-folded rather than lower-cased so that the simple folds APFS honours
-    (reportſ is reports) count too; globs fold case only where the filesystem does.  In another project
-    Spud has no own files: every path there is a deliverable, and a member's bare glob is relative to its
-    ticket's project, a `<key>:<glob>` to that project's, a `home:<glob>` to the home.  `home` is
-    worktrees.home_roots for the checkout the path was mapped into, so in the transition window a worktree of the tool
-    repository still carries the generated roots and Spud's own set, while its globs stay project spud's.  `elsewhere`
-    is (ticket key, bound worktree, checkout) when the member's ticket is bound and the path lies in another
-    checkout of the ticket's own project: no glob of the member's matches there, whatever it says.  `directory` is "make"
-    or "remove" when the write only makes or removes a directory, which a glob covers without matching; it is
-    read inside the glob loop, so a glob's scope and its case folding hold for it exactly as they hold for a match, and
-    every refusal before the loop -- the generated roots, a bound ticket's other checkouts -- wins over it as it did.
-    "tree" is a write anywhere under `rel`, which only glob_covers_directory's whole-subtree reading lets in: a
+    """None when the actor may write the repository path `rel` of project `project_key`, else the reason.  The generated
+    roots are the home's alone and are matched whatever the case (a case variant is refused on every filesystem),
+    case-folded rather than lower-cased so that the simple folds APFS honours (reportſ is reports) count too; globs fold
+    case only where the filesystem does.  In another project Spud has no own files: every path there is a deliverable, and
+    a member's bare glob is relative to its ticket's project, a `<key>:<glob>` to that project's, a `home:<glob>` to the
+    home.  `home` is worktrees.is_home for the checkout the path was mapped into: the home alone carries the generated
+    roots and Spud's own set.  `elsewhere` is (ticket key, bound worktree, checkout) when the member's ticket is bound and
+    the path lies in another checkout of the ticket's own project: no glob of the member's matches there, whatever it
+    says.  `directory` is "make" or "remove" when the write only makes or removes a directory, which a glob covers without
+    matching; it is read inside the glob loop, so a glob's scope and its case folding hold for it exactly as they hold for
+    a match, and every refusal before the loop -- the generated roots, a bound ticket's other checkouts -- wins over it as
+    it did. "tree" is a write anywhere under `rel`, which only glob_covers_directory's whole-subtree reading lets in: a
     glob that merely matches `rel` does not.  Spud has no globs, so for him every kind is the write of `rel` itself."""
     generated = home and rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS
     if member is None:
@@ -404,7 +402,7 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
             elsewhere = None
             if bound is not None and project["key"] == ticket_project and not worktrees.same_directory(root, bound):
                 elsewhere = (ticket["key"], bound, root)
-            reason = path_reason(rel, caller_member, ref, worktrees.folds_case(root), project["key"], ticket_project, worktrees.home_roots(project, ctx.home),
+            reason = path_reason(rel, caller_member, ref, worktrees.folds_case(root), project["key"], ticket_project, worktrees.is_home(project),
                                  elsewhere, directory)
             if reason:
                 return reason, rel
@@ -412,13 +410,13 @@ def edit_reason(ctx, con, caller_agent_id, caller_member, path, cwd, mode="spud"
     plain = mode == "plain"
     if caller_agent_id:  # the home's generated roots are Law 5's for every caller, bound or not, before the binding matters
         for project, _root, rel in inside:
-            if worktrees.home_roots(project, ctx.home) and rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS:
+            if worktrees.is_home(project) and rel.split("/")[0].casefold() in hookio.GENERATED_ROOTS:
                 return path_reason(rel, {"deliverables": "[]"}, "agent_id %s" % caller_agent_id), rel
     if caller_agent_id and not plain:
         return ("your agent_id %s is not bound to a member yet (the PostToolUse(Agent) hook binds a background spawn right after launch;"
                 " a foreground spawn is bound at its first tool call or at its stop), so %s cannot be checked against your deliverables" % (caller_agent_id, first)), first
     for project, root, rel in inside:
-        home = worktrees.home_roots(project, ctx.home)
+        home = worktrees.is_home(project)
         if plain:
             if not home:
                 continue

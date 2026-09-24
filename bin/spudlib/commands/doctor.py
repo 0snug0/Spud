@@ -303,14 +303,13 @@ def agent_files(paths):
 
 
 def doctor_projects(ctx, problems, notes):
-    """doctor's projects section: each active project, its root a main checkout (or the home itself, before
-    `home move`), and when it is installed its local settings carrying this home's hooks, the file ignored, the
-    user-scope agent being what this home installs now, the /spud skill present, and whether a definition of the
-    project's own shadows the installed one.  The home pointer, the superseded worktree cache and that shadow
-    are notes, never problems.
+    """doctor's projects section: each active project, its root a main checkout, and when it is installed its local settings
+    carrying this home's hooks, the file ignored, the user-scope agent being what this home installs now, the /spud skill
+    present, and whether a definition of the project's own shadows the installed one.  The home pointer, the superseded
+    worktree cache and that shadow are notes, never problems.
 
-    The shadow is a note because the file is that repository's and not this home's: doctor's problems are what `home
-    init` and `home move` refuse on, and neither has anything to do with a file a project's git tracks.  It is read for
+    The shadow is a note because the file is that repository's and not this home's: doctor's problems are what `home init`
+    and `home move` refuse on, and neither has anything to do with a file a project's git tracks.  It is read for
     installed projects only -- the ones this home has written a definition for, and so the ones where two definitions can
     disagree.  The root is read, not each worktree: a file a project tracks reaches every worktree of it anyway."""
     out = []
@@ -333,8 +332,6 @@ def doctor_projects(ctx, problems, notes):
         root, checks, bad, project_agent = p["root_path"], [], [], None
         if not os.path.isdir(root):
             bad.append("root %s is not a directory" % root)
-        elif worktrees.file_identity(root) == worktrees.file_identity(ctx.home):
-            checks.append("root is the home (before home move)")  # a project rooted in the home, as the tool once was
         else:
             try:
                 proc = homeconf.run_git(root, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", timeout=10)
