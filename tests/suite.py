@@ -1,11 +1,24 @@
 """tests/suite.py: the whole suite on every core, over a snapshot of the tree it names (SPD-102).
 
-  python3.14 -I -S tests/suite.py [-j N] [--chunk N] [--cold] [NAME ...]   the suite, or the modules, classes or tests named
-  python3.14 -I -S tests/suite.py --digest                                 the digest of the checkout's tree alone; runs nothing
+  python3.14 -I -S tests/suite.py [-j N] [--chunk N] [--cold] [--no-wait] [--background] [NAME ...]
+                                                   the suite, or the modules, classes or tests named
+  python3.14 -I -S tests/suite.py --digest         the digest of the checkout's tree alone; runs nothing, waits for nothing
 
 Standard library only, and unittest discovery never collects this file (it is not test*.py).  The serial command,
 `python3.14 -I -S -m unittest discover -s tests -t tests`, still runs the same tests the same way.  A run goes:
 
+0. One run per machine (SPD-232).  Two runs side by side each take every core, double each other's time and fail the
+   wall_clock tests on contention alone, so a run first takes an exclusive flock on `spud-suite.lock` in the user's temp
+   directory (tempfile.gettempdir(); SPUD_SUITE_LOCK names another file) and writes into it its pid, checkout and start
+   time.  A second run, named or full, waits, says on stderr whose run it waits for, and starts when that one ends; with
+   --no-wait it exits 75 at once with one line instead.  The kernel releases the lock when the run's last process dies:
+   the workers inherit the descriptor and never lock anything themselves, so a run killed with SIGKILL keeps the lock
+   until its orphaned workers have gone too.  Holding it, the run removes every `spud-suite-*` directory in the temp
+   directory whose owner (the pid in its `owner` file) is gone, or which has no owner file and is over a day old (a run
+   from before SPD-232); nothing else there is the runner's.  --background then drops the run to macOS's background
+   priority (os.PRIO_DARWIN_BG), which every worker and every process a test starts inherits: quieter and slower.
+   SIGTERM and SIGHUP end a run as Ctrl-C does: the workers' process groups are killed and waited for, and the scratch
+   directory is removed.
 1. Snapshot.  Every file `git ls-files -c -o --exclude-standard` lists (tracked, and untracked but not ignored) is read
    once, hashed and written into a scratch directory, and the tests run there: a file another member half-writes in the
    checkout during the run reaches no worker, and two runs in one checkout share nothing (SPD-083).  The digest is a
@@ -20,24 +33,31 @@ Standard library only, and unittest discovery never collects this file (it is no
    backups); a Home a test builds itself starts empty.  --cold sets it to `off`, and every home starts empty, as before.
 3. Discovery, exactly as the serial command's, in this process.  Tests stay grouped by class; a class larger than --chunk
    is cut into consecutive chunks, each run with its own setUpClass and tearDownClass.
-4. Workers.  -j interpreters (this file with --worker, inside the snapshot) each take the largest chunk left when idle and
-   report every test as it ends.  The tests marked tests/helpers.wall_clock, which assert an upper bound on wall time, are
-   held back until every other test is done and then run beside nothing but each other.  A worker that dies fails the
+4. Workers.  -j interpreters (this file with --worker, inside the snapshot, each the leader of a process group of its
+   own) each take the largest chunk left when idle and report every test as it ends.  Their temp directory, and this
+   process's from the snapshot on, is the scratch directory's `tmp/` (TMPDIR and tempfile.tempdir), so every home and
+   directory a test or a program it runs makes through the temp directory goes with the run, however it ends, and a
+   nested run inside a test locks and sweeps inside it, never beside this one (SPUD_SUITE_LOCK is not passed on).  The
+   tests marked tests/helpers.wall_clock, which assert an upper bound on wall time, are held back until every other test
+   is done and then run beside nothing but each other; under --background, at normal priority again, in fresh workers.  A worker that dies fails the
    test it was running, its chunk's untouched tests go back on the queue, and a new worker takes its place.
 5. The report, as unittest prints it: a character per test while it runs, then the errors and failures with their
    tracebacks (the snapshot's paths spelled as the checkout's), `Ran N tests in S`, OK or FAILED, and one final line on
    stdout: the result, the count, the wall time, the workers and the tree's digest.  The exit status is 1 on any
-   failure, error, crashed worker or test never reported, else 0.  Nothing is written into the checkout; bytecode is
-   never written at all, and the scratch directory is removed by this process alone.
+   failure, error, crashed worker or test never reported, 75 when --no-wait found another run, 128 plus the signal's
+   number when SIGINT, SIGTERM or SIGHUP ended it, else 0.  Nothing is written into the checkout; bytecode is never
+   written at all, and the scratch directory is removed by this process alone, or by the next run if this one was killed.
 """
 
 import argparse
+import fcntl
 import hashlib
 import io
 import json
 import os
 import selectors
 import shutil
+import signal
 import stat
 import subprocess
 import sys
@@ -52,6 +72,13 @@ sys.dont_write_bytecode = True  # before a test or the program is imported: noth
 ENV = dict(os.environ)  # before tests/helpers, imported by discovery, points SPUD_HOME at its guard
 CHECKOUT = Path(__file__).resolve().parent.parent
 PYCACHE_ENV = "SPUD_SUITE_PYCACHE"  # read by tests/helpers.py
+LOCK_ENV = "SPUD_SUITE_LOCK"  # the lock file, in place of spud-suite.lock in the temp directory; never passed to a worker
+LOCK_NAME = "spud-suite.lock"
+SCRATCH_PREFIX = "spud-suite-"  # a run's scratch directory in the temp directory: the only name there the runner owns
+OWNER = "owner"  # the file in a run's scratch directory naming the pid of the run that made it
+LEGACY_AGE = 24 * 3600  # a scratch directory with no owner file (a run from before SPD-232) is swept past this age
+EXIT_BUSY = 75  # EX_TEMPFAIL: --no-wait, and another run holds the lock
+POLL = 0.5  # seconds between two looks at a held lock
 DEFAULT_WORKERS = os.cpu_count() or 4  # 18 on this Mac, where 6 and 12 were slower and 24 and 32 no faster (SPD-102)
 DEFAULT_CHUNK = 4
 KINDS = ("errors", "failures", "skipped", "expectedFailures", "unexpectedSuccesses")
@@ -111,6 +138,143 @@ def snapshot(files, dest, admin):
     (admin / "commondir").write_text(common + "\n", encoding="utf-8")
     (admin / "HEAD").write_text(head + "\n", encoding="utf-8")
     (dest / ".git").write_text("gitdir: %s\n" % admin, encoding="utf-8")
+
+
+# -- one run per machine (SPD-232) ------------------------------------------------------------------------------------
+
+
+def lock_path():
+    """The machine's suite lock: $SPUD_SUITE_LOCK, else spud-suite.lock in the temp directory."""
+    return os.environ.get(LOCK_ENV) or os.path.join(tempfile.gettempdir(), LOCK_NAME)
+
+
+def read_holder(path):
+    """{pid, checkout, started} as the run holding the lock at `path` wrote them, or None while unwritten or unreadable."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            holder = json.loads(f.read() or "null")
+        return holder if isinstance(holder, dict) and "pid" in holder else None
+    except (OSError, ValueError):
+        return None
+
+
+def alive(pid):
+    """Whether a process `pid` exists; one of another user's counts."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def describe(holder):
+    if holder is None:
+        return "another run (it has not said whose yet)"
+    text = "the run of pid %s in %s, started %s" % (holder.get("pid"), holder.get("checkout"), holder.get("started"))
+    if isinstance(holder.get("pid"), int) and not alive(holder["pid"]):
+        text += " (it has exited, and its workers are still finishing)"
+    return text
+
+
+def acquire(path, wait=True, say=None, poll=POLL):
+    """Take the lock at `path` for this run: the open file holding it (the kernel drops the lock when the last process
+    holding the descriptor dies), or None when `wait` is false and another run holds it.  While waiting, says whose run
+    it waits for, again whenever that changes.  Records this run's pid, checkout and start time in the file."""
+    say = say or (lambda text: (sys.stderr.write(text + "\n"), sys.stderr.flush()))
+    f = open(path, "a+", encoding="utf-8")
+    announced, looks = False, 0
+    try:
+        while True:
+            try:
+                fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                holder = read_holder(path)
+                if not wait:
+                    say("suite: not waiting (--no-wait): %s holds %s" % (describe(holder), path))
+                    f.close()
+                    return None
+                looks += 1
+                if (holder is not None or looks > 2) and holder != announced:
+                    say("suite: waiting for %s" % describe(holder))
+                    announced = holder
+                time.sleep(poll)
+        f.seek(0)
+        f.truncate()
+        f.write(json.dumps({"pid": os.getpid(), "checkout": str(CHECKOUT), "started": time.strftime("%Y-%m-%d %H:%M:%S %z")}) + "\n")
+        f.flush()
+        return f
+    except BaseException:
+        f.close()
+        raise
+
+
+def release(f):
+    """Give the lock up, leaving the file empty: nobody holds it."""
+    try:
+        f.seek(0)
+        f.truncate()
+        f.flush()
+    finally:
+        f.close()
+
+
+def sweep(directory, now=None):
+    """Remove every `spud-suite-*` directory under `directory` whose run is gone, while this run holds the lock: its
+    owner file names a pid that no longer exists, or it has none and is older than LEGACY_AGE.  Returns their names.  A
+    reused pid keeps a dead run's directory until the next sweep; with the lock held, no other run is using one."""
+    now = time.time() if now is None else now
+    removed = []
+    try:
+        entries = sorted(os.scandir(directory), key=lambda e: e.name)
+    except OSError:
+        return removed
+    for entry in entries:
+        if not entry.name.startswith(SCRATCH_PREFIX) or not entry.is_dir(follow_symlinks=False):
+            continue
+        try:
+            with open(os.path.join(entry.path, OWNER), encoding="utf-8") as f:
+                owner = int(f.read().strip())
+        except (OSError, ValueError):
+            owner = None
+        if owner is None:
+            try:
+                if now - entry.stat(follow_symlinks=False).st_mtime < LEGACY_AGE:
+                    continue
+            except OSError:
+                continue
+        elif alive(owner):
+            continue
+        shutil.rmtree(entry.path, ignore_errors=True)
+        removed.append(entry.name)
+    return removed
+
+
+def background():
+    """Drop this process, and so every process it starts from now on, to macOS's background priority.  None when done,
+    else why not."""
+    if not (hasattr(os, "PRIO_DARWIN_BG") and hasattr(os, "PRIO_DARWIN_PROCESS")):
+        return "this platform has no os.PRIO_DARWIN_BG"
+    try:
+        os.setpriority(os.PRIO_DARWIN_PROCESS, 0, os.PRIO_DARWIN_BG)
+    except OSError as e:
+        return str(e)
+    return None
+
+
+def foreground():
+    """Back to normal priority, for the processes this one starts from now on (the wall_clock tests' workers)."""
+    os.setpriority(os.PRIO_DARWIN_PROCESS, 0, 0)
+
+
+class Interrupted(KeyboardInterrupt):
+    """SIGINT, SIGTERM or SIGHUP: each ends a run as Ctrl-C always has."""
+
+    def __init__(self, signum):
+        super().__init__(signum)
+        self.signum = signum
 
 
 # -- a worker ---------------------------------------------------------------------------------------------------------
@@ -180,9 +344,11 @@ class Reported:
 
 
 class Worker:
-    def __init__(self, snap, env):
+    def __init__(self, snap, env, keep=()):
+        # A process group of its own, which the parent kills whole on an interrupt, tests' programs included; `keep` is the
+        # lock's descriptor, held and never locked, so the lock outlives a killed parent until its last worker is gone.
         self.proc = subprocess.Popen([sys.executable, "-I", "-S", str(snap / "tests" / "suite.py"), "--worker"], cwd=snap, env=env,
-                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, process_group=0, pass_fds=keep)
         self.buffer = b""
         self.unit = None  # the chunk it is running: [ids]
         self.running = None  # [id, name, doc] of the test it started last and has not finished
@@ -194,11 +360,22 @@ class Worker:
         self.proc.stdin.flush()
 
 
+def kill(w):
+    """Kill a worker's process group, the programs its test started with it, and reap the worker."""
+    try:
+        os.killpg(w.proc.pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+    w.proc.wait()
+
+
 class Run:
-    def __init__(self, order, snap, env, workers, total):
+    def __init__(self, order, snap, env, workers, total, keep=(), on_last=None):
         self.order, self.snap, self.env = order, snap, env
         self.count = workers
         self.total = total
+        self.keep = keep  # descriptors every worker inherits: the lock's
+        self.on_last = on_last  # called before the wall_clock tests' fresh workers start (--background: normal priority)
         self.entries = []  # [kind, owner id, name, doc, text]
         self.run = 0
         self.unrun = 0
@@ -254,7 +431,7 @@ class Run:
         workers = []
 
         def spawn():
-            w = Worker(self.snap, self.env)
+            w = Worker(self.snap, self.env, self.keep)
             os.set_blocking(w.proc.stdout.fileno(), False)
             sel.register(w.proc.stdout, selectors.EVENT_READ, w)
             workers.append(w)
@@ -266,6 +443,13 @@ class Run:
             while queue or last or any(w.unit is not None for w in workers):
                 if not queue and last and all(w.unit is None for w in workers):
                     queue, last = last, []
+                    if self.on_last is not None:  # the idle workers go, and the wall_clock tests get workers started after it
+                        self.on_last()
+                        for w in workers:
+                            sel.unregister(w.proc.stdout)
+                            w.proc.stdin.close()
+                            w.proc.wait()
+                        workers.clear()
                     while len(workers) < min(self.count, len(queue)):
                         spawn()
                 for w in workers:
@@ -287,6 +471,10 @@ class Run:
                     *lines, w.buffer = w.buffer.split(b"\n")
                     for line in lines:
                         self.handle(w, json.loads(line))
+        except BaseException:  # an interrupt, a signal, or too many dead workers: nothing waits for a chunk to end
+            for w in workers:
+                kill(w)
+            raise
         finally:
             for w in workers:
                 w.proc.stdin.close()
@@ -392,6 +580,8 @@ def main(argv=None):
     parser.add_argument("--chunk", type=int, default=DEFAULT_CHUNK, help="most tests of one class a worker takes at once (default %d)" % DEFAULT_CHUNK)
     parser.add_argument("--cold", action="store_true", help="no warm bytecode cache: every scratch home compiles the program itself")
     parser.add_argument("--digest", action="store_true", help="print the digest of the checkout's tree and exit, running nothing")
+    parser.add_argument("--no-wait", action="store_true", help="exit %d at once if another run holds the machine's suite lock, rather than wait for it" % EXIT_BUSY)
+    parser.add_argument("--background", action="store_true", help="run at macOS's background priority, workers included: quieter and slower (the wall_clock tests run at normal priority)")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.worker:
@@ -401,14 +591,58 @@ def main(argv=None):
         return 0
     if args.workers < 1 or args.chunk < 1:
         parser.error("-j and --chunk take a positive number")
-    started = time.perf_counter()
-    scratch = Path(tempfile.mkdtemp(prefix="spud-suite-")).resolve()
+    caught = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    before = {s: signal.getsignal(s) for s in caught}
+
+    def interrupted(signum, frame):  # the first of them ends the run; the cleanup that follows runs to its end
+        for s in caught:
+            signal.signal(s, signal.SIG_IGN)
+        raise Interrupted(signum)
+
+    for s in caught:
+        signal.signal(s, interrupted)
+    lock = None
     try:
+        lock = acquire(lock_path(), wait=not args.no_wait)
+        if lock is None:
+            return EXIT_BUSY
+        return run_locked(args, lock)
+    except KeyboardInterrupt as e:
+        signum = getattr(e, "signum", signal.SIGINT)
+        sys.stderr.write("\nsuite: interrupted%s\n" % ("" if signum == signal.SIGINT else " (%s)" % signal.Signals(signum).name))
+        return 128 + signum
+    finally:
+        if lock is not None:
+            release(lock)
+        for s, handler in before.items():
+            signal.signal(s, handler)
+
+
+def run_locked(args, lock):
+    """The run itself, holding the lock: sweep, snapshot, discover, run, report; the scratch directory removed after."""
+    if args.background:
+        why = background()
+        if why is not None:
+            sys.stderr.write("suite: --background: %s; running at normal priority\n" % why)
+            args.background = False
+    removed = sweep(tempfile.gettempdir())
+    if removed:
+        sys.stderr.write("suite: removed %d scratch director%s of runs that are gone: %s\n" % (len(removed), "y" if len(removed) == 1 else "ies", " ".join(removed)))
+    started = time.perf_counter()
+    scratch = Path(tempfile.mkdtemp(prefix=SCRATCH_PREFIX)).resolve()
+    try:
+        (scratch / OWNER).write_text("%d\n" % os.getpid(), encoding="utf-8")
+        tmp = scratch / "tmp"
+        tmp.mkdir()
+        tempfile.tempdir = str(tmp)  # discovery imports tests/helpers here, which makes its guard launchctl in it
+        os.environ["TMPDIR"] = str(tmp)
         files = tree(CHECKOUT)
         tree_digest = digest(files)
         snap = scratch / "tree"
         snapshot(files, snap, scratch / "git")
         env = dict(ENV)
+        env["TMPDIR"] = str(tmp)
+        env.pop(LOCK_ENV, None)  # a nested run in a test locks inside this run's temp directory, never this run's lock
         env[PYCACHE_ENV] = "off" if args.cold else str(scratch / "pycache")
         os.environ[PYCACHE_ENV] = env[PYCACHE_ENV]  # this process imports tests/helpers too, and leaves the cleanup to itself
         sys.path.insert(0, str(snap / "tests"))
@@ -423,7 +657,8 @@ def main(argv=None):
         failed_imports = [t for t in tests if isinstance(t, unittest.loader._FailedTest)]
         runnable = [t for t in tests if not isinstance(t, unittest.loader._FailedTest)]
         units, last = chunks([t for t in runnable if not timed(t)], args.chunk), chunks([t for t in runnable if timed(t)], args.chunk)
-        run = Run([t.id() for t in tests], snap, env, args.workers, len(tests))
+        run = Run([t.id() for t in tests], snap, env, args.workers, len(tests), keep=(lock.fileno(),),
+                  on_last=foreground if args.background else None)
         if failed_imports:  # a module discovery could not import: loadable by no name, so it runs here, and fails as it does serially
             here = argparse.Namespace(unit=[t.id() for t in failed_imports], running=None, finished=set())
             result = Reporter(io.StringIO())
@@ -434,10 +669,9 @@ def main(argv=None):
         run.go(units, last)
         sys.stderr.write("\n")
         return 0 if report(run, time.perf_counter() - started, args.names, tree_digest, min(args.workers, len(units) + len(last)) or 1) else 1
-    except KeyboardInterrupt:
-        sys.stderr.write("\nsuite: interrupted\n")
-        return 130
     finally:
+        for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):  # a signal now would leave the scratch half removed
+            signal.signal(s, signal.SIG_IGN)
         shutil.rmtree(scratch, ignore_errors=True)
 
 

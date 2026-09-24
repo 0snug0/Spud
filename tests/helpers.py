@@ -230,7 +230,9 @@ def wall_clock(test):
     """Mark a test that asserts an upper bound on the wall time of work it does itself (SPD-102).  tests/suite.py runs such a
     test only after every other test is done, beside no other work but the other marked tests, so the bound it asserts is
     measured on an idle machine as it is in the serial run; 18 workers on this Mac's six performance and twelve efficiency
-    cores once took ZshGlobOperatorTest's 7.7 s past its 10 s bound.  The serial command ignores the mark."""
+    cores once took ZshGlobOperatorTest's 7.7 s past its 10 s bound.  Since SPD-232 no other run's workers can be beside
+    them either (one run per machine), and under --background they run at normal priority.  The serial command ignores
+    the mark."""
     test.wall_clock = True
     return test
 

@@ -32,6 +32,8 @@ python3.14 -I -S tests/suite.py   # the full suite on every core, about 80 secon
 
 While iterating, run only the modules, classes or tests you touched, `python3.14 -I -S tests/suite.py test_members test_hooks.StopTest` (seconds; about a minute for all of `test_hooks`), and run the whole suite once at the end. A named run's final line says `partial`, and it proves nothing at landing. `-j N` overrides the worker count; `--cold` gives every scratch home an empty bytecode cache, as before SPD-102. Two rules keep the parallel run honest: a test that asserts an upper bound on wall time carries `helpers.wall_clock` and runs after every other test is done, and a `SpudTestCase` that asserts what the launcher caches or what `init` or a backup leaves in `.spud/` sets `warm_cache = False`.
 
+One run at a time per machine (SPD-232): every run, named or full, takes an flock on `spud-suite.lock` in the user's temp directory, and a second run waits, saying on stderr whose run (pid, checkout, start time) it waits for, then starts when that one ends; `--digest` never waits. `--no-wait` exits 75 at once with one line instead of queueing. `--background` runs the suite and every process it starts at macOS's background priority, quieter and slower, and puts the `wall_clock` tests back at normal priority. A run ended by Ctrl-C, SIGTERM or SIGHUP kills its workers and removes its scratch directory; a run killed outright leaves it for the next run, which removes every `spud-suite-*` directory whose run is gone. Workers' temp directory is inside the run's scratch directory, so every scratch home goes with the run, and a test that starts a nested `tests/suite.py` names its own lock in `SPUD_SUITE_LOCK` (a run passes that variable to no worker).
+
 The serial command is the fallback: the same tests, one at a time, in the checkout itself, about eleven minutes. It reads the live files, removes at exit the bytecode its first two modules wrote, and prints no digest, so run it only while nothing else writes to or runs in that checkout, and never as a landing's evidence:
 
 ```bash
@@ -69,6 +71,14 @@ python3.14 -I -S tests/suite.py --digest   # the digest of the checkout's tree n
 
 ```bash
 python3.14 -I -S tests/suite.py test_package test_hooks.StopTest   # named modules, classes or tests only, while iterating
+```
+
+```bash
+python3.14 -I -S tests/suite.py --no-wait   # exit 75 at once if another run holds the machine's suite lock, rather than queue
+```
+
+```bash
+python3.14 -I -S tests/suite.py --background   # at macOS's background priority, workers included: quieter, slower
 ```
 
 ```bash
