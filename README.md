@@ -77,6 +77,12 @@ iterating on a smaller area, name the modules, classes or tests to run instead o
 python3.14 -I -S tests/suite.py test_package test_hooks.StopTest
 ```
 
+Only one run goes at a time on a machine, since two side by side would each take every core. A
+second run waits for the first and says whose run it is waiting for; `--no-wait` makes it exit at once
+with a non-zero status instead. `--background` runs the suite at macOS's background priority, so it is
+quieter and slower. A run stopped by Ctrl-C, SIGTERM or SIGHUP removes its scratch copy; a run killed
+outright leaves it for the next run to remove.
+
 A serial fallback runs the same tests one at a time directly against the checkout, with no parallelism
 and no digest:
 
