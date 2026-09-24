@@ -187,6 +187,8 @@ ALIAS_WORD_RE = lazy.LazyPattern(r"^([^=\s]+)=(.*)\Z", re.S)
 # The key an alias's name is recorded under in `assigned` and `doubt`, so every rule that doubts a variable the line assigned
 # doubts the alias too.  No variable name can hold it.
 ALIAS_KEY = "\x00alias\x00"
+# ShellAnalysis.body_locals's value for a name `vars` did not hold when a function body declared it local (SPD-246).
+UNSET = object()
 # The findings that say only that the hook cannot read a word, dropped from text the shell itself holds -- an
 # alias's body or a function's, out of Claude Code's snapshot of the user's profile.  The member did not write that text,
 # cannot spell it differently and cannot write the file it comes from, and Claude Code's own shadows for find, grep,
@@ -678,6 +680,16 @@ class ShellAnalysis:
         # a list holding `$@`/`$1`.., and a variable a value holding a positional assigns.  A finding naming one of them
         # is the member's own, so analyse_shell_text's prune keeps it rather than drop it as the body's (SPD-205).
         self.member_vars = set()
+        # SPD-246: a function body the shell already holds (a snapshot's) runs in the line's shell, so a name it assigns is
+        # still set after the call and a later text reads it -- unless the body declared it local, which is gone when it
+        # returns.  `line_assigned`, every name assigned where the assignment reaches the line's shell: everything the
+        # line's own text assigns (a for or select loop's variable too), and what such a body assigns to a name no body
+        # open around the assignment declared local; analyse_shell_text reads it as the line's variables (SPD-205).
+        # `body_locals`, None outside such a body, else one dict per body being read, innermost last: each name the body
+        # surely declared local (assignment_words.local_names) -> the value `vars` held for it before, UNSET for none,
+        # which analyse.read_body puts back when the body returns.  `line_members`, the member_vars no open body declared
+        # local, which outlive the reading that filled them, where a body's local does not.
+        self.line_assigned, self.body_locals, self.line_members = set(), None, set()
         # The names a `name () { ... }`/`function name` definition earlier on the line bound to a shell function, so
         # a later bare call of one of them (in command position) runs that function, not the program the hook read.  Kept as a
         # set like `hashed`, but scoped: a definition in a branch, a loop or another function's body may exist at the call, so
@@ -712,6 +724,17 @@ class ShellAnalysis:
     def all_spud(self):
         """Every simple command is a spud call (a `cd` beside it changes nothing that matters)."""
         return "spud" in self.kinds and all(k in ("spud", "cd") for k in self.kinds) and not self.unparseable
+
+    def reaching(self, names):
+        """The names whose assignment here reaches the line's shell: none an open function body declared local (SPD-246)."""
+        scopes = self.body_locals
+        return names if scopes is None else [n for n in names if not any(n in scope for scope in scopes)]
+
+    def fill_members(self, names):
+        """Names the call's words fill inside a function's body (member_vars), each one that reaches the line's shell kept
+        in line_members for a later reading (SPD-246)."""
+        self.member_vars.update(names)
+        self.line_members.update(self.reaching(names))
 
 
 def loop_name(word, first=False):

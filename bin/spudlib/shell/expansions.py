@@ -44,8 +44,9 @@ def assign_variable(a, name, value, append=False):
     a.vars[name] = ("$" if name in ("CDPATH", "cdpath") else hookio.SUBST) if append else value
     loop_bindings.loop_assigned(a, name, value, append)  # a loop's binding of the name ends; `name=$(basename ...)` kept (SPD-146)
     if not append and syntax.POSITIONAL_RE.search(prepare.deglob(value)) is not None:
-        a.member_vars.add(name)  # a value holding a positional fills the name with the call's words (SPD-205)
+        a.fill_members((name,))  # a value holding a positional fills the name with the call's words (SPD-205)
     a.assigned.append(name)
+    a.line_assigned.update(a.reaching((name,)))  # the line's variable, unless a function body's local (SPD-246)
     if a.unsure or a.loop_depth:
         a.doubt.add(name)
         if a.loop_depth:

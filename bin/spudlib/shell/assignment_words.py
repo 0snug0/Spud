@@ -85,6 +85,37 @@ def declaration_word(word):
     return found
 
 
+_LOCAL_ATTRIBUTES = frozenset("airx")  # array, integer, readonly, export: attributes both shells give a local (local_names)
+
+
+def local_names(words):
+    """The names a declaration makes local to the function body it runs in (SPD-246): `local`, or `typeset` or `declare`
+    with no -g, each operand a plain name or `name=value`.  Probed 2026-09-24 (shell_probe: zsh 5.9 -f and -f -o
+    nobareglobqual, bash 3.2.57): `x=0; f () { local x=1; }; f; echo $x` printed 0 in all three, and so did typeset,
+    declare, `local -a`, `-i`, `-x` and `-r`; `typeset -g` printed 1 in zsh (bash 3.2 has no -g), export 1 in all three,
+    readonly 0 in zsh and 1 in bash.  So nothing is local where the hook cannot say so for both shells: export, readonly,
+    an option other than those four attributes (-g global, -f/-F functions, -p print, -m a pattern, `+` switching one off,
+    `-A` or a bare `-`, which bash 3.2 refuses, leaving a later `x=1` global), and an operand with a subscript, one that
+    appends, or one the hook cannot read.  Such a name counts as the line's.  The caller holds a declaration to the body's
+    own shell, where it surely runs: the same probe's `(local x)`, `false && local x` and `if false; then local x; fi`
+    each left a later `x=1` in the function global."""
+    if words[0] not in ("local", "typeset", "declare"):
+        return ()
+    names = []
+    for w in words[1:]:
+        text = prepare.deglob(w)
+        if text.startswith(("-", "+")):
+            if text[0] == "+" or len(text) < 2 or not set(text[1:]) <= _LOCAL_ATTRIBUTES:
+                return ()
+            continue
+        found = declaration_word(w)
+        name = text if found is None else found[0] if found[1] is None and not found[2] else None
+        if name is None or not syntax.IDENTIFIER_RE.match(name):
+            return ()
+        names.append(name)
+    return names
+
+
 def array_head(word):
     """True for the word before an array's `(`: `name=`, `name+=`, `name[subscript]=` or `name[subscript]+=` (probed:
     `path[1,0]=(<dir>)` and `typeset path[1]=(<dir>)` ran in zsh)."""

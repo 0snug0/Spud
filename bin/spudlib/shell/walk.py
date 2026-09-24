@@ -48,12 +48,17 @@ class ShellFrame:
     `do ... done` (resolve_body)."""
 
     __slots__ = ("kind", "closer", "saved", "seen", "outer", "pattern", "mark", "body", "funcs", "printed", "earlier", "stdin", "prints",
-                 "procsub", "serial", "bare", "defines", "arith", "bound", "form")
+                 "procsub", "serial", "bare", "defines", "arith", "bound", "form", "locals")
 
     def __init__(self, kind, closer, saved, outer, mark=0, funcs=None):
         self.kind, self.closer, self.saved, self.seen, self.outer = kind, closer, saved, saved, outer
         self.pattern = kind == "case"  # a case command reads a pattern first, and again after each ;;
         self.mark = mark  # how many assignments the line had made when it opened
+        # the locals the innermost function body the shell holds had declared when it opened (ShellAnalysis.body_locals),
+        # put back when it closes: a declaration inside a compound command, which may not run it (a condition, a loop) or
+        # runs it in a subshell, makes no name surely local after it -- a group's is read the same way, the safe side
+        # (SPD-246); None outside such a body
+        self.locals = None
         # the functions defined before a `( ... )` subshell opened, with their bodies (ShellAnalysis.functions and
         # function_bodies), restored when it closes; None for every other frame kind, whose function definitions reach a
         # call after it and are kept.
@@ -206,6 +211,8 @@ class ShellWalk:
         # a subshell's own function definitions do not escape, nor their bodies
         funcs = (set(self.a.functions), bodies_copy(self.a.function_bodies)) if kind == "sub" else None
         frame = ShellFrame(kind, closer, self.a.cwds, outer, len(self.a.assigned), funcs)
+        if self.a.body_locals is not None:
+            frame.locals = dict(self.a.body_locals[-1])
         frame.serial, frame.bare, self.opened, self.closed = self.opened, not self.words, self.opened + 1, None
         if frame.bare:  # the compound command a definition's header is followed by, and not a `<( )` in a command's words
             frame.defines, self.defining = self.defining, None
@@ -248,6 +255,8 @@ class ShellWalk:
         self.piped_text, self.frame_stdin, self.piped_fed, self.frame_stdin_fed, self.pipe_feeds = frame.stdin
         if frame.kind == "sub":
             self.a.functions, self.a.function_bodies = frame.funcs  # a function defined in a subshell does not reach a call after it
+        if frame.locals is not None:
+            self.a.body_locals[-1] = frame.locals  # a local declared inside it may not be one after it (SPD-246)
         if frame.kind in ("loop", "func"):
             self.a.loop_depth -= 1
         self.a.func_depth -= frame.kind == "func"
@@ -420,6 +429,7 @@ class ShellWalk:
         if "in" not in self.words:
             if syntax.IDENTIFIER_RE.match(t):
                 self.a.doubt.add(t)
+                self.a.line_assigned.update(self.a.reaching((t,)))  # assigned as a variable is (SPD-246)
             return
         at = self.words.index("in")
         names = [n for n in self.words[:at] if syntax.IDENTIFIER_RE.match(n)]
@@ -427,6 +437,8 @@ class ShellWalk:
         # word that may start with `-` on
         if len(self.words) == at + 1:
             self.a.dashless_loops.update(names)
+            # the loop assigns its variables in the shell it runs in, a function body's global among them (SPD-246)
+            self.a.line_assigned.update(self.a.reaching(names))
         elif _value_may_start_with_dash(t):
             self.a.dashless_loops.difference_update(names)
         # a list holding a positional parameter (`for a in "$@"`), or -- once shell/positional has set the call's words
@@ -435,7 +447,7 @@ class ShellWalk:
         # word just read is tested, so a long list stays linear: each word reaches this once as `t`.
         word = prepare.deglob(t)
         if syntax.POSITIONAL_RE.search(word) is not None or word in self.a.shell_words:
-            self.a.member_vars.update(names)
+            self.a.fill_members(names)
 
     def end_header(self):
         """The loop's header, or an if/while/until condition ending in `]]`, is complete.  Its body may follow with no `do`
@@ -1013,17 +1025,21 @@ def reading_start(a):
     """The state a walk reads a line's commands with, and changes as it goes, that restore_reading puts back: the
     directories, the variables, the loop depth, the aliases, the loop names read as dashless, and the function bodies
     bound to their names (SPD-212: each walk of the line binds its own definitions again, and zsh's reading's do not
-    stand for bash's reading's while it walks), and shell/loop_bindings' loop and substitution values (SPD-146)."""
+    stand for bash's reading's while it walks), and shell/loop_bindings' loop and substitution values (SPD-146), and the
+    locals the innermost function body the shell holds has declared (SPD-246)."""
     return (a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases), set(a.dashless_loops), bodies_copy(a.function_bodies),
-            dict(a.loop_words), dict(a.derived), a.func_depth, dict(a.loop_derived))
+            dict(a.loop_words), dict(a.derived), a.func_depth, dict(a.loop_derived),
+            None if a.body_locals is None else dict(a.body_locals[-1]))
 
 
 def restore_reading(a, start):
     """Put back reading_start's state, copied, so one start serves every walk of the line."""
-    cwds, variables, loop_depth, aliases, dashless, function_bodies, loop_words, derived, func_depth, loop_derived = start
+    cwds, variables, loop_depth, aliases, dashless, function_bodies, loop_words, derived, func_depth, loop_derived, local = start
     a.cwds, a.vars, a.loop_depth, a.cd_uncertain = cwds, dict(variables), loop_depth, False
     a.aliases, a.dashless_loops, a.function_bodies = dict(aliases), set(dashless), bodies_copy(function_bodies)
     a.loop_words, a.derived, a.func_depth, a.loop_derived = dict(loop_words), dict(derived), func_depth, dict(loop_derived)
+    if local is not None:
+        a.body_locals[-1] = dict(local)
 
 
 def bodies_copy(function_bodies):

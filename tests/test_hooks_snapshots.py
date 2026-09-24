@@ -393,7 +393,9 @@ class RealShellSnapshotTest(BashHookCase):
 
     def test_the_commands_members_run_all_day_stay_silent(self):
         for cmd in ("ls", "ls -la", "grep -rn spud .", "python3 --version", "cat /etc/hosts", "echo hi", "git status",
-                    "find . -name x", "diff /etc/hosts /etc/hosts"):
+                    "find . -name x", "diff /etc/hosts /etc/hosts",
+                    # SPD-246: two of the harness's shadows on one line (HarnessShadowTest)
+                    "find . -name x | grep y", "grep a f | grep -v b", "grep -c a f; grep -c b f"):
             with self.subTest(cmd):
                 r = self.real_bash(cmd)
                 self.assertNotEqual(r.decision, "deny", (cmd, r.reason))
@@ -1581,6 +1583,239 @@ class ReaderFailsClosedTest(ShellSnapshotCase):
         started = time.monotonic()
         m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path)))
         self.assertLess(time.monotonic() - started, 2)
+
+
+# The harness's own shadows as Claude Code writes them into every snapshot it sources, copied from this Mac's snapshot
+# of 2026-09-24 (snapshot-zsh-1790235321145-pm4nbj.sh) with the Mac's own claude path spelled as a scratch one.  find, grep
+# and rg keep `_cc_bin` (grep also `_cc_a`) local, settle it with `[[ -x $_cc_bin ]] || _cc_bin=...` -- an assignment that
+# may not run, so `"$_cc_bin"` is read in doubt -- and dispatch through it; pkill declares its locals inside a condition.
+# SHELL_SNAPSHOT's one-line grep has no `||`, which is why no test met a second shadow's doubt (SPD-246).
+HARNESS_SHADOWS = """\
+# Functions
+setv () {
+\tV="$1"
+}
+globalv () {
+\ttypeset -g V="$1"
+}
+localv () {
+\tlocal V="$1"
+}
+mixv () {
+\tV="$1"
+\tlocal V=x
+}
+condlocal () {
+\t[[ -n $1 ]] && local V
+\tV="$1"
+}
+sublocal () {
+\t(local V)
+\tV="$1"
+}
+iflocal () {
+\tif [[ -n $1 ]]; then local V; fi
+\tV="$1"
+}
+vgit () {
+\tgit $V
+}
+loopglobal () {
+\tfor W in "$@"; do :; done
+}
+wgit () {
+\tgit $W
+}
+loopmember () {
+\tlocal a
+\tfor a in "$@"; do :; done
+}
+runa () {
+\tlocal a=ls
+\t[[ -n $X ]] && a=cat
+\t$a f
+}
+globalgit () {
+\tgit $GITVERB
+}
+# Shadow find/grep with embedded bfs/ugrep
+unalias find 2>/dev/null || true
+unalias grep 2>/dev/null || true
+function find {
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  [[ -x $_cc_bin ]] || _cc_bin=/Users/Someone/.local/bin/claude
+  if [[ ! -x $_cc_bin ]]; then command find ${1+"$@"}; return; fi
+  if [[ -n ${ZSH_VERSION:-} ]]; then
+    ARGV0=bfs "$_cc_bin" -S dfs -regextype findutils-default ${1+"$@"}
+  elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
+    ARGV0=bfs "$_cc_bin" -S dfs -regextype findutils-default ${1+"$@"}
+  else
+    (exec -a bfs "$_cc_bin" -S dfs -regextype findutils-default ${1+"$@"})
+  fi
+}
+function grep {
+  local _cc_a
+  for _cc_a in ${1+"$@"}; do
+    case "$_cc_a" in -*-filter*|-*-pager*|-*-view*|-*-format-open*|-*-config*|---*|-@*|-*-save-config*|-[Zz]*|-[!-]*[Zz]*|--null|--null-data) command grep ${1+"$@"}; return ;; esac
+  done
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  [[ -x $_cc_bin ]] || _cc_bin=/Users/Someone/.local/bin/claude
+  if [[ ! -x $_cc_bin ]]; then command grep ${1+"$@"}; return; fi
+  if [[ -n ${ZSH_VERSION:-} ]]; then
+    ARGV0=ugrep "$_cc_bin" -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl ${1+"$@"}
+  elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
+    ARGV0=ugrep "$_cc_bin" -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl ${1+"$@"}
+  else
+    (exec -a ugrep "$_cc_bin" -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl ${1+"$@"})
+  fi
+}
+# Shadow pkill to refuse patterns matching the CLI process
+unalias pkill 2>/dev/null || true
+function pkill {
+  if [ -n "${CLAUDE_PID:-}" ] && [ -r "/proc/${CLAUDE_PID}/comm" ]; then
+    local _cc_skip="" _cc_a
+    local -a _cc_probe=()
+    for _cc_a in ${1+"$@"}; do
+      if [ -n "$_cc_skip" ]; then _cc_skip=""; continue; fi
+      case "$_cc_a" in
+        --signal) _cc_skip=1 ;;
+        --signal=*|-e|--echo) ;;
+        -[0-9]*) ;;
+        -[PUGOF]?*) _cc_probe+=("$_cc_a") ;;
+        -[ABCDEFGHIJKLMNOPQRSTUVWXYZ][ABCDEFGHIJKLMNOPQRSTUVWXYZ0-9]*) ;;
+        *) _cc_probe+=("$_cc_a") ;;
+      esac
+    done
+    if command pgrep ${_cc_probe[@]+"${_cc_probe[@]}"} 2>/dev/null | command grep -qx "${CLAUDE_PID}"; then
+      printf 'pkill: refusing to run -- this pattern matches the Claude CLI process (PID %s). Narrow the pattern, or target your own children with `pkill -P $$ ...`.\\n' "${CLAUDE_PID}" >&2
+      return 1
+    fi
+  fi
+  command pkill ${1+"$@"}
+}
+if ! (unalias rg 2>/dev/null; command -v rg) >/dev/null 2>&1; then
+  function rg {
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  [[ -x $_cc_bin ]] || _cc_bin=/Users/Someone/.local/bin/claude
+  if [[ ! -x $_cc_bin ]]; then command rg ${1+"$@"}; return; fi
+  if [[ -n ${ZSH_VERSION:-} ]]; then
+    ARGV0=rg "$_cc_bin" ${1+"$@"}
+  elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
+    ARGV0=rg "$_cc_bin" ${1+"$@"}
+  else
+    (exec -a rg "$_cc_bin" ${1+"$@"})
+  fi
+}
+fi
+"""
+
+
+class HarnessShadowTest(ShellSnapshotCase):
+    """SPD-246 (proposal by SPUD-134/Billie): analyse_shell_text keeps a body's finding that names a variable the line
+    assigned before the text (SPD-205), and took the line's variables to be every name assigned so far -- a function
+    body's own locals included.  The first shadow on a line put its `_cc_bin` there, so the second one's `"$_cc_bin"`,
+    read in doubt after its `[[ -x $_cc_bin ]] || _cc_bin=...`, was kept as the member's: every member was refused
+    `find . -name x | grep y`, `grep a f | grep -v b` and `grep -c a f; grep -c b f` with "the variable $_cc_bin may not
+    hold the value this line assigned it".
+
+    The rule now: the line's variables are the names whose assignment reaches the line's shell -- every one the line's own
+    text makes, as before, and one a function body the line calls makes to a name it did not declare local, which is
+    still set when a later text runs (`setv () { V="$1" }; vgit () { git $V }`: `setv $(echo push); vgit` pushes), and a
+    for loop's variable is assigned as `NAME=value` is.  A body's local is gone when it returns, so it is never the
+    line's, and the name is again what it was before the call.  A name counts as local only where the declaration surely
+    ran in the body's own shell: `local`, or `typeset`/`declare` without -g, at the body's own level -- not after `&&` or
+    `||`, in a pipeline, or inside any compound command (a group included, read the same way) -- and so in both of the
+    hook's readings.  The variables a call's words fill (SPD-205's member_vars) follow the same rule: a body's local filled
+    from its call's words is not the member's in a later call's text.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        path = self.write_snapshot("snapshot-zsh-1700000000024-246246.sh", HARNESS_SHADOWS)
+        newest = path.stat().st_mtime + 60  # newer than SHELL_SNAPSHOT, whose one-line grep it replaces
+        os.utime(path, (newest, newest))
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def test_the_shadows_are_the_harness_s(self):
+        for line in ("find . -name x", "grep a f", "pkill -f x", "rg x"):
+            with self.subTest(line=line):
+                self.assertEqual(self.analysis(line).shell_expanded, [(line.split()[0], "a shell function")])
+                self.silent_for_everyone(line)
+
+    def test_the_tickets_evidence(self):
+        for line in ("find . -name x | grep y", "grep a f | grep -v b", "grep -c a f; grep -c b f"):
+            with self.subTest(line=line):
+                self.assertNotIn(("var-doubt", "$_cc_bin"), self.analysis(line).findings)
+                self.silent_for_everyone(line)
+
+    def test_any_two_shadows_on_one_line(self):
+        for line in ("grep -rn x . | grep -v y | grep -c z", "find . -name x; find . -name y", "rg x && rg y", "rg x | grep y",
+                     "grep a f || find . -name x", "pkill -f x; pkill -f y", "pkill -f x; grep a f", "grep a f; pkill -f x",
+                     "(grep a f); grep b f", "echo $(grep a f) | grep b", "for f in a b; do grep x $f; done; grep y z",
+                     "X=$(echo y); grep a f | grep $X", "grep a f; X=$(echo y); grep $X g"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
+
+    # -- SPD-205's findings for the line's own variables stand ------------------------------------------------------------
+    def test_a_variable_the_line_assigns_keeps_its_finding(self):
+        """A variable the line's own text assigns is the member's wherever a later text reads it, a shadow's run between
+        or not -- the very `_cc_bin` a shadow reads included, since the line assigned that name itself -- and a for loop's
+        variable is assigned as much as `NAME=value` is (it was not counted, and the loop's list passed as the verb)."""
+        for line in ("grep a f; GITVERB=$(echo push); globalgit", "GITVERB=$(echo push); grep a f | globalgit",
+                     "find . -name x | grep y; GITVERB=$(echo push); globalgit", "GITVERB=$(echo push); grep a f; grep b f; globalgit",
+                     "_cc_bin=$(echo x); grep a f", "grep a f; _cc_bin=$(echo x); grep b f",
+                     "for GITVERB in $(echo push); do :; done; globalgit", "grep a f; for GITVERB in $(echo push); do grep b f; done; globalgit"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "cannot resolve")
+                self.assertSilent(line, agent_id=None)
+        self.silent_for_everyone("grep a f; globalgit")  # no line assigns GITVERB: the environment's, as SPD-205 reads it
+
+    # -- a function that sets a global a later text reads -------------------------------------------------------------
+    def test_a_global_a_function_sets_is_the_line_s(self):
+        """A body's assignment to a name it did not declare local is still set when the call returns, so a later text that
+        reads it reads what the call put there -- here the member's own word, which the hook cannot read."""
+        for line in ("setv $(echo push); vgit", "globalv $(echo push); vgit", "setv $(echo push); grep a f; vgit",
+                     "grep a f | setv $(echo push); vgit", "loopglobal $(echo push); wgit", "loopglobal $(echo push); wgit x"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "cannot resolve")
+                self.assertSilent(line, agent_id=None)
+        self.refused_for_members("setv push; vgit", "Law 7")
+        self.refused_for_members("globalv push; vgit", "Law 7")
+
+    def test_a_local_that_may_not_be_one_counts_as_global(self):
+        """A declaration the body may not run, or runs in a subshell -- after `&&`, in `( )`, in an `if` -- does not make
+        the assignment after it local: each left a later `x=1` global in zsh and bash (assignment_words.local_names's probe), and
+        the hook reads it as the global it may be."""
+        for line in ("condlocal $(echo push); vgit", "sublocal $(echo push); vgit", "iflocal $(echo push); vgit"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "cannot resolve")
+                self.assertSilent(line, agent_id=None)
+
+    def test_a_function_s_local_is_gone_when_it_returns(self):
+        """`local V="$1"` sets nothing after the call: vgit reads the environment's V, as `vgit` alone does, and a V the
+        line assigned before the call is what it was -- its value and its certainty (the local's value was read as the
+        line's, and the call left the line's V in doubt).  A body that assigned the line's V before declaring its own
+        changed it."""
+        self.silent_for_everyone("vgit")
+        self.silent_for_everyone("localv $(echo push); vgit")
+        self.silent_for_everyone("localv push; vgit")
+        self.silent_for_everyone("V=status; localv push; git $V")
+        self.silent_for_everyone("V=status; localv $(echo push); vgit")
+        self.refused_for_members("V=status; mixv push; git $V", "Law 7")
+        self.refused_for_members("true && V=status; localv x; git $V", "may not hold the value")  # in doubt before the call
+
+    def test_a_local_the_call_s_words_filled_stays_in_its_call(self):
+        """SPD-205's member_vars: loopmember's local `a`, which its call's words fill, is not the member's in runa's text,
+        whose own local `a` is read in doubt."""
+        self.silent_for_everyone("runa z")
+        self.silent_for_everyone("loopmember y; runa z")
 
 
 if __name__ == "__main__":
