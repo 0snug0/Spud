@@ -307,7 +307,7 @@ def git_read_point(words, start=1):
         if w in ("branch", "tag", "config"):
             return option_point(first_read_index(words, max(i + 1, start)))
         k = verb_option_read_index(words, i, start)
-        return None if k is None else (k, {"dash": True, "shift": True, "options": git_verbs.git_file_options(w)})
+        return None if k is None else (k, {"dash": True, "shift": True, "options": git_verbs.git_read_options(w)})
     return None
 
 
@@ -322,7 +322,7 @@ def verb_option_read_index(words, verb_at, start):
     any option at all.  The value a literal file option takes as the next word is a path, not an option, and is left
     to the path rule (`git archive -o $T HEAD`)."""
     verb = words[verb_at]
-    longs, shorts = git_verbs.git_file_options(verb)
+    longs, shorts = git_verbs.git_read_options(verb)
     program, table = verb in syntax.GIT_VERB_PROGRAM_OPTIONS, verb in syntax.GIT_VERB_FILE_OPTIONS
     k = verb_at + 1
     while k < len(words):

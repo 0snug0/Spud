@@ -13554,7 +13554,7 @@ class GitFileWriteTest(BashHookCase):
         super().setUp()
         self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
         home = self.home.path
-        for d in ("ledger/tickets", "docs", "tests/out", "bin"):
+        for d in ("ledger/tickets", "docs", "tests/out", "bin", ".claude/patches"):
             (home / d).mkdir(parents=True, exist_ok=True)
         (home / "ledger/tickets/SPD-001.md").write_text("orig\n", encoding="utf-8")
         (home / "docs/x.md").write_text("orig\n", encoding="utf-8")
@@ -13677,7 +13677,9 @@ class GitFileWriteTest(BashHookCase):
             with self.subTest(command):
                 self.out_of_deliverables(command)
         self.assertSilent("git format-patch -o tests/out -1")
-        self.assertSilent("git format-patch -1")
+        self.assertSilent("git format-patch --stdout -1")
+        # with no -o the files land here, at the home's root, outside tests/** (SPD-093, GitCwdWriteTest)
+        self.assertRefused("git format-patch -1", "default form")
 
     def test_the_diff_output_option_on_every_verb_that_takes_it(self):
         home = self.home.path
@@ -13825,11 +13827,14 @@ class GitFileWriteTest(BashHookCase):
                 continue  # a verb with no entry: its words are read only where spelled with a leading `-` (below)
             command = line.format(opt="$OPT")
             self.refused_to_members(command)
+            # format-patch, bugreport and diagnose with no -o write where they run (SPD-093), which Law 1 lets Spud do
+            # only among his own paths, and an unsettled $OPT may not be their -o
+            cwd = str(self.home.path / ".claude" / "patches") if line.split()[1] in ("format-patch", "bugreport", "diagnose") else None
             with self.subTest(command=command, agent_id="spud"):
-                self.assertSilent(command, agent_id=None)
+                self.assertSilent(command, agent_id=None, cwd=cwd)
             settled = "OPT=%s; %s" % ("%s=%s" % (long, note) if long else "-%s%s" % (short, note), command)
             with self.subTest(command=settled, agent_id="spud"):
-                self.assertRefused(settled, "Law 1", agent_id=None)
+                self.assertRefused(settled, "Law 1", agent_id=None, cwd=cwd)
         for command in ("git log -$X", "git log --outp$X=d.txt", "git diff --o$(echo utput)=d.txt"):
             self.refused_to_members(command)
 
@@ -13837,7 +13842,7 @@ class GitFileWriteTest(BashHookCase):
         # Its literal head has settled it already (an option with its `=`, a short option that names no file, a path),
         # or it stands where a spaced option takes its value, which the path rule reads.
         for ok in ("git log --grep=$P", "git log --author=$ME -1", "git log -S$X", "git diff $A $B", "git show HEAD:$F",
-                   "git log --oneline src/*.py", "git format-patch --subject-prefix=$P -1", "git archive HEAD src/*.py",
+                   "git log --oneline src/*.py", "git format-patch --stdout --subject-prefix=$P -1", "git archive HEAD src/*.py",
                    "git log --format=%h*"):
             with self.subTest(ok):
                 self.assertSilent(ok)
@@ -13903,6 +13908,263 @@ class GitFileWriteTest(BashHookCase):
                         "for f in a; do git archive -o %s/docs/a.tar HEAD; done"):
             with self.subTest(command % home):
                 self.assertRefused(command % home, "deliverables", AGENT_A)
+
+
+AGENT_PATCHES = "a4b5c6d7e8f9a0b1c"  # SPD-093: a member holding out/* and patches/*.patch
+PICKED = ""  # hooks/pathrule.NAME_CHAR + NAME_MORE: a name git picks, of any length; a reason shows `?*`
+
+
+class GitCwdWriteTest(BashHookCase):
+    """SPD-093: `git format-patch -1`, `git bugreport` and `git diagnose`, in their default forms, write a file of git's
+    own naming into the directory git runs in, and no rule saw it: a member dropped files into a checkout outside its
+    deliverables, and Spud past Law 1.  syntax.GIT_VERB_CWD_WRITES reads that form as a new file directly in that
+    directory whose name git picks (PICKED), held to the path rule like a redirection target, so a glob covers it only
+    when it covers every file directly there.
+
+    Probed on git 2.54.0 (Apple Git-157), in a directory under this worktree's tests/ (removed after) and in the
+    scratchpad.  `git format-patch -1 <rev>` wrote 0001-<subject>.patch into the directory it ran in, `git -C a -C b
+    format-patch` into a/b and `git -C a -C ""` into a; `git bugreport` wrote git-bugreport-<date>.txt there, `git
+    diagnose` git-diagnostics-<date>.zip, and `git bugreport --diagnose` both.  `-o ''`, `--output-directory=` and
+    `--stdout --no-stdout` wrote there too; `--output=F` and `--output F` wrote one file F.  format-patch takes no
+    abbreviation of any option (`--std`, `--output-dir=D`, `--outp=F` and `--no-std` were each "unrecognized
+    argument") and refuses `--no-output-directory`; bugreport took `--out=D` as -o and `--no-o` set it back.
+    `--subject-prefix --stdout -1` and `--to --stdout -1` wrote 0001-...patch here: an option of format-patch's own
+    took --stdout as its value, as the diff option --src-prefix took `--output=F`.  `-h` and `--help` printed usage and
+    wrote nothing wherever they stood (exit 129).  The
+    names: `-v ../x/y` wrote v.-x-y-0001-... (git sanitises the reroll count), but `--suffix=/../b/x` wrote b/x through a
+    directory named for the patch, bugreport's `-s /../x` wrote ./x.txt (making git-bugreport-/), `-o D -s /../../x`
+    wrote beside D, diagnose's `-s /../../dx` two levels up, and `-s %D` wrote git-bugreport-09/23/26.txt, as %x, %Ex,
+    %OD, %_D, %0x and %-D did.
+
+    AGENT_A plans tests/** and bin/spud, AGENT_C home:** and AGENT_PATCHES out/* and patches/*.patch; each line runs at
+    the home's root unless it says otherwise."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.narrow = self.spawn(self.plan(actor=self.lead["ref"], persona="engineer", model="opus",
+                                           deliverable=["home:out/*", "home:patches/*.patch"]), AGENT_PATCHES, caller=AGENT_A)
+        for d in ("docs/superpowers/specs", "tests/out", "out", "patches", ".claude/patches", "ledger/tickets"):
+            (self.home.path / d).mkdir(parents=True, exist_ok=True)
+
+    def at(self, *parts):
+        return str(self.home.path.joinpath(*parts))
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def test_the_default_forms_outside_every_glob_are_refused(self):
+        for command in ("git format-patch -1", "git format-patch HEAD~3", "git format-patch --cover-letter -n -3",
+                        "git bugreport", "git bugreport --diagnose", "git diagnose", "git diagnose --mode=all"):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", AGENT_A)
+                self.assertIn("default form, into ./?*", r.reason)
+                self.assertRefused(command, "deliverables", AGENT_PATCHES)
+                self.assertSilent(command, AGENT_C)
+
+    def test_a_directory_whose_every_file_a_glob_covers_is_allowed(self):
+        for command, cwd in (("git format-patch -1", ("tests",)), ("git format-patch -3", ("tests", "out")),
+                             ("git bugreport", ("tests", "out")), ("git diagnose", ("tests",))):
+            with self.subTest(command, cwd=cwd):
+                self.assertSilent(command, AGENT_A, cwd=self.at(*cwd))
+        for command in ("cd tests/out && git format-patch -1", "cd tests; git bugreport", "(cd tests/out && git diagnose)"):
+            with self.subTest(command):
+                self.assertSilent(command, AGENT_A)
+        for command in ("cd out && git format-patch -1", "cd out; git bugreport --diagnose", "cd out && git diagnose"):
+            with self.subTest(command):
+                self.assertSilent(command, AGENT_PATCHES)
+
+    def test_a_glob_that_covers_some_names_git_may_pick_does_not_cover_it(self):
+        """patches/*.patch matches 0001-<subject>.patch, but not what --numbered-files, --suffix or a format.suffix in a
+        config the hook does not read make of it, so a name git picks is read as any name at all."""
+        for command in ("cd patches && git format-patch -1", "git -C patches format-patch -1",
+                        "cd patches && git format-patch --suffix=.patch -1"):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", AGENT_PATCHES)
+                self.assertIn("patches/?*", r.reason)
+
+    def test_spud_is_held_to_law_1(self):
+        for command in ("git format-patch -1", "git bugreport", "cd docs && git diagnose", "git -C ledger/tickets format-patch -1"):
+            with self.subTest(command):
+                self.assertRefused(command, "Law 1", agent_id=None)
+        for command in ("cd .claude/patches && git format-patch -1", "git -C docs/superpowers/specs bugreport",
+                        "git -C .claude/patches diagnose -s %Y"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)
+        self.assertRefused("cd ledger/tickets && git format-patch -1", "generated", AGENT_C)
+
+    def test_minus_C_and_the_directories_the_shell_may_be_in_are_followed(self):
+        home = self.home.path
+        for ok in ("git -C tests/out format-patch -1", "git -C tests -C out format-patch -1",
+                   "git -C docs -C %s/tests/out format-patch -1" % home, "cd docs && git -C ../tests/out format-patch -1",
+                   "cd tests/out; git -C .. bugreport", "git -C tests/out -C '' diagnose"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+        for refused in ("git -C docs format-patch -1", "git -C tests -C ../docs format-patch -1",
+                        "cd tests/out && git -C ../../docs bugreport", "cd docs && git diagnose",
+                        "git -C tests/out -C %s/docs diagnose" % home):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_A)
+                self.assertIn("docs/?*", r.reason)
+
+    def test_a_directory_the_hook_cannot_follow_refuses_everyone(self):
+        for command in ("cd $DIR; git format-patch -1", "popd; git bugreport", "cd -; git diagnose"):
+            with self.subTest(command):
+                self.assertRefused(command, "cannot follow", AGENT_A)
+                self.assertRefused(command, "cannot follow", agent_id=None)
+        for command in ("git -C $D format-patch -1", "git -C $(pwd)/x bugreport"):
+            with self.subTest(command):
+                self.assertRefused(command, "cannot resolve", AGENT_A)
+                self.assertRefused(command, "cannot resolve", agent_id=None)
+
+    def test_the_forms_that_send_the_files_elsewhere_keep_their_own_reading(self):
+        """-o's directory stays GitFileWriteTest's (SPD-049); --stdout and --output write nothing here."""
+        for ok in ("git format-patch --stdout -1", "git format-patch -1 --stdout", "git format-patch HEAD~2 --stdout -k",
+                   "git format-patch -o tests/out -1", "git format-patch -otests/out -1",
+                   "git format-patch --output-directory=tests/out -3", "git format-patch --output-directory tests/out -1",
+                   "git format-patch -ko tests/out -1", "git format-patch -so tests/out -1", "git format-patch -nNkso tests/out -1",
+                   "git format-patch --output=tests/out/all.patch -2", "git format-patch --output tests/out/all.patch -1",
+                   "git format-patch HEAD~2 --output=tests/out/all.patch", "git format-patch --no-stdout --stdout -1",
+                   "git format-patch --subject-prefix=RFC --stdout -1", "git format-patch --subject-prefix RFC --stdout -1",
+                   "git format-patch -1 -M --stdout", "git format-patch --to x@y --cc z@w --stdout -1",
+                   "git format-patch --stdout -- -o", "git bugreport -o tests/out", "git bugreport --output-directory=tests/out --diagnose",
+                   "git bugreport --out=tests/out", "git bugreport --output tests/out", "git bugreport -o tests/out --no-suffix",
+                   "git diagnose -otests/out", "git diagnose --mode stats -o tests/out"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+                self.assertEqual([w for w in self.analysis(ok).git_writes if "default form" in w[0]], [])
+
+    def test_a_word_git_takes_as_an_options_value_sends_nothing_away(self):
+        for command in ("git format-patch --subject-prefix --stdout -1", "git format-patch --to --stdout -1",
+                        "git format-patch -v --stdout -1", "git format-patch --stdout --no-stdout -1",
+                        "git format-patch --signature --output=tests/out/x.patch -1", "git format-patch --subject-prefix -h -1",
+                        "git format-patch --src-prefix --output=tests/out/x.patch -1", "git bugreport -s --output-directory=tests/out"):
+            with self.subTest(command):
+                r = self.assertRefused(command, "deliverables", AGENT_A)
+                self.assertIn("default form", r.reason)
+
+    def test_a_later_parses_option_the_hook_does_not_know_keeps_the_reading(self):
+        """format-patch hands every word it does not know to the revision and diff options, where --output is read, and
+        one of those that takes a value takes --output as its value: `--src-prefix --output=F -1` wrote 0001-...patch here
+        and no F (probed).  Which of them take one is not read, so any such option before --output keeps the default
+        reading, fail closed, at the price of `-M --output=F -1`, which wrote F alone (probed)."""
+        self.assertRefused("git format-patch -M --output=tests/out/x.patch -1", "default form", AGENT_A)
+        self.assertSilent("git format-patch -3 --output=tests/out/x.patch", AGENT_A)
+        self.assertSilent("git format-patch --output=tests/out/x.patch -M -1", AGENT_A)
+
+    def test_help_writes_nothing(self):
+        for ok in ("git format-patch -h", "git format-patch --help", "git format-patch -1 -h", "git format-patch -1 --help",
+                   "git bugreport -h", "git bugreport -s x -h", "git diagnose --help", "git diagnose -s x -h"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+
+    def test_a_suffix_with_a_slash_is_read_where_it_lands(self):
+        # out/* covers every file directly in out, so the default form runs there; a name a suffix sends through a
+        # directory is not directly there
+        for ok in ("cd out && git bugreport -s %Y%m%d-%H%M", "cd out && git bugreport --suffix=%F", "cd out && git diagnose -s x",
+                   "cd out && git format-patch --suffix=.txt -1", "cd out && git format-patch -v /../../x -1"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_PATCHES)
+        for refused in ("cd out && git bugreport -s /../../docs/x", "cd out && git bugreport -s x/y",
+                        "cd out && git bugreport -s %D", "cd out && git bugreport -s %-D", "cd out && git bugreport -s %Ex",
+                        "cd out && git bugreport --suf=/../docs/x", "cd out && git diagnose -s /../../docs/x",
+                        "cd out && git diagnose --suffix %x", "cd out && git format-patch --suffix=/../../docs/x -1",
+                        "git -C out bugreport -s /../../x"):
+            with self.subTest(refused):
+                self.assertRefused(refused, "deliverables", AGENT_PATCHES)
+        # tests/** covers any depth, so a date's slashes stay inside it; a suffix that climbs out does not
+        self.assertSilent("cd tests/out && git bugreport -s %D", AGENT_A)
+        r = self.assertRefused("cd tests/out && git bugreport -s /../../../docs/x", "deliverables", AGENT_A)
+        self.assertIn("docs/x.txt", r.reason)
+
+    def test_a_suffix_is_read_under_the_directory_minus_o_names(self):
+        for ok in ("git bugreport -o tests/out -s %x", "git format-patch -o tests/out --suffix=.txt -1",
+                   "git diagnose -o tests/out -s a/b"):
+            with self.subTest(ok):
+                self.assertSilent(ok, AGENT_A)
+        for refused in ("git bugreport -o tests/out -s /../../../docs/x", "git diagnose --output-directory=tests/out -s /../../../docs/x",
+                        "git format-patch -o tests/out --suffix=/../../../docs/x -1",
+                        "git -C docs bugreport -o %s/tests/out -s /../../../docs/x" % self.home.path):
+            with self.subTest(refused):
+                r = self.assertRefused(refused, "deliverables", AGENT_A)
+                self.assertIn("docs/x", r.reason)
+
+    def test_a_word_that_may_become_another_option_keeps_the_reading(self):
+        """A glob or an expansion the hook cannot read may become a reset or an option that takes the next word as its
+        value, so a line holding one before `--` is read as the default form, fail closed.  One whose option the line
+        settles (`--subject-prefix=$P`) is read as spelled."""
+        for command in ("git format-patch --stdout --no-std?ut -1", "git format-patch --stdout --subject-pre* -1",
+                        "git bugreport -o tests/out --no-o*", "git bugreport -o tests/out --suf?ix=/../../../docs/x"):
+            with self.subTest(command):
+                self.assertRefused(command, "", AGENT_A)
+        self.assertRefused("git format-patch --stdout $X -1", "Law 1", agent_id=None)
+        self.assertSilent("git format-patch --stdout $X -1", agent_id=None, cwd=self.at(".claude", "patches"))
+        self.assertSilent("git format-patch --stdout --subject-prefix=$P -1", AGENT_A)
+
+    def test_config_the_line_sets_moves_the_directory_for_spud(self):
+        """-c format.outputDirectory moves format-patch's default directory, and -o and --stdout win over it
+        (git-format-patch(1): "The -o option takes precedence over format.outputDirectory"); format.suffix shapes the
+        names as --suffix does.  A member sets no format.* key at all (Law 7's inert allowlist), so this is Spud's
+        reading, and the one the prober could not run: the hook refuses a member the -c."""
+        spec = ".claude/patches"
+        for ok in ("git -c format.outputDirectory=%s format-patch -1" % spec,
+                   "git -c format.outputdirectory=docs format-patch --stdout -1",
+                   "git -c format.outputDirectory=docs format-patch -o %s -1" % spec,
+                   "git -c format.outputDirectory=docs -c format.outputDirectory=%s format-patch -1" % spec):
+            with self.subTest(ok):
+                self.assertSilent(ok, agent_id=None)
+        for refused in ("git -c format.outputDirectory=docs format-patch -1", "git -c FORMAT.OUTPUTDIRECTORY=docs format-patch -1",
+                        "git -C %s -c format.outputDirectory=../../docs format-patch -1" % spec,
+                        "git -c format.suffix=/../../../docs/x -C %s format-patch -1" % spec,
+                        "git -c format.outputDirectory=%s format-patch -o '' -1" % spec):
+            with self.subTest(refused):
+                self.assertRefused(refused, "Law 1", agent_id=None)
+        self.assertRefused("git --config-env=format.outputDirectory=D format-patch -1", "cannot resolve", agent_id=None)
+        self.assertRefused("git -c format.outputDirectory=tests/out format-patch -1", "Law 7", AGENT_A)
+
+    def test_inside_shell_strings_eval_and_subshells(self):
+        for command in ("sh -c 'git format-patch -1'", "eval 'git bugreport'", "(git diagnose)", "true && git format-patch -1",
+                        "for f in a; do git format-patch -1; done", "git status && git format-patch -1"):
+            with self.subTest(command):
+                self.assertRefused(command, "deliverables", AGENT_A)
+
+    def test_the_channel_records_the_file_git_names(self):
+        cwds = frozenset([str(self.home.path)])
+        self.assertEqual(self.analysis("git format-patch -1").git_writes,
+                         [("format-patch's default form, into ./" + PICKED, PICKED, cwds)])
+        self.assertEqual(self.analysis("git -C docs diagnose -s x/y").git_writes,
+                         [("diagnose's default form, into ./docs/" + PICKED, "docs/" + PICKED, cwds),
+                          ("diagnose's suffix x/y, into ./docs/git-diagnostics-x/y.zip", "docs/git-diagnostics-x/y.zip", cwds)])
+        for writes_nothing in ("git format-patch --stdout -1", "git bugreport -h", "git diagnose -o tests/out"):
+            with self.subTest(writes_nothing):
+                self.assertEqual([w for w in self.analysis(writes_nothing).git_writes if PICKED in w[1]], [])
+
+    def test_the_verbs_the_survey_read(self):
+        """Every verb of GIT_MEMBER_VERBS read against its man page for "current (working) directory" and "temporary
+        file": format-patch, bugreport and diagnose are the three that write there by default.  The others that write a
+        file write only what the line names, or to standard output."""
+        m = load_spud_module()
+        self.assertEqual(sorted(m.GIT_VERB_CWD_WRITES), ["bugreport", "diagnose", "format-patch"])
+        self.assertTrue(set(m.GIT_VERB_CWD_WRITES) <= m.GIT_MEMBER_VERBS)
+        for ok in ("git archive HEAD", "git fast-export HEAD", "git shortlog -s", "git request-pull v1 url", "git log -1"):
+            with self.subTest(ok):
+                self.assertEqual(self.analysis(ok).git_writes, [])
+
+    def test_each_verbs_option_table_is_gits_own(self):
+        """Which words are options is read from the table, so a value option missing from it would let the word after it
+        be read as --stdout or -o.  `git <verb> --help-all` lists every option (git 2.54.0 hides none of these three's),
+        each with whether it takes a separate value; a git that adds one fails this, so the next reader reads it in."""
+        m = load_spud_module()
+        spec = re.compile(r"^\s+(?:-(\w), )?--(?:\[no-\])?([\w-]+)(?:\[=<[^>]*>\])?( [<(])?", re.M)
+        for verb, entry in m.GIT_VERB_CWD_WRITES.items():
+            with self.subTest(verb):
+                usage = subprocess.run(["git", verb, "--help-all"], capture_output=True, text=True,
+                                       stdin=subprocess.DEVNULL).stdout
+                listed = {("--" + name, short, bool(value)) for short, name, value in spec.findall(usage)}
+                self.assertGreater(len(listed), 2, usage)
+                ours = {(long, short, kind not in ("flag", "stdout")) for long, short, kind in entry[1]}
+                self.assertEqual(ours, listed)
 
 
 # The verbs `git --list-cmds=main` gives on this machine that a member may run, as SPD-087's sweep read them: every name
@@ -14013,7 +14275,8 @@ class GitVerbAllowlistTest(BashHookCase):
                    "git show-index", "git verify-pack -v p.idx", "git verify-commit HEAD", "git fmt-merge-msg",
                    "git pack-redundant --all", "git ls-tree HEAD", "git diff-files", "git diff-index HEAD",
                    "git name-rev --all", "git merge-base a b", "git cat-file -p HEAD", "git var -l",
-                   "git format-patch -1", "git archive HEAD", "git mailsplit mbox", "git fast-export HEAD"):
+                   # --stdout: with no -o format-patch writes where it runs, which GitCwdWriteTest reads (SPD-093)
+                   "git format-patch --stdout -1", "git archive HEAD", "git mailsplit mbox", "git fast-export HEAD"):
             with self.subTest(ok):
                 self.assertSilent(ok)
                 self.assertSilent(ok, agent_id=None)

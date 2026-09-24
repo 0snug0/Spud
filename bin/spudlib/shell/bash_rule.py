@@ -41,7 +41,10 @@ REDIRECT_MESSAGES = {
 GIT_WRITE_MESSAGES = {
     "into": ("a file this git call writes (%s): %s. A git option or a GIT_TRACE* variable can name a file git creates or"
              " appends to anywhere -- `--output`, archive and format-patch `-o`, `bundle create`, GIT_TRACE2_EVENT and"
-             " their kin -- under a verb Law 7's table allows, so it goes through the path rule as a redirection does"),
+             " their kin -- under a verb Law 7's table allows, and format-patch, bugreport and diagnose with no -o write"
+             " files of git's own naming into the directory git runs in, which a glob covers only when it covers every"
+             " file directly there (name a directory with -o, or use --stdout); each goes through the path rule as a"
+             " redirection does"),
     "variable": ("the file this git call writes (%s) holds a variable or substitution the hook cannot resolve, so it cannot"
                  " tell where git would write; spell the path out"),
     "unfollowable": "the file this git call writes (%s) is relative to a directory the hook cannot follow (" + _UNFOLLOWABLE + "; use an absolute path",

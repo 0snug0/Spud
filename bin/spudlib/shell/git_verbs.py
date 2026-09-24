@@ -1,4 +1,4 @@
-"""shell/git_verbs: Law 7's verbs: git's own commands, unknown verbs, repository targets."""
+"""shell/git_verbs: Law 7's verbs: git's own commands, unknown verbs, repository targets, and the files a git call writes."""
 
 import contextlib
 import json
@@ -6,7 +6,7 @@ import os
 
 from . import git_programs, globbing, prepare, spud_calls, syntax
 from ..core import homeconf, lazy
-from ..hooks import hookio
+from ..hooks import hookio, pathrule
 
 
 def git_verb(words):
@@ -277,10 +277,219 @@ def git_write_env_targets(variables):
     return out
 
 
+def git_read_options(verb):
+    """git_file_options, and the suffix options of the verb's syntax.GIT_VERB_CWD_WRITES entry (format-patch's --suffix,
+    bugreport's and diagnose's -s): the options a glob or an expansion is read as it may become
+    (expansions.git_read_point), since a suffix's value can move a file git writes as far as a path option's can."""
+    longs, shorts = git_file_options(verb)
+    entry = syntax.GIT_VERB_CWD_WRITES.get(verb)
+    if entry is None:
+        return longs, shorts
+    suffixes = [(long, short) for long, short, kind in entry[1] if kind == "suffix"]
+    return (longs + tuple(long for long, _ in suffixes if long not in longs),
+            shorts + "".join(short for _, short in suffixes if short not in shorts))
+
+
+def cwd_own_options(word, options, abbreviates):
+    """(the options of a syntax.GIT_VERB_CWD_WRITES entry one word spells, in order, each (option, the value it carries
+    attached or None, whether it is the `--no-` form), what of the word git leaves to its later parse or None), as git's
+    parse-options reads the word.  A long option exact, or, where the verb abbreviates, the one option an unambiguous
+    `--` prefix names (an ambiguous one git refuses); a short cluster letter by letter, until a letter that takes a
+    value -- which takes the rest of the cluster, or the next word when nothing is left -- or one the verb does not have,
+    where parse-options leaves the rest of the cluster to the later parse."""
+    if word.startswith("--"):
+        key, sep, attached = word.partition("=")
+        name, value, found = key[2:], (attached if sep else None), []
+        for option in options:
+            for spelled, negated in ((option[0][2:], False), ("no-" + option[0][2:], True)):
+                if spelled == name:
+                    return [(option, value, negated)], None
+                if abbreviates and name and spelled.startswith(name):
+                    found.append((option, value, negated))
+        return (found, None) if len(found) == 1 else ([], word)
+    if not word.startswith("-") or len(word) < 2:
+        return [], word
+    out = []
+    for k in range(1, len(word)):
+        option = next((o for o in options if o[1] == word[k]), None)
+        if option is None:
+            return out, "-" + word[k:]
+        if option[2] not in ("flag", "stdout"):
+            return out + [(option, word[k + 1 :] or None, False)], None
+        out.append((option, None, False))
+    return out, None
+
+
+def cwd_unread_word(word):
+    """True when the shell may turn a masked word into an option the hook does not see -- a reset, or one that takes the
+    next word as its value: a glob or an expansion whose literal head is empty, or starts with `-` and has not reached
+    the `=` that settles which option it is (`--subject-prefix=$P` has)."""
+    head = literal_head(word)
+    return head != prepare.deglob(word) and (not head or (head.startswith("-") and "=" not in head))
+
+
+def cwd_later_takes_value(word):
+    """Whether a word format-patch leaves to its revision and diff options may take the next word as its value: any
+    option but a count (`-3`), a `--no-` form or one that carries its value after `=`.  Which of those options take one
+    is not read, so any other may, fail closed."""
+    if not word.startswith("-") or word == "-":
+        return False
+    if word.startswith("--"):
+        return "=" not in word and not word.startswith("--no-")
+    return not word[1:].isdigit()
+
+
+def cwd_write_scan(args, entry):
+    """What the arguments of a verb of syntax.GIT_VERB_CWD_WRITES leave git to write, or None when it writes nothing
+    (`-h` or `--help` no option takes as its value): (whether the files go to standard output or to one file, the
+    directory a "dir" option names -- "" for the current one -- or None when none does, every suffix the line gives,
+    whether a word the hook cannot read stands before `--`).  The verb's own options first, as parse-options reads
+    them, a "value" option taking the next word whatever it is; then the words that parse leaves, in order, where an
+    option of the later parse sends the files to one file unless the word before it may take it as its value."""
+    abbreviates, options, later = entry[0], entry[1], entry[2]
+    stdout, directory, suffixes, unread, kept = False, None, [], False, []
+    i = 0
+    while i < len(args):
+        w = args[i]
+        i += 1
+        if w == "--":
+            break
+        if w in ("-h", "--help") and not unread:
+            return None  # usage, or the manual: nothing written, wherever it stood (exit 129, probed)
+        unread = unread or cwd_unread_word(w)
+        spelled, rest = cwd_own_options(w, options, abbreviates)
+        if rest is not None:
+            kept.append(rest)
+        for (_long, _short, kind), value, negated in spelled:
+            if negated:  # `--no-stdout`, bugreport's `--no-output-directory`: back to the current directory
+                stdout = stdout and kind != "stdout"
+                directory = None if kind == "dir" else directory
+                continue
+            if value is None and kind not in ("flag", "stdout"):
+                value = args[i] if i < len(args) else None
+                i += 1
+                unread = unread or (kind == "value" and value is not None and cwd_unread_word(value))
+            if kind == "stdout":
+                stdout = True
+            elif kind == "dir" and value is not None:
+                directory = value
+            elif kind == "suffix" and value is not None:
+                suffixes.append(value)
+    sent, taker, k = stdout, False, 0
+    while k < len(kept):
+        w = kept[k]
+        k += 1
+        key, sep, attached = w.partition("=")
+        if key in later and not taker:
+            value = attached if sep else (kept[k] if k < len(kept) else None)
+            k += 0 if sep else 1
+            sent, taker = sent or bool(value), False
+            continue
+        taker = cwd_later_takes_value(w)
+    return sent, directory, suffixes, unread
+
+
+def git_chdir_and_config(words, keys):
+    """(the directory the composed -C chain names or None, {key: the value `-c` or `--config-env` gives it last} for the
+    config keys of `keys`, compared case-folded), read from git's global options.  A `--config-env` value lives in a
+    variable the hook cannot read, so it comes back as that variable's `$NAME`, which the path rule refuses as
+    unresolvable."""
+    base, values, i = None, {}, 1
+    while i < len(words):
+        w = words[i]
+        if w == "-C":
+            named = words[i + 1] if i + 1 < len(words) else None
+            if named:  # `-C ''` leaves the directory as it is
+                base = named if os.path.isabs(named) or base is None else os.path.join(base, named)
+            i += 2
+            continue
+        operand = None
+        if w in ("-c", "--config-env"):
+            operand, i = (words[i + 1] if i + 1 < len(words) else ""), i + 2
+        elif w.startswith("--config-env="):
+            operand, i = w[len("--config-env=") :], i + 1
+        if operand is not None:
+            key, _, given = operand.partition("=")
+            if key.strip().casefold() in keys:
+                values[key.strip().casefold()] = given if w == "-c" else "$" + given
+            continue
+        if w in syntax.GIT_GLOBAL_VALUE_FLAGS:
+            i += 2
+            continue
+        if w.startswith("-"):
+            i += 1
+            continue
+        break
+    return base, values
+
+
+def strftime_shape(value):
+    """A strftime format as the name git makes of it: its literal text as it is, `%%` a `%`, a conversion
+    syntax.STRFTIME_FLAT names a run git picks, and every other conversion a run two slashes deep (%D's mm/dd/yy), so a
+    name git writes through directories is read that deep."""
+    pick, out, i = pathrule.NAME_CHAR + pathrule.NAME_MORE, [], 0
+    while i < len(value):
+        if value[i] != "%" or i + 1 == len(value):
+            out.append(value[i])
+            i += 1
+            continue
+        c = value[i + 1]
+        out.append("%" if c == "%" else pick if c in syntax.STRFTIME_FLAT else "/".join((pick,) * 3))
+        i += 2
+    return "".join(out)
+
+
+def cwd_write_target(what, base, place, name):
+    """(the spelling a reason names a default-form write by, the path word): `name` in the directory `place`, relative
+    to -C's; an absolute directory drops -C's, as git's does."""
+    path = os.path.join(*[x for x in (base, place, name) if x])
+    shown = path if os.path.isabs(path) or path.startswith(("./", "~")) else "./" + path
+    return "%s, into %s" % (what, shown), path
+
+
+def git_cwd_write_targets(words):
+    """What a verb of syntax.GIT_VERB_CWD_WRITES writes with no word the line spells naming it, as (the spelling a reason
+    names it by, the path): a name git picks directly in the directory it writes into when the line sends the files
+    nowhere else -- the shell's, -C's, format.outputDirectory's when `-c` sets it -- and, for each suffix the line gives
+    (the option, or format.suffix), the name it shapes there and in -o's directory, which may lie in another directory.
+    Nothing when `-h` or `--help` prints usage, or when --stdout or --output takes every file, or -o does and no suffix
+    shapes a name (git_write_option_targets reads -o's and --output's own path)."""
+    verb, args = git_verb(words)
+    entry = syntax.GIT_VERB_CWD_WRITES.get(verb)
+    scan = None if entry is None else cwd_write_scan(args, entry)
+    if scan is None:
+        return []
+    sent, directory, suffixes, unread = scan
+    config, names, strftime = entry[3], entry[4], entry[5]
+    base, configured = git_chdir_and_config(words, config or ())
+    default = configured.get(config[0]) if config else None  # format.outputDirectory: where no -o is given
+    if default is not None and default.startswith("~"):
+        default = "./" + default  # a config value, which no shell expanded
+    if config and configured.get(config[1]) is not None:
+        suffixes = [configured[config[1]]] + suffixes  # format.suffix, which --suffix overrides
+    if unread:  # a word the hook cannot read may be a reset or take --stdout as its value
+        here = [""] + ([default] if default is not None else [])
+    elif sent:
+        return []
+    elif directory is None:
+        here = [default if default is not None else ""]
+    else:
+        here = [""] if directory == "" else []
+    pick = pathrule.NAME_CHAR + pathrule.NAME_MORE
+    out = [cwd_write_target("%s's default form" % verb, base, place, pick) for place in here]
+    for place in here + ([directory] if directory else []):
+        for value in suffixes:
+            shaped = strftime_shape(value) if strftime else value
+            for name in names:
+                out.append(cwd_write_target("%s's suffix %s" % (verb, value), base, place, name.format(pick=pick, value=shaped)))
+    return list(dict.fromkeys(out))
+
+
 def git_write_targets(words, variables):
-    """Every file or directory a git call writes beside the repository it reads: what its options name, then
-    what the environment in force names.  Each is checked with the path rule in bash_reason, like a redirection target."""
-    return git_write_option_targets(words) + git_write_env_targets(variables)
+    """Every file or directory a git call writes beside the repository it reads: what its options name, the file
+    a default form writes into the directory git runs in, then what the environment in force names.  Each is checked
+    with the path rule in bash_reason, like a redirection target."""
+    return git_write_option_targets(words) + git_cwd_write_targets(words) + git_write_env_targets(variables)
 
 
 def flag_list_refused(verb, args, read_flags, value_flags):
