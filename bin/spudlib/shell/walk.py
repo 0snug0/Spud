@@ -574,13 +574,17 @@ class ShellWalk:
                 loop_bindings.bind_loop(cleaned, self.stack[-1], a)
             if header != "repeat":  # a for or select header assigns its name; a repeat count assigns nothing
                 for w in cleaned:
-                    a.doubt.update(syntax._NAME_RE.findall(prepare.deglob(w)))
+                    names = syntax._NAME_RE.findall(prepare.deglob(w))
+                    a.doubt.update(names)
+                    loop_bindings.forget(a, names)  # a loop body's basename of any of them no longer holds (SPD-221)
             return
         outer_substitutions, a.subst_words = a.subst_words, self.substitutions
         before = a.cwds
         # an assignment in a command that may not run (after && or ||) or runs in its own process may not hold after it
         unsure = unsure or self.conditional or self.piped
         a.unsure += unsure
+        # the settled for loop whose body this command stands in directly, run in every pass (SPD-221), or None
+        body_loop, a.body_loop = a.body_loop, None if unsure or self.function_next else loop_bindings.certain_loop(self.stack)
         # the text the command reads on standard input: the pipe's or the compound command's, and its own input
         # redirections in the order they stand in `words`, which still hold its here-document operators, as zsh and bash
         # each read them (stdin_text.command_input, SPD-209), with the values the line settled before it runs (SPD-148)
@@ -606,6 +610,7 @@ class ShellWalk:
             analyse.analyse_segment(cleaned, bodies, a, self.depth, redirect_cwds, stdin, self.piped_fed)
             self.printed = stdin_text.joined(self.printed, printed)
         a.unsure -= unsure
+        a.body_loop = body_loop
         a.subst_words = outer_substitutions
         if a.cd_uncertain or (a.cwds != before and self.conditional):
             self.uncertain = True
@@ -896,6 +901,7 @@ class ShellWalk:
                 self.finish(unsure=True)
                 self.close_sublists()  # `repeat 2 git push &`: the `&` ends the body's sublist, and the loop with it
                 self.a.doubt.update(self.a.assigned[self.list_mark :])  # a background list assigns in its own process
+                loop_bindings.forget(self.a, self.a.assigned[self.list_mark :])
                 self.end_pipeline()
                 self.a.cwds = self.list_start  # the whole and-or list ran in the background
                 self.start_list()
@@ -1009,15 +1015,15 @@ def reading_start(a):
     bound to their names (SPD-212: each walk of the line binds its own definitions again, and zsh's reading's do not
     stand for bash's reading's while it walks), and shell/loop_bindings' loop and substitution values (SPD-146)."""
     return (a.cwds, dict(a.vars), a.loop_depth, dict(a.aliases), set(a.dashless_loops), bodies_copy(a.function_bodies),
-            dict(a.loop_words), dict(a.derived), a.func_depth)
+            dict(a.loop_words), dict(a.derived), a.func_depth, dict(a.loop_derived))
 
 
 def restore_reading(a, start):
     """Put back reading_start's state, copied, so one start serves every walk of the line."""
-    cwds, variables, loop_depth, aliases, dashless, function_bodies, loop_words, derived, func_depth = start
+    cwds, variables, loop_depth, aliases, dashless, function_bodies, loop_words, derived, func_depth, loop_derived = start
     a.cwds, a.vars, a.loop_depth, a.cd_uncertain = cwds, dict(variables), loop_depth, False
     a.aliases, a.dashless_loops, a.function_bodies = dict(aliases), set(dashless), bodies_copy(function_bodies)
-    a.loop_words, a.derived, a.func_depth = dict(loop_words), dict(derived), func_depth
+    a.loop_words, a.derived, a.func_depth, a.loop_derived = dict(loop_words), dict(derived), func_depth, dict(loop_derived)
 
 
 def bodies_copy(function_bodies):

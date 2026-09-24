@@ -36,6 +36,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
     for m in syntax._ASSIGNING_EXPANSION_RE.finditer(command):  # `${X:=git}` assigns X wherever it is expanded (probed)
         a.doubt.add(m.group(1))
         a.sticky.add(m.group(1))
+        a.unseen_assigned.add(m.group(1))  # SPD-221: no loop body's basename settles it
     text, bodies, expanded = heredocs.strip_heredocs(command)
     text, apart = prepare.ansi_c_quotes(text)
     if apart is not None and a.unparseable is None:
@@ -113,7 +114,8 @@ def analyse_isolated(a, command, depth, stdin=None, fed=False):
     the body runs on (analyse_command), part of that state (SPD-210)."""
     key = (command, depth, a.cwds, a.loop_depth, tuple(sorted(a.vars.items())), frozenset(a.doubt), frozenset(a.sticky),
            a.all_doubt, a.alias_scope, stdin_text.reading_key(stdin, fed),
-           tuple(sorted(a.loop_words.items())), tuple(sorted(a.derived.items())), a.func_depth)  # SPD-146's values too
+           tuple(sorted(a.loop_words.items())), tuple(sorted(a.derived.items())), a.func_depth,  # SPD-146's values too
+           tuple(sorted(a.loop_derived.items())))  # and SPD-221's
     if key in a.isolated_done:
         return
     a.isolated_done.add(key)
@@ -231,6 +233,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         reserved = not fresh and w in syntax.RESERVED_WORDS
         if not (m or reserved):
             a.doubt.update(prefix_names)  # a prefix assignment is the command's environment; the shell's variable keeps its value
+            loop_bindings.forget(a, prefix_names)  # ... which no loop body's basename settles either (SPD-221)
             prefix_names = []
             # an assignment's value is not expanded (probed: X=g?t kept g?t); a command word left as spelled is read once
             if not spelled_command and (expansions.expansion_word(w, command=True) or globbing.active_glob_word(w)):
@@ -258,6 +261,8 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         elif m:
             record_assignment(a, m)
             prefix_names.append(m[0])
+            if effect != "shell":
+                loop_bindings.forget(a, prefix_names)  # behind coproc or zsh's `-`: it may not assign the shell's (SPD-221)
             words = words[1:]
         elif w == "-":
             effect = max(effect, "either", key=directories.EFFECT_ORDER.get)  # zsh's `-` precommand modifier; bash finds no `-`
