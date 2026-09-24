@@ -290,6 +290,8 @@ def cd_target(word, a, physical=False):
                 e = os.path.expanduser(e) if e.startswith("~") else e
                 bases += [e] if os.path.isabs(e) else [os.path.join(c, e) for c in sorted(a.cwds)]
         paths = [os.path.join(b, word) for b in bases]
+    if physical == "either":  # CHASE_LINKS may or may not be on (ShellAnalysis.chase): both readings
+        return frozenset(os.path.normpath(p) for p in paths) | frozenset(os.path.realpath(p) for p in paths)
     resolve = os.path.realpath if physical else os.path.normpath
     return frozenset(resolve(p) for p in paths)
 
@@ -300,11 +302,12 @@ def cd_destinations(name, args, a):
     -@, -N) is refused as unfollowable, since zsh reads an option it does not know as the first string of `cd old new`
     and bash 3.2 rejects it, and pushd takes none but -- in both.  popd, and pushd with no directory, go where the stack
     says.  Two arguments: zsh replaces the first occurrence of the first in the current directory with the second, bash 3.2
-    changes to the first, a later bash stays."""
+    changes to the first, a later bash stays.  With neither -L nor -P the shell's CHASE_LINKS (bash's physical) decides,
+    as ShellAnalysis.chase holds it (SPD-263): zsh's -L keeps the path as spelled whatever it says."""
     if name == "popd":
         return None
     args = [settled(w, a) for w in args]  # a value the line settled is the word the builtin gets, option or target (SPD-147)
-    physical = False
+    physical = a.chase
     while args and args[0].startswith("-") and args[0] != "-":
         if args[0] == "--":
             args = args[1:]

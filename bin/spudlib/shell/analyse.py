@@ -29,6 +29,8 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         a.cwds = None
         a.dir_moves += 1
         return a
+    if depth == 0:
+        held_text.line_options(a)  # the options the shell's snapshot set before the line (SPD-263)
     if depth == 0 and not command.isascii() and unread.has_marker(command):
         # SPD-199: a private-use marker the member typed into the reading's own alphabet, on the raw line before any pass
         # writes one; recorded and read on, so a refusal the readable words earn keeps its own reason.
@@ -233,6 +235,13 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     # `coproc` was read; no word has taken the command position away yet, so an alias the line defined is
     # still expanded here (a reserved word and an assignment keep it, a wrapper other than zsh's `time` does not).
     coproc, command_position = False, True
+    # SPD-262: whether the shell still looks the next word up as a function, which outlasts the command position an alias
+    # needs: True until a wrapper that resolves its word itself takes it (command, env, nice, ...; nocorrect and time
+    # where the command position is gone, a program's name there), kept by zsh's noglob, exec and `-`, and "builtin"
+    # after `builtin`, whose word is looked up as a builtin alone, so only a modifier builtin gives the lookup back
+    # (syntax.FUNCTION_KEEP_MODIFIERS).  `looked_up`: the words the shell looked up as a function on the way, each
+    # wrapper's own name among them (a function named nice runs in nice's place), for shadowed_name.
+    seeks_function, looked_up = True, []
     input_appended = False  # an xargs this command runs under appends what it reads to the words (find_xargs)
     # The standard input the line gives this command, which a shell here runs as its commands, and the command
     # string an xargs makes of that input for the shell it runs (`echo 'git push' | xargs -0 sh -c`).  `fed`,
@@ -283,6 +292,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             effect = max(effect, "either", key=directories.EFFECT_ORDER.get)  # zsh's `-` precommand modifier; bash finds no `-`
             prefixed = True
             command_position = False
+            seeks_function = seeks_function is not False  # a builtin, and the function lookup goes on after it
             words = words[1:]
             fresh = max(fresh - 1, 0)
         elif os.path.basename(w).casefold() in syntax.WRAPPERS and w not in a.vars:
@@ -295,6 +305,20 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 wrapper_from = k + 1 if outcome == expansions._FLAGGED else k
                 continue
             wrapper_from = 1
+            # zsh's `time` and `nocorrect` where the command position holds are reserved words, never looked up; every
+            # other wrapper's name is looked up as the command word is, an alias where the command position holds and a
+            # function where the lookup does, and one the shell holds runs in the wrapper's place (SPD-262)
+            reserved = command_position and w in zsh.ZSH_COMMAND_POSITION_WORDS
+            if seeks_function is True and not reserved:
+                looked_up.append(w)
+            if (command_position or seeks_function is True) and held_text.read_shell_name(
+                    words, a, depth, stdin, fed, effect, aliased=command_position,
+                    function=seeks_function is True and not reserved):
+                return  # an alias the shell holds under the wrapper's name took the command
+            if seeks_function is not False and (w == "builtin" or w in syntax.FUNCTION_KEEP_MODIFIERS):
+                seeks_function = "builtin" if w == "builtin" else True
+            elif not (seeks_function is True and reserved):
+                seeks_function = False
             if os.path.basename(w).casefold() == "xargs":
                 # What xargs reads from its input stands where -J or -I puts it, or after the words it runs
                 rest, appended = find_xargs.xargs_input(words, consumed, rest)
@@ -327,10 +351,10 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             path_names.append(w)
             script_files.read_path_word(a, w)  # `./env git status` runs whatever ./env holds, not env
             prefixed = True
-            # only zsh's `time` keeps the command position an alias is expanded in (probed: `eval 'time gp'` ran the
-            # alias, `eval 'command gp'` and `eval 'env gp'` ran nothing)
-            shell_modifier = command_position and w in zsh.ZSH_COMMAND_POSITION_WORDS
-            command_position = w in zsh.ZSH_COMMAND_POSITION_WORDS
+            # only zsh's `time` and `nocorrect`, where the command position holds, keep it for an alias (probed: `eval
+            # 'time gp'` ran the alias, `eval 'command gp'` and `eval 'env gp'` ran nothing, and `noglob time gp` ran
+            # /usr/bin/time, SPD-262)
+            shell_modifier = command_position = reserved
             effect = max(effect, directories.prefix_effect(w, words[1] if len(words) > 1 else None), key=directories.EFFECT_ORDER.get)
             # env and sudo read NAME=value as an assignment of their own, and the shell reads one after its own `time`
             # or `nocorrect`, which keep the command position; every other wrapper -- and `time` anywhere but in the command
@@ -373,8 +397,12 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             if doubtful:  # after the body, so a refusal the body itself earns keeps its own reason
                 a.findings.append(("alias", prepare.deglob(cmd)))
             return
-    if command_position and held_text.read_shell_name(words, a, depth, stdin, fed, effect):
-        # The shell this line runs in already defines the command word as an alias, whose body took the command
+    if seeks_function is True:
+        looked_up.append(cmd)
+    if (command_position or seeks_function is True) and held_text.read_shell_name(
+            words, a, depth, stdin, fed, effect, aliased=command_position, function=seeks_function is True):
+        # The shell this line runs in already defines the command word as an alias, whose body took the command; a
+        # function it defines is read behind noglob, exec and `-` too, where no alias is expanded (SPD-262)
         return
     if cmd in syntax.ASSIGNING_COMMANDS and directories.builtin_runs(effect):
         # `read X`, `printf -v X`, `unset X`, `getopts o X`, `let X=1`: the line's own assignments, each builtin's names read
@@ -385,6 +413,8 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         a.arith_opaque = True  # an option may change how arithmetic reads a number (SPD-225, ShellAnalysis.arith_opaque)
     if options or cmd == "shopt":
         a.cdable = True  # ... or turn on CDABLE_VARS (bash's cdable_vars), for a cd after it (SPD-252, ShellAnalysis.cdable)
+    if options or cmd == "set" and any(syntax.PHYSICAL_FLAG_RE.match(prepare.deglob(w)) for w in words[1:]):
+        a.chase = "either"  # ... or CHASE_LINKS (bash's `set -P`), or turn one off (SPD-263, ShellAnalysis.chase)
     if cmd in ("source", ".", "trap"):
         a.all_doubt = True  # code the hook does not read may assign any variable
     if cmd in ("source", "."):
@@ -650,7 +680,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 loop_bindings.unbind(a, names)
     else:
         a.kinds.append("other")  # CD, /usr/bin/cd, env cd: /usr/bin/cd in its own process, and the shell stays
-    shadowed_name(a, cmd, path_names)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason
+    shadowed_name(a, cmd, path_names, looked_up)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason
 
 
 def record_assignment(a, found):
@@ -724,7 +754,7 @@ def hashed_names(words):
     return [n for n in names if n]
 
 
-def shadowed_name(a, cmd, path_names):
+def shadowed_name(a, cmd, path_names, looked_up):
     """Record that the shell would not run the program the hook read by name: the line bound the name to
     a shell function, assigned PATH (or zsh's `path`, tied to it) so the shell searches a directory of the line's own
     choosing, or hashed the name to a file of its own.  Only the names the hook reads count (git, spud, python3.14, sqlite3,
@@ -732,13 +762,14 @@ def shadowed_name(a, cmd, path_names):
     than running a program of its own.  A command run by a path is not looked for on PATH, and GIT_EXEC_PATH keeps the
     reason git's program check gives it.
 
-    A function is looked up in command position, so it shadows the command word `cmd` unless a wrapper that resolves its own
-    word (`command`, `builtin`, `env`, `nice`, ...) took the position; the wrappers zsh keeps looking a function up after
-    (`exec`, `noglob`, `nocorrect`, `time`) and its `-` modifier leave `cmd` in command position, and a function named for
-    the first such resolving wrapper shadows it in turn (probed in the four shells).  A PATH or a hash, in contrast,
-    decides the lookup of every one of these names, so both are read for the command word and the wrappers alike."""
-    bypass = [w for w in path_names if os.path.basename(w).casefold() not in syntax.FUNCTION_KEEP_WRAPPERS]
-    for word in bypass[:1] if bypass else [cmd]:
+    A function shadows each word the shell looks up as one, `looked_up` (dispatch_words): the command word `cmd` unless a
+    wrapper that resolves its own word (`command`, `builtin` alone, `env`, `nice`, ...) took the lookup away, and each
+    wrapper's own name on the way, up to the first such resolving wrapper, which a function named for it shadows in turn;
+    zsh's `noglob`, `exec` and `-`, `builtin` naming one of them, and `nocorrect` and `time` where the command position
+    holds keep the lookup for the word after them (probed in zsh 5.9 and bash 3.2, SPD-262: tests/test_hooks_snapshots.py
+    ModifierLookupTest).  A PATH or a hash, in contrast, decides the lookup of every one of these names, so both are read
+    for the command word and the wrappers alike."""
+    for word in looked_up:
         if git_programs.path_dispatched(word) and (prepare.deglob(word) in a.functions or syntax.UNKNOWN_NAME in a.functions):
             a.findings.append(("function", prepare.deglob(word)))
             return

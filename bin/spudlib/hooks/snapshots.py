@@ -1,4 +1,4 @@
-"""hooks/snapshots: the aliases and functions the Bash tool's shell already holds, read from Claude Code's shell snapshot."""
+"""hooks/snapshots: the aliases, functions and options the Bash tool's shell already holds, read from Claude Code's shell snapshot."""
 
 import contextlib
 import json
@@ -57,8 +57,8 @@ def ansi_c_value(body):
 # Which snapshot a session sources is not in the hook's input, so every one of them is read, newest first, and the table is
 # their union: they are the same profile, and the newest snapshot that names a name decides it.
 #
-# A snapshot is machine-written and its shape is fixed: `unalias -a`, one `name () { ... }` per function, `setopt` lines,
-# one `alias -- name=body` per alias, then whatever the harness appends -- on this Mac an `unalias` and a `function name {
+# A snapshot is machine-written and its shape is fixed: `unalias -a`, one `name () { ... }` per function, `setopt` lines
+# (bash's `shopt -p` lines, before the functions), one `alias -- name=body` per alias, then whatever the harness appends -- on this Mac an `unalias` and a `function name {
 # ... }` for each command Claude Code shadows (find, grep, pkill, and rg where it is not on PATH), which is why a snapshot
 # is read in line order: a later `unalias` clears an alias and a later definition wins, as the shell's own reading does.
 #
@@ -66,6 +66,17 @@ def ansi_c_value(body):
 SNAPSHOTS = "shell-snapshots"
 SNAPSHOT_PREFIX = "snapshot-"
 CACHE_NAME = "shell-snapshot.json"  # the parsed table, under the home's .spud/, keyed by every snapshot's size and mtime
+# What a cache holds, which changes whenever the table does: one of another format, or of none (written before SPD-263
+# added the options), is built again, never read, since a table read from it would lack what this one reads.
+CACHE_FORMAT = 2
+# A snapshot's option lines, which the shell runs before every Bash call (SPD-263): zsh's `setopt <name>` (and unsetopt),
+# bash's `shopt -s|-u <name>`, and `set -o|+o <name>`, each at the start of a line of its own (a function's body, which
+# runs only when called, is skipped as a whole).  Read as (kind, the option as spelled, on or off), with the line itself
+# for a reason to show; shell/held_text.line_options reads what each means for the line.  A line of any other shape --
+# an option builtin with a flag of its own, a redirection, an operator, quoting -- is kept with no option (None), which
+# the reader takes as one it cannot model.
+OPTION_RE = re.compile(r"^(?P<builtin>setopt|unsetopt|shopt|set)(?P<rest>(?:\s.*)?)$", re.S)
+OPTION_WORD_RE = re.compile(r"[A-Za-z0-9_]+\Z")
 BODY_CAP = 64 * 1024  # the most of one function body the hook reads; nothing a profile defines comes near it
 # A snapshot's `alias` line: zsh writes `alias -- name=body`, with the options it was defined with before the `--`.  A
 # global (`-g`) alias is expanded in every word, not only in command position, which the hook does not yet read on a line
@@ -82,15 +93,18 @@ FUNCTION_RE = re.compile(r"^\s*(?:function\s+)?(?P<name>[^\s(){}=#|&;<>'\"]+)\s*
 
 class Table:
     """What the shell the Bash tool starts already defines: `aliases`, each name's body as the shell stores it (None for a
-    body the hook cannot read); `functions`, each name's body as (which snapshot, its first byte, its length); `gap`, what
-    stopped the table being read, or None.  An empty table is the answer on a machine with no snapshots, and it keeps every
-    line the reading it had without one."""
+    body the hook cannot read); `functions`, each name's body as (which snapshot, its first byte, its length); `options`,
+    every option line any snapshot runs, as (kind, the option or None, on, the line, which snapshot) -- kind "setopt",
+    "shopt" or "set" -- each once, from the newest snapshot that has it (SPD-263: which snapshot a session sources is not in
+    the hook's input, so an option any of them sets may be in force); `gap`, what stopped the table being read, or None.
+    An empty table is the answer on a machine with no snapshots, and it keeps every line the reading it had without one."""
 
-    def __init__(self, aliases=None, functions=None, files=(), gap=None):
+    def __init__(self, aliases=None, functions=None, files=(), gap=None, options=()):
         self.aliases = aliases if aliases is not None else {}
         self.functions = functions if functions is not None else {}
         self.files = list(files)
         self.gap = gap
+        self.options = tuple(options)
 
     def body(self, name):
         """The shell text a function of this name runs, or None: read from the snapshot only when a line names it, so no
@@ -152,8 +166,10 @@ def load_table(home):
     with contextlib.suppress(OSError, ValueError, TypeError, KeyError, AttributeError):
         with open(cache, encoding="utf-8") as f:
             stored = json.load(f)
-        if stored["fingerprint"] == [list(e) for e in entries] and isinstance(stored["aliases"], dict):
-            return Table(stored["aliases"], {k: tuple(v) for k, v in stored["functions"].items()}, files)
+        if (stored["format"] == CACHE_FORMAT and stored["fingerprint"] == [list(e) for e in entries]
+                and isinstance(stored["aliases"], dict)):
+            return Table(stored["aliases"], {k: tuple(v) for k, v in stored["functions"].items()}, files,
+                         options=(tuple(o) for o in stored["options"]))
     built = build_table(files)
     if built.gap is None:
         write_cache(cache, entries, built)
@@ -163,14 +179,14 @@ def load_table(home):
 def build_table(files):
     """The union of these snapshots, newest first: the first one that names a name decides what that name is, so a name a
     newer snapshot unaliased is not taken from an older one."""
-    aliases, functions, decided = {}, {}, set()
+    aliases, functions, decided, options = {}, {}, set(), {}
     for index, path in enumerate(files):
         try:
             with open(path, "rb") as f:
                 data = f.read()
         except OSError as e:
             return Table(gap="cannot read %s: %s" % (path, e))
-        file_aliases, file_functions, named = read_snapshot(data, index)
+        file_aliases, file_functions, named, file_options = read_snapshot(data, index)
         for name in named:
             if name in decided:
                 continue
@@ -179,14 +195,16 @@ def build_table(files):
                 aliases[name] = file_aliases[name]
             elif name in file_functions:
                 functions[name] = file_functions[name]
-    return Table(aliases, functions, files)
+        for option in file_options:  # every snapshot's, since any may be the one a session sourced (SPD-263)
+            options.setdefault(option[:3] if option[1] is not None else option[3], option)
+    return Table(aliases, functions, files, options=options.values())
 
 
 def read_snapshot(data, index):
     """(the aliases this snapshot leaves defined, its functions as (index, the body's first byte, its length), every name
-    any of its lines names).  The lines are read in order, so a later `unalias` clears an alias and a later definition
-    replaces an earlier one, as the shell reading the same file does."""
-    aliases, functions, named = {}, {}, []
+    any of its lines names, its option lines as Table.options holds them).  The lines are read in order, so a later
+    `unalias` clears an alias and a later definition replaces an earlier one, as the shell reading the same file does."""
+    aliases, functions, named, options = {}, {}, [], []
     lines = data.split(b"\n")
     offsets, at = [], 0
     for raw in lines:
@@ -212,6 +230,11 @@ def read_snapshot(data, index):
                 aliases.pop(name, None)
                 named.append(name)
             continue
+        if raw.startswith((b"setopt", b"unsetopt", b"shopt", b"set")):
+            found = option_line(line, index)
+            if found is not None:
+                options.extend(found)
+                continue
         m = FUNCTION_RE.match(line)
         if m is None:
             continue
@@ -226,7 +249,38 @@ def read_snapshot(data, index):
         aliases.pop(name, None)
         named.append(name)
         i += 1
-    return aliases, functions, named
+    return aliases, functions, named, options
+
+
+def option_line(line, index):
+    """The options one of a snapshot's lines sets, as Table.options holds them, or None for a line that is no option
+    builtin (a `set` alone, or a word that only starts like one: `settle`).  `setopt a b`, `shopt -s a b` and `set -o a -o b`
+    set each name they list; `setopt` and `shopt -p` with no name set nothing, and a line of any other shape is one entry
+    with no option, which the reader cannot model."""
+    m = OPTION_RE.match(line.strip())
+    if m is None or FUNCTION_RE.match(line):  # `set () {`: a function the profile names so, read as one
+        return None
+    builtin, words = m.group("builtin"), m.group("rest").split()
+    kind = {"unsetopt": "setopt"}.get(builtin, builtin)
+    on, names = builtin != "unsetopt", []
+    if builtin == "set":
+        if not words:
+            return None
+        while words and words[0] in ("-o", "+o") and len(words) > 1:
+            on = words[0] == "-o"
+            names.append((words[1], on))
+            words = words[2:]
+    elif builtin == "shopt":
+        if words and words[0] in ("-s", "-u"):
+            on = words[0] == "-s"
+            names, words = [(w, on) for w in words[1:]], []
+        elif words == ["-p"] or not words:
+            return []
+    else:
+        names, words = [(w, on) for w in words], []
+    if words or not all(OPTION_WORD_RE.match(name) for name, _ in names):
+        return [(kind, None, on, line, index)]
+    return [(kind, name, on, line, index) for name, on in names]
 
 
 def alias_definition(line):
@@ -323,8 +377,9 @@ def write_cache(cache, entries, built):
     tmp = "%s.%d.tmp" % (cache, os.getpid())
     with contextlib.suppress(OSError):
         with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"fingerprint": [list(e) for e in entries], "aliases": built.aliases,
-                       "functions": {k: list(v) for k, v in built.functions.items()}}, f)
+            json.dump({"format": CACHE_FORMAT, "fingerprint": [list(e) for e in entries], "aliases": built.aliases,
+                       "functions": {k: list(v) for k, v in built.functions.items()},
+                       "options": [list(o) for o in built.options]}, f)
         os.replace(tmp, cache)
     with contextlib.suppress(OSError):
         os.unlink(tmp)

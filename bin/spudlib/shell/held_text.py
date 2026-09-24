@@ -2,13 +2,16 @@
 
 A module of its own since SPD-264, taken out of shell/analyse: analyse.dispatch_words asks read_shell_name for a command
 word the Bash tool's shell already defines, and analyse_shell_text reads the body through analyse.analyse_command, then
-drops what would fall on a member for text it did not write (names_member_var through unresolvable_write).  It joins the
-shell reading's import cycle, every read of analyse inside a function body.  Past 250 lines as one reading:
+drops what would fall on a member for text it did not write (names_member_var through unresolvable_write).  The options
+the shell holds are read here too, into the state a line starts from (line_options, SPD-263).  It joins the shell
+reading's import cycle, every read of analyse inside a function body.  Past 250 lines as one reading:
 analyse_shell_text's prune and the helpers it keeps by are one rule, and read_shell_name and read_body are its only way
 in."""
 
+import os
+
 from . import analyse, directories, expansions, globbing, loop_bindings, positional, prepare, stdin_text, syntax, walk
-from ..hooks import hookio
+from ..hooks import hookio, snapshots
 
 
 def read_body(a, text, depth, stdin, fed):
@@ -44,11 +47,13 @@ def read_body(a, text, depth, stdin, fed):
     loop_bindings.unbind(a, own)
 
 
-def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell"):
+def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", aliased=True, function=True):
     """A command word the shell the Bash tool starts already defines, read for what it actually runs: an alias,
     whose body and the words after it are analysed as the text the shell put there -- and True, since that text is the
     command now -- or a function, whose body is read as an `eval` string is while the call's own words go on to be
-    dispatched for what they name.  An alias shadows a function of the same name, as the shell resolves them.
+    dispatched for what they name.  An alias shadows a function of the same name, as the shell resolves them.  `aliased`:
+    the word stands where the shell expands an alias (the command position); `function`: where it looks a function up,
+    which zsh's noglob, exec and `-` keep and the command position does not (SPD-262, analyse.dispatch_words).
 
     Either runs in the line's shell, so the directory it leaves is the line's after it (SPD-252), settled by `effect`,
     where the command runs (directories.prefix_effect): `coproc takedir x` moves a forked shell and leaves the line where
@@ -76,21 +81,24 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell"):
     once per starting state, whose findings the member's words keep: a profile whose functions call one another with
     ever other words cannot multiply one line's readings without bound."""
     cmd = prepare.deglob(words[0])
-    text, own_words, expanded, unreadable = expansions.shell_aliased(words, a)
-    a.shell_expanded.extend(expanded)
-    if unreadable is not None:  # the chain reached a body whose quoting the hook cannot take off: it runs the line, unread
-        a.kinds.append("other")
-        a.findings.append(("shell-alias", unreadable))
-        return True
     before = a.cwds
-    if expanded:
-        a.expanding.extend(name for name, _ in expanded)
-        try:
-            analyse_shell_text(a, text, depth + 1, own_words, stdin=stdin, fed=fed)
-        finally:
-            del a.expanding[len(a.expanding) - len(expanded):]
-        a.cwds = directories.settle(effect, before, a.cwds)
-        return True
+    if aliased:
+        text, own_words, expanded, unreadable = expansions.shell_aliased(words, a)
+        a.shell_expanded.extend(expanded)
+        if unreadable is not None:  # the chain reached a body whose quoting the hook cannot take off: it runs the line, unread
+            a.kinds.append("other")
+            a.findings.append(("shell-alias", unreadable))
+            return True
+        if expanded:
+            a.expanding.extend(name for name, _ in expanded)
+            try:
+                analyse_shell_text(a, text, depth + 1, own_words, stdin=stdin, fed=fed)
+            finally:
+                del a.expanding[len(a.expanding) - len(expanded):]
+            a.cwds = directories.settle(effect, before, a.cwds)
+            return True
+    if not function:
+        return False
     walk.read_call(a, cmd, stdin, fed)
     body = expansions.shell_function(cmd, a)
     if body is not None:
@@ -125,6 +133,58 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell"):
 # ShellAnalysis.body_dirs' marks for a function body whose reading is under way, and for one a call inside that reading
 # reached again from the same state (read_shell_name)
 _READING, _REENTERED = object(), object()
+
+
+def line_options(a):
+    """Start a line's reading from the options the shell holds (SPD-263): the snapshot's option lines run before every
+    line, so CDABLE_VARS there is ShellAnalysis.cdable from the line's first word, CHASE_LINKS or CHASE_DOTS
+    ShellAnalysis.chase, an option that changes arithmetic ShellAnalysis.arith_opaque; and an option the reader does not
+    model, which may change how the shell reads the line's words (syntax's option tables), is an "unread" finding that
+    names the profile's line, refused a member.  Every snapshot's options count, any of them may be the one sourced."""
+    table = snapshots.shell_table(a.home)
+    for kind, name, on, line, index in table.options:
+        effect = option_effect(kind, name, on)
+        if effect == "cdable":
+            a.cdable = True
+        elif effect == "chase":
+            a.chase = True
+        elif effect == "arith":
+            a.arith_opaque = True
+        elif effect == "unread":
+            where = os.path.basename(table.files[index]) if 0 <= index < len(table.files) else "a shell snapshot"
+            a.findings.append(("unread", ("option", "`%s` (%s)" % (line.strip(), where))))
+
+
+def option_effect(kind, name, on):
+    """What one option line of the snapshot does to the line the shell reads next: None, "cdable", "chase", "arith" or
+    "unread", as syntax's option tables say (-- the options a shell snapshot sets --).  `kind` is the builtin that set it,
+    "setopt" (zsh, `unsetopt` turning it off), "shopt" (bash) or "set" (`set -o`, zsh's names); a name None is a line the
+    snapshot reader could not take apart."""
+    if name is None:
+        return "unread"
+    if kind == "shopt":
+        name = name.lower()
+        if name == "cdable_vars":
+            return "cdable" if on else None
+        if name in syntax.BASH_SHOPT_INERT or on == (name in syntax.BASH_SHOPT_ON):
+            return None
+        return "unread"
+    name = name.lower().replace("_", "")
+    if name == "physical":  # zsh's other name for CHASE_LINKS, and bash's `set -o physical`
+        name = "chaselinks"
+    if name not in syntax.ZSH_OPTIONS_ON and name not in syntax.ZSH_OPTIONS_OFF and name.startswith("no"):
+        name, on = name[2:], not on  # `nohashdirs`, `NO_CDABLE_VARS`: the option's name after a `no` (nomatch, notify are names)
+    if name not in syntax.ZSH_OPTIONS_ON and name not in syntax.ZSH_OPTIONS_OFF:
+        return "unread"
+    if on == (name in syntax.ZSH_OPTIONS_ON) or name in syntax.ZSH_OPTIONS_INERT:
+        return None  # its default state, or a state that changes nothing the hook reads
+    if name == "cdablevars":
+        return "cdable"
+    if name in syntax.ZSH_OPTIONS_CHASE:
+        return "chase"
+    if name in syntax.ZSH_OPTIONS_ARITH:
+        return "arith"
+    return "unread"
 
 
 def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted=None, stdin=None, fed=False, filled=()):

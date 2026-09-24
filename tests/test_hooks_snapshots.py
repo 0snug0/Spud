@@ -4,13 +4,14 @@ failing closed on text it cannot read."""
 import json
 import os
 import shutil
+import sys
 import time
 import unittest
 from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
-from helpers import load_spud_module, wall_clock
+from helpers import forget_process_caches, load_spud_module, wall_clock
 from hookcase import AGENT_A, AGENT_B, AGENT_C, INLINE_WORDING, SCRIPT_WORDING, VARIABLE_WORDING, BashHookCase
 
 
@@ -427,6 +428,24 @@ class RealShellSnapshotTest(BashHookCase):
             with self.subTest(name=name), mock.patch.dict(os.environ, self.env, clear=True):
                 a = m.analyse_command("%s %s; echo hi > f" % (name, away), m.ShellAnalysis(cwd=home, home=home))
                 self.assertEqual([c for t, c in a.redirects if t == "f"], [frozenset([home, away])])
+
+    def test_262_a_function_behind_noglob_or_exec_is_read(self):
+        """SPD-262's evidence on this Mac's own profile (ModifierLookupTest holds the same definition)."""
+        if "ggp" not in self.table.functions:
+            self.skipTest("this profile defines no ggp")
+        for line in ("noglob ggp", "exec ggp"):
+            with self.subTest(line=line):
+                r = self.real_bash(line)
+                self.assertEqual(r.decision, "deny", r)
+                self.assertIn("Law 7", r.reason)
+
+    def test_263_this_profile_s_options_change_nothing_the_hook_reads(self):
+        """SPD-263: every option line this Mac's snapshots run is one the hook reads as changing nothing (SnapshotOptionsTest
+        holds the same lines); a profile that sets another would fail here first, naming it."""
+        m = load_spud_module()
+        effects = [(line, m.option_effect(kind, name, on)) for kind, name, on, line, _ in self.table.options]
+        self.assertTrue(effects)
+        self.assertEqual([e for e in effects if e[1] is not None], [])
 
 
 SETTLED_SNAPSHOT = """\
@@ -2375,6 +2394,306 @@ class FunctionDirectoryTest(ShellSnapshotCase):
                 self.refused_for_members(line, "")
                 self.assertSilent(line, agent_id=None)
         self.silent_for_everyone("V=status; vgit; vgit")
+
+
+MODIFIER_FUNCTIONS = """\
+# Functions
+vgit () {
+\tgit $V
+}
+gocd () {
+\tcd "$1"
+}
+nice () {
+\tgit push "$@"
+}
+# Aliases
+alias -- sudo='sudo '
+"""
+
+
+class ModifierLookupTest(ShellSnapshotCase):
+    """SPD-262 (proposal by SPUD-252/Bill): zsh still looks the word after its noglob, exec and `-` precommand modifiers up
+    as a function, but dispatch_words read the text the shell holds only while the command position held, which those
+    take away, so a snapshot function behind them ran unread: `noglob ggp` and `exec ggp` pushed past Law 7, and `V=push;
+    noglob vgit` too, while `nocorrect ggp` and `time vgit` were refused.  A function is now read behind every modifier
+    after which the shell looks the word up as one, and an alias -- which zsh expands only where the command position
+    holds -- where it held before; and the modifier's own word, looked up the same way, is read as a function or an alias
+    the shell holds under that name (`nice` below, `alias sudo='sudo '` chaining into the next word).
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and -f,
+    alike, and GNU bash 3.2.57, with `foo () { echo FN "$@"; }`: FN ran after noglob, nocorrect, time, `-`, exec (and
+    exec -c, -l, -cl, --, -a nm), after each chained with another (`noglob -`, `- noglob`, `noglob exec`, `exec noglob`,
+    `exec -`, `- exec`, `nocorrect noglob`, `time noglob`, `X=1 noglob`, `! noglob`, `{ noglob`, `if noglob`, `coproc
+    noglob`), after `builtin` naming a modifier (`builtin noglob`, `builtin exec`, `builtin -`, `builtin builtin
+    noglob`), and after `$W` holding noglob, exec, `-` or builtin; it did not after builtin or command alone, `command
+    -p`, `noglob command`, `noglob builtin`, `command noglob`, `exec command`, `exec builtin`, `builtin nocorrect`, and
+    after nocorrect or time where the command position no longer holds (`noglob nocorrect`: "command not found:
+    nocorrect"; `noglob time` is /usr/bin/time), nor after NOGLOB or Exec, which are no modifiers.  bash ran FN after
+    `time` alone (`exec foo`: "exec: foo: not found").  An alias (`alias al='echo ALIAS'`) expanded after nocorrect and
+    time only, in zsh; bash expands none in a script.  A function named noglob, exec, command, builtin or nice ran in
+    place of that word in all three, and `alias nice='nice '` expanded the word after it.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        path = self.write_snapshot("snapshot-zsh-1700000000062-262262.sh", MODIFIER_FUNCTIONS)
+        newest = path.stat().st_mtime + 60
+        os.utime(path, (newest, newest))
+
+    def test_the_tickets_evidence(self):
+        for line in ("noglob ggp", "exec ggp", "V=push; noglob vgit", "V=push; exec vgit", "nocorrect ggp", "V=push; time vgit"):
+            with self.subTest(line=line):
+                self.assertIn("git push", self.refused_for_members(line).reason)
+
+    def test_every_modifier_after_which_the_shell_looks_a_function_up(self):
+        for line in ("- ggp", "builtin noglob ggp", "builtin exec ggp", "builtin - ggp", "builtin builtin noglob ggp",
+                     "noglob exec ggp", "exec noglob ggp", "exec -c ggp", "exec -l ggp", "exec -cl ggp", "exec -- ggp",
+                     "exec -a nm ggp", "noglob - ggp", "- noglob ggp", "- exec ggp", "exec - ggp", "nocorrect noglob ggp",
+                     "time noglob ggp", "X=1 noglob ggp", "! noglob ggp", "{ noglob ggp; }", "if noglob ggp; then :; fi",
+                     "coproc noglob ggp", "W=noglob; $W ggp", "W=exec; $W ggp", "W=-; $W ggp", "F=ggp; noglob $F",
+                     "echo $(noglob ggp)", "eval noglob ggp"):
+            with self.subTest(line=line):
+                self.assertIn("git push", self.refused_for_members(line).reason)
+
+    def test_a_modifier_that_resolves_the_word_itself_is_not_read_as_the_function(self):
+        """command and builtin find a program or a builtin, never a function, and so does a modifier the shell reads as
+        a plain command name where the command position is gone: the word runs as the program it names, which the hook
+        reads as it always did (no such program here)."""
+        for line in ("command ggp", "command -p ggp", "builtin ggp", "noglob command ggp", "noglob builtin ggp",
+                     "noglob nocorrect ggp", "exec nocorrect ggp", "noglob time ggp", "exec command ggp", "exec builtin ggp",
+                     "builtin nocorrect ggp", "NOGLOB ggp", "Exec ggp", "nohup ggp", "env ggp", "V=push; command vgit"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
+
+    def test_an_alias_is_expanded_only_where_the_command_position_holds(self):
+        for line in ("noglob gp", "- gp", "exec gp", "command gp", "builtin gp", "builtin noglob gp"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
+        for line in ("nocorrect gp", "time gp"):
+            with self.subTest(line=line):
+                self.refused_for_members(line)
+
+    def test_the_directory_a_function_behind_noglob_leaves(self):
+        """noglob is zsh's (bash finds no noglob), so the line may be in either directory after it, as after `nocorrect
+        gocd`: a relative write outside the deliverables is refused."""
+        self.refused_for_members("noglob gocd %s; echo hi > note.txt" % self.home.path, "note.txt", str(self.home.path / "tests"))
+        self.refused_for_members("- gocd %s; echo hi > note.txt" % self.home.path, "note.txt", str(self.home.path / "tests"))
+
+    def test_a_function_or_alias_named_for_the_modifier_runs_in_its_place(self):
+        for line in ("nice ls", "noglob nice ls", "X=1 nice ls", "sudo gp", "time sudo gp"):
+            with self.subTest(line=line):
+                self.assertIn("git push", self.refused_for_members(line).reason)
+        # the chain reaches the next word alone: `-u` is no alias, so gp after it is not expanded
+        for line in ("command nice ls", "sudo ggp", "env nice ls", "sudo -u root gp", "noglob sudo gp"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
+
+    def test_a_function_the_line_defines_behind_builtin_noglob(self):
+        """The line's own function shadows the name behind `builtin noglob` as it does behind noglob, and not behind
+        `builtin` alone ("no such builtin")."""
+        for line in ("git () { :; }; builtin noglob git status", "git () { :; }; noglob git status",
+                     "git () { :; }; - git status", "git () { :; }; builtin exec git status"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "shell function `git`")
+        self.silent_for_everyone("git () { :; }; command git status")
+
+
+def options_snapshot(*lines):
+    """A snapshot holding only a `# Shell Options` section of these lines, as Claude Code writes one after the functions
+    (`setopt | sed 's/^/setopt /'`), and the aliases after it."""
+    return "# Functions\n# Shell Options\n" + "".join(line + "\n" for line in lines) + "# Aliases\nalias -- gp='git push'\n"
+
+
+# This Mac's profile, as every snapshot in ~/.claude/shell-snapshots/ wrote it on 2026-09-24 (snapshot-zsh-1790261341840-
+# igxh0c.sh lines 3378-3397): oh-my-zsh's options and the interactive shell's own.
+THIS_MACS_OPTIONS = ("setopt alwaystoend", "setopt autocd", "setopt autopushd", "setopt completeinword", "setopt extendedhistory",
+                     "setopt noflowcontrol", "setopt nohashdirs", "setopt histexpiredupsfirst", "setopt histignoredups",
+                     "setopt histignorespace", "setopt histverify", "setopt interactivecomments", "setopt login",
+                     "setopt longlistjobs", "setopt nopromptcr", "setopt nopromptsp", "setopt promptsubst",
+                     "setopt pushdignoredups", "setopt pushdminus", "setopt sharehistory")
+
+
+class SnapshotOptionsTest(ShellSnapshotCase):
+    """SPD-263 (proposal by SPUD-252/Bill): the snapshot's `# Shell Options` section -- `setopt` lines the shell sources
+    before every Bash call -- was never read, so a profile that sets CDABLE_VARS moved every `cd` into a relative name that
+    is no directory to a variable's value while the hook read cwd/name.  The options are now read into the table, and a
+    line starts from the state they give: cdablevars on is ShellAnalysis.cdable from the line's first word.  An option
+    the reader does not model that changes how the shell reads words fails closed for a member, naming the profile line.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py, zsh 5.9 -f -o nobareglobqual and -f, bash 3.2.57: with
+    `setopt cdablevars` (CDABLE_VARS, cdable_vars and `unsetopt nocdablevars` alike) or `shopt -s cdable_vars`, `cd dest`
+    went to $dest; with `setopt nocdablevars` it stayed.  shwordsplit split `$X` holding `a b` in two, globsubst globbed
+    `$X` holding `g*`, ksharrays made `$A` its first element, and extendedglob made `^keep` a glob, in zsh (bash split and
+    globbed already).  This Mac's options change nothing the hook reads: AUTO_CD needs a shell reading standard input
+    (FunctionDirectoryTest's docstring), AUTO_PUSHD, PUSHD_MINUS and PUSHD_IGNORE_DUPS change the stack only
+    popd, a stack entry and `cd -N` read, which the hook never follows, and the rest are history, completion, prompt, job
+    and hashing options.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.m = load_spud_module()
+        self.order = 0
+
+    def with_options(self, *lines, shell="zsh"):
+        self.order += 1
+        path = self.write_snapshot("snapshot-%s-17000000%05d-263263.sh" % (shell, self.order), options_snapshot(*lines))
+        newest = path.stat().st_mtime + 60 * self.order
+        os.utime(path, (newest, newest))
+        return path
+
+    def analysis(self, command, cwd=None):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            forget_process_caches()  # the table this process read before a snapshot the test wrote since
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=cwd or str(self.home.path), home=str(self.home.path)))
+
+    def written_in(self, command, target):
+        return [c for t, c in self.analysis(command).redirects if t == target]
+
+    def test_the_tickets_cdablevars(self):
+        """A cd into a relative name that is no directory is unknown once the profile sets CDABLE_VARS, as after `setopt
+        cdablevars` on the line (SPD-252): the write after it is refused for everyone."""
+        home = str(self.home.path)
+        self.assertEqual(self.written_in("cd dest; echo x > f", "f"), [frozenset([home, os.path.join(home, "dest")])])
+        for spelled in ("setopt cdablevars", "setopt CDABLE_VARS", "setopt cdable_vars", "unsetopt nocdablevars",
+                        "setopt autocd cdablevars", "setopt Cdable_Vars"):
+            with self.subTest(spelled=spelled):
+                shutil.rmtree(self.snapshots)
+                self.snapshots.mkdir()
+                self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", SHELL_SNAPSHOT)
+                self.with_options(spelled)
+                self.assertEqual(self.written_in("cd dest; echo x > f", "f"), [None])
+                self.refused_for_members("cd dest; echo x > f", "cannot follow")
+                self.assertRefused("cd dest; echo x > f", "cannot follow", agent_id=None)
+                self.assertSilent("cd tests; echo hi > note.txt", AGENT_A)  # a directory, whatever CDABLE_VARS says
+                self.assertSilent("cd %s/tests; echo hi > note.txt" % self.home.path, AGENT_A)
+
+    def test_bash_spells_it_cdable_vars(self):
+        self.with_options("shopt -s cdable_vars", shell="bash")
+        self.assertEqual(self.written_in("cd dest; echo x > f", "f"), [None])
+
+    def test_chaselinks_reads_a_cd_through_a_symlink_physically(self):
+        """CHASE_LINKS (and CHASE_DOTS, for the `..` that follows a link) makes `cd lnk/..` the parent of where lnk points,
+        as `cd -P` does (probed: zsh 5.9 printed <dir>/a after `cd lnk/..` with lnk -> a/b, and <dir> without): the write
+        after it lands in tests/, a member's, where the logical reading put it in the home."""
+        (self.home.path / "lnk").symlink_to(self.home.path / "tests" / "sub")
+        line = "cd lnk/..; echo hi > note.txt"
+        self.refused_for_members(line, "note.txt")
+        for option in ("setopt chaselinks", "setopt chasedots"):
+            with self.subTest(option=option):
+                self.with_options(option)
+                self.assertEqual(self.written_in(line, "note.txt"), [frozenset([str(self.home.path / "tests")])])
+                self.assertSilent(line, AGENT_A)
+                self.assertSilent(line, AGENT_B)
+
+    def test_a_lines_own_option_builtin_reads_a_cd_through_a_symlink_both_ways(self):
+        """The same hole on the line itself: `setopt chaselinks` (or bash's `set -P`) before `cd lnk/..` moves the shell to
+        the parent of where lnk points, which the hook read as the directory lnk stands in -- a member's tests/, while the
+        write landed in away/.  An option builtin may set it or not, so both directories are read, as SPD-252 reads
+        CDABLE_VARS after one.  zsh's -L keeps the path as spelled whatever CHASE_LINKS says, and bash's too (probed: zsh
+        5.9 and bash 3.2.57 printed <dir> after `cd -L lnk/..`, <dir>/a after `cd -P lnk/..` and `pushd lnk/..` with it
+        on; bash's `set -P` turned it on, zsh's did not)."""
+        away = self.home.path / "away" / "sub"
+        away.mkdir(parents=True)
+        (self.home.path / "tests" / "lnk").symlink_to(away)
+        cwd = str(self.home.path / "tests")
+        self.assertSilent("cd lnk/..; echo hi > note.txt", AGENT_A, cwd)
+        for line in ("setopt chaselinks; cd lnk/..; echo hi > note.txt", "set -P; cd lnk/..; echo hi > note.txt",
+                     "setopt chase_dots; pushd lnk/..; echo hi > note.txt"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "note.txt", cwd)
+        self.with_options("setopt chaselinks")
+        self.refused_for_members("cd lnk/..; echo hi > note.txt", "note.txt", cwd)
+        self.assertSilent("cd -L lnk/..; echo hi > note.txt", AGENT_A, cwd)
+
+    def test_an_arithmetic_option_makes_arithmetic_opaque_from_the_start(self):
+        """OCTAL_ZEROES and its kin change the number an arithmetic expansion gives, as the line's own setopt may (SPD-225)."""
+        self.assertFalse(self.analysis("echo hi").arith_opaque)
+        for option in ("setopt octalzeroes", "setopt cbases", "setopt cprecedences", "setopt forcefloat"):
+            with self.subTest(option=option):
+                self.with_options(option)
+                self.assertTrue(self.analysis("echo hi").arith_opaque)
+
+    def test_an_option_turned_off_changes_nothing(self):
+        before = self.written_in("cd dest; echo x > f", "f")
+        for spelled in ("setopt nocdablevars", "unsetopt cdablevars", "setopt NO_CDABLE_VARS"):
+            with self.subTest(spelled=spelled):
+                self.with_options(spelled)
+                self.assertEqual(self.written_in("cd dest; echo x > f", "f"), before)
+
+    def test_any_snapshot_that_sets_it_counts(self):
+        """Which snapshot a session sources is not in the hook's input, so an older snapshot's CDABLE_VARS may be the one
+        in force: every snapshot's options are read."""
+        older = self.with_options("setopt cdablevars")
+        self.with_options("setopt autocd")
+        self.assertLess(older.stat().st_mtime, (self.snapshots / ("snapshot-zsh-17000000%05d-263263.sh" % 2)).stat().st_mtime)
+        self.assertEqual(self.written_in("cd dest; echo x > f", "f"), [None])
+
+    def test_this_macs_options_change_nothing(self):
+        lines = ("cd dest; echo x > f", "cd tests; echo hi > note.txt", "pushd tests; echo hi > f", "pushd +1; echo hi > f",
+                 "cd -1; echo hi > f", "popd; echo hi > f", "tests; echo hi > f", "echo $((010)) > f", "git status", "gp",
+                 "X='a b'; $X", "echo *.txt > f", "cd ~; echo hi > f", "noglob ggp", "setopt cdablevars; cd dest; echo x > f")
+        before = {line: self.hook_reading(line) for line in lines}
+        self.with_options(*THIS_MACS_OPTIONS)
+        self.assertFalse([f for f in self.analysis("echo hi").findings if f[0] == "unread"])  # none unmodelled
+        options = sys.modules["spudlib.hooks.snapshots"].shell_table(str(self.home.path)).options
+        self.assertEqual(len(options), len(THIS_MACS_OPTIONS))  # every line read
+        for line in lines:
+            with self.subTest(line=line):
+                self.assertEqual(self.hook_reading(line), before[line])
+        self.assertSilent("cd tests; echo hi > note.txt", AGENT_A)
+
+    def test_an_option_the_reader_does_not_model_fails_closed_for_a_member(self):
+        """shwordsplit, globsubst, ksharrays and extendedglob change the words the shell makes of a line (probed), and an
+        option the hook does not know may too: a member's line is refused, naming the profile's line, while Spud's is
+        read as it was."""
+        for option in ("shwordsplit", "SH_WORD_SPLIT", "globsubst", "ksharrays", "extendedglob", "rcquotes", "noglob",
+                       "posixbuiltins", "somethingnew", "nomultios"):
+            with self.subTest(option=option):
+                shutil.rmtree(self.snapshots)
+                self.snapshots.mkdir()
+                self.with_options("setopt " + option)
+                found = [f for f in self.analysis("echo hi").findings if f[0] == "unread"]
+                self.assertEqual(len(found), 1, found)
+                form, shown = found[0][1]
+                self.assertEqual(form, "option")
+                self.assertIn("setopt " + option, shown)
+                self.assertSilent("echo hi", agent_id=None)
+                if "option" in sys.modules["spudlib.shell.bash_rule"].UNREAD_MESSAGES:  # the reason a member adds to shell/bash_rule (SPD-262)
+                    self.refused_for_members("echo hi", "setopt " + option)
+
+    def test_the_option_lines_as_the_snapshot_reader_takes_them_apart(self):
+        """Each name a line lists is one option; a line of another shape is kept whole as one the reader cannot model; a
+        function's body -- indented, as zsh prints it -- and a function named like the builtin are no option lines."""
+        text = ("# Functions\nquiet () {\n\tsetopt localoptions shwordsplit\n}\nset () {\n\tbuiltin set \"$@\"\n}\n"
+                "setup () {\n\ttrue\n}\n# Shell Options\nsetopt autocd NO_hash_dirs\nunsetopt nomatch\nshopt -s cdable_vars\n"
+                "shopt -p\nset -o physical +o braceexpand\nsetopt -m 'no*'\nsetopt\n")
+        m = load_spud_module()
+        _, functions, _, options = m.read_snapshot(text.encode(), 0)
+        self.assertEqual(sorted(functions), ["quiet", "set", "setup"])
+        self.assertEqual([o[:3] for o in options],
+                         [("setopt", "autocd", True), ("setopt", "NO_hash_dirs", True), ("setopt", "nomatch", False),
+                          ("shopt", "cdable_vars", True), ("set", "physical", True), ("set", "braceexpand", False),
+                          ("setopt", None, True)])
+        self.assertEqual([m.option_effect(*o[:3]) for o in options], [None, None, "unread", "cdable", "chase", "unread", "unread"])
+
+    def test_an_old_cache_is_rebuilt_never_misread(self):
+        """The table's cache now holds the options too, so one written before them is built again: read as it stands, it
+        would give a table with no options, and a CDABLE_VARS profile would read as none."""
+        self.with_options("setopt cdablevars")
+        cache = self.home.path / ".spud" / "shell-snapshot.json"
+        self.assertEqual(self.written_in("cd dest; echo x > f", "f"), [None])
+        stored = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertIn("options", stored)
+        old = {k: v for k, v in stored.items() if k not in ("options", "format")}
+        cache.write_text(json.dumps(old), encoding="utf-8")
+        self.assertEqual(self.written_in("cd dest; echo x > f", "f"), [None])
+        self.assertIn("options", json.loads(cache.read_text(encoding="utf-8")))
 
 
 if __name__ == "__main__":
