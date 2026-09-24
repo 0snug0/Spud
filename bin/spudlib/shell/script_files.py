@@ -72,7 +72,8 @@ cannot resolve, which any write may be):
   against the line around it.  Refused a member where any write of the line names the file (script_reason's `written`).
 
 Both earn WRITTEN_REASON, which names the two-call respelling; Spud is never refused them, as every "script" finding is
-read for a member alone.  The shell scripts above need neither: an allow-listed one runs only where the line writes none
+read for a member alone.  An archive or a patch the hook lists is held to the same two forms (shell/tree_writes, SPD-275),
+through an "archive" finding and a reason of its own, rewritten() deciding its "rewritable" as it decides a script's.  The shell scripts above need neither: an allow-listed one runs only where the line writes none
 of it at all, in any order, and the hook opens no shell script, interpreter program or runner file but these -f files and
 the runner files shell/runner_files holds to the same `written`.  What refuses more than it must, on purpose: a line the
 reading walks twice (zsh's reading and bash's, a compound's own input, a function's calls) meets in its second walk the

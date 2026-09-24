@@ -20,10 +20,13 @@ the path rule and SPD-066's refusal as a spelled target does, the name in the re
 standard input is read as the archive or patch it reads there (syntax.ShellAnalysis.stdin_file).  What cannot be listed
 -- an archive on any other standard input (a pipe from a program, an inherited one), one the line does not spell or
 writes before the command reads it, one missing, too large, of a format or compression the standard library lacks, a
-name that leaves the directory -- is syntax.ANY_PATH with the cause after it
-(UNLISTED), refused to a member alone (SPD-217); Spud keeps the tree reading he had.  A write the line makes after the
-command, beside it in a pipeline or a loop's next pass, is not held against the file (SPD-151's "rewritable" form, which
-bash_rule reads for a script file, has no archive counterpart).  A download's names stay unread.
+name that leaves the directory -- is an "archive" finding with its cause (UNLISTED), which bash_rule refuses a member
+alone (SPD-217, SPD-275) with ARCHIVE_REASON: the archive, the cause and the respelling; Spud keeps the tree reading he
+had.  A write the line may make after the command opens the file and before it reads it -- beside it in a pipeline or a
+background job, after && or ||, in a loop's or a function's next pass, around a nested shell -- is held against the file
+as SPD-151 holds one against a -f script ("rewritable", archive_reason): every write of the whole line but the command's
+own, which come after it has opened the file, save in a loop, where the names it listed on the pass before count too.  A
+download's names stay unread.
 
 Past 250 lines (the package's look-again point) it stays whole: it is a list of five grammars, each one short reader with its
 table, and its one caller, the analysis, dispatches to all of them through read_tree_writes; the walk, which another caller
@@ -35,7 +38,7 @@ directory and the mark only its own grammar has."""
 import os
 import re
 
-from . import analyse, arg_writes, archive_names, bash_rule, globbing, prepare, stdin_text, syntax
+from . import analyse, arg_writes, archive_names, bash_rule, globbing, prepare, script_files, stdin_text, syntax
 from ..hooks import hookio, pathrule
 
 
@@ -94,21 +97,32 @@ DITTO_VALUE_LONGS = frozenset({"--arch", "--bom", "--zlibCompressionLevel", "--k
 DITTO_FILES = ("--keepBinariesList", "--outBom")
 # A word whose start is `$NAME`, `${NAME`, or a special or positional parameter.
 _START_NAME_RE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*|[0-9@*#?$!-])")
-# SPD-144: why the hook cannot list what an archive or a patch writes, shown in the reason a write the line cannot place
-# earns a member (bash_rule's "anywhere") after the command; Spud is never refused one.  "written" is SPD-151's shape.
+# SPD-144: why the hook cannot list what an archive or a patch writes, each the clause ARCHIVE_REASON gives its cause
+# (SPD-275).  "written" is SPD-151's shape, which "rewritable" (archive_reason) reads too.
 UNLISTED = {
-    "read": "the %s %s %s, so the hook cannot list the names it writes",
-    "stdin": ("`%s` reads its %s from standard input or a default device, which the hook does not read, so it cannot list"
-              " the names it writes; name the file (%s)"),
-    "unspelled": ("`%s` names its %s through a word the line does not spell or a directory the hook cannot follow (%s): a"
-                  " substitution, a variable it cannot settle, find's or xargs's operand, a glob; spell the path out"),
-    "written": ("the %s %s, which the hook reads before the line runs, and the line may write that file before `%s` reads"
-                " it: a redirection, a copy, move or link onto it, a download, an extraction, an earlier command. The hook"
-                " would list one file's names and the command write another's; write it in one Bash call and run `%s` in"
-                " the next, where the hook reads the file the command runs"),
-    "leaves": "`%s` names %s, which lands outside the directory it writes into",
-    "rewrites": "`%s` rewrites the names it extracts (%s), which the hook does not follow",
+    "read": "the %s `%s` %s, so the hook cannot list the names it writes",
+    "stdin": ("it reads its %s from standard input or a default device, which the hook does not read, so it cannot list the"
+              " names it writes (name the file: %s)"),
+    "unspelled": ("it names its %s through a word the line does not spell or a directory the hook cannot follow (`%s`): a"
+                  " substitution, a variable it cannot settle, find's or xargs's operand, a glob"),
+    "written": ("the hook reads the %s `%s` before the line runs, and the line may write that file before `%s` reads it: a"
+                " redirection, a copy, move or link onto it, a download, an extraction, an earlier command, or one that may"
+                " run beside or after it (a pipeline, a background job, a command after && or ||, a loop's or a function's"
+                " next pass, a nested shell), so the hook would list one file's names and the command write another's"),
+    "leaves": ("the %s `%s` names %s, which lands outside the directory it writes into (a patch's -p strips leading"
+               " directories from its names)"),
+    "rewrites": "it rewrites the names the %s %s yields (%s), which the hook does not follow",
 }
+# SPD-275: the reason an "archive" finding earns a member (bash_rule's member loop, archive_reason): the command, the
+# cause's clause, and the caps archive_names keeps.
+ARCHIVE_REASON = (
+    "`%s` writes the names an archive or a patch holds, and %s. The hook lists those names and holds each to the path rule"
+    " and the .git refusal as it holds a path the line spells, so a git hook or config (Law 7), a ledger file (Law 5) or a"
+    " file outside your deliverables cannot land unread, and it refuses a member what it cannot list. Name the archive or"
+    " patch on the line as a file the hook can read (tar's -f, patch's -i, unzip's or `ditto -x -k`'s operand, or a `<`"
+    " file), spelled out, with no -s or --use-compress-program, within the caps (%d names, %d MiB decompressed, %d under"
+    " bzip2, %d KiB of patch); where the line makes or changes that file, write it in one Bash call and extract or apply it"
+    " in the next, where the hook reads the file the command reads")
 
 
 def read_tree_writes(cmd, base, words, a, depth):
@@ -243,32 +257,34 @@ def read_tar(cmd, args, a, depth):
             text = prepare.deglob(value)
             directory = value if directory is None or text.startswith(("/", "~")) else directory.rstrip("/") + "/" + value
     record(a, cmd, directory if directory is not None else ".")
-    read_tar_names(cmd, options, directory, a, mark)
+    read_tar_names(cmd, options, directory, a, mark, depth)
 
 
-def read_tar_names(cmd, options, directory, a, mark):
+def read_tar_names(cmd, options, directory, a, mark, depth):
     """SPD-144: the names bsdtar's x mode writes, from the archive -f names (or TAPE, set on the line), opened from the line's
     own directory ("In x mode, change directories after opening the archive", tar(1)), each placed under `directory` as
     archive_names.tar_placed places it after --strip-components.  -s and --use-compress-program change what the archive
     yields and are not followed; an archive on standard input or the default device is not read."""
-    rewrites = [n for n, _ in options if n in ("-s", "--use-compress-program")]
-    if rewrites:
-        return unlisted(a, cmd, "rewrites", cmd, rewrites[-1])
-    strip = last_value(options, ("--strip-components",))
-    if strip is not None:
-        if arg_writes.unresolved(strip) or not prepare.deglob(strip).isdigit():
-            return unlisted(a, cmd, "unspelled", cmd, "--strip-components count", shown(strip))
-        strip = int(prepare.deglob(strip))
     archive = last_value(options, ("-f", "--file"))
     if archive is None and ("TAPE" in a.vars or "TAPE" in a.assigned):
         archive = arg_writes.resolved("$TAPE", a)
+    rewrites = [n for n, _ in options if n in ("-s", "--use-compress-program")]
+    if rewrites:
+        where = "`%s`" % shown(archive) if archive is not None else "on standard input"
+        return unlisted(a, cmd, "rewrites", "archive", where, rewrites[-1])
+    strip = last_value(options, ("--strip-components",))
+    if strip is not None:
+        if arg_writes.unresolved(strip) or not prepare.deglob(strip).isdigit():
+            return unlisted(a, cmd, "unspelled", "--strip-components count", shown(strip))
+        strip = int(prepare.deglob(strip))
     if archive is None or prepare.deglob(archive) in stdin_text.STDIN_OPERANDS:
         # standard input: bsdtar here reads it with no -f too (probed: `tar -x < t.tar` extracted t.tar's members); the
         # file the line redirects there is read, any other input is not
         if a.stdin_file is None:
-            return unlisted(a, cmd, "stdin", cmd, "archive", "-f, or `<` a file")
+            return unlisted(a, cmd, "stdin", "archive", "-f, or `<` a file")
         archive = arg_writes.resolved(a.stdin_file, a)
-    read_archive(cmd, archive, a, mark, directory, lambda name: [p for p in [archive_names.tar_placed(name, strip or 0)] if p])
+    read_archive(cmd, archive, a, mark, depth, directory,
+                 lambda name: [p for p in [archive_names.tar_placed(name, strip or 0)] if p])
 
 
 def shown(word):
@@ -277,9 +293,41 @@ def shown(word):
 
 
 def unlisted(a, cmd, form, *values):
-    """Record, for a member alone, a write the line cannot place: what an archive or a patch holds that the hook cannot
-    list, UNLISTED[form] filled with `values` shown after the operand marker in the reason bash_rule gives it."""
-    a.arg_writes.append((cmd, syntax.ANY_PATH + ": " + UNLISTED[form] % values, a.cwds, (), "path", None, "tree"))
+    """Record what an archive or a patch holds that the hook cannot list: an "archive" finding (form, the command as
+    spelled, UNLISTED[form] filled with `values`, None, ()), which bash_rule refuses a member alone (archive_reason).
+    False, for a caller that returns it."""
+    a.findings.append(("archive", (form, shown(cmd), UNLISTED[form] % values, None, ())))
+    return False
+
+
+def rewritable(a, cmd, what, word, paths, mark, depth):
+    """SPD-275: where `cmd` may run beside or before a write the reading meets after it -- in a pipeline, a background job
+    or after && or || (a.unsure), in a loop's or a function's body (a.loop_depth), in a nested reading (`depth`) -- record
+    an "archive" finding of form "rewritable" holding the readings of the file it reads (`paths`, lexical and real) and
+    the writes it makes itself (from `mark` on), which archive_reason holds every other write of the whole line against,
+    as SPD-151's rewritable -f script is (shell/script_text.written_script).  A command opens its file before it writes, so
+    its own writes are left out, save where it may run again -- a loop's or a function's body, or a nested reading, which
+    find's -exec and xargs run once per file -- and one run writes before the next one reads: there only its tree write
+    (SPD-126's reading of the whole directory) is left out, and the names it listed count."""
+    if not (a.unsure or a.loop_depth or depth):
+        return
+    readings = tuple(sorted({r for p in paths for r in (p, os.path.realpath(p))}))
+    again = a.loop_depth or depth
+    own = tuple(e for e in a.arg_writes[mark:] if not again or e[6] == "tree")
+    a.findings.append(("archive", ("rewritable", shown(cmd), UNLISTED["written"] % (what, shown(word), shown(cmd)),
+                                   readings, own)))
+
+
+def archive_reason(detail, written):
+    """The refusal an "archive" finding earns a member (bash_rule's member loop), or None: ARCHIVE_REASON with the cause,
+    for a "rewritable" one only where `written` -- every write of the line but the command's own (rewritable), a
+    redirection or tee target, a git call's own write, a write by argument, as bash_rule.writes_but reads them -- names
+    the file or a directory above it."""
+    form, cmd, cause, readings, _own = detail
+    if form == "rewritable" and not script_files.rewritten(readings, written):
+        return None
+    return ARCHIVE_REASON % (cmd, cause, archive_names.MAX_NAMES, archive_names.MAX_STREAM["r:gz"] >> 20,
+                             archive_names.MAX_STREAM["r:bz2"] >> 20, archive_names.MAX_PATCH >> 10)
 
 
 def file_readings(word, a, extra_dirs=()):
@@ -319,16 +367,18 @@ def written_first(paths, a, mark):
     return any(r == w or r.startswith(w.rstrip("/") + "/") for w in written for r in readings)
 
 
-def read_archive(cmd, word, a, mark, directory, place, zip_only=False, alternate=None):
+def read_archive(cmd, word, a, mark, depth, directory, place, zip_only=False, alternate=None):
     """Record every name the archive `word` names would write under `directory` (None for the line's own), each as
-    `place` places a member name; what the hook cannot list is refused a member (unlisted).  `alternate`: a suffix tried
-    when the file as named does not exist (unzip's `.zip`)."""
+    `place` places a member name; what the hook cannot list is refused a member (unlisted), and a write of the line that
+    may reach the file before the command reads it too (written_first, rewritable).  `alternate`: a suffix tried when the
+    file as named does not exist (unzip's `.zip`), whose file the line's writes are held against as well."""
     what = "archive"
     paths = file_readings(word, a)
     if paths is None:
-        return unlisted(a, cmd, "unspelled", cmd, what, shown(word))
-    if written_first(paths, a, mark):
-        return unlisted(a, cmd, "written", what, shown(word), cmd, cmd)
+        return unlisted(a, cmd, "unspelled", what, shown(word))
+    readings = paths + [p + alternate for p in paths] if alternate else paths
+    if written_first(readings, a, mark):
+        return unlisted(a, cmd, "written", what, shown(word), shown(cmd))
     names = []
     for path in paths:
         if alternate and not os.path.lexists(path) and os.path.lexists(path + alternate):
@@ -337,25 +387,27 @@ def read_archive(cmd, word, a, mark, directory, place, zip_only=False, alternate
         if found is None:
             return unlisted(a, cmd, "read", what, shown(word), archive_names.CAUSES[cause])
         names += found
-    record_names(a, cmd, directory, [(placed, is_dir) for name, is_dir in names for placed in place(name)], what, word)
+    if record_names(a, cmd, directory, [(placed, is_dir) for name, is_dir in names for placed in place(name)], what, word):
+        rewritable(a, cmd, what, word, readings, mark, depth)
 
 
 def record_names(a, cmd, directory, names, what, word, extra=None):
     """Record each (name, is a directory) as a write under `directory`, a file's or a directory's making, held to the path
-    rule as a spelled target is with the name in the reason; a name the hook cannot place, or one that leaves the
-    directory, is refused a member instead (unlisted).  `extra(name)`: what else each file's write brings (patch's
-    backups and reject file), given the name as a word relative to `directory`."""
+    rule as a spelled target is with the name in the reason, and return True; a name the hook cannot place, or one that
+    leaves the directory, is refused a member instead (unlisted, False).  `extra(name)`: what else each file's write
+    brings (patch's backups and reject file), given the name as a word relative to `directory`."""
     base = (directory if directory is not None else ".").rstrip("/")
     for name, is_dir in dict.fromkeys(names):
         if archive_names.unplaceable(name):
             return unlisted(a, cmd, "read", what, shown(word), archive_names.CAUSES["name"])
         if name.startswith("/") or os.path.normpath(name).split("/")[0] == "..":
-            return unlisted(a, cmd, "leaves", cmd, name)
+            return unlisted(a, cmd, "leaves", what, shown(word), name)
     for name, is_dir in dict.fromkeys(names):
         literal = globbing.literalize(name)
         a.arg_writes.append((cmd, base + "/" + literal, a.cwds, (), "path", None, "make" if is_dir else None))
         if extra is not None and not is_dir:
             extra("./" + literal)  # never a leading `~` or `=` the shell would expand, whatever the name
+    return True
 
 
 def read_unzip(cmd, args, a, depth):
@@ -401,8 +453,9 @@ def read_unzip(cmd, args, a, depth):
     # SPD-144: its names, as unzip places them (archive_names.zip_placed); a wildcard zipfile unzip matches itself names
     # archives the hook does not choose between
     if any(c in prepare.deglob(archive) for c in "*?["):
-        return unlisted(a, cmd, "unspelled", cmd, "archive", shown(archive))
-    read_archive(cmd, archive, a, mark, exdir, lambda name: archive_names.zip_placed(name, junk), zip_only=True, alternate=".zip")
+        return unlisted(a, cmd, "unspelled", "archive", shown(archive))
+    read_archive(cmd, archive, a, mark, depth, exdir, lambda name: archive_names.zip_placed(name, junk), zip_only=True,
+                 alternate=".zip")
 
 
 def read_patch(cmd, args, a, depth):
@@ -457,10 +510,10 @@ def read_patch(cmd, args, a, depth):
         if not rejected:
             record(a, cmd, here(name) + ".rej", None)
 
-    read_patch_names(cmd, options, operands, directory, a, mark, beside)
+    read_patch_names(cmd, options, operands, directory, a, mark, depth, beside)
 
 
-def read_patch_names(cmd, options, operands, directory, a, mark, beside):
+def read_patch_names(cmd, options, operands, directory, a, mark, depth, beside):
     """SPD-144: the names a patch's headers give (archive_names.patch_names, under -p), each written under -d's directory
     with what `beside` adds; a name that leaves the directory, absolute under -p0 or climbing out with `../`, is refused a
     member.  The patch is every -i file, else the second operand, else standard input: the file the line redirects there
@@ -471,35 +524,38 @@ def read_patch_names(cmd, options, operands, directory, a, mark, beside):
     strip = last_value(options, ("-p", "--strip"))
     if strip is not None:
         if arg_writes.unresolved(strip) or not prepare.deglob(strip).isdigit():
-            return unlisted(a, cmd, "unspelled", cmd, "-p strip count", shown(strip))
+            return unlisted(a, cmd, "unspelled", "-p strip count", shown(strip))
         strip = int(prepare.deglob(strip))
     files = [(v, True) for n, v in options if n in ("-i", "--input") and v is not None] or [(w, True) for w in operands[1:2]]
     if any(prepare.deglob(w) in stdin_text.STDIN_OPERANDS for w, _ in files):
         files = []
     if not files and a.stdin_file is not None:
         files = [(arg_writes.resolved(a.stdin_file, a), False)]
-    texts, word = [], None
+    texts, word, read = [], None, []
     for word, beneath in files:
         paths = file_readings(word, a, [directory] if beneath and directory is not None else ())
         if paths is None:
-            return unlisted(a, cmd, "unspelled", cmd, "patch", shown(word))
+            return unlisted(a, cmd, "unspelled", "patch", shown(word))
         if written_first(paths, a, mark):
-            return unlisted(a, cmd, "written", "patch", shown(word), cmd, cmd)
+            return unlisted(a, cmd, "written", "patch", shown(word), shown(cmd))
         present = [p for p in paths if os.path.lexists(p)] or paths[:1]
         for path in present:
             text, cause = archive_names.patch_file_text(path)
             if text is None:
                 return unlisted(a, cmd, "read", "patch", shown(word), archive_names.CAUSES[cause])
             texts.append(text)
+        read.append((word, paths))
     if not files:
         if a.stdin is None:
             if a.stdin_fed:
-                return unlisted(a, cmd, "stdin", cmd, "patch", "-i, or `<` a file")
+                return unlisted(a, cmd, "stdin", "patch", "-i, or `<` a file")
             return
         texts = stdin_text.each_reading(a.stdin)
         word = "-"
     names = [n for text in texts for n in archive_names.patch_names(text, strip)]
-    record_names(a, cmd, directory, [(n, False) for n in names], "patch", word, beside)
+    if record_names(a, cmd, directory, [(n, False) for n in names], "patch", word, beside):
+        for word, paths in read:  # each file it reads, every reading of it (the line's directory and -d's)
+            rewritable(a, cmd, "patch", word, paths, mark, depth)
 
 
 def patch_backups(a, cmd, written, here, options, names):
@@ -606,8 +662,8 @@ def read_ditto(cmd, args, a, depth):
                     break
                 if prepare.deglob(source) == "-":  # ditto(1): `-` reads the archive from standard input
                     if a.stdin_file is None:
-                        unlisted(a, cmd, "stdin", cmd, "archive", "a file, or `<` one")
+                        unlisted(a, cmd, "stdin", "archive", "a file, or `<` one")
                         break
                     source = arg_writes.resolved(a.stdin_file, a)
-                read_archive(cmd, source, a, mark, dest, archive_names.zip_placed, zip_only=True)
+                read_archive(cmd, source, a, mark, depth, dest, archive_names.zip_placed, zip_only=True)
 

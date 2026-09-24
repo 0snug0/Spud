@@ -2,7 +2,8 @@
 
 import os
 
-from . import analyse, arg_writes, expansions, git_config, prepare, redirect_globs, runner_files, script_files, spud_calls, syntax
+from . import (analyse, arg_writes, expansions, git_config, prepare, redirect_globs, runner_files, script_files, spud_calls,
+               syntax, tree_writes)
 from ..hooks import hookio, pathrule, worktrees
 from ..state import lookup
 
@@ -381,6 +382,13 @@ def written_targets(analysis, written):
     return sorted(out)
 
 
+def writes_but(analysis, own):
+    """written_targets over every write of the line but the writes by argument `own` holds, by identity: what a file a
+    command reads is held against where its own writes come after it opens the file (shell/tree_writes.rewritable)."""
+    mine = {id(e) for e in own}
+    return written_targets(analysis, arg_writes.written_paths([e for e in analysis.arg_writes if id(e) not in mine])[0])
+
+
 def target_has_active_glob(target):
     """True when a masked redirection or tee target holds an unquoted glob metacharacter the shell would expand (a quoted
     one is a sentinel, so GLOB_RE, which looks for bare `* ? [` or a brace list, does not see it)."""
@@ -711,6 +719,14 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                 if line_writes is None:
                     line_writes = written_targets(analysis, written)
                 reason = runner_files.runner_reason(ctx, con, caller_agent_id, caller_member, cwd, mode, detail, line_writes, runner_cache)
+                if reason:
+                    return reason, analysis
+                continue
+            if kind == "archive":
+                # an archive or a patch whose names the hook cannot list, or one a write of the line may reach before the
+                # command reads it (shell/tree_writes, SPD-144, SPD-275): after every write the path rule refuses above,
+                # so the directory it extracts into, and each name it did list, keep their own reasons
+                reason = tree_writes.archive_reason(detail, writes_but(analysis, detail[4]) if detail[0] == "rewritable" else ())
                 if reason:
                     return reason, analysis
                 continue

@@ -154,8 +154,8 @@ class UnlistedArchiveTest(ArchiveCase):
         for command in ("tar -xf nota.tar -C out", "unzip nota.zip -d out", "tar -xf missing.tar -C out",
                         "tar -xf many.tar -C out", "ditto -x clean.tar out", "patch -d out -p1 -i missing.patch"):
             with self.subTest(command):
-                self.assertRefused(command, UNLISTED_WORDING, agent_id=AGENT_K)
-                self.assertRefused(command, ANYWHERE_WORDING, agent_id=AGENT_K)
+                reason = self.assertRefused(command, UNLISTED_WORDING, agent_id=AGENT_K).reason
+                self.assertNotIn(ANYWHERE_WORDING, reason)  # SPD-275: its own reason, not SPD-126's generic one
 
     def test_an_archive_the_line_writes_first_is_refused(self):
         for command in ("cp clean.tar out/c.tar && tar -xf out/c.tar -C out", "curl -sS -o out/d.zip https://example.com/d.zip; unzip out/d.zip -d out",
@@ -204,3 +204,97 @@ class UnlistedArchiveTest(ArchiveCase):
     def test_the_outside_allowlist_still_holds_a_name(self):
         self.assertRefused("patch -d /tmp/spd-144-x -p0 -i abs.patch", OUTSIDE_DIR_WORDING, agent_id=AGENT_K)
         self.assertRefused("tar -xf clean.tar -C /Users/Nobody", OUTSIDE, agent_id=AGENT_K)
+
+
+ARCHIVE_WORDING = "write it in one Bash call and extract or apply it in the next"  # SPD-275: the respelling every cause gets
+CAPS_WORDING = "1000 names"  # SPD-275: the caps the reason names
+
+
+class ArchiveReasonTest(ArchiveCase):
+    """SPD-275 (proposal by SPUD-144/Locutus): SPD-144 refused a member an archive or a patch the hook cannot list as a
+    write anywhere, syntax.ANY_PATH with the cause after it, so the reason read as SPD-126's generic one ("places files where
+    the line cannot say", tar's -P and curl's config among it).  Each cause is now an "archive" finding of its own, read in
+    bash_rule's member loop, with a reason naming the archive, the cause and the respelling.  out/in.tar, out/in.zip and
+    out/p.patch are archives in the member's own tree, which a line may write."""
+
+    def build_home(self):
+        super().build_home()
+        home = self.home.path
+        write_tar(home / "out" / "in.tar", ["a.txt", "sub/b.txt"])
+        write_zip(home / "out" / "in.zip", ["a.txt", "sub/b.txt"])
+        (home / "out" / "p.patch").write_text("--- a/x.txt\n+++ b/x.txt\n@@ -1 +1 @@\n-a\n+b\n", encoding="utf-8")
+        (home / "big.patch").write_text("--- a/x.txt\n+++ b/x.txt\n" + "#" * (1 << 20), encoding="utf-8")
+        write_tar(home / "out" / "self.tar", ["a.txt", "self.tar"])  # extracting it writes the archive itself
+
+    def test_each_cause_is_refused_with_a_reason_of_its_own(self):
+        for command, cause, shown in (("tar -xf nota.tar -C out", "is not a tar or zip archive", "`nota.tar`"),
+                                      ("unzip nota.zip -d out", "is not a tar or zip archive", "`nota.zip`"),
+                                      ("tar -xf missing.tar -C out", "does not exist now", "`missing.tar`"),
+                                      ("tar -xf many.tar -C out", "holds more than 1000 names", "`many.tar`"),
+                                      ("ditto -x clean.tar out", "cpio", "`clean.tar`"),
+                                      ("tar -xf dollar.tar -C out", "cannot place as a path", "`dollar.tar`"),
+                                      ("patch -d out -p1 -i big.patch", "larger than the 1024 KiB", "`big.patch`"),
+                                      ("cat clean.tar | tar -xf - -C out", STDIN_WORDING, "`tar`"),
+                                      ("cat in.patch | patch -d out -p1", STDIN_WORDING, "`patch`"),
+                                      ("tar -xf $(ls *.tar) -C out", UNSPELLED_WORDING, "$(...)"),
+                                      ("tar -xf *.tar -C out", UNSPELLED_WORDING, "*.tar"),
+                                      ("cp clean.tar out/c.tar && tar -xf out/c.tar -C out", WRITTEN_WORDING, "`out/c.tar`"),
+                                      ("patch -d out -p0 -i esc.patch", OUTSIDE_DIR_WORDING, "`esc.patch`"),
+                                      ("tar -xf clean.tar -s /a/b/ -C out", "rewrites the names", "`clean.tar`"),
+                                      ("tar -x --use-compress-program cat -f clean.tar -C out", "--use-compress-program",
+                                       "`clean.tar`")):
+            with self.subTest(command):
+                reason = self.assertRefused(command, cause, agent_id=AGENT_K).reason
+                self.assertIn(shown, reason)
+                self.assertIn(ARCHIVE_WORDING, reason)
+                self.assertIn(CAPS_WORDING, reason)
+                self.assertNotIn(ANYWHERE_WORDING, reason)
+        self.assertIn("../escaped.txt", self.bash("patch -d out -p0 -i esc.patch", AGENT_K).reason)
+
+    def test_the_cause_is_a_finding_not_a_write(self):
+        reading = self.hook_reading("tar -xf nota.tar -C out")
+        self.assertEqual([(w[1], w[6]) for w in reading["arg_writes"]], [("out", "tree")])
+        self.assertEqual([kind for kind, _ in reading["findings"]], ["archive"])
+
+    def test_a_write_of_the_line_that_may_land_on_the_archive_first_is_refused(self):
+        # beside it (a background job, a pipeline), or in a loop's next pass, a write the reading meets after the command
+        for command in ("tar -xf out/in.tar -C out & cp git.tar out/in.tar",
+                        "for i in 1 2; do tar -xf out/in.tar -C out; cp git.tar out/in.tar; done",
+                        "while true; do tar -xf out/in.tar -C out; cp git.tar out/in.tar; done",
+                        "tar -xvf out/in.tar -C out | cat > out/in.tar",
+                        "tar -xvf out/in.tar -C out | cp git.tar out/in.tar",
+                        "tar -xvf out/in.tar -C out | tee out/x.txt out/in.tar",
+                        "tar -x -C out < out/in.tar & cp git.tar out/in.tar",
+                        "unzip -o out/in.zip -d out & cp git.zip out/in.zip",
+                        "unzip -o out/in -d out & cp git.zip out/in.zip",  # unzip tries in.zip when `in` is not there
+                        "ditto -x -k out/in.zip out & cp git.zip out/in.zip",
+                        "patch -p1 -d out < out/p.patch & cp git.patch out/p.patch",
+                        "for i in 1 2; do patch -p1 -d out < out/p.patch; cp git.patch out/p.patch; done",
+                        "tar -xf out/in.tar -C out & cp git.tar out/*.tar",
+                        "tar -xf out/in.tar -C out & rsync -a git.tar out/",
+                        "sh -c 'tar -xf out/in.tar -C out & cp git.tar out/in.tar'",  # a nested reading
+                        "f() { tar -xf out/in.tar -C out; }; f; cp git.tar out/in.tar; f",  # a function's next call
+                        # a pass that writes the archive itself before the next pass reads it
+                        "for i in 1 2; do tar -xf out/self.tar -C out; done",
+                        "find out -name a.txt -exec tar -xf out/self.tar -C out \\;"):
+            with self.subTest(command):
+                reason = self.assertRefused(command, WRITTEN_WORDING, agent_id=AGENT_K).reason
+                self.assertIn(ARCHIVE_WORDING, reason)
+
+    def test_an_archive_the_line_never_writes_is_read_as_today(self):
+        # SPD-144's reading, unchanged: beside a write that does not land on it, in a loop, after it on the line
+        for command in ("tar -xf out/in.tar -C out | cat", "tar -xf out/in.tar -C out & echo x > out/x.txt",
+                        "for i in 1 2; do tar -xf out/in.tar -C out; done", "cd out && tar -xf in.tar",
+                        "for i in 1 2; do tar -xf clean.tar -C out; done", "for i in 1 2; do unzip -o out/in.zip -d out; done",
+                        "patch -p1 -d out < out/p.patch | cat", "tar -xf out/in.tar -C out; cp git.tar out/in.tar",
+                        "for i in 1 2; do ditto -x -k out/in.zip out; done", "tar -xf clean.tar -C out & cp git.tar out/other.tar",
+                        "tar -xf out/self.tar -C out", "tar -xf out/self.tar -C out | cat"):  # it opens the file before it writes
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_K)
+
+    def test_spuds_answers_are_unchanged(self):
+        for command in ("tar -xf /tmp/spd-275-x/in.tar -C /tmp/spd-275-x & cp clean.tar /tmp/spd-275-x/in.tar",
+                        "cat clean.tar | tar -xf - -C /tmp/spd-275-x", "tar -xf nota.tar -C /tmp/spd-275-x",
+                        "for i in 1 2; do tar -xf /tmp/spd-275-x/c.tar -C /tmp/spd-275-x; cp git.tar /tmp/spd-275-x/c.tar; done"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=None)

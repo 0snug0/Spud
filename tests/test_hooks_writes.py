@@ -991,11 +991,12 @@ class ExtractionWriteTest(TreeWriteCase):
                                 ("curl -s https://example.com/x", []), ("curl -K cfg https://example.com/x", [(m.ANY_PATH, "tree")])):
             with self.subTest(command):
                 self.assertEqual(self.writes(command), writes)
-        # SPD-144: a patch fed by a pipe from a program is text the line does not spell, so after the tree its names are a
-        # write the line cannot place, refused a member; a `<` file the line names is read, above
-        (tree, kind), (unlisted, _) = self.writes("cat x.patch | patch -p1")
+        # SPD-144: a patch fed by a pipe from a program is text the line does not spell, so after the tree its names are an
+        # "archive" finding the hook cannot list (SPD-275), refused a member; a `<` file the line names is read, above
+        (tree, kind), = self.writes("cat x.patch | patch -p1")
         self.assertEqual((tree, kind), (".", "tree"))
-        self.assertTrue(unlisted.startswith(m.ANY_PATH) and "from standard input" in unlisted, unlisted)
+        findings = self.hook_reading("cat x.patch | patch -p1")["findings"]
+        self.assertTrue(any(k == "archive" and d[0] == "stdin" and "from standard input" in d[2] for k, d in findings), findings)
 
     def test_into_the_members_own_subtree_is_silent(self):
         for command in ("tar -xf a.tar -C out", "tar xzf a.tar -C out", "tar -x -C out -f a.tar", "tar -xf a.tar --directory=out/x",
