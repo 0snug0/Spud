@@ -485,7 +485,7 @@ class ShellWalk:
         A body whose delimiter is unquoted is expanded here too, before the command reads it, wherever it is fed
         (SPD-192): its substitutions run in the command's directory with the values the line holds when the command runs,
         which its own prefix assignments do not reach (probed: `x=a; x=b cat <<EOF` and `cat <<EOF ...; x=b` wrote into
-        a, `cat <<EOF ...; cd d` where the line stood before the cd; tests/test_hooks.py HereDocumentExpansionTest).
+        a, `cat <<EOF ...; cd d` where the line stood before the cd; tests/test_hooks_input.py HereDocumentExpansionTest).
         What the command reads, and what the bodies returned hold, is then the text the expansion leaves, its escapes
         resolved (heredocs.received_body, SPD-206): `sh <<EOF` fed `\\$(git push)` runs the push.  Where the expansion ran a
         substitution that text holds its output, which the line does not spell, and the body returned is a

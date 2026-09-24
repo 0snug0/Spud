@@ -19,7 +19,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from helpers import EXIT_ERROR, TEAM_TABLE_DELIMITER, TEAM_TABLE_HEADER, SpudTestCase, load_spud_module, real_config
-from test_hooks import AGENT_A, AGENT_B, COMPLETION, TWO_REQUESTS_SUM, HookCase
+from hookcase import AGENT_A, AGENT_B, COMPLETION, TWO_REQUESTS_SUM, HookCase
 from test_team_card import MEMBER, TICKET_ONE, TICKET_TWO, YUKON_USAGE, cells, frontmatter, member_of, table_rows, team_section, total_row
 
 spud = load_spud_module()

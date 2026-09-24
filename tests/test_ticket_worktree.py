@@ -19,7 +19,7 @@ import shutil
 import unittest
 
 from helpers import EXIT_OK, EXIT_TRANSITION, REPO, RepoMixin, SpudTestCase, git, load_spud_module
-from test_hooks import AGENT_A, AGENT_B, AGENT_C, SESSION, HookCase
+from hookcase import AGENT_A, AGENT_B, AGENT_C, SESSION, HookCase
 
 BRIEF = "Build it."
 BOUND_WORDING = "a member of a bound ticket writes its project's paths there alone"  # the refusal outside the bound worktree

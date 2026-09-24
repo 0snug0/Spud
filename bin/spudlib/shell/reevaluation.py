@@ -15,7 +15,7 @@ expanded, and each (e) expansion in the word is read:
   decode apart; SPD-202 reads every other one as its value) refuses a member, and
   Spud reads on, as he does past an eval of a word the hook cannot resolve.
 
-Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py (tests/test_hooks.py EvalFlagTest has
+Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py (tests/test_hooks_words.py EvalFlagTest has
 the lines): (e) alone, repeated or beside `@` evaluates the value as it is; (P) first takes it for the name whose value is
 evaluated; every other flag may change the text first -- `(Le)` lowercased `$(TOUCH R9)` before it ran, `(l(10)(x)e)` cut
 its `$` off and ran nothing, `${(e)x#\\\\}` took a backslash away and ran what the value only spelled -- and so may a
@@ -229,7 +229,7 @@ def read_expanded_body(body, a, depth):
     `depth` (SPD-192): as read_evaluated_text reads a value, since the body is expanded as that text is -- its quotes
     are text, a backslash escapes `$`, a backtick, a backslash or a newline, and each `$( )`, backtick, default word,
     arithmetic expansion and zsh (e) expansion in it runs (probed through tests/probes/shell_probe.py in zsh 5.9 -f,
-    -f -o nobareglobqual and bash 3.2.57: tests/test_hooks.py HereDocumentExpansionTest).  A body with neither a `$`
+    -f -o nobareglobqual and bash 3.2.57: tests/test_hooks_input.py HereDocumentExpansionTest).  A body with neither a `$`
     nor a backtick expands nothing, and is not scanned.
 
     Whether the expansion runs a command substitution -- a default word's, one in arithmetic and one an (e) expansion
@@ -279,7 +279,7 @@ def body_values(a, words):
     """The line's reading of each parameter expansion in an unquoted here-document's body, for heredocs.received_body
     (SPD-208): the shell expanding the body puts each value in the text, and a shell fed it parses that text again, so
     the value's separators, redirections, newlines and substitutions are commands it runs (probed through
-    tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: tests/test_hooks.py
+    tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: tests/test_hooks_input.py
     HereDocumentValueTest).  `words` are the command's, whose prefix assignments bash expands the body with and zsh
     does not (probed: `x=a; x=b cat <<EOF` printed `[$x]` as b in bash and a in zsh).
 

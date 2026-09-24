@@ -200,7 +200,7 @@ class ProjectEditRemoveTest(RepoMixin, SpudTestCase):
 
 class ProjectScriptsTest(RepoMixin, SpudTestCase):
     """SPD-145: a project's allow-list of repository scripts, which the Bash hook lets a member of that project's tickets run
-    (tests/test_hooks.py ScriptFileTest): set by Spud with `project edit --allow-script/--drop-script`, kept in
+    (tests/test_hooks_programs.py ScriptFileTest): set by Spud with `project edit --allow-script/--drop-script`, kept in
     projects.scripts, and printed by `project show` and `project list`."""
 
     def setUp(self):
@@ -313,7 +313,7 @@ class ProjectScriptsTest(RepoMixin, SpudTestCase):
 
 class ProjectRunnersTest(RepoMixin, SpudTestCase):
     """SPD-168: a project's allow-list of runner names -- npm scripts, deno tasks, make targets -- which the Bash hook lets
-    a member of that project's tickets run through a script runner (tests/test_hooks.py ScriptRunnerTest): set by Spud with
+    a member of that project's tickets run through a script runner (tests/test_hooks_programs.py ScriptRunnerTest): set by Spud with
     `project edit --allow-runner/--drop-runner`, kept in projects.runners, printed by `project show` and `project list`,
     and carried by Projects.md."""
 

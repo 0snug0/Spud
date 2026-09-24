@@ -74,7 +74,7 @@ checkout. The run ends with one line naming the result and a digest of the tree 
 iterating on a smaller area, name the modules, classes or tests to run instead of the whole suite:
 
 ```bash
-python3.14 -I -S tests/suite.py test_package test_hooks.StopTest
+python3.14 -I -S tests/suite.py test_package test_hooks_session.StopTest
 ```
 
 To run only the tests a change reaches, name the branch it is compared against (default `main`):

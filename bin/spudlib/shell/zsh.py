@@ -268,7 +268,7 @@ def _optional_list(text, k):
     text[k] (SPD-184): (both readings' text for it, the index after it), or None where no `=(` opens that content.  zsh
     lexes that content as the pattern's text, so the substitution runs the list up to its first `)` with the pattern's
     `(` and `|` taken out of it, and only one opening the content runs: probed in zsh 5.9 -f and -f -o nobareglobqual (see
-    tests/test_hooks.py CaseSubstitutionTest), `( =(tou|ch r90) )` made r90, `( =(touch (r97|r98)) )` made r97r98,
+    tests/test_hooks_groups.py CaseSubstitutionTest), `( =(tou|ch r90) )` made r90, `( =(touch (r97|r98)) )` made r97r98,
     `( =(touch r105)|=(touch r106) )` made r105 alone, and a newline before it (`(<newline>=(touch r83) )`) made nothing.
     The list is marked as a line of its own, and read as the `<( ... )` whose file name it hands the pattern: bash
     rejects the line."""
@@ -403,7 +403,7 @@ def mark_zsh_patterns(text):
             # substitution, its list parsed as commands, and its `)` is the list's, never the pattern's (probed in zsh 5.9
             # -f and -f -o nobareglobqual: `case x in =(touch r01)) ...`, `case =(touch r02) in x) ...`, `y|=(...)`,
             # `x| =(...)`, `;; =(...)` and `=(case y in y) touch r17;; esac))` made theirs, and `x|=(tou|ch r100))` ran
-            # `tou` and `ch`; tests/test_hooks.py CaseSubstitutionTest has the rest).  Both readings take it for the
+            # `tou` and `ch`; tests/test_hooks_groups.py CaseSubstitutionTest has the rest).  Both readings take it for the
             # `<( ... )` whose file name it hands the case, as zsh does -- a file holding the list's output -- and bash
             # rejects the line.
             out.append("<(")

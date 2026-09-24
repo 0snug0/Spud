@@ -19,7 +19,7 @@ import os
 import unittest
 
 from helpers import EXIT_ERROR, EXIT_OK, EXIT_OWNERSHIP, EXIT_USAGE
-from test_hooks import AGENT_A, AGENT_B, AGENT_C, COMPLETION, PER_BLOCK_BREAKDOWN, PER_ENTRY_SUM, SESSION, TWO_REQUESTS_SUM, HookCase
+from hookcase import AGENT_A, AGENT_B, AGENT_C, COMPLETION, PER_BLOCK_BREAKDOWN, PER_ENTRY_SUM, SESSION, TWO_REQUESTS_SUM, HookCase
 
 MAIN = "-Users-Someone-Personal-Spud"  # the main checkout's project directory
 WORKTREE = "-Users-Someone-Personal-Spud--claude-worktrees-spd-001-tokens"  # a worktree session's, emptied when the session left it

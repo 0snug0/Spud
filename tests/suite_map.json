@@ -4,8 +4,8 @@
     "Every path changed against the merge base of BASE and HEAD, tracked or untracked and not ignored, is matched against",
     "`full` first and then against each rule in order, the first match deciding; a pattern is an fnmatch pattern over the",
     "path from the repository root, and its `*` crosses `/`.  A path in `full`, or in no rule at all, runs the full suite.",
-    "A rule's `modules` are test module names or fnmatch patterns over them (`test_hooks*` is right before and after",
-    "SPD-231 splits tests/test_hooks.py), expanded against the tree the run covers.  With `importers`, the rule also runs",
+    "A rule's `modules` are test module names or fnmatch patterns over them (`test_hooks*` takes every module SPD-231",
+    "split tests/test_hooks.py into), expanded against the tree the run covers.  With `importers`, the rule also runs",
     "the changed file's own module when it is a test module, and every test module that imports it, directly or through",
     "another, read from the tree's import statements.",
     "Until the fixture ticket (SPD-233) lands, bin/ and share/ have two safe rules, shell and probes, from the audit of",
@@ -28,7 +28,7 @@
     {
       "name": "shell",
       "paths": ["bin/spudlib/shell/*"],
-      "modules": ["test_hooks*", "test_ticket_worktree", "test_home", "test_launcher", "test_package",
+      "modules": ["test_hooks*", "test_hookcase", "test_ticket_worktree", "test_home", "test_launcher", "test_package",
                   "test_cost", "test_team_card", "test_resum"]
     },
     {
@@ -39,7 +39,7 @@
     {
       "name": "hookcase",
       "paths": ["tests/hookcase.py"],
-      "modules": ["test_hooks*"],
+      "modules": ["test_hooks*", "test_hookcase"],
       "importers": true
     },
     {

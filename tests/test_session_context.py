@@ -15,7 +15,7 @@ import re
 import unittest
 
 from helpers import aged_event, hold_watch_lock, install_watcher_plist, load_spud_module
-from test_hooks import HookCase
+from hookcase import HookCase
 from test_hooks_projects import KEY, ProjectHookCase
 
 spud = load_spud_module()

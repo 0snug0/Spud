@@ -399,8 +399,10 @@ def modules_of(files):
     return sorted(p.decode()[len("tests/"):-3] for p, *_ in files if fnmatch.fnmatchcase(p.decode(), "tests/test*.py"))
 
 
-# The ticket's two safe rules, from the audit of 2026-09-23: what the modules a map rule names must come to.
-SHELL_NAMED = {"test_ticket_worktree", "test_home", "test_launcher", "test_package", "test_cost", "test_team_card", "test_resum"}
+# The ticket's two safe rules, from the audit of 2026-09-23: what the modules a map rule names must come to.  test_hookcase
+# joined the shell rule with SPD-231: it reads shell/bash_rule.py's source.
+SHELL_NAMED = {"test_hookcase", "test_ticket_worktree", "test_home", "test_launcher", "test_package", "test_cost", "test_team_card",
+               "test_resum"}
 PROBES = ["test_module_sizes", "test_probe_env", "test_shell_probe"]
 # What the fixture, or every test, depends on: each of these runs the full suite whatever else changed.
 CORE = ["bin/spud", "bin/spud_ledger.py", "bin/spudlib/core/kernel.py", "bin/spudlib/state/ledgerdb.py", "bin/spudlib/cli/cliparser.py",
@@ -493,9 +495,17 @@ class SelectTest(unittest.TestCase):
     def test_hookcase_runs_every_hook_module_and_everything_importing_it(self):
         files = [entry("tests/suite_map.json", MAP.read_text(encoding="utf-8")), entry("tests/hookcase.py", "from helpers import X\n"),
                  entry("tests/test_hooks_bash.py", "from hookcase import HookCase\n"), entry("tests/test_hooks_git.py", "import unittest\n"),
-                 entry("tests/test_cost.py", "from hookcase import HookCase\n"), entry("tests/test_members.py", "import helpers\n")]
+                 entry("tests/test_cost.py", "from hookcase import HookCase\n"), entry("tests/test_members.py", "import helpers\n"),
+                 entry("tests/test_hookcase.py", "import unittest\n")]
         sel = self.select("tests/hookcase.py", files=files)
-        self.assertEqual((sel.full, sel.rules, sel.modules), (False, ["hookcase"], ["test_cost", "test_hooks_bash", "test_hooks_git"]))
+        self.assertEqual((sel.full, sel.rules, sel.modules),
+                         (False, ["hookcase"], ["test_cost", "test_hookcase", "test_hooks_bash", "test_hooks_git"]))
+
+    def test_this_trees_hookcase_change_runs_every_module_importing_it(self):
+        sel = self.select("tests/hookcase.py")
+        importers = {"test_cost", "test_team_card", "test_resum", "test_auto_claim", "test_session_context", "test_pull_requests",
+                     "test_ticket_worktree", "test_hookcase"}
+        self.assertTrue(importers | {m for m in self.present if m.startswith("test_hooks")} <= set(sel.modules))
 
     def test_rules_add_up_and_nothing_changed_selects_nothing(self):
         sel = self.select("tests/probes/probe_env.py", "bin/spudlib/shell/zsh.py", "tests/test_members.py")
@@ -519,7 +529,7 @@ class ChangedLineTest(unittest.TestCase):
 
     def test_a_selection_by_the_map_says_affected_its_rules_its_base_and_the_digest(self):
         sel = suite.Selection(["bin/spudlib/shell/walk.py", "tests/test_x.py"], [("bin/spudlib/shell/walk.py", "shell"), ("tests/test_x.py", "tests")],
-                              False, ["shell", "tests"], ["test_hooks", "test_x"])
+                              False, ["shell", "tests"], ["test_hooks_bash", "test_x"])
         self.assertEqual(self.line(suite.scope(sel, "main")),
                          "OK: 3 tests (affected: shell+tests against main, 2 modules) in 1.5 s on 4 workers; tree 0123456789abcdef\n")
 
