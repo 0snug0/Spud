@@ -150,14 +150,17 @@ GIT_INPUT_REASON = (
     " --batch`), or spell the words out; Spud commits, after the outcome is recorded")
 
 
-# A git call inside a trap's action (expansions.TrapDirs, SPD-122), refused a member after every reason the words as
-# spelled earn, so Law 7's verb check inside the action keeps its own reason.
+# A git call inside a trap's action (expansions.TrapDirs, SPD-122) -- or in a function zsh runs by itself, SPD-276 --
+# refused a member after every reason the words as spelled earn, so Law 7's verb check inside the action keeps its own
+# reason.
 TRAP_GIT_REASON = (
-    "Law 7: this line runs git inside a trap's action (`trap '...' <signal>`), which the shell runs later -- on exit, on a"
-    " signal, around a command under DEBUG, ERR, ZERR or RETURN, as a subshell or a function ends -- in whichever directory"
-    " it stands in then, so the hook cannot tell which repository that git reads, nor whose hooks and config it runs"
-    " (post-index-change under `git status`). Nobody needs git in a trap: run git as its own command on the line, where"
-    " the hook reads the directory it runs in; Spud commits, after the outcome is recorded")
+    "Law 7: this line runs git inside a trap's action (`trap '...' <signal>`, or a function zsh runs by itself: a"
+    " TRAPxxx function, zshexit, chpwd, command_not_found_handler, or one a zshexit_functions or chpwd_functions array"
+    " names), which the shell runs later -- on exit, on a signal, around a command under DEBUG, ERR, ZERR or RETURN, after"
+    " a cd, as a subshell or a function ends -- in whichever directory it stands in then, so the hook cannot tell which"
+    " repository that git reads, nor whose hooks and config it runs (post-index-change under `git status`). Nobody needs"
+    " git in a trap: run git as its own command on the line, where the hook reads the directory it runs in; Spud commits,"
+    " after the outcome is recorded")
 
 
 # The reason for an (e) expansion whose text the hook cannot read (shell/reevaluation, SPD-189).
@@ -193,6 +196,8 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 # "option"   an option Claude Code's shell snapshot sets that the reader does not model (held_options.line_options, SPD-263),
 #             which may change how the shell reads every line; shown is the snapshot's line and its file.  No spelling of
 #             the line gets past it, so the respelling is the profile's.
+# "function-body" a function body zsh's `functions` parameter is handed that the line does not spell -- a variable, a
+#             substitution, text appended to a body (walk.assign_function, SPD-278); shown is the assignment.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
@@ -233,6 +238,10 @@ UNREAD_MESSAGES = {
                " how the shell reads a line's words or runs its commands in a way the hook does not model",
                "no spelling of the line gets past a profile's option: ask Spud to have it taken out of the shell profile;"
                " the hook reads every snapshot in that directory, so the option counts until no snapshot there sets it"),
+    "function-body": ("zsh's `functions` parameter is handed a function body the line does not spell (`%s`): a variable,"
+                      " a substitution, or text appended to a body, which runs when the function is called, or by itself"
+                      " for a TRAPxxx, zshexit or chpwd name",
+                      "define the function with name() { ... } on the line, where the hook reads its body"),
 }
 
 

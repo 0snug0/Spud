@@ -497,6 +497,265 @@ class TrapRepositoryTest(BashHookCase):
             self.members_refused(command, "Law 7")
 
 
+class PlantedRepository:
+    """A BashHookCase's home as TrapRepositoryTest builds it (SPD-122): a git repository, with a hand-built one at
+    tests/fake holding a hook that is not a sample, so a git call read there is refused a member as a repository no
+    checkout owns and Spud as a planted one.  AGENT_A plans home:tests/** and home:bin/spud, AGENT_C home:**."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        scratch_git(home, "init", "-q", "-b", "main")
+        scratch_git(home, "commit", "-q", "--allow-empty", "-m", "root")
+        self.nested = home / "tests" / "fake"
+        plant_git_dir(self.nested / ".git")
+        (self.nested / ".git" / "hooks").mkdir()
+        hook = self.nested / ".git" / "hooks" / "post-index-change"
+        hook.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        hook.chmod(0o755)
+        self.tests = str(home / "tests")
+
+    def members_refused(self, command, needle, cwd=None, members=(AGENT_C, AGENT_A)):
+        r = None
+        for agent_id in members:
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id, cwd)
+        return r
+
+    def spud_refused(self, command):
+        with self.subTest(command=command, agent_id="spud"):
+            r = self.assertRefused(command, SPUD_PLANTED_WORDING, agent_id=None)
+            self.assertIn(str(self.nested), r.reason)
+
+    def silent_for(self, command, agents=(AGENT_C, AGENT_A, None), cwd=None):
+        for agent_id in agents:
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id, cwd)
+
+    def analysis(self, command, cwd=None):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=cwd or str(self.home.path), home=str(self.home.path)))
+
+    def git_dirs(self, command, cwd=None):
+        """The directories each git call of the line may run in, in order."""
+        return [found for _targets, found in self.analysis(command, cwd).git_calls]
+
+
+class LineFunctionCallTest(PlantedRepository, BashHookCase):
+    """SPD-277 (Kyle's SPD-122 proposal): walk.py read a function the line defines once, in place, where it is defined,
+    so a git call or a relative write in its body was checked in the definition's directory and never where a call after
+    a cd runs it: `f() { git status; }; cd tests/fake; f` ran git in a planted repository -- its hooks and its config --
+    unchecked, while `cd tests/fake && git status` is refused, and `f() { echo x > out.txt; }; cd tests; f` was refused a
+    member whose deliverables hold tests/out.txt, the file the shell writes.  SPD-252 read a function the shell's snapshot
+    holds at each call, from that call's state (held_text.read_shell_name); a function the line defines is now read the
+    same way: at each call, from the directories, the variables and the options the call starts from, with the call's
+    standard input (SPD-212), its cd carried into the rest of the line (SPD-252's rule) and a call that reads exactly as
+    one before given that reading's directories.  A function defined and never called is read as it always was, in place,
+    so its Law 7 verbs are still found and its findings keep their place on the line.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and
+    -f and in GNU bash 3.2.57, `pwd` standing for git: `f() { pwd; echo x > out1.txt; }; cd d; f` printed d and wrote
+    d/out1.txt in all three; `g() { echo y; } > out2.txt; cd d; g` wrote d/out2.txt (a definition's own redirection opens
+    at each call, where the call runs); `h() { cd d; }; h; pwd` printed d; `w() { pwd; }; cd d; w; cd e; w` printed d, then
+    d/e; `k() { echo NEVER; }` ran nothing; `m() { cd d; echo z; } > out7.txt; m` wrote out7.txt where the call started."""
+
+    def test_the_tickets_lines_are_refused_for_every_caller(self):
+        """Silent on main for both members and for Spud: the body's git was read in the home, a clean checkout."""
+        for command in ("f() { git status; }; cd tests/fake; f", "f() { git status; }; cd tests/fake && f",
+                        "function f { git status; }; cd tests/fake; f", "f() ( git status ); cd tests/fake; f",
+                        "f() git status; cd tests/fake; f", "f() { git status; }; cd tests/fake; f; cd ../..",
+                        "f() { git status; }; cd tests/fake; time f", "f() { git status; }; cd tests/fake; noglob f",
+                        "f() { git status; }; g() { f; }; cd tests/fake; g", "f() { git status; }; cd tests/fake; eval f",
+                        "f() { git status; }; cd tests/fake; echo $(f)", "f() { git status; }; cd tests/fake; ( f )",
+                        "f() { git status; }; cd tests/fake; if true; then f; fi", "f() { git status; } > /dev/null; cd tests/fake; f",
+                        "f() { cd tests/fake; }; f; git status", "f() { cd tests/fake; }; f && git status",
+                        "eval 'f() { git status; }'; cd tests/fake; f"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        # ... as the plain spelling already was
+        self.members_refused("cd tests/fake && git status", GIT_NESTED_WORDING)
+        self.spud_refused("cd tests/fake && git status")
+
+    def test_each_call_is_read_where_it_runs(self):
+        home, nested = str(self.home.path), str(self.nested)
+        self.assertEqual(self.git_dirs("f() { git status; }; cd tests/fake; f; cd ../..; f"),
+                         [frozenset([nested]), frozenset([home])])
+        self.assertEqual(self.git_dirs("f() { git status; }; cd tests/fake; f; f"), [frozenset([nested])])
+        self.assertEqual(self.git_dirs("f() { cd tests/fake; }; f; git status"), [frozenset([nested])])
+        # SPD-252's rule, now for a function the line defines: its cd carries into the rest of the line
+        self.assertEqual([c for t, c in self.analysis("f() { cd /tmp; }; f; echo > x").redirects if t == "x"],
+                         [frozenset(["/tmp"])])
+        # a call that may not run leaves both directories, as a cd there does
+        self.assertEqual(self.git_dirs("f() { cd tests/fake; }; true && f; git status"), [frozenset([home, nested])])
+        # a body that runs in a process of its own leaves the line where it was
+        for command in ("f() ( cd tests/fake ); f; git status", "f() { cd tests/fake; }; (f); git status",
+                        "f() { cd tests/fake; }; f | cat; git status", "f() { cd tests/fake; }; coproc f; git status",
+                        "f() { cd tests/fake; }; echo $(f); git status", "f() { cd tests/fake; }; git status; f"):
+            with self.subTest(command=command):
+                self.assertEqual(self.git_dirs(command), [frozenset([home])])
+
+    def test_a_write_in_the_body_lands_where_the_call_runs(self):
+        """From the home, where out.txt is nobody's but AGENT_C's, a call in tests/ writes a file AGENT_A plans; from
+        tests/, a call back in the home writes one AGENT_A does not."""
+        for command in ("f() { echo x > out.txt; }; cd tests; f", "f() { echo x; } > out.txt; cd tests; f",
+                        "f() { cp /dev/null out.txt; }; cd tests; f", "f() { echo x | tee out.txt; }; cd tests && f",
+                        "f() { cd tests; }; f; echo hi > out.txt", "f() { cd tests; }; f && echo hi > out.txt",
+                        "function f { cd tests; }; f; touch out.txt", "f() { cd tests; }; g() { f; }; g; echo hi > out.txt"):
+            with self.subTest(command=command):
+                self.assertSilent(command, AGENT_A)
+        for command in ("f() { echo x > out.txt; }; cd ..; f", "f() { echo x; } > out.txt; cd ..; f",
+                        "f() { echo x > out.txt; }; f; cd ..; f", "f() { cd ..; }; f; echo hi > out.txt",
+                        "f() { echo x > out.txt; }; cd %s; f" % self.home.path):
+            with self.subTest(command=command):
+                self.assertRefused(command, "out.txt", AGENT_A, self.tests)
+        # the write before the call, and the call that may not run, keep the directory the line stood in
+        for command in ("f() { cd tests; }; echo hi > out.txt; f", "f() { cd tests; }; true && f; echo hi > out.txt",
+                        "f() ( cd tests ); f; echo hi > out.txt", "f() { cd tests; }; (f); echo hi > out.txt"):
+            with self.subTest(command=command):
+                self.assertRefused(command, "out.txt", AGENT_A)
+
+    def test_a_function_defined_and_never_called_reads_as_before(self):
+        """Its body is read where it is defined, as always: its Law 7 verbs found, its writes held to the path rule there,
+        its findings in their place on the line; and the definition itself moves nothing."""
+        self.assertEqual(self.analysis("f() { git push; }; git status").findings,
+                         [("git", ("push", "push")), ("git", ("status", None))])
+        self.assertEqual(self.analysis("git log; f() { git push; }; git status").findings,
+                         [("git", ("log", None)), ("git", ("push", "push")), ("git", ("status", None))])
+        self.members_refused("f() { git push; }", "Law 7")
+        self.members_refused("f() { git push; }; cd tests/fake", "Law 7")
+        self.assertRefused("f() { echo x > out.txt; }", "out.txt", AGENT_A)
+        self.assertSilent("f() { echo x > out.txt; }", AGENT_A, self.tests)
+        home = str(self.home.path)
+        for command in ("f() { git status; }; cd tests/fake", "cw() { git status; }; cd tests/fake; command cw",
+                        "(f() { git status; }); cd tests/fake; f", "x=$(f() { git status; }; echo); cd tests/fake; f"):
+            with self.subTest(command=command):
+                self.silent_for(command)
+                self.assertEqual(self.git_dirs(command)[:1], [frozenset([home])])
+        self.assertEqual(self.analysis("f() { cd tests; }").cwds, frozenset([home]))
+        self.assertSilent("f() { cd /tmp; }; echo hi > tests/out.txt", AGENT_A)
+        # zsh's anonymous function runs where it stands, at once (probed in zsh 5.9: `() { cd d; }; pwd` printed d), and
+        # is read in place as it always was: a relative cd in a body the hook cannot follow
+        self.assertRefused("() { cd tests; }; echo hi > out.txt", "cannot follow", AGENT_A)
+        self.assertRefused("() cd tests; echo hi > out.txt", "cannot follow", AGENT_A)
+        self.members_refused("() { git push; }", "Law 7")
+
+    def test_a_body_that_calls_itself(self):
+        """Read once per state: a call from the state its own reading started in reads no further, and one from another
+        is read again, deeper, up to the reading's bound, past which a member is refused the text left unread."""
+        self.silent_for("f() { f; }; f")
+        self.silent_for("f() { h; }; h() { f; }; f")
+        self.silent_for("f() { git status; f; }; f")
+        started = time.monotonic()
+        self.assertRefused("f() { cd tests; f; }; f; echo hi > out.txt", "levels the hook reads", AGENT_A)
+        self.assertLess(time.monotonic() - started, 30)
+
+    def test_a_body_the_shells_own_text_calls_is_the_members(self):
+        """A function of Claude Code's snapshot of the shell that calls one the line defines reads the line's body at that
+        call, and what the body earns is the member's own text, never pruned as the snapshot's (held_text.read_function)."""
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000277-277277.sh").write_text("runhelper () {\n\tmkhelper\n}\n", encoding="utf-8")
+        self.assertRefused("mkhelper() { echo x > $T; }; runhelper", VARIABLE_WORDING, AGENT_A)
+        self.assertRefused("mkhelper() { git status; }; cd tests/fake; runhelper", GIT_NESTED_WORDING, AGENT_A)
+        self.assertSilent("mkhelper() { echo x > out.txt; }; cd tests; runhelper", AGENT_A)
+
+
+class FunctionTrapTest(PlantedRepository, BashHookCase):
+    """SPD-276 (Kyle's SPD-122 proposal): SPD-122 refuses a member any git call inside a trap's action and holds Spud's to
+    the repository check wherever the action may run, but only for the trap builtin.  zsh runs other functions by
+    itself, later, wherever the line stands then: TRAPEXIT and the other TRAPxxx functions, zshexit, chpwd, and each
+    function a zshexit_functions or chpwd_functions array names; so do its command_not_found_handler and
+    zsh_directory_name (and its array).  The walk read such a body as any function's, once, in place, so `TRAPEXIT() { git
+    status; }; cd tests/fake` ran git in a planted repository unchecked.  Their bodies are now read as a trap's action
+    is (expansions.read_action): git in them refused a member with SPD-122's reason, Spud's held to the repository check
+    in every directory the line stands in.  And a signal's action may run in a directory the line only passes through
+    (`cd tests/fake; sleep 9; cd ../..`), which no field kept: ShellAnalysis.stood now keeps each directory a command of
+    the line runs in, for SPD-122's TrapDirs.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and -f
+    and GNU bash 3.2.57, each line in a `zsh -f -c` or `bash -c` child and `$PWD` standing for git: TRAPEXIT ran at exit
+    in the line's last directory, and as the function returned when defined inside one; TRAPDEBUG before each command;
+    chpwd after each cd, in the directory it entered, and a chpwd that cds moved the line; chpwd_functions named before
+    or after the function was defined; zshexit and zshexit_functions at exit; TRAPUSR1 and `trap ... USR1` on the
+    signal, in the directory the line had passed into; command_not_found_handler for a command zsh did not find;
+    zsh_directory_name for `~[x]`; `functions[TRAPEXIT]=...` and `functions[chpwd]=...` as the functions they name.  A
+    function a trap's action (or such a body) calls that the line defines only after it runs when the action does, and
+    is read the same way (`trap cleanup EXIT; cleanup () { ... }`, expansions.read_action).
+    bash ran none of them, and ran the `trap` builtin's USR1 action where zsh did; its command_not_found_handle is bash
+    4's, which 3.2.57 did not run, read the same way on the safe side (a newer bash on PATH runs it)."""
+
+    def test_the_tickets_lines_are_refused_for_every_caller(self):
+        """Silent on main for Spud, and refused a member only by the repository check in the home."""
+        for command in ("TRAPEXIT() { git status; }; cd tests/fake", "cd tests/fake; TRAPEXIT() { git status; }",
+                        "chpwd() { git status; }; cd tests/fake", "zshexit() { git status; }; cd tests/fake",
+                        "chpwd_functions=(f); f() { git status; }; cd tests/fake",
+                        "f() { git status; }; zshexit_functions+=(f); cd tests/fake"):
+            self.members_refused(command, TRAP_WORDING)
+            self.spud_refused(command)
+
+    def test_every_function_zsh_runs_by_itself_is_refused_git_for_a_member(self):
+        for command in ("TRAPEXIT() { git status; }", "TRAPDEBUG() { git status; }", "TRAPZERR() { git status; }",
+                        "TRAPERR() { git status; }", "TRAPINT() { git status; }", "TRAPTERM() { git status; }",
+                        "TRAPHUP() { git log; }", "TRAPUSR1() { git status; }", "TRAPEXIT() git status",
+                        "function TRAPEXIT { git status; }", "TRAPEXIT () ( git status )", "zshexit() { git status; }",
+                        "chpwd() { git status; }", "command_not_found_handler() { git status; }",
+                        "command_not_found_handle() { git status; }",
+                        "zsh_directory_name() { git status; }", "chpwd_functions=(f); f() { git status; }",
+                        "f() { git status; }; chpwd_functions=(f)", "f() { git status; }; chpwd_functions+=(f)",
+                        "zshexit_functions=(f); f() { git log; }", "f() { git status; }; typeset -a chpwd_functions=(f)",
+                        "f() { git status; }; chpwd_functions[1]=f", "f() { git status; }; chpwd_functions=f",
+                        "chpwd_functions=($x); f() { git status; }", "f() { git status; }; chpwd_functions=(a $x)",
+                        "zsh_directory_name_functions=(f); f() { git status; }", "g() { TRAPEXIT() { git status; }; }; g",
+                        "(TRAPEXIT() { git status; })", "eval 'TRAPEXIT() { git status; }'", "f() { :; }; TRAPEXIT() { f; git status; }",
+                        "TRAPEXIT() { g; }; g() { git status; }; chpwd_functions=(g)", "TRAPEXIT() { g; }; g() { git status; }",
+                        "trap cleanup EXIT; cleanup() { git status; }", "trap 'cleanup' INT; cleanup() { git log; }",
+                        "f() { g; }; trap f EXIT; g() { git status; }"):
+            self.members_refused(command, TRAP_WORDING)
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+
+    def test_spud_is_checked_wherever_the_function_may_run(self):
+        for command in ("chpwd() { git status; }; cd tests/fake; cd ../..", "TRAPINT() { git status; }; cd tests/fake; sleep 0; cd ../..",
+                        "TRAPDEBUG() { git status; }; cd tests/fake && echo hi; cd ../..",
+                        "chpwd_functions=(f); f() { git status; }; cd tests/fake; cd ../..",
+                        "f() { cd tests/fake; }; TRAPEXIT() { git status; }; f; cd ../..",
+                        "trap cleanup EXIT; cleanup() { git status; }; cd tests/fake"):
+            self.spud_refused(command)
+            self.members_refused(command, TRAP_WORDING)
+
+    def test_a_signal_s_action_runs_in_a_directory_the_line_passes_through(self):
+        """The trap builtin's: silent for Spud on main, where TrapDirs kept only where the trap was set, where the line
+        ends, and where a git call or a write ran."""
+        for command in ("trap 'git status' INT; cd tests/fake; sleep 0; cd ../..", "trap 'git status' TERM; cd tests/fake; cd ../..",
+                        "trap 'git status' USR1; cd tests/fake && true; cd ../..", "trap 'git status' HUP; { cd tests/fake; ls; }; cd ../.."):
+            self.spud_refused(command)
+            self.members_refused(command, TRAP_WORDING)
+
+    def test_a_function_zsh_runs_with_no_git_is_unchanged(self):
+        for command in ("TRAPEXIT() { echo done; }; cd tests/fake", "chpwd() { echo moved; }; cd tests/fake; cd ../..",
+                        "zshexit() { true; }; cd tests/fake", "TRAP() { git status; }; cd tests/fake",
+                        "trapexit() { git status; }; cd tests/fake", "chpwd_x() { git status; }; cd tests/fake",
+                        "f() { git status; }; chpwd_functions=(g); cd tests/fake"):
+            self.silent_for(command)
+
+    def test_a_body_zsh_runs_inside_the_line_that_moves_it(self):
+        """As a trap's action that runs inside the line and moves it (SPD-252): the rest of the line's directory is
+        unknown; one that runs at exit moves nothing the line reads."""
+        for command in ("chpwd() { cd /tmp; }; cd ..; echo hi > note.txt", "TRAPDEBUG() { cd /tmp; }; echo hi > note.txt",
+                        "chpwd_functions=(f); f() { cd /tmp; }; cd ..; echo hi > note.txt",
+                        "TRAPZERR() { cd /tmp; }; false; echo hi > note.txt"):
+            with self.subTest(command=command):
+                for agent_id in (AGENT_A, None):
+                    self.assertRefused(command, "cannot follow", agent_id, self.tests)
+        for command in ("zshexit() { cd /tmp; }; echo hi > note.txt", "TRAPEXIT() { cd /tmp; }; echo hi > note.txt",
+                        "TRAPINT() { cd /tmp; }; echo hi > note.txt"):
+            with self.subTest(command=command):
+                self.assertSilent(command, AGENT_A, self.tests)
+        # its own relative write lands wherever it runs, which the hook cannot say
+        self.assertRefused("chpwd() { echo x > log.txt; }; cd ..", "cannot follow", AGENT_A, self.tests)
+
+
 # SPD-189: the words in which zsh's (e) flag evaluates the value of x, which the line settles, each read as the text zsh
 # runs (EvalFlagTest has the probes): the flag alone, repeated, beside `@`, nested either way, through (P), and in every
 # place a word stands -- an argument, one glued to text, an assignment's value, a command's prefix, a case's word and
@@ -678,7 +937,7 @@ class EvalFlagTest(BashHookCase):
         for line in ("x=$(cat f); echo ${(e)x}", "x=`cat f`; echo ${(e)x}", 'x="$(cat f)"; echo "${(e)x}"',
                      "echo ${(e)x}", "echo ${(e)HOME}", "x=$y; echo ${(e)x}", "read x; echo ${(e)x}",
                      "true && x='$(date)'; echo ${(e)x}", "for x in a; do echo ${(e)x}; done",
-                     "x='$(date)'; for f in a; do echo ${(e)x}; done", "x='$(date)'; f() { echo ${(e)x}; }; f",
+                     "x='$(date)'; for f in a; do echo ${(e)x}; done", "x='$(date)'; f() { echo ${(e)x}; }",
                      "x=a; x+=b; echo ${(e)x}", "x=$'\\u0024(date)'; echo ${(e)x}", "x=(a '$(date)'); echo ${(e)x}",
                      "echo ${(e)$(cat f)}", 'echo ${(e)"$(cat f)"}', "echo ${(e):-$y}", "echo ${(e)1} ${(e)@}",
                      "n=HOME; echo ${(Pe)n}", "n=$(cat f); x='$(date)'; echo ${(Pe)n}", "x='\\$(date)'; echo ${(e)${(e)x}}",
@@ -696,14 +955,18 @@ class EvalFlagTest(BashHookCase):
 
     def test_spud_reads_every_value_the_line_spells(self):
         """A value the line spells but may not hold where it is expanded is read all the same, for Spud's writes: the
-        member's refusal says only that the hook cannot be sure of it."""
+        member's refusal says only that the hook cannot be sure of it.  A function body a call reads is read where the
+        call runs it (SPD-277), where the value is the one the line settled: its write refuses a member too."""
         for line in ("true && x='$(echo x > ledger/tickets/SPD-001.md)'; echo ${(e)x}",
-                     "x='$(echo x > ledger/tickets/SPD-001.md)'; f() { echo ${(e)x}; }; f",
+                     "x='$(echo x > ledger/tickets/SPD-001.md)'; f() { echo ${(e)x}; }",
                      "x=a; x='$(echo x > ledger/tickets/SPD-001.md)' y=${(e)x}",
                      "x='$(echo x > ledger/tickets/SPD-001.md)'; echo ${(Le)x}"):
             with self.subTest(line=line):
                 self.assertRefused(line, "Law 1", agent_id=None)
                 self.assertRefused(line, "(e) flag")
+        called = "x='$(echo x > ledger/tickets/SPD-001.md)'; f() { echo ${(e)x}; }; f"
+        self.assertRefused(called, "Law 1", agent_id=None)
+        self.assertRefused(called, "ledger/tickets/SPD-001.md")
 
     def test_an_escaped_dollar_is_read_both_ways(self):
         """shlex leaves the backslash of `"\\$"` in the word, where the shell takes it off, so `x="\\$(git push)"`, which
@@ -1764,6 +2027,73 @@ class FunctionShadowTest(BashHookCase):
             with self.subTest(ok):
                 self.assertNotEqual(self.bash(ok).decision, "deny", ok)
                 self.assertNotEqual(self.bash(ok, agent_id=None).decision, "deny", ok)
+
+
+# SPD-278: the refusal a member earns for a function body zsh's `functions` parameter is handed that the line does not
+# spell, which names the respelling.
+FUNCTION_BODY_WORDING = "define the function with name() { ... }"
+
+
+class FunctionsParameterBodyTest(PlantedRepository, BashHookCase):
+    """SPD-278 (Kyle's SPD-122 proposal): zsh's `functions[name]=body`, `functions+=(name body ...)` and `functions=(name
+    body ...)` define a function whose body runs when it is called, or by itself for a TRAPxxx, zshexit or chpwd name
+    (SPD-276), but the reader recorded the name alone (SPD-105, assignment_words.special_bindings) and never read the body:
+    `functions[f]='git push'; f` and `functions[TRAPEXIT]='git push'` earned no finding.  A body the line spells is now
+    read as a `name() { body }` definition's is -- at each call, from the call's state (SPD-277), in place where nothing
+    calls it, as a trap's action for a name zsh runs by itself -- and one it does not spell (a variable, a substitution,
+    text appended to a body) refuses a member as SPD-217 refuses text the reader did not read, naming the respelling:
+    define the function with name() { ... }.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and -f,
+    each line in a `zsh -f -c` child, `pwd` standing for git: `functions[fb]="pwd; echo x > out13.txt"; cd d; fb` printed d
+    and wrote d/out13.txt; `functions+=(fp "echo FP \\$PWD"); cd d; fp` printed d; `functions[TRAPEXIT]=...` ran at exit
+    in d and `functions[chpwd]=...` after the cd, in d.  bash 3.2.57 has no such parameter and ran none of them."""
+
+    def test_the_tickets_lines(self):
+        """Both earned no finding on main."""
+        for command in ("functions[f]='git push'; f", "functions[TRAPEXIT]='git push'"):
+            self.members_refused(command, "git push")
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+
+    def test_every_spelling_of_a_body_is_read(self):
+        for command in ("functions[f]='git push'", "functions+=(f 'git push'); f", "functions=(f 'git push'); f",
+                        "typeset 'functions[f]=git push'; f", "export 'functions[f]=git push'", "functions+=(a true f 'git push')",
+                        "functions[f]='git push' true", "functions[f]=\"git push\"; f", "functions[f]='git status; git push'",
+                        "functions[$k]='git push'", "(functions[f]='git push')", "x=$(functions[f]='git push')"):
+            self.members_refused(command, "git push")
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_body_is_read_where_each_call_runs(self):
+        for command in ("functions[f]='git status'; cd tests/fake; f", "functions+=(f 'git status'); cd tests/fake && f",
+                        "functions[f]='cd tests/fake'; f; git status"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        self.assertSilent("functions[f]='echo x > out.txt'; cd tests; f", AGENT_A)
+        self.assertRefused("functions[f]='echo x > out.txt'; cd ..; f", "out.txt", AGENT_A, self.tests)
+        # never called, the body is read where it is spelled
+        self.assertRefused("functions[f]='echo x > out.txt'", "out.txt", AGENT_A)
+        self.silent_for("functions[f]='git status'; cd tests/fake")
+
+    def test_a_body_zsh_runs_by_itself_is_read_as_a_traps_action(self):
+        for command in ("functions[TRAPEXIT]='git status'; cd tests/fake", "functions[chpwd]='git status'; cd tests/fake",
+                        "functions+=(zshexit 'git status'); cd tests/fake", "chpwd_functions=(f); functions[f]='git status'; cd tests/fake"):
+            self.members_refused(command, TRAP_WORDING)
+            self.spud_refused(command)
+
+    def test_a_body_the_line_does_not_spell_is_refused_a_member(self):
+        for command in ("functions[f]=$x; f", 'functions[f]="$x"', "functions[f]=$(cat body.txt)", 'functions+=(f "$x")',
+                        "functions[f]+=' git push'", "x='git push'; functions[f]=$x; f", "functions[TRAPEXIT]=$x",
+                        "functions=(f `cat body.txt`)", "typeset \"functions[f]=$x\""):
+            self.members_refused(command, FUNCTION_BODY_WORDING)
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+
+    def test_the_controls_read_as_before(self):
+        for command in ("functions[deploy]='echo hi'; deploy", "functions+=(deploy 'echo hi')", "echo $functions[f]",
+                        "functions[$k]=true; ls", "unset 'functions[f]'", "dis_functions[f]='git status'; cd tests/fake"):
+            self.silent_for(command)
 
 
 class EnvironmentFunctionTest(BashHookCase):

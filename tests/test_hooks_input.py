@@ -1344,15 +1344,16 @@ class FunctionInputTest(BashHookCase):
     `{ sh; } < x.sh` records a script "stdin" finding, and read nothing of the here-string in `g() { sh; }; g <<< 'touch
     g1'`.  SPD-210 covered a redirection on the definition itself (`fn() { sh; } < x.sh`), not on the call.
 
-    The rule (walk.walk_line): a call of a function the line defines, in command position, hands the function's body the
-    standard input the call is given (its pipe and its own input redirections, as SPD-209 reads a command's), and the line
-    is walked again with that input standing where the body opens, once per distinct input, as SPD-210 walks it again for
-    a compound command's own input.  A call the second walk finds (in a body, in a group given input) is read the same
-    way.  These walks are bounded as SPD-203's per-call readings are (READINGS_PER_NAME), across the whole analysis: past
-    the bound a line's bodies are read once more on input the line does not spell, refused a member on doubt.  A
-    function an `eval` string defines is defined in the shell that runs the line, but its text's reading is over before
-    the call: a call of it given input is refused a member as such input is (script_files, "function"); a function a
-    substitution or a `-c` string defines stays in its own process.
+    The rule (walk.read_call, SPD-277): a call of a function the line defines, in command position, hands the function's
+    body the standard input the call is given (its pipe and its own input redirections, as SPD-209 reads a command's),
+    and the body is read at that call, from the state the call starts in, on that input -- with a compound body's own
+    input redirections after it, zsh reading the call's input and then the definition's (held_text.read_function).  A
+    call inside a body, or in a group given input, is read the same way where it runs.  The readings on a call's input
+    are bounded as SPD-203's per-call readings are (READINGS_PER_NAME), across the whole analysis: past the bound a
+    call's input is read as input the line does not spell, refused a member on doubt.  A function an `eval` string
+    defines is defined in the shell that runs the line, but its text's reading is over before the call: a call of it
+    given input is refused a member as such input is (script_files, "function"); a function a substitution or a `-c`
+    string defines stays in its own process.
 
     Probed 2026-09-23 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) under -f -o nobareglobqual
     and under -f, which printed the same, and in GNU bash 3.2.57, with TMPPREFIX in the probe's directory, each file and
@@ -1423,15 +1424,15 @@ class FunctionInputTest(BashHookCase):
         self.law_7("d() { sh; } <<< 'git push'; d <<< 'true'")
 
     def test_the_readings_of_one_body_have_a_bound(self):
-        """READINGS_PER_NAME distinct inputs are each read; one more, or a chain of calls longer than that, reads every
-        body on the line once more on input the line does not spell: refused a member on doubt, Spud reading on."""
+        """READINGS_PER_NAME distinct inputs are each read; one more, or a chain of calls longer than that, reads the
+        call's body on input the line does not spell: refused a member on doubt, Spud reading on."""
         cap = load_spud_module().READINGS_PER_NAME
         inputs = "m() { sh; }; " + "; ".join("m <<< 'true %d'" % k for k in range(1, cap + 1))
         self.data(inputs)
         self.unspelled(inputs + "; m <<< 'git push'")
         chain = "f1() { sh; }; " + "; ".join("f%d() { f%d; }" % (k + 1, k) for k in range(1, cap + 2))
         self.unspelled(chain + "; f%d <<< 'git push'" % (cap + 2))
-        # the bound holds across the analysis, so a line nested in a body read on each input cannot multiply the walks
+        # the bound holds across the analysis, so a line nested in a body read on each input cannot multiply the readings
         nested = "f() { echo $(g() { sh; }; %s); }; " % "; ".join("g <<< 'true %d'" % k for k in range(1, cap + 1))
         nested += "; ".join("f <<< 'true %d'" % k for k in range(1, cap + 1))
         self.assertEqual(self.analysis(nested).body_walks, cap)
