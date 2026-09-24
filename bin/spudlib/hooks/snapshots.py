@@ -72,7 +72,7 @@ CACHE_FORMAT = 2
 # A snapshot's option lines, which the shell runs before every Bash call (SPD-263): zsh's `setopt <name>` (and unsetopt),
 # bash's `shopt -s|-u <name>`, and `set -o|+o <name>`, each at the start of a line of its own (a function's body, which
 # runs only when called, is skipped as a whole).  Read as (kind, the option as spelled, on or off), with the line itself
-# for a reason to show; shell/held_text.line_options reads what each means for the line.  A line of any other shape --
+# for a reason to show; shell/held_options.line_options reads what each means for the line.  A line of any other shape --
 # an option builtin with a flag of its own, a redirection, an operator, quoting -- is kept with no option (None), which
 # the reader takes as one it cannot model.
 OPTION_RE = re.compile(r"^(?P<builtin>setopt|unsetopt|shopt|set)(?P<rest>(?:\s.*)?)$", re.S)
@@ -94,7 +94,7 @@ FUNCTION_RE = re.compile(r"^\s*(?:function\s+)?(?P<name>[^\s(){}=#|&;<>'\"]+)\s*
 # returns it, byte for byte as every snapshot on this Mac held it on 2026-09-24, with CLAUDE_BIN where it writes the claude
 # binary it installed (this Mac's /Users/<user>/.local/bin/claude).  find, grep and rg run that binary as bfs, ugrep and rg
 # through `"$_cc_bin"`, which ${CLAUDE_CODE_EXECPATH:-} may name instead, and fall back to `command <name>`; pkill refuses a
-# pattern matching the CLI's own process, then runs `command pkill`.  shell/held_text.read_shadow reads a call of one as what
+# pattern matching the CLI's own process, then runs `command pkill`.  shell/held_shadows.read_shadow reads a call of one as what
 # the full reading of its body records; any other text -- another harness version, a profile's own function of the name, one
 # byte changed -- is read in full (tests/test_hooks_snapshots.py HarnessShadowReadingTest).
 CLAUDE_BIN = "\x00"
