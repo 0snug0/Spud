@@ -799,6 +799,39 @@ class XargsInputTest(TreeWriteCase):
                 self.assertNotIn(INPUT_WORDING, r.reason or "")
                 self.assertNotIn(ANYWHERE_WORDING, r.reason or "")
 
+    def test_268_input_after_a_spelled_double_dash_is_never_an_option(self):
+        """SPD-268 (proposal by SPUD-265/Milo): SPD-248 read every operand xargs appends to sed as a file it may edit in
+        place, since the first may be -i, and asked only whether the first operand was that input, not whether a `--` came
+        first; so `xargs sed -f p.sed -- < list`, where sed's getopt has stopped, was refused.  After a `--` the line spells
+        the input is operands to every getopt reader here (sed, install, rm, chmod and kin), never an option.  Probed
+        2026-09-24 through tests/probes/shell_probe.py (zsh 5.9 -f -o nobareglobqual and -f, bash 3.2.57, alike in all
+        three; this Mac's BSD sed, rm, chmod and xargs): `echo "-i '' s/a/b/ f" | xargs sed -n -f c.sed --` left f
+        unedited (sed: -i: No such file), `echo '-f e.sed f' | xargs sed -n -f c.sed --` ran not e.sed's `w` (it did
+        without `--`), `echo '-r d' | xargs rm --` said -r: No such file, `echo '-R 700 d' | xargs chmod --` said Invalid
+        file mode: -R; and `echo f | xargs sed -i '' -e s/a/d/ --` edited f, as `xargs sed -i '' s/d/e/ --` did."""
+        m = self.module
+        (self.home.path / "out" / "clean.sed").write_text("p\n", encoding="utf-8")
+        for command in ("xargs sed -f out/clean.sed -- < list", "xargs sed -n 's/a/b/p' -- < list", "xargs sed -n -e p -- < list",
+                        "cat list | xargs sed -n -f out/clean.sed --", "xargs -J % sed -n -e p -- % < list",
+                        "xargs -I{} sed -n -f out/clean.sed -- {} < list"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        # -i given on the line: the input after `--` is still files sed edits; without `--`, as SPD-248 read it
+        for command in ("xargs sed -i '' -e s/a/b/ -- < list", "xargs sed -i.bak -e s/a/b/ -- < list",
+                        "xargs sed -f out/clean.sed < list", "xargs sed -n -e p < list", "xargs rm -- < list",
+                        "xargs chmod -- < list", "xargs chmod -- 600 < list"):
+            with self.subTest(command):
+                self.assertRefused(command, INPUT_WORDING, agent_id=AGENT_G)
+        # after the script operand BSD getopt has stopped, so that `--` is itself a file sed edits (probed: it edited f
+        # after a file named `--`), refused as its own write before the input's
+        for command in ("xargs sed -i '' 's/a/b/' -- < list", "xargs chmod 600 -- < list"):
+            with self.subTest(command):
+                self.assertRefused(command, "home:--", agent_id=AGENT_G)
+                self.assertIn(m.INPUT_OPERAND, [w for w, _ in self.writes(command)])
+        self.assertEqual(self.writes("xargs sed -f out/clean.sed -- < list"), [])
+        self.assertEqual(self.writes("xargs rm -- < list"), [(m.INPUT_OPERAND, None)] * 2)  # no -r among them
+        self.assertEqual(self.writes("xargs rm < list"), [(m.INPUT_OPERAND, "rm-tree")] * 2)  # as before
+
 
 class RecursiveWriteTest(TreeWriteCase):
     """SPD-126: what a recursive removal, copy or move carries under the directory it names.  Main (08c344e) read `rm -rf
