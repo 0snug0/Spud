@@ -9465,7 +9465,9 @@ class SettledStandardInputTest(BashHookCase):
         mark = ""
         self.assertEqual(m.neutralize_quoted_globs('echo "$X" $Y "a $Z/b" \'$W\''),
                          'echo "$X%s" $Y "a $Z%s/b" \'$W\'' % (mark, mark))
-        self.assertNotIn(mark, m.neutralize_quoted_globs('echo "${X}" "$1" "$@" "cost $"'))
+        self.assertNotIn(mark, m.neutralize_quoted_globs('echo "$1" "$@" "cost $" "${X:-y}" "${#X}"'))
+        # SPD-141: a plain `"${X}"` is `"$X"`, its braces left plain
+        self.assertEqual(m.neutralize_quoted_globs('echo "${X}" "a ${Y}/b"'), 'echo "${X}%s" "a ${Y}%s/b"' % (mark, mark))
         self.assertEqual(m.deglob("$X" + mark), "$X")
         self.assertRefused("X=push; \"$X\"; git \"$X\"", "Law 7")
         self.assertRefused("S=docs; echo x > \"$S/y.md\"", "deliverables")
@@ -10332,8 +10334,8 @@ class InterpreterWordTest(BashHookCase):
                  "deno $FLAG code", "deno run $FLAG code", "perl $FLAG 'print 1'", "php $FLAG code", "lua $FLAG code",
                  "Rscript $FLAG code", "osascript $FLAG code", "tsx $FLAG code", "swift $FLAG code",
                  "ruby $FLAG -e 'puts 1'", "node -r ./r.js $FLAG code",
-                 # a partial expansion is resolved nowhere (SPD-043): `$S/x.js` may be an option as much as a file
-                 "S=scripts; node $S/x.js", "X=cript; node -$X x.js")
+                 # a partial expansion the line does not settle: `$S/x.js` may be an option as much as a file
+                 "node $S/x.js", "true && S=scripts; node $S/x.js", "X='-e x'; node -$X x.js")
     # Each line hands a tabled interpreter words out of an xargs's input that the line does not spell: a file, another
     # program's output, or text stdin_text does not read -- `echo -x code` among them, a leading word starting with
     # `-` that is no option of echo's and holds no blank, which stdin_text._echo_text does not read.  (`echo '-e code'`
@@ -10377,7 +10379,8 @@ class InterpreterWordTest(BashHookCase):
                 self.assertEqual(self.inline(command)[0][:2], (command.split()[1], option))
                 self.assertRefused(command, INLINE_WORDING)
         self.assertSilent("X=-p; node $X code")  # SPD-175: the program `-p` carries is read, and writes nothing
-        for command in ("X=scripts/x.js; node $X", "X=tests/x.py; python3 $X", "X=scripts/x.php; php $X"):
+        for command in ("X=scripts/x.js; node $X", "X=tests/x.py; python3 $X", "X=scripts/x.php; php $X",
+                        "S=scripts; node $S/x.js", "S=scripts; node \"${S}/x.js\""):  # glued, settled as one word (SPD-141)
             with self.subTest(command):  # a settled value naming a file: a program from a file, as it always was
                 self.assertEqual(self.inline(command), [])
                 self.assertSilent(command)
@@ -13145,6 +13148,108 @@ class SettledCdTargetTest(BashHookCase):
         self.assertRefused('S=%s; env -C "$S$T" touch f' % s, "cannot follow", agent_id=None, cwd=s)
         self.assertRefused('S=%s; env -C "$S$T" touch f' % s, WORD_WORDING, cwd=s)
         self.assertSilent('S=%s; env -C "$S/perturb" touch f' % s, agent_id=None, cwd=s)
+
+
+class GluedByNameWordTest(BashHookCase):
+    """SPD-141: a word the hook reads by name (SPD-043: git's options and the value -c sets, a wrapper's options, a shell's)
+    settled only a word that is an expansion whole, so `git -C $D status` was read with D's value in place while
+    `git --git-dir=$D/.git status` on the same line earned var-word, and `P=cat; git -c core.pager=$P log` was refused
+    although core.pager=cat is inert.  The glued word is now read as SPD-127 reads a write target (arg_writes.resolved):
+    every expansion in it put in place when the line settled its value as one plain word, and the word then read as
+    spelled; a value the line cannot settle (not assigned, doubted, holding a blank or a glob, one of two expansions
+    unsettled) keeps the var-word refusal.  Also (proposal 325): a double-quoted `"${NAME}"` reached the reading with its
+    braces as quoted glob sentinels, so resolved settled `$S`, `"$S"` and `${S}` but not `"${S}"`, in a write target and,
+    after SPD-147, in a cd target; it is now marked as `"$S"` is and settled the same way."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        self.out = Path(tempfile.mkdtemp(prefix="spd-141-")).resolve()
+        self.addCleanup(shutil.rmtree, self.out, True)
+        self.repo = self.out / "repo"
+        (self.repo / ".git" / "objects").mkdir(parents=True)
+        (self.repo / ".git" / "refs" / "heads").mkdir(parents=True)
+        (self.repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (self.repo / ".git" / "config").write_text("[core]\n\trepositoryformatversion = 0\n", encoding="utf-8")
+        (self.home.path / "ledger" / "tickets").mkdir(parents=True, exist_ok=True)
+
+    def finding(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))).findings
+
+    def test_the_tickets_probed_lines_are_read_with_the_value_in_place(self):
+        d = self.out
+        for spelled in ("--git-dir=$D/.git", "--git-dir=${D}/.git", '--git-dir="$D/.git"', '--git-dir="${D}/.git"',
+                        '"--git-dir=$D/.git"'):
+            with self.subTest(spelled):
+                self.assertEqual(self.finding("D=%s; git %s status" % (d, spelled)),
+                                 [("git", ("status", None)),
+                                  ("git-repo", ("--git-dir=%s/.git" % d, "%s/.git" % d, frozenset({str(self.home.path)})))])
+        self.assertEqual(self.finding("P=cat; git -c core.pager=$P log"), self.finding("git -c core.pager=cat log"))
+        self.assertEqual(self.finding('P=cat; git -c "core.pager=$P" log'), self.finding("git -c core.pager=cat log"))
+        self.assertEqual(self.finding("P=vim; git -c core.editor=$P log"), self.finding("git -c core.editor=vim log"))
+
+    def test_a_settled_glued_word_is_silent_where_its_value_is(self):
+        home = self.home.path
+        for ok in ("D=%s; git --git-dir=$D/.git status" % home, "D=%s; git --work-tree=${D}/.claude/worktrees/w status" % home,
+                   'D=%s; git --git-dir="${D}/.git" log' % home, "P=cat; git -c core.pager=$P log",
+                   "P=cat; git -c core.pager=\"$P\" log", "K=pager; git -c core.$K=cat log"):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(ok=ok, agent_id=agent_id):
+                    self.assertSilent(ok, agent_id)
+
+    def test_the_value_in_place_earns_its_own_refusal(self):
+        r = self.assertRefused("D=%s; git --git-dir=$D/.git status" % self.repo, "outside", AGENT_C)
+        self.assertIn(str(self.repo), r.reason)
+        self.assertRefused("P=vim; git -c core.pager=$P log", "Law 7", AGENT_C)
+        self.assertRefused("E=vim; git -c core.$E=x log", "Law 7", AGENT_C)
+        self.assertSilent("P=vim; git -c core.pager=$P log", agent_id=None)
+
+    def test_an_unsettled_glued_word_stays_refused(self):
+        s = self.out
+        for cmd in ("git --git-dir=$D/.git status", "true && D=%s; git --git-dir=$D/.git status" % s,
+                    "(D=%s); git --git-dir=$D/.git status" % s, "D=%s; git --git-dir=$D$E/.git status" % s,
+                    "D='%s/a b'; git --git-dir=$D/.git status" % s, "D='%s/*'; git --git-dir=$D/.git status" % s,
+                    "for D in %s; do git --git-dir=$D/.git status; done" % s, "D=%s; D+=/x; git --git-dir=$D/.git status" % s,
+                    "git -c core.pager=$P log", "P='less -R'; git -c core.pager=$P log", "P='c*t'; git -c core.pager=$P log",
+                    "true && P=cat; git -c core.pager=$P log", "git --git-dir=$(pwd)/.git status", "P=cat; git -c core.pager=${P:-x} log",
+                    # bash splits at IFS's characters; a `~` an expansion gives stays literal
+                    "IFS=.; P=cat; git -c core.pager=$P log", "D='~'; git --git-dir=$D/.git status"):
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(cmd=cmd, agent_id=agent_id):
+                    self.assertEqual(self.bash(cmd, agent_id).decision, "deny")
+        # the repository option's own reason comes first, as for `git --git-dir=$D status` (SPD-047); var-word stays found
+        self.assertRefused("D=%s; git --git-dir=$D$E/.git status" % s, "cannot resolve", AGENT_C)
+        self.assertIn(("var-word", "--git-dir=$D$E/.git"), self.finding("D=%s; git --git-dir=$D$E/.git status" % s))
+        self.assertRefused("D=%s; nice -n $D$E git status" % s, WORD_WORDING, AGENT_C)
+        self.assertIn(("var-word", "core.pager=$P"), self.finding("git -c core.pager=$P log"))
+        self.assertIn(("var-word", "core.pager=$P"), self.finding("P='less -R'; git -c core.pager=$P log"))
+
+    def test_a_quoted_braced_name_is_settled_in_a_write_target(self):
+        home, s = self.home.path, self.out
+        for write in ('S=%s/ledger/tickets; echo x > "${S}/SPD-001.md"', 'S=%s/ledger; touch "${S}/tickets/SPD-001.md"',
+                      'S=%s/ledger/tickets; echo x | tee "${S}/SPD-001.md"'):
+            with self.subTest(write):
+                self.assertRefused(write % home, "generated", AGENT_C)
+        for ok in ('S=%s; echo x > "${S}/f"', 'S=%s; touch "${S}/f"', 'S=%s; echo x | tee "${S}"/f'):
+            for agent_id in (AGENT_A, None):
+                with self.subTest(ok=ok, agent_id=agent_id):
+                    self.assertSilent(ok % s, agent_id, cwd=str(s))
+        # unsettled, it keeps the unresolvable-target refusal
+        for bad in ('echo x > "${S}/f"', 'S="%s/a b"; echo x > "${S}/f"' % s, 'true && S=%s; echo x > "${S}/f"' % s):
+            with self.subTest(bad):
+                self.assertRefused(bad, VARIABLE_WORDING, AGENT_A, cwd=str(s))
+
+    def test_a_quoted_braced_name_is_settled_in_a_cd_target(self):
+        home, s = self.home.path, self.out
+        self.assertRefused('S=%s/ledger/tickets; cd "${S}"; echo x > SPD-001.md' % home, "generated", AGENT_C)
+        self.assertRefused('S=%s/ledger; pushd "${S}/tickets"; echo x > SPD-001.md' % home, "generated", AGENT_C)
+        for agent_id in (AGENT_A, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent('S=%s; cd "${S}"; echo x > note.txt' % s, agent_id, cwd=str(s))
+        for bad in ('cd "${S}"; echo x > note.txt', 'S="%s/a b"; cd "${S}"; echo x > note.txt' % s):
+            with self.subTest(bad):
+                self.assertRefused(bad, "cannot follow", AGENT_A, cwd=str(s))
 
 
 class GitVerbProgramOptionTest(BashHookCase):

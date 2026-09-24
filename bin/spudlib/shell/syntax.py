@@ -215,6 +215,7 @@ _EXPANDING_DOLLAR_RE = lazy.LazyPattern("\\$(?!" + _LITERAL_DOLLAR + ")")  # a w
 # `${X=v}`, `${X:=v}` and zsh's `${X::=v}` (flags and a subscript allowed) assign X wherever they are expanded.
 _ASSIGNING_EXPANSION_RE = lazy.LazyPattern(r"\$\{(?:\([^)]*\))?[#!]?([A-Za-z_][A-Za-z0-9_]*)(?:\[[^\]]*\])?:{0,2}=")
 _NAME_RE = lazy.LazyPattern(r"[A-Za-z_][A-Za-z0-9_]*")
+_BRACED_NAME_RE = lazy.LazyPattern(r"\{[A-Za-z_][A-Za-z0-9_]*\}")  # the `{X}` of a plain `${X}`, no operator (SPD-141)
 _NAME_CHAR_RE = lazy.LazyPattern(r"[A-Za-z0-9_]")
 _BARE_NAME_TAIL_RE = lazy.LazyPattern(r"\$[A-Za-z_][A-Za-z0-9_]*\Z")
 _IFS_BLANKS_RE = lazy.LazyPattern(r"[ \t\n]+")

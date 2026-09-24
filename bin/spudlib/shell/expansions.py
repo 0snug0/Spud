@@ -1,6 +1,6 @@
 """shell/expansions: Parameter expansions and a command's read points."""
 
-from . import analyse, git_verbs, globbing, loop_bindings, prepare, spud_calls, syntax
+from . import analyse, arg_writes, git_verbs, globbing, loop_bindings, prepare, spud_calls, syntax
 from ..hooks import hookio, snapshots
 
 
@@ -236,6 +236,11 @@ def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fres
         readings, doubtful = variable_readings(a, name)
         if readings is not None and i > 0 and not all(readings):
             readings = None  # an empty value drops the word: read as spelled (a member is refused, Spud's reading is kept)
+    if readings is None and name is None and i > 0 and not wrapper_command:
+        settled = glued_word(w, a)
+        if settled is not None:
+            words[i] = settled
+            return _AGAIN
     spelled = "$(...)" if hookio.SUBST in w else prepare.deglob(w)
     if readings is None:
         if wrapper_command:
@@ -255,6 +260,24 @@ def resolve_expansion(words, i, bodies, a, depth, budget, effect, prefixed, fres
         return _AGAIN
     globbing.analyse_readings(words, i, readings, bodies, a, depth, budget, effect, prefixed, fresh, expanded=True)
     return _STOP
+
+
+def glued_word(word, a):
+    """The word a by-name word holding an expansion glued to literal text becomes (`--git-dir=$D/.git`,
+    `core.pager="$P"`), or None when the line does not settle it (SPD-141).  It is SPD-127's one reading of a write target,
+    arg_writes.resolved: every `$NAME` and `${NAME}` put in place when the line settled its value as one plain word both
+    shells pass (not doubted, no blank, no glob character, nothing left to expand), so the word is then read as though
+    spelled, and its own reading -- the repository it names, the key and value -c sets -- decides.  One expansion the
+    line cannot settle leaves the whole word as spelled, and so does a substitution, a `~` the value brings (the
+    shell does not expand a tilde an expansion gives), a line that assigns IFS (bash then splits the value at other
+    characters, as variable_readings holds) and a reading under a loop's binding, which the dispatch is not run once
+    per value of."""
+    if hookio.SUBST in word or a.binding is not None or "IFS" in a.vars or "IFS" in a.doubt:
+        return None
+    settled = arg_writes.resolved(word, a)
+    if settled == word or expansion_word(settled) or settled.count("~") != word.count("~"):
+        return None
+    return settled
 
 
 def first_read_index(words, start):
