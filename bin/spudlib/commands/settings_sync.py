@@ -128,19 +128,60 @@ def merge_allow_rules(ctx, settings):
 # matches a parameter the call leaves out, so a spawn without `model` is still the hook's to refuse.
 AGENT_DENY_RULES = ("Agent(isolation:*)", "Agent(model:inherit)")
 
+# SPD-033: SPD-031's edit-hook rule for the ledger state directory (hooks/pathrule.in_state_dir: the database, its WAL and
+# shm, the caches, the backups, the launcher's bytecode; only the CLI writes there) held by the permission system too, so
+# it stands where the hook does not run.  The spelling follows Claude Code's permissions docs, "Read and Edit"
+# (code.claude.com/docs/en/permissions):
+#   - "`Edit` rules apply to all built-in tools that edit files", Write and NotebookEdit included, while a path rule named
+#     for Write, NotebookEdit or the legacy MultiEdit is "accepted but never consulted" -- so Edit is the one tool named;
+#   - the path is gitignore syntax, and `//path` is the "Absolute path from filesystem root" (a single `/path` anchors at
+#     the settings source instead: the home's own directory for its .claude/settings.json, the session's working
+#     directory for a project's local settings, which is why neither is used);
+#   - `*` stays within one segment and `**` crosses directories, so `<dir>/**` is everything under the directory at any
+#     depth, and the bare `<dir>` is the directory's own path;
+#   - rules "you write yourself aren't escaped", so each gitignore character of the home's path (\ * ? [ ]) gets a
+#     backslash, and the rule matches that path alone; parentheses need none, and a rule is not a shell word, so a path
+#     with a space or a non-ASCII letter goes in as it is spelled and JSON carries it;
+#   - a deny rule applies when either a symlink or its target matches, and the home is resolved already
+#     (core/homeconf.resolve_home), so the one spelling covers both.
+# The docs' own caveat stands: these rules reach the file tools and the file commands Claude Code recognizes in Bash, not
+# a program that opens files itself -- the Bash hook's DB_PATH_RE stays the rule there.
+GITIGNORE_SPECIAL = "\\*?[]"
+# A state-directory rule of ours, whatever home it names: Edit(//<a literal path>/.spud) or its `/**`, every gitignore
+# character in the path escaped, as state_dir_deny_rules writes it.  A moved home's rules are stale spellings of ours and
+# go; a rule with a live wildcard, a relative anchor, another tool, or a file inside the directory is the user's.
+STATE_DENY_MARK = re.compile(r"Edit\(//(?:[^*?\[\]\\]|\\.)+/\.spud(?:/\*\*)?\)")
 
-def merge_deny_rules(settings):
-    """Keep every other deny rule where it is, drop non-strings and repeats of ours, append ours when missing."""
+
+def gitignore_literal(text):
+    """`text` as a gitignore pattern that matches exactly itself: a backslash before each of \\ * ? [ ]."""
+    return "".join("\\" + c if c in GITIGNORE_SPECIAL else c for c in text)
+
+
+def state_dir_deny_rules(ctx):
+    """The two Edit deny rules for the home's state directory: the directory's own path, and everything under it."""
+    state = gitignore_literal(str(ctx.db_path.parent).lstrip("/"))
+    return ["Edit(//%s)" % state, "Edit(//%s/**)" % state]
+
+
+def merge_deny_rules(ctx, settings, agent=True, keep=()):
+    """Keep every other deny rule where it is, drop non-strings, repeats of ours and a state-directory rule of ours for
+    another home (unless `keep` names it: project install's file had it before install), append ours when missing.  Ours
+    are the state directory's rules, and with `agent` Law 3's Agent rules before them."""
     permissions = settings.get("permissions")
     if not isinstance(permissions, dict):
         permissions = {}
         settings["permissions"] = permissions
+    ours = (list(AGENT_DENY_RULES) if agent else []) + state_dir_deny_rules(ctx)
     deny = permissions.get("deny")
     kept = []
     for rule in (deny if isinstance(deny, list) else []):
-        if isinstance(rule, str) and not (rule in AGENT_DENY_RULES and rule in kept):
-            kept.append(rule)
-    for rule in AGENT_DENY_RULES:
+        if not isinstance(rule, str) or (rule in ours and rule in kept):
+            continue
+        if rule not in ours and rule not in keep and STATE_DENY_MARK.fullmatch(rule):
+            continue
+        kept.append(rule)
+    for rule in ours:
         if rule not in kept:
             kept.append(rule)
     permissions["deny"] = kept
@@ -160,10 +201,11 @@ def merge_additional_dirs(settings, dirs):
     return added
 
 
-def merge_settings(ctx, settings, *, env, deny, additional_dirs=(), project_key=None):
-    """One merge for both writers:`settings sync` for the home (env=True, deny=True) and `project install` for
-    another repository's local settings (env=False, deny=False, the home as an additional directory, the project's key on
-    every hook line).  Keeps every key and entry that is not the ledger's; returns what it set."""
+def merge_settings(ctx, settings, *, env, agent_deny, keep_deny=(), additional_dirs=(), project_key=None):
+    """One merge for both writers:`settings sync` for the home (env=True, agent_deny=True) and `project install` for
+    another repository's local settings (env=False, agent_deny=False, the home as an additional directory, the project's
+    key on every hook line).  Both write the state directory's deny rules (SPD-033).  Keeps every key and entry that is
+    not the ledger's; returns what it set."""
     out = {}
     if env:
         limits = ctx.limits
@@ -175,8 +217,7 @@ def merge_settings(ctx, settings, *, env, deny, additional_dirs=(), project_key=
         block["CLAUDE_CODE_MAX_CONCURRENT_SUBAGENTS"] = str(limits["max_concurrent_total"])
         out["env"] = block
     out["allow"] = merge_allow_rules(ctx, settings)
-    if deny:
-        out["deny"] = merge_deny_rules(settings)
+    out["deny"] = merge_deny_rules(ctx, settings, agent=agent_deny, keep=keep_deny)
     if additional_dirs:
         out["additional_dirs_added"] = merge_additional_dirs(settings, list(additional_dirs))
     out["hooks"] = merge_hooks(ctx, settings, project_key)
@@ -195,7 +236,7 @@ def cmd_settings_sync(ctx, args):
             raise kernel.SpudError(kernel.EXIT_ERROR, "%s is not a JSON object" % path)
     else:
         settings = {}
-    merged = merge_settings(ctx, settings, env=True, deny=True)
+    merged = merge_settings(ctx, settings, env=True, agent_deny=True)
     env, allow, deny, hook_count = merged["env"], merged["allow"], merged["deny"], merged["hooks"]
     rendered = json.dumps(settings, indent=2) + "\n"
     current = path.read_text(encoding="utf-8") if path.is_file() else None

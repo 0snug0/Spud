@@ -84,9 +84,22 @@ def remove_exclude_block(root, key):
     return removed
 
 
+def original_deny_rules(original_text):
+    """The deny rules of the settings file as it stood before install first wrote it (the record's `original`), [] when
+    install created it or it does not parse."""
+    try:
+        data = json.loads(original_text) if original_text is not None else None
+    except ValueError:
+        return []
+    permissions = data.get("permissions") if isinstance(data, dict) else None
+    deny = permissions.get("deny") if isinstance(permissions, dict) else None
+    return [d for d in deny if isinstance(d, str)] if isinstance(deny, list) else []
+
+
 def install_project(ctx, con, p):
     """Write what project install writes, each file only when its content changes: the ledger hooks,
-    the CLI allow rules and the home as an additional directory in the project's untracked local settings; the exclude
+    the CLI allow rules, the state directory's deny rules and the home as an additional directory in the project's
+    untracked local settings; the exclude
     line when git does not already ignore that file; the spudagent definitions rendered for this machine -- the base and
     its effort variants, agentdef.definitions -- and the /spud skill at user scope; the home pointer when absent.
     Returns (the install record for projects.installed, the paths written, whether the user agents directory held no
@@ -106,7 +119,14 @@ def install_project(ctx, con, p):
     settings_path = files["settings"]
     current = settings_path.read_text(encoding="utf-8") if settings_path.is_file() else None
     settings = read_json_object(settings_path) if current is not None else {}
-    merged = settings_sync.merge_settings(ctx, settings, env=False, deny=False, additional_dirs=[str(ctx.home)], project_key=p["key"])
+    original = previous["original"] if "original" in previous else current
+    # SPD-033: the state directory's deny rules are written here too, because the home is this project's additional
+    # directory: a session here may edit the home by absolute path, its .spud/ included, and the edit hook refuses that
+    # to every caller, plain sessions too, so the native rule narrows nothing the hook allows.  Law 3's Agent rules
+    # stay the home's: a session here is plain until claimed, and a plain session's spawns are Eric's.  A rule of the
+    # same shape the file held before install is the user's, kept by the merge and by uninstall.
+    merged = settings_sync.merge_settings(ctx, settings, env=False, agent_deny=False, keep_deny=original_deny_rules(original),
+                                          additional_dirs=[str(ctx.home)], project_key=p["key"])
     rendered = json.dumps(settings, indent=2) + "\n"
     written = []
     if rendered != current:
@@ -131,7 +151,7 @@ def install_project(ctx, con, p):
     record = {
         "path": str(settings_path),
         "created_file": previous.get("created_file", current is None),
-        "original": previous["original"] if "original" in previous else current,
+        "original": original,
         "added_additional_dir": previous.get("added_additional_dir", bool(merged.get("additional_dirs_added"))),
         "added_exclude": bool(previous.get("added_exclude")) or added_exclude,
         "agent_sha256": kernel.sha256_bytes(agent_texts[kernel.SPUDAGENT].encode("utf-8")),
@@ -144,8 +164,9 @@ def install_project(ctx, con, p):
 
 
 def strip_ledger_settings(ctx, settings, original, home_added):
-    """Settings with the ledger's hooks and allow rules taken out, and the home out of additionalDirectories when install
-    put it there; containers left empty are dropped when the original file did not have them."""
+    """Settings with the ledger's hooks and allow rules taken out, its state-directory deny rules too unless the original
+    file held that very rule, and the home out of additionalDirectories when install put it there; containers left empty
+    are dropped when the original file did not have them."""
     orig = original if isinstance(original, dict) else {}
     hooks = settings.get("hooks")
     if isinstance(hooks, dict):
@@ -173,9 +194,13 @@ def strip_ledger_settings(ctx, settings, original, home_added):
         orig_permissions = orig.get("permissions") if isinstance(orig.get("permissions"), dict) else {}
         if isinstance(permissions.get("allow"), list):
             permissions["allow"] = [a for a in permissions["allow"] if not (isinstance(a, str) and settings_sync.ALLOW_RULE_MARK.match(a))]
+        if isinstance(permissions.get("deny"), list):
+            orig_deny = orig_permissions.get("deny") if isinstance(orig_permissions.get("deny"), list) else []
+            permissions["deny"] = [d for d in permissions["deny"]
+                                   if not (isinstance(d, str) and settings_sync.STATE_DENY_MARK.fullmatch(d) and d not in orig_deny)]
         if home_added and isinstance(permissions.get("additionalDirectories"), list):
             permissions["additionalDirectories"] = [d for d in permissions["additionalDirectories"] if d != str(ctx.home)]
-        for key in ("allow", "additionalDirectories"):
+        for key in ("allow", "deny", "additionalDirectories"):
             if permissions.get(key) == [] and key not in orig_permissions:
                 del permissions[key]
         if not permissions and "permissions" not in orig:

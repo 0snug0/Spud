@@ -17,9 +17,11 @@ of what makes a session launched in the home Spud -- and which no check of docto
 read until then, so a home that had never been synced passed a green doctor."""
 
 import json
+import re
 import shlex
 import sys
 import unittest
+from pathlib import Path
 
 from helpers import EXIT_ERROR, EXIT_OK, RepoMixin, SpudTestCase, load_spud_module
 
@@ -53,6 +55,56 @@ def prescribed_allow_rules(home):
     """The allow rules settings sync writes for a home since SPD-038: the prescribed call, `python3.14 -I -S <home>/bin/spud`,
     by the documented interpreter name and by the absolute interpreter.  No rule for the launcher run by its own path."""
     return ["Bash(python3.14 -I -S %s/bin/spud *)" % home, "Bash(%s -I -S %s/bin/spud *)" % (sys.executable, home)]
+
+
+AGENT_DENY = ["Agent(isolation:*)", "Agent(model:inherit)"]
+
+
+def gitignore_escape(text):
+    """The suite's own spelling of a literal path inside a gitignore pattern: a backslash before each of \\ * ? [ ].  Claude
+    Code reads an Edit rule's path as gitignore syntax and escapes nothing in a rule written by hand (the permissions docs,
+    "Read and Edit"), so a home path holding one of these must be escaped to match only itself."""
+    return "".join("\\" + c if c in "\\*?[]" else c for c in text)
+
+
+def state_deny_rules(home):
+    """SPD-033: the two Edit rules for the home's state directory, by the `//` anchor, the documented absolute path from the
+    filesystem root: the directory itself, and everything under it."""
+    state = gitignore_escape(str(Path(home) / ".spud").lstrip("/"))
+    return ["Edit(//%s)" % state, "Edit(//%s/**)" % state]
+
+
+def prescribed_deny_rules(home):
+    """What settings sync writes into an empty deny list: SPD-016's Agent rules, then SPD-033's state-directory rules."""
+    return AGENT_DENY + state_deny_rules(home)
+
+
+def gitignore_regex(pattern):
+    """A gitignore pattern with no leading anchor as a regular expression over a path with no leading slash: `\\x` is x
+    itself, `**` crosses directories, `*` and `?` stay within one.  An unescaped `[` or `]` is refused rather than read,
+    so a rule that should have escaped one fails here instead of matching by luck."""
+    out, i = [], 0
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "\\" and i + 1 < len(pattern):
+            out.append(re.escape(pattern[i + 1]))
+            i += 2
+            continue
+        if pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+            continue
+        if c in "[]":
+            raise ValueError("unescaped %s in %r" % (c, pattern))
+        out.append("[^/]*" if c == "*" else "[^/]" if c == "?" else re.escape(c))
+        i += 1
+    return "".join(out)
+
+
+def edit_rule_matches(rule, path):
+    """Whether an absolute `Edit(//...)` rule covers `path`, read as gitignore reads it."""
+    assert rule.startswith("Edit(//") and rule.endswith(")"), rule
+    return re.fullmatch(gitignore_regex(rule[len("Edit(//"):-1]), str(path).lstrip("/")) is not None
 
 
 def spud_hooks(data):
@@ -95,7 +147,7 @@ class SettingsSyncTest(SpudTestCase):
         self.assertIn("bin/spud hook", text)
         self.assertIn('"Agent(isolation:*)"', text)
         self.assertIn('"Agent(model:inherit)"', text)
-        self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
+        self.assertEqual(out["settings"]["permissions"]["deny"], prescribed_deny_rules(self.home.path))
 
     def test_missing_file_is_created_with_caps_hooks_and_allow_rules(self):
         path = self.home.path / "elsewhere" / "settings.json"
@@ -169,18 +221,64 @@ class SettingsSyncTest(SpudTestCase):
         # SPD-016: the permission system itself refuses these spawns, even when the PreToolUse(Agent) hook is removed or
         # does not run.  The syntax is the documented parameter rule, Tool(param:value), deny and ask rules only.
         out = self.home.json("settings", "sync", "--path", self.home.path / ".claude" / "settings.json")
-        self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
+        self.assertEqual(out["settings"]["permissions"]["deny"][:2], AGENT_DENY)
+
+    def test_deny_rules_keep_every_file_tool_out_of_the_homes_state_directory(self):
+        # SPD-033: SPD-031's edit-hook rule held by the permission system too, as SPD-016 did for Law 3.  One Edit rule
+        # covers every built-in tool that edits files; a path rule for Write, NotebookEdit or MultiEdit is accepted and
+        # never consulted, so none is written.  `//` is the absolute anchor (`/path` would anchor at the settings file's
+        # project), and `/**` is everything under the directory, at any depth.
+        out = self.home.json("settings", "sync", "--path", self.home.path / ".claude" / "settings.json")
+        deny = out["settings"]["permissions"]["deny"]
+        self.assertEqual(deny, prescribed_deny_rules(self.home.path))
+        ours = deny[2:]
+        self.assertFalse([r for r in deny if r.startswith(("Write(", "NotebookEdit(", "MultiEdit("))])
+        state = self.home.path / ".spud"
+        for path, covered in ((state, True), (state / "ledger.db", True), (state / "ledger.db-wal", True), (state / "pycache" / "a" / "b.pyc", True),
+                              (state / "backups" / "x.db", True), (self.home.path / ".spudx" / "a", False), (self.home.path / "ledger" / ".spud", False),
+                              (self.home.path / "spud.config.json", False), (self.home.path / ".claude" / "settings.json", False)):
+            self.assertEqual(any(edit_rule_matches(r, path) for r in ours), covered, path)
+
+    def test_a_home_path_gitignore_would_read_as_a_pattern_is_escaped_to_match_itself(self):
+        # A rule written by hand is not escaped for us, so each of \ * ? [ ] in the home's path is escaped, and the rule
+        # then covers that path and not the siblings the bare characters would have matched.  Parentheses, a space, a
+        # non-ASCII letter and a leading ! or # inside the path need nothing: the `//` anchor comes first.
+        spud = load_spud_module()
+        names = {"a [b] c": "a b c", "star*q?": "starXXqZ", "back\\slash": "backslash", "Sp üd (2024)": None, "!bang": None, "#hash": None}
+        for name, sibling in names.items():
+            home = Path("/tmp/spd-033") / name / "home"
+            ctx = spud.Ctx(home, "SPUD_HOME", False, tool=home)
+            rules = spud.state_dir_deny_rules(ctx)
+            self.assertEqual(rules, state_deny_rules(home), name)
+            for path in (home / ".spud", home / ".spud" / "ledger.db"):
+                self.assertTrue(any(edit_rule_matches(r, path) for r in rules), (name, path))
+            if sibling:
+                other = Path("/tmp/spd-033") / sibling / "home" / ".spud" / "ledger.db"
+                self.assertFalse(any(edit_rule_matches(r, other) for r in rules), (name, other))
+
+    def test_a_state_directory_rule_for_another_home_is_replaced_and_the_users_own_are_kept(self):
+        # Ours by shape: Edit(//<a literal path>/.spud) or .../.spud/**), whatever home it names, as the allow rules'
+        # mark reads any home's `bin/spud` -- so a moved home's rules go.  A rule with a live wildcard in its path, a
+        # relative one, another tool's, or one naming a file inside is the user's and stays where it is.
+        users = ["Edit(//**/.spud/**)", "Edit(./.spud/**)", "Edit(.spud)", "Read(//old/home/.spud/**)", "Edit(//old/home/.spudder/**)",
+                 "Edit(//old/home/.spud/ledger.db)", "Write(//old/home/.spud/**)", "Edit(/.spud/**)"]
+        stale = ["Edit(//old/home/.spud)", "Edit(//old/home/.spud/**)", "Edit(//old \\[x\\]/.spud/**)"]
+        mine = state_deny_rules(self.home.path)
+        path = self.home.write_settings({"permissions": {"deny": [users[0], stale[0], mine[1], users[1], mine[1], stale[1]] + users[2:] + [stale[2]]}})
+        first = self.home.json("settings", "sync", "--path", path)
+        self.assertEqual(first["settings"]["permissions"]["deny"], [users[0], mine[1], users[1]] + users[2:] + AGENT_DENY + [mine[0]])
+        self.assertFalse(self.home.json("settings", "sync", "--path", path)["written"])
 
     def test_deny_rules_merge_like_the_allow_rules(self):
         path = self.home.write_settings({"permissions": {"deny": ["Bash(rm -rf *)", "Agent(model:inherit)", 7, {"x": 1}]}})
         first = self.home.json("settings", "sync", "--path", path)
-        self.assertEqual(first["settings"]["permissions"]["deny"], ["Bash(rm -rf *)", "Agent(model:inherit)", "Agent(isolation:*)"])
+        self.assertEqual(first["settings"]["permissions"]["deny"], ["Bash(rm -rf *)", "Agent(model:inherit)", "Agent(isolation:*)"] + state_deny_rules(self.home.path))
         second = self.home.json("settings", "sync", "--path", path)
         self.assertFalse(second["written"])
         self.assertEqual(second["settings"]["permissions"]["deny"], first["settings"]["permissions"]["deny"])
         path = self.home.write_settings({"permissions": {"deny": "notalist", "ask": ["Bash(curl *)"]}})
         out = self.home.json("settings", "sync", "--path", path)
-        self.assertEqual(out["settings"]["permissions"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
+        self.assertEqual(out["settings"]["permissions"]["deny"], prescribed_deny_rules(self.home.path))
         self.assertEqual(out["settings"]["permissions"]["ask"], ["Bash(curl *)"])
 
     def test_merge_keeps_foreign_hooks_and_replaces_stale_ledger_hooks(self):
@@ -205,7 +303,7 @@ class SettingsSyncTest(SpudTestCase):
         self.assertEqual(data["hooks"]["Notification"], stale["hooks"]["Notification"])
         foreign = [h["command"] for g in data["hooks"]["PreToolUse"] for h in g["hooks"] if "bin/spud hook" not in h["command"]]
         self.assertEqual(foreign, ["echo foreign", "echo also-mine"])
-        self.assertEqual(data["permissions"]["deny"], ["Bash(rm -rf *)", "Agent(isolation:*)", "Agent(model:inherit)"])
+        self.assertEqual(data["permissions"]["deny"], ["Bash(rm -rf *)"] + prescribed_deny_rules(self.home.path))
         self.assertEqual(data["permissions"]["allow"], ["Bash(date:*)"] + prescribed_allow_rules(self.home.path))
         self.assertFalse(any("/old/" in a for a in data["permissions"]["allow"]))
 
@@ -239,7 +337,7 @@ class SettingsSyncTest(SpudTestCase):
         events = [e for e in self.home.json("events", "--kind", "config.synced")["events"] if e["data"]["path"] == str(path)]
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["data"]["hooks"], 7)
-        self.assertEqual(events[0]["data"]["deny"], ["Agent(isolation:*)", "Agent(model:inherit)"])
+        self.assertEqual(events[0]["data"]["deny"], prescribed_deny_rules(self.home.path))
         self.assertIn("path", events[0]["data"])
 
     def test_default_path_is_under_spud_home(self):
@@ -592,6 +690,18 @@ class QuotedPathHomeTest(SpudTestCase):
             self.assertTrue(spud.is_ledger_command(command), command)
         for command in self.USERS_OWN + ("echo hi", "", "SPUD_HOME='/x y' python3 -I -S '/x y/bin/spud' hook"):
             self.assertFalse(spud.is_ledger_command(command), command)
+
+    def test_the_state_directory_rules_name_the_path_as_it_is_spelled(self):
+        """SPD-033 in a home shlex.quote would quote: a deny rule is no shell word, so the path goes in raw -- no quote
+        character, the space and the `ü` as they are -- and JSON carries it through the file unchanged."""
+        path = self.home.path / ".claude" / "settings.json"  # init synced it
+        deny = json.loads(path.read_text(encoding="utf-8"))["permissions"]["deny"]
+        self.assertEqual(deny, prescribed_deny_rules(self.home.path))
+        self.assertTrue(deny[3].endswith("/Sp üd/.spud/**)"), deny[3])
+        self.assertFalse([r for r in deny if "'" in r or '"' in r])
+        for target in (self.home.path / ".spud", self.home.path / ".spud" / "ledger.db"):
+            self.assertTrue(any(edit_rule_matches(r, target) for r in deny[2:]), target)
+        self.assertFalse(self.home.json("settings", "sync")["written"])
 
     def test_every_sync_replaces_this_homes_lines_and_keeps_the_users_own(self):
         """The defect itself: `spud init` synced this home once already, so each sync after it must find the seven lines
