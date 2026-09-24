@@ -222,8 +222,10 @@ _NAME_CHAR_RE = lazy.LazyPattern(r"[A-Za-z0-9_]")
 _BARE_NAME_TAIL_RE = lazy.LazyPattern(r"\$[A-Za-z_][A-Za-z0-9_]*\Z")
 _IFS_BLANKS_RE = lazy.LazyPattern(r"[ \t\n]+")
 # Builtins that assign a shell variable named by an argument (`read X`, `printf -v X`, `getopts o X`, `unset X`, zsh's
-# `print -v X`, `vared X`, `zparseopts -A X`, `set -A X` ...): a variable any of their words names may no longer hold what the line
-# assigned it.  `trap`, `source` and `.` run code the hook does not read, so after them no variable is certain.
+# `print -v X`, `vared X`, `zparseopts -A X`, `set -A X` ...), each read by its own grammar (assignment_words.builtin_names)
+# and every name it assigns recorded as the line's assignment of a value the hook does not know (expansions.
+# read_assigning_builtin, SPD-254); `let` assigns by arithmetic (SPD-225).  `trap`, `source` and `.` run code the hook does
+# not read, so after them no variable is certain.
 ASSIGNING_COMMANDS = {"read", "getopts", "printf", "print", "mapfile", "readarray", "unset", "let", "wait", "vared", "zparseopts", "zstyle",
                       "zformat", "zregexparse", "strftime", "zstat", "stat", "sysread", "getln", "select", "foreach", "zle", "zcurses",
                       "zsocket", "ztcp", "zpty", "zselect", "zsystem", "private", "integer", "float", "set", "compadd", "compset"}
@@ -649,6 +651,11 @@ class ShellAnalysis:
         self.doubt, self.sticky, self.assigned = set(), set(), []
         self.unsure = 0
         self.all_doubt = False
+        # SPD-225: `typed`, the names a declaration on the line gave the integer or float attribute, whose assignments the
+        # shells evaluate as arithmetic and format their own way (assignment_words.typed_names); `arith_opaque`, the line ran
+        # an option builtin (setopt, unsetopt, emulate, `set -o`), which may change how arithmetic reads a number (zsh's
+        # FORCE_FLOAT turned `(( X = 5 ))` into 5.000000000e+00, probed), so no arithmetic literal is taken after it.
+        self.typed, self.arith_opaque = set(), False
         # `aliases`, what `alias NAME=body` defined on the line, name -> the body's text, None for one the hook
         # cannot read and for one `unalias` cleared; `alias_scope`, how many `eval` re-analyses deep the reading is, the only
         # place on one line where a name the line aliased is expanded (a shell expands an alias when it parses the text);

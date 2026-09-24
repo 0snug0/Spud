@@ -1818,5 +1818,83 @@ class HarnessShadowTest(ShellSnapshotCase):
         self.silent_for_everyone("loopmember y; runa z")
 
 
+# Profile functions that read a name the line may assign through a builtin or an arithmetic evaluation, and ones that
+# assign a name from their call's words that way (SPD-225, SPD-254).
+ASSIGNING_FUNCTIONS = HARNESS_SHADOWS.replace("# Shadow find/grep", """\
+printgit () {
+\tprintf -v V %s "$1"
+\tgit $V
+}
+printlocal () {
+\tlocal V
+\tprintf -v V %s "$1"
+\tgit $V
+}
+countgit () {
+\t(( N = $# ))
+\tgit log -n $N
+}
+# Shadow find/grep""")
+
+
+class AssignedNameThroughFunctionTest(ShellSnapshotCase):
+    """SPD-254 (proposal by SPUD-246/Oliver) and SPD-225: SPD-205 keeps a function body's finding that names a variable the
+    line assigned before the body's text, and SPD-246 made the line's variables the names whose assignment reaches the
+    line's shell.  A name an assigning builtin sets (`read GITVERB < f`, `printf -v GITVERB %s push`) or an arithmetic
+    evaluation sets (`((GITVERB=1))`, `let GITVERB++`) was not among them, so `read GITVERB < f; globalgit` (globalgit ()
+    { git $GITVERB }) had the body's `$GITVERB` finding dropped as the body's own and passed a member, where
+    `GITVERB=$(echo push); globalgit` was refused; and a name a builtin in the body assigns from the call's words was not
+    counted as the member's either (`printgit push`, whose body is `printf -v V %s "$1"; git $V`).  Each of these is now
+    the line's assignment, with a value the hook does not know unless it is an arithmetic literal, and a name a builtin
+    in a body assigns while the call has words is the member's (SPD-205's member_vars).  AGENT_A and AGENT_B plan
+    home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        path = self.write_snapshot("snapshot-zsh-1700000000025-254254.sh", ASSIGNING_FUNCTIONS)
+        newest = path.stat().st_mtime + 60  # newer than SHELL_SNAPSHOT, whose one-line grep it replaces
+        os.utime(path, (newest, newest))
+
+    def test_the_tickets_evidence(self):
+        for line in ("read GITVERB < f; globalgit", "printf -v GITVERB %s push; globalgit"):
+            with self.subTest(line=line):
+                self.refused_for_members(line, "cannot resolve")
+                self.assertSilent(line, agent_id=None)
+
+    def test_every_builtin_that_assigns_the_name(self):
+        for line in ("read -r GITVERB < f", "IFS= read -r GITVERB < f", "read -p P GITVERB < f", "read -A GITVERB < f",
+                     "read -a GITVERB < f", "read 'GITVERB?verb: ' < f", "printf -vGITVERB %s push", "print -v GITVERB push",
+                     "getopts ab GITVERB", "mapfile GITVERB < f", "readarray -t GITVERB < f", "unset GITVERB", "wait -p GITVERB",
+                     "set -A GITVERB push", "zstyle -s ctx st GITVERB", "vared GITVERB", "sysread GITVERB < f", "getln GITVERB",
+                     "zparseopts -a GITVERB h", "V=GITVERB; read -r $V < f", ": ${GITVERB:=push}", ": ${GITVERB=push}",
+                     "true && read -r GITVERB < f", "cat f | read -r GITVERB", "{ read -r GITVERB; } < f"):
+            with self.subTest(line=line):
+                self.refused_for_members(line + "; globalgit", "")
+                self.assertSilent(line + "; globalgit", agent_id=None)
+
+    def test_every_arithmetic_form_that_assigns_the_name(self):
+        """An arithmetic value is a number, which git takes for no verb of its own, and one the hook cannot compute is
+        read as the substitution's value was: the finding is the member's either way (SPD-205)."""
+        for line in ("((GITVERB=1))", "(( GITVERB++ ))", "echo $((GITVERB=1))", "let GITVERB=1", "let GITVERB++",
+                     "for ((GITVERB=0; GITVERB<1; GITVERB++)); do :; done", "typeset -i GITVERB; GITVERB=1",
+                     "[[ GITVERB=1 -eq 1 ]]"):
+            with self.subTest(line=line):
+                self.refused_for_members(line + "; globalgit", "")
+                self.assertSilent(line + "; globalgit", agent_id=None)
+
+    def test_a_builtin_in_a_body_assigns_the_member_s_words(self):
+        self.refused_for_members("printgit push", "cannot resolve")
+        self.refused_for_members("printlocal push", "cannot resolve")  # a local, but its call's words fill it
+        self.assertSilent("printgit push", agent_id=None)
+
+    def test_what_assigns_another_name_or_no_variable_stays_silent(self):
+        for line in ("globalgit", "read -r X < f; globalgit", "printf '%s' GITVERB; globalgit", "unset -f GITVERB; globalgit",
+                     "getopts GITVERB X; globalgit", "((X=1)); globalgit", "(( GITVERB > 1 )); globalgit", "zstyle ':x' GITVERB y; globalgit",
+                     "read -r x < f; grep a f | grep b", "grep a f; read -r x < f; grep b f", "(( n = 1 )); grep a f | grep -v b",
+                     "countgit", "countgit a b"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
+
+
 if __name__ == "__main__":
     unittest.main()

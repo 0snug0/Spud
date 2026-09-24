@@ -37,6 +37,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         a.doubt.add(m.group(1))
         a.sticky.add(m.group(1))
         a.unseen_assigned.add(m.group(1))  # SPD-221: no loop body's basename settles it
+        a.line_assigned.update(a.reaching((m.group(1),)))  # ... and it is the line's variable (SPD-205, SPD-254)
     text, bodies, expanded = heredocs.strip_heredocs(command)
     text, apart = prepare.ansi_c_quotes(text)
     if apart is not None and a.unparseable is None:
@@ -392,11 +393,12 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     if command_position and read_shell_name(words, a, depth, stdin, fed):
         # The shell this line runs in already defines the command word as an alias, whose body took the command
         return
-    if cmd in syntax.ASSIGNING_COMMANDS:
-        for x in words[1:]:  # `read X`, `printf -v X`, `unset X`, `getopts o X`: X may now hold anything (probed)
-            names = syntax._NAME_RE.findall(prepare.deglob(x))
-            a.doubt.update(names)
-            loop_bindings.unbind(a, names)  # and no loop's word any more (SPD-146)
+    if cmd in syntax.ASSIGNING_COMMANDS and directories.builtin_runs(effect):
+        # `read X`, `printf -v X`, `unset X`, `getopts o X`, `let X=1`: the line's own assignments, each builtin's names read
+        # by its grammar (SPD-254, SPD-225); a builtin's program run by its path or behind env assigns nothing here
+        expansions.read_assigning_builtin(words, a, effect)
+    if cmd in ("setopt", "unsetopt", "emulate") or cmd == "set" and any(prepare.deglob(w)[:2] in ("-o", "+o") for w in words[1:]):
+        a.arith_opaque = True  # an option may change how arithmetic reads a number (SPD-225, ShellAnalysis.arith_opaque)
     if cmd in ("source", ".", "trap"):
         a.all_doubt = True  # code the hook does not read may assign any variable
     if cmd in ("source", "."):
@@ -645,6 +647,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             scope = a.body_locals[-1]  # a function body the shell holds, where it surely runs: its names are local (SPD-246)
             for name in assignment_words.local_names(words):
                 scope.setdefault(name, a.vars.get(name, syntax.UNSET))
+        a.typed.update(assignment_words.typed_names(words))  # `declare -i X`: X's assignments are arithmetic (SPD-225)
         for w in words[1:]:
             m = assignment_words.declaration_word(w)
             if m:
@@ -852,8 +855,14 @@ def record_assignment(a, found):
     that reads the variable as a plain assignment does -- PATH and zsh's `path` for shadowed_name, CDPATH, GIT_*.
     An element of zsh's `functions`, `commands` or `aliases` binds the name it keys as a definition, a `hash` or an `alias`
     line would, a name the hook cannot read standing for all of them; and a BASH_FUNC_ variable is refused
-    outright."""
+    outright.
+
+    SPD-225: a subscript is arithmetic, which the shells evaluate before they assign (`arr[X=1]=q` and `declare
+    arr2[X=1]=q` assigned X in zsh 5.9 and bash 3.2.57, probed), and so is the value a name with the integer or float
+    attribute is assigned (a.typed: `typeset -i X; X='T=12'` set T as well), whose own value the hook does not compute."""
     name, subscript, append, value = found
+    if subscript is not None:
+        expansions.read_arithmetic(a, prepare.deglob(subscript), doubtful=True)
     script_files.read_assignment(a, name)  # BASH_ENV, ENV, ZDOTDIR: a file of commands a shell started later runs
     script_runners.read_runner_assignment(a, name)  # npm_config_*, MAKEFLAGS ...: a runner's configuration, its shell among it
     if name.startswith(assignment_words.ENV_FUNCTION_PREFIX):
@@ -869,7 +878,11 @@ def record_assignment(a, found):
         else:
             names = a.functions if table == "function" else a.hashed
             names.update([syntax.UNKNOWN_NAME] if pairs is None else [prepare.deglob(key) for key, _ in pairs])
-    expansions.assign_variable(a, name, value, append or subscript is not None)
+    if name in a.typed:
+        expansions.read_arithmetic(a, prepare.deglob(value), doubtful=bool(append or subscript is not None))
+        expansions.assign_unknown(a, name)
+    else:
+        expansions.assign_variable(a, name, value, append or subscript is not None)
 
 
 def exported_function_names(words):

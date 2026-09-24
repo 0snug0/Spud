@@ -1,6 +1,8 @@
 """shell/expansions: Parameter expansions and a command's read points."""
 
-from . import analyse, arg_writes, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax
+import functools
+
+from . import analyse, arg_writes, assignment_words, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
 from ..hooks import hookio, snapshots
 
 
@@ -53,6 +55,151 @@ def assign_variable(a, name, value, append=False):
             a.sticky.add(name)
     elif name not in a.sticky:
         a.doubt.discard(name)
+
+
+# SPD-225 and SPD-254: the assignments a line makes by other grammars than `name=value` -- an arithmetic evaluation, an
+# assigning builtin's name operands -- recorded as the line's, where the shell makes them, as assign_variable records one.
+# The operators of `[[ ... ]]` whose operands both shells evaluate as arithmetic (probed: `[[ X=22 -eq 22 ]]` and `[[ 1 -lt
+# X=60 ]]` assigned X in zsh 5.9 and bash 3.2.57; `[[ X=61 == 61 ]]` and `[ 1 -eq 1 ]` evaluate none)
+_ARITHMETIC_TESTS = frozenset(("-eq", "-ne", "-lt", "-le", "-gt", "-ge"))
+
+
+def assign_unknown(a, name):
+    """Record an assignment of a value the hook does not read -- a builtin's (`read X`, `printf -v X`, `unset X`), an
+    arithmetic evaluation's that is no literal -- as an appended value is recorded: unknown, the name's loop binding and
+    basename gone, doubted where the assignment may not run or persist."""
+    assign_variable(a, name, hookio.SUBST, append=True)
+
+
+def settled_text(a, name):
+    """The text the line settles for a `$name` arithmetic reads, or None: the value arg_writes.resolved puts in place, but
+    as text, so a blank or a glob character in it stands (arithmetic reads the text again and splits and globs nothing)."""
+    value = a.vars.get(name)
+    if value is None or name in a.doubt or name in a.sticky or a.all_doubt or name in syntax.DYNAMIC_VARIABLES:
+        return None
+    if hookio.SUBST in value or syntax._ARRAY_VALUE in value:
+        return None
+    text = prepare.deglob(value)
+    return None if "$" in text or "`" in text else text
+
+
+def read_arithmetic(a, text, doubtful=False):
+    """Record what an arithmetic expression, spelled as the shells read it, assigns (SPD-225): each name with the literal
+    assignment_words.arithmetic_names reads for it where the evaluation surely runs and persists -- not `doubtful` (a
+    command's prefix, a here-document's body, a `[[ ]]` operand, a subscript), not after an option that may change how
+    the shells read a number (a.arith_opaque), and not a name with the integer or float attribute (a.typed), whose value
+    the shells format their own way (`typeset -i 16 X; X=255` printed 16#FF in zsh) -- else a value the hook does not
+    know.  A name the hook cannot read refuses a member unread (SPD-217)."""
+    record_arithmetic(a, assignment_words.arithmetic_names(text, functools.partial(settled_text, a), doubtful), text)
+
+
+def record_arithmetic(a, found, shown, doubtful=False):
+    """read_arithmetic's record, for the names arithmetic_names or word_arithmetic found (None: one it cannot read)."""
+    if found is None:
+        unread.record_unread(a, "assigned", ("an arithmetic evaluation", unread.unread_shown(shown)))
+        return
+    for name, value in found:
+        if value is None or doubtful or a.arith_opaque or name in a.typed:
+            assign_unknown(a, name)
+        else:
+            assign_variable(a, name, value)
+
+
+def read_word_arithmetic(words, a, bodies=()):
+    """Record what the arithmetic a simple command's words expand assigns (SPD-225): each `$(( ... ))` and `$[ ... ]` in
+    its words, where the shell expands them, in order (`echo $((X=5)) $((X=6))` left 6), the operands of a `[[ ... -eq
+    ... ]]`, and each unquoted here-document's body among `bodies`.  Probed in zsh 5.9 -f, -f -o nobareglobqual and bash
+    3.2.57, from `X=a`: an external command's words are expanded in the shell (`/usr/bin/true $((X=9))` left 9) but its
+    redirections in its own process (`/bin/echo hi > f$((X=5))` and `cat < f$((X=8))` left a, a builtin's `echo hi >
+    g$((X=6))` 6); a prefix's arithmetic before a command word stays in the command's process in zsh (`Y=$((X=7))
+    /usr/bin/true` assigned X in bash alone), and bash expands the prefix after the command's own words (`Y=$((X=11))
+    /usr/bin/true $((X=12))` left 11 in bash and 12 in zsh), while an assignment-only command's is the shell's own
+    (`Y=$((X=8))` assigned in all three); a body is expanded where the shell and the command decide (bash's `cat <<EOF` fed
+    `$((X=26))` left X, its `: <<EOF` did not); and a `[[ ]]` operand may not be evaluated at all (`[[ -n y || X=1 -eq 1
+    ]]`).  A redirection's target, a prefix, a body and a `[[ ]]` operand are read as ones that may not persist, a
+    prefix after the command's own words."""
+    settle = functools.partial(settled_text, a)
+    expanding = [k for k, w in enumerate(words) if "$" in w]
+    if expanding:
+        prefix, targets = _word_roles(words)
+        for k in [k for k in expanding if k not in prefix] + [k for k in expanding if k in prefix]:
+            found = assignment_words.word_arithmetic(words[k], settle)
+            record_arithmetic(a, found, words[k], doubtful=k in prefix or k in targets)
+    if "[[" in words:
+        for k, w in enumerate(words):
+            if w in _ARITHMETIC_TESTS and 0 < k < len(words) - 1:
+                for operand in (words[k - 1], words[k + 1]):
+                    read_arithmetic(a, prepare.deglob(operand), doubtful=True)
+    for body in bodies:
+        if "$" in body:
+            record_arithmetic(a, assignment_words.word_arithmetic(body, settle, raw=True), body, doubtful=True)
+
+
+def _word_roles(words):
+    """({the indexes of a simple command's prefix assignments}, {the indexes of its redirections' targets}): the prefix
+    being the assignment words before its command word, none for an assignment-only command, which assigns in the shell."""
+    prefix, targets, command, target = set(), set(), False, False
+    for k, w in enumerate(words):
+        if target:
+            targets.add(k)
+            target = False
+        elif w in syntax.OUT_REDIRECTS or w in syntax.IN_REDIRECTS:
+            target = True
+        elif not command and assignment_words.assignment_word(w) is not None:
+            prefix.add(k)
+        else:
+            command = True
+    return (prefix if command else set()), targets
+
+
+def read_assigning_builtin(words, a, effect):
+    """Record what an assigning builtin assigns (SPD-254; syntax.ASSIGNING_COMMANDS), read by its own grammar: `let`'s
+    words as arithmetic (SPD-225), zsh's `integer`, `float` and `private` as declarations -- the first two giving the
+    integer or float attribute, so what they and later assignments give the name is arithmetic -- and every other
+    builtin's name operands as assignment_words.builtin_names reads them, each assigned a value the hook does not know.
+    A name the line settles is the name it spells (`N=X; read $N` reads X); one the hook cannot read refuses a member
+    unread (SPD-217), and so does code the builtin is handed to run.  `effect`: where the builtin runs -- in the shell, in
+    either (`command read`: zsh's external, bash's builtin) or in a fork, where what it assigns may not reach the line.
+    Inside a function body the shell holds, with the call's words, a name a builtin assigns may hold them: the member's
+    own (SPD-205's member_vars)."""
+    cmd = prepare.deglob(words[0])
+    words = [words[0]] + [arg_writes.resolved(w, a) for w in words[1:]]
+    maybe = effect != "shell"
+    a.unsure += maybe
+    if cmd == "let":
+        for w in words[2:] if len(words) > 1 and prepare.deglob(words[1]) == "--" else words[1:]:
+            read_arithmetic(a, prepare.deglob(w))
+    elif cmd in ("integer", "float", "private"):
+        _read_zsh_declaration(words, a)
+    else:
+        names, subscripts, unreadable, evaluated = assignment_words.builtin_names(words, functools.partial(settled_text, a))
+        if evaluated is not None:
+            unread.record_unread(a, "evaluated", "`%s` %s" % (cmd, unread.unread_shown(evaluated)))
+        if unreadable is not None:
+            unread.record_unread(a, "assigned", ("`%s`" % cmd, unread.unread_shown(" ".join(words))))
+        for subscript in subscripts:
+            read_arithmetic(a, prepare.deglob(subscript), doubtful=True)
+        for name in dict.fromkeys(names):
+            assign_unknown(a, name)
+        if a.shell_reading:
+            a.fill_members(names)
+    a.unsure -= maybe
+
+
+def _read_zsh_declaration(words, a):
+    """zsh's `integer` and `float` (a typeset with the integer or float attribute: `integer X=3+4` left 7, probed) and
+    `private` (zsh/param/private's local): each `name=value` recorded as a declaration's is, the rest assigned a value the
+    hook does not know; an operand the hook cannot read refuses a member."""
+    a.typed.update(assignment_words.typed_names(words))
+    for w in words[1:]:
+        text = prepare.deglob(w)
+        found = assignment_words.declaration_word(w)
+        if found is not None:
+            analyse.record_assignment(a, found)
+        elif syntax.IDENTIFIER_RE.match(text):
+            assign_unknown(a, text)
+        elif expansion_word(w):
+            unread.record_unread(a, "assigned", ("`%s`" % prepare.deglob(words[0]), unread.unread_shown(" ".join(words))))
 
 
 # `alias NAME=body` stores shell text the shell runs wherever it next reads NAME in command position.  A shell

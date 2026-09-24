@@ -2,8 +2,9 @@
 
 The reader has a handful of places where it once dropped, or read past, text the shell will run: a substitution nested
 past its depth bound, a `${ }` nested past its own, a `$( )` whose end it cannot place, its own placeholder in a word the
-line did not lift, a backslash-escaped substitution a re-reading unescapes, and a value a shell evaluates as code in a
-form it does not model.  Each such site records one "unread" finding, (form, shown), which bash_rule.unread_reason turns
+line did not lift, a backslash-escaped substitution a re-reading unescapes, a value a shell evaluates as code in a
+form it does not model, and an assignment whose name it cannot read (SPD-225, SPD-254: expansions.record_arithmetic and
+read_assigning_builtin).  Each such site records one "unread" finding, (form, shown), which bash_rule.unread_reason turns
 into the refusal a member earns -- the form named, and how to respell the line so the hook can read it.  A member alone
 is refused; Spud reads on (the findings loop skips these for him), as under every Law 7 fence.  The reasons and the
 per-form messages live in bash_rule with the other refusals; this module is only where the findings are made."""
