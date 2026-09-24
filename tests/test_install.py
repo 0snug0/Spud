@@ -10,7 +10,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from helpers import EXIT_ERROR, EXIT_OK, RepoMixin, SpudTestCase, git
+from helpers import EXIT_ERROR, EXIT_OK, RepoMixin, SpudTestCase, git, load_spud_module
 
 # BadTakes' .claude/settings.local.json as it stands (design section 2.2), in a style json.dumps(indent=2) does not write.
 BADTAKES_LOCAL = ('{\n    "permissions": {"allow": ["Bash(node -e \' *)"]},\n    "outputStyle": "Concise",\n'
@@ -21,7 +21,9 @@ AGENT = "---\nname: spudagent\ndescription: A spudagent (test fixture).\n---\nYo
 EVENTS = {"PreToolUse": 1, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop": 1, "SessionStart": 1, "Stop": 1, "UserPromptSubmit": 1}
 
 
-class InstallTest(RepoMixin, SpudTestCase):
+class InstallFixture(RepoMixin):
+    """A repository shaped like BadTakes registered as project badtakes beside the scratch home, and what install writes."""
+
     def setUp(self):
         super().setUp()
         # SPW-004: the source is share/agents/spudagent.md under the tool, which here is the home itself; Home.agent_source
@@ -57,6 +59,8 @@ class InstallTest(RepoMixin, SpudTestCase):
         path = (repo or self.other) / ".git" / "info" / "exclude"
         return path.read_text(encoding="utf-8") if path.is_file() else ""
 
+
+class InstallTest(InstallFixture, SpudTestCase):
     def test_install_writes_the_local_settings_keeping_every_foreign_key(self):
         out = self.cli_json("project", "install", "badtakes", actor="spud")
         self.assertTrue(out["project"]["installed"])
@@ -449,6 +453,59 @@ class InstallTest(RepoMixin, SpudTestCase):
         self.assertEqual(record["agent_sha256"], hashlib.sha256(self.rendered().encode("utf-8")).hexdigest())
         shown = self.cli_json("project", "show", "badtakes")["project"]
         self.assertNotIn("original", shown["install_record"])
+
+
+class QuotedPathInstallTest(InstallFixture, SpudTestCase):
+    """SPD-226: install, sync and uninstall in a home whose path shlex.quote quotes, where every line install writes
+    reads `... '<home>/bin/spud' hook <event> --project badtakes` and projects/sessions.HOOK_MARK is no substring of it.
+    Install and sync must replace those lines rather than append a copy, and uninstall must strip them."""
+
+    home_name = "Sp üd"
+    # A hook of Eric's own that runs a quoted `bin/spud` without being a line hook_command writes: never the ledger's.
+    USERS_OWN = {"hooks": [{"type": "command", "command": "'/opt/my tools/bin/spud' hook Stop"},
+                           {"type": "command", "command": "echo \"'/opt/my tools/bin/spud' hook Stop\""}]}
+
+    def assert_one_line_per_event(self):
+        spud = load_spud_module()
+        ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+        commands = {}
+        for event, groups in self.settings()["hooks"].items():
+            for g in groups:
+                if g != self.USERS_OWN:
+                    commands.setdefault(event, []).extend(h["command"] for h in g["hooks"])
+        self.assertEqual(commands, {e: [spud.hook_command(ctx, e, "badtakes")] for e in EVENTS})
+
+    def test_a_second_install_or_sync_writes_nothing_and_leaves_one_line_per_event(self):
+        self.install()
+        self.assertTrue(self.settings()["hooks"]["Stop"][0]["hooks"][0]["command"].endswith("'%s/bin/spud' hook Stop --project badtakes" % self.home.path))
+        self.assert_one_line_per_event()
+        self.assertEqual(self.cli_json("project", "install", "badtakes", actor="spud")["written"], [])
+        self.assertEqual(self.cli_json("project", "sync", "badtakes", actor="spud")["projects"][0]["written"], [])
+        synced = {r["project"]: r["written"] for r in self.cli_json("project", "sync", "--all", actor="spud")["projects"]}
+        self.assertEqual(synced["badtakes"], [])
+        self.assert_one_line_per_event()
+        # a group of the user's own among them stays where it is through the next install
+        data = self.settings()
+        data["hooks"]["Stop"].insert(0, self.USERS_OWN)
+        self.local.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        self.assertEqual(self.cli_json("project", "install", "badtakes", actor="spud")["written"], [])
+        self.assertEqual(self.settings()["hooks"]["Stop"][0], self.USERS_OWN)
+        self.assert_one_line_per_event()
+
+    def test_uninstall_gives_back_the_original_bytes(self):
+        self.install()
+        self.cli("project", "uninstall", "badtakes", actor="spud")
+        self.assertEqual(self.local.read_text(encoding="utf-8"), BADTAKES_LOCAL)
+
+    def test_uninstall_strips_the_quoted_lines_and_keeps_the_users_own(self):
+        self.install()
+        data = self.settings()
+        data["hooks"]["Stop"].insert(0, self.USERS_OWN)
+        self.local.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        self.cli("project", "uninstall", "badtakes", actor="spud")
+        left = self.settings()
+        self.assertEqual(left["hooks"], {"Stop": [self.USERS_OWN]})
+        self.assertEqual(left["permissions"], json.loads(BADTAKES_LOCAL)["permissions"])
 
 
 if __name__ == "__main__":

@@ -72,9 +72,10 @@ def tool_warning(ctx):
 
 
 def is_ledger_hook(entry):
-    """The mark itself lives in projects/sessions, which reads installed hook lines too and, unlike every
-    module here, may be imported by a hook -- so there is one spelling of it."""
-    return isinstance(entry, dict) and sessions.HOOK_MARK in str(entry.get("command", ""))
+    """Whether a hook entry is the ledger's, by projects/sessions.is_ledger_command: the rule lives there, beside the
+    mark, because that module reads installed hook lines too and, unlike every module here, may be imported by a hook --
+    so there is one spelling of it, and a line whose launcher shlex.quote quoted is the ledger's here as well (SPD-226)."""
+    return isinstance(entry, dict) and sessions.is_ledger_command(str(entry.get("command", "")))
 
 
 def merge_hooks(ctx, settings, project_key=None):
@@ -219,13 +220,14 @@ def cmd_settings_sync(ctx, args):
 def settings_exact_hooks(ctx, path, key=None):
     """The events `path` carries the hook line this home writes for them, byte for byte as hook_command writes it now.
 
-    The strongest evidence a file can carry, and read at all because projects/sessions.HOOK_MARK cannot see a
-    line whose launcher word got quoted.  shlex.quote quotes any path outside ASCII `[\\w@%+=:,./-]`, so in a home whose
-    path holds a space or a non-ASCII character (a home named `Spüd`) every installed line reads
-    `... '<home>/bin/spud' hook Stop`, in which `bin/spud hook` is not a substring: the mark then finds nothing, and a
-    home `settings sync` had just written read as a home with no ledger hook at all.  Answering with the generated
-    string instead of parsing one cannot have that class of bug.  The mark still answers beside this, because a line an
-    older sync wrote -- another interpreter path, an older spelling -- is this home's line and does run."""
+    The strongest evidence a file can carry, first read because projects/sessions.HOOK_MARK cannot see a line whose
+    launcher word got quoted.  shlex.quote quotes any path outside ASCII `[\\w@%+=:,./-]`, so in a home whose path holds
+    a space or a non-ASCII character (a home named `Spüd`) every installed line reads `... '<home>/bin/spud' hook Stop`,
+    in which `bin/spud hook` is not a substring: the mark then found nothing, and a home `settings sync` had just written
+    read as a home with no ledger hook at all.  sessions.is_ledger_command reads such a line by its shape since SPD-226;
+    answering with the generated string instead of parsing one stays, since it cannot have that class of bug at all.  The
+    marked reading answers beside this, because a line an older sync wrote -- another interpreter path, an older
+    spelling -- is this home's line and does run."""
     try:
         with open(path, encoding="utf-8") as f:
             data = json.load(f)

@@ -271,9 +271,10 @@ class OlderInstallTest(RepoMixin, SpudTestCase):
         `--project <key>` -- each line spelled as those syncs spelled it, and a PreToolUse row of the user's own written by
         hand between the ledger's first two."""
         hooks = {}
+        q = shlex.quote  # as every sync has spelled each word since SPD-008, so a home whose path needs quoting gets it quoted
         for event, matcher in OLDER_TABLE:
-            line = "SPUD_HOME=%s %s -I -S %s/bin/spud hook %s" % (self.home.path, sys.executable, self.home.path, event)
-            entry = {"type": "command", "command": line + (" --project %s" % key if key else ""), "timeout": 30}
+            line = "SPUD_HOME=%s %s -I -S %s hook %s" % (q(str(self.home.path)), q(sys.executable), q(str(self.home.path / "bin" / "spud")), event)
+            entry = {"type": "command", "command": line + (" --project %s" % q(key) if key else ""), "timeout": 30}
             hooks.setdefault(event, []).append({"matcher": matcher, "hooks": [entry]} if matcher else {"hooks": [entry]})
         hooks["PreToolUse"].insert(1, self.USER_ROW)
         return hooks
@@ -324,6 +325,14 @@ class OlderInstallTest(RepoMixin, SpudTestCase):
         self.assertEqual(self.synced_all()["badtakes"], [str(local)])
         self.assert_one_row(local, older)
         self.assertEqual(self.synced_all()["badtakes"], [])
+
+
+class QuotedOlderInstallTest(OlderInstallTest):
+    """SPD-226: the same older files in a home whose path shlex.quote quotes, where every line an older sync or install
+    wrote reads `... '<home>/bin/spud' hook <event>` and projects/sessions.HOOK_MARK is not a substring of any of them.
+    The next sync, install or `project sync --all` must still see the three rows as the ledger's and leave the one."""
+
+    home_name = "Sp üd"
 
 
 class HookEvidenceTest(SpudTestCase):
@@ -518,32 +527,91 @@ class DoctorHomeSettingsTest(SpudTestCase):
 class QuotedPathHomeTest(SpudTestCase):
     """A home whose path shlex.quote quotes: a space, and SPD-029's non-ASCII character (`\\w` under re.ASCII).  Every
     hook line this home installs then reads `SPUD_HOME='<home>' <python> -I -S '<home>/bin/spud' hook <event>`, in
-    which projects/sessions.HOOK_MARK, `bin/spud hook`, is not a substring -- so the marked reading finds nothing in a
-    file `settings sync` wrote itself, and SPW-006's check would have called every such home broken.  Which is why
-    settings_missing_hooks reads the generated line too (settings_exact_hooks); the mark's own blindness is a defect of
-    its own, filed as a proposal, and it costs more than this check: `merge_hooks` cannot see its own previous entries
-    either, so every `settings sync` in such a home appends a second copy of all seven lines.
+    which projects/sessions.HOOK_MARK, `bin/spud hook`, is not a substring -- so a reading by the mark alone finds nothing
+    in a file `settings sync` wrote itself, and SPW-006's check would have called every such home broken.  Which is why
+    settings_missing_hooks reads the generated line too (settings_exact_hooks).  SPD-226: the mark's blindness cost more
+    than that check -- `merge_hooks` could not see its own previous entries, so every `settings sync` in such a home
+    appended a second copy of all seven lines, and `project uninstall` left them behind.  projects/sessions.is_ledger_command
+    is the one rule now: the mark, or a line of the whole shape hook_command writes whatever its words' spelling.
     """
 
     home_name = "Sp üd"
 
+    def ctx(self):
+        return load_spud_module().Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+
     def test_a_home_whose_path_needs_quoting_reads_as_installed_and_doctor_is_green(self):
         spud = load_spud_module()
-        ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.path)
+        ctx = self.ctx()
         settings = self.home.path / ".claude" / "settings.json"
         command = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["Stop"][0]["hooks"][0]["command"]
         # the premise: the line is this home's own, and the mark cannot see it
         self.assertEqual(command, spud.hook_command(ctx, "Stop"))
         self.assertIn("'%s/bin/spud' hook Stop" % self.home.path, command)
         self.assertNotIn(spud.HOOK_MARK, command)
-        self.assertEqual(spud.settings_hook_events(ctx, settings), set())
-        # and the whole-table answer, and so doctor, read it anyway
+        # SPD-226: the marked reading sees it anyway, by its shape, and so does `session show`
+        self.assertEqual(spud.settings_hook_events(ctx, settings), set(spud.TABLE_EVENTS))
+        # and the whole-table answer, and so doctor, read it too
         self.assertEqual(spud.settings_exact_hooks(ctx, settings), set(spud.TABLE_EVENTS))
         self.assertEqual(spud.settings_missing_hooks(ctx, settings), [])
         self.assertTrue(spud.settings_hold_hooks(ctx, settings))
         proc = self.home.run("doctor", check=False)
         self.assertEqual(proc.returncode, EXIT_OK, proc.stderr)
         self.assertIn("settings    %s: this home's ledger hooks, all 7 events" % settings, proc.stdout.splitlines())
+
+    # Hooks of the user's own that run some `bin/spud` spelled quoted, or quote the ledger's words, without being a line
+    # hook_command writes: no sync, install or uninstall may take one of them for the ledger's.
+    USERS_OWN = (
+        "'/opt/my tools/bin/spud' hook Stop",
+        "echo \"'/opt/my tools/bin/spud' hook Stop\"",
+        "SPUD_HOME='/x y' python3 -I -S '/x y/bin/spud' hook Stop; say done",
+        "SPUD_HOME='/x y' python3 '/x y/bin/spud' hook Stop",
+        "SPUD_HOME='/x y' python3 -I -S '/x y/bin/spudder' hook Stop",
+        "SPUD_HOME='/x y' python3 -I -S '/x y/bin/spud' hook Stop --project 'a' --verbose",
+    )
+
+    def test_one_rule_tells_the_ledgers_lines_from_the_users_own(self):
+        """projects/sessions.is_ledger_command: HOOK_MARK as it has always been read (any home, any spelling around it),
+        or a line of exactly the shape hook_command writes -- `SPUD_HOME=<w> <w> -I -S <w> hook <event>`, then
+        ` --project <w>` or nothing, each word in one of the two spellings shlex.quote writes and the launcher word naming
+        a path that ends in /bin/spud -- whatever home, interpreter or key it names, since home move strips an old home's
+        lines by it."""
+        spud = load_spud_module()
+        ctx = self.ctx()
+        for event in spud.TABLE_EVENTS:
+            for key in (None, "badtakes", "it's mine"):
+                self.assertTrue(spud.is_ledger_command(spud.hook_command(ctx, event, key)), (event, key))
+        q = shlex.quote
+        ledgers = (
+            "SPUD_HOME=/old /old/python -I -S /old/bin/spud hook Stop",
+            "/old/bin/spud hook Stop",  # the mark alone, as test_merge_keeps_foreign_hooks_and_replaces_stale_ledger_hooks pins it
+            "SPUD_HOME=%s %s -I -S %s hook Stop" % (q("/other home"), q("/usr/local/bin/python 3"), q("/other home/bin/spud")),
+            "SPUD_HOME=%s /usr/bin/python3 -I -S %s hook PreToolUse --project %s" % (q("/o's hüm"), q("/o's hüm/bin/spud"), q("a b")),
+        )
+        for command in ledgers:
+            self.assertTrue(spud.is_ledger_command(command), command)
+        for command in self.USERS_OWN + ("echo hi", "", "SPUD_HOME='/x y' python3 -I -S '/x y/bin/spud' hook"):
+            self.assertFalse(spud.is_ledger_command(command), command)
+
+    def test_every_sync_replaces_this_homes_lines_and_keeps_the_users_own(self):
+        """The defect itself: `spud init` synced this home once already, so each sync after it must find the seven lines
+        it wrote and put the seven it writes now in their place -- not a second copy beside them."""
+        spud = load_spud_module()
+        ctx = self.ctx()
+        path = self.home.path / ".claude" / "settings.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        mine = {"hooks": [{"type": "command", "command": c} for c in self.USERS_OWN]}
+        data["hooks"]["Stop"].insert(0, mine)
+        path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        for _ in range(2):
+            self.home.json("settings", "sync")
+            hooks = json.loads(path.read_text(encoding="utf-8"))["hooks"]
+            self.assertEqual(hooks["Stop"][0], mine)
+            for event, matcher in spud.HOOK_TABLE:
+                ours = [g for g in hooks[event] if g is not hooks["Stop"][0]] if event == "Stop" else hooks[event]
+                entry = {"type": "command", "command": spud.hook_command(ctx, event), "timeout": spud.HOOK_TIMEOUT}
+                self.assertEqual(ours, [{"matcher": matcher, "hooks": [entry]} if matcher else {"hooks": [entry]}], event)
+        self.assertFalse(self.home.json("settings", "sync")["written"])
 
 
 if __name__ == "__main__":
