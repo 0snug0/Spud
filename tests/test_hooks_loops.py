@@ -1466,24 +1466,25 @@ class GluedReservedWordTest(BashHookCase):
     def member_payloads(self):
         """(command, the reason a member is refused for it, the directory it runs in): Law 7, Law 6, Law 5's --as, and Law 1
         through a redirection and through tee -- none holding a quote, so each fits between a qualifier's quotes.  The
-        writes run in the tickets directory, their targets holding no `/`: in a glued word's group a `/` is a bad pattern
-        to zsh (probed: `else(e:'echo x > sub/t':)` failed so under -f -o nobareglobqual, while -f ran the code), and the
-        hook's reading of a glob command word takes it for a directory's, the pattern after it naming any command, the
-        database's first -- refused all the same, but in the database's words rather than the path rule's."""
-        spud, tickets = self.spud_cli, str(self.home.path / "ledger" / "tickets")
+        writes name ledger/tickets/SPD-001.md from the home: in a glued word's group a `/` is a bad pattern to zsh (probed:
+        `else(e:'echo x > sub/t':)` failed so under -f -o nobareglobqual, while -f ran the code), and since SPD-179 the
+        hook's reading of the glob command word keeps that `/` in its last segment, which names no command, so the code's
+        write is refused in the path rule's words.  Before it the word was split inside the group, the pattern after the
+        `/` named any command, the database's first, and these writes ran in the tickets directory to hold no `/`."""
+        spud = self.spud_cli
         return (("git push", "Law 7", None),
                 ("%s ticket new --title x" % spud, "Law 6", None),
                 ("%s --as spud member log hi" % spud, "Law 6", None),
                 ("%s --as %s member log hi" % (spud, AGENT_B), "--as", None),
-                ("echo x > SPD-001.md", "generated", tickets),
-                ("echo x | tee SPD-001.md", "generated", tickets))
+                ("echo x > ledger/tickets/SPD-001.md", "generated", None),
+                ("echo x | tee ledger/tickets/SPD-001.md", "generated", None))
 
     def spud_payloads(self):
         """Spud is never refused for git; these are the checks that do apply to him."""
-        spud, tickets = self.spud_cli, str(self.home.path / "ledger" / "tickets")
+        spud = self.spud_cli
         return (("%s --as %s member log hi" % (spud, AGENT_A), "--as", None),
-                ("echo x > SPD-001.md", "Law 1", tickets),
-                ("echo x | tee SPD-001.md", "Law 1", tickets))
+                ("echo x > ledger/tickets/SPD-001.md", "Law 1", None),
+                ("echo x | tee ledger/tickets/SPD-001.md", "Law 1", None))
 
     def every_payload(self, form):
         for command, needle, cwd in self.member_payloads():
@@ -1513,11 +1514,11 @@ class GluedReservedWordTest(BashHookCase):
         self.assertIn("git push", r.reason)
         self.assertRefused(line, "Law 7", AGENT_C)
         self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
-        # ... and a write there is held to the path rule (in the tickets directory: see member_payloads)
-        line = "if true; then :; else(e:'echo x > SPD-001.md':); fi"
-        tickets = str(self.home.path / "ledger" / "tickets")
-        self.assertRefused(line, "Law 1", None, tickets)
-        self.assertRefused(line, "generated", AGENT_C, tickets)
+        # ... and a write there is held to the path rule, in its own words (SPD-179: see member_payloads)
+        line = "if true; then :; else(e:'echo x > ledger/tickets/SPD-001.md':); fi"
+        self.assertNotIn("db", self.analysis(line).kinds)
+        self.assertRefused(line, "Law 1", None)
+        self.assertRefused(line, "generated", AGENT_C)
         line = "if true; then :; else(e:'echo x > k.txt':); fi"
         self.assertRefused(line, "deliverables", AGENT_A)  # AGENT_A plans tests/** and bin/spud
         self.assertSilent(line, AGENT_C)
@@ -1764,13 +1765,12 @@ class ForArithmeticBodyTest(BashHookCase):
         self.assertIn("git push", r.reason)
         self.assertRefused(line, "Law 7", AGENT_C)
         self.assertSilent(line, agent_id=None)  # Law 7 refuses members only
-        # ... and a write there is held to the path rule, run in the tickets directory as GluedReservedWordTest runs its
-        # own, so the code holds no `/`
-        line = "for (( i=0; i<1; i++ )) ls (b|c)(e:'echo x > SPD-001.md':)"
-        tickets = str(self.home.path / "ledger" / "tickets")
-        self.assertRefused(line, "Law 1", None, tickets)
-        self.assertRefused(line, "generated", AGENT_C, tickets)
-        self.assertRefused(line, "generated", AGENT_A, tickets)
+        # ... and a write there is held to the path rule, from the home as GluedReservedWordTest runs its own since SPD-179
+        line = "for (( i=0; i<1; i++ )) ls (b|c)(e:'echo x > ledger/tickets/SPD-001.md':)"
+        self.assertNotIn("db", self.analysis(line).kinds)
+        self.assertRefused(line, "Law 1", None)
+        self.assertRefused(line, "generated", AGENT_C)
+        self.assertRefused(line, "generated", AGENT_A)
 
     def test_the_body_reads_as_the_command_does_alone(self):
         """The loop runs its body, and its header changes none of the body's words: every finding, redirection target and

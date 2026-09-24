@@ -134,12 +134,36 @@ def glob_too_complex(text):
     return False
 
 
+def partition_outside_groups(pattern, sep, last=False):
+    """pattern.partition(sep), or .rpartition(sep) when `last`, taking only a `sep` outside every zsh group of the masked
+    pattern: zsh splits a path at a `/` there alone, a group holding one being a bad pattern (probed: `time(ls /tmp)`,
+    `ech(o|/x) x`) or a bracket's (`/bin/(e|[/])cho x` ran echo), so the segment after the last keeps the group whole."""
+    if syntax.ZSH_OPEN not in pattern and syntax.ZSH_CLOSE not in pattern:
+        return pattern.rpartition(sep) if last else pattern.partition(sep)
+    depth, at = 0, -1
+    for k, c in enumerate(pattern):
+        if c == syntax.ZSH_OPEN:
+            depth += 1
+        elif c == syntax.ZSH_CLOSE:
+            depth -= 1
+        elif c == sep and depth == 0:
+            at = k
+            if not last:
+                break
+    if at < 0:
+        return ("", "", pattern) if last else (pattern, "", "")
+    return pattern[:at], sep, pattern[at + 1 :]
+
+
 @functools.lru_cache(maxsize=512)
 def glob_sample_matches(segment, fold):
-    """The GLOB_SAMPLES a masked glob segment matches (case-insensitively when `fold`), or None when it is too complex to match."""
+    """The GLOB_SAMPLES a masked glob segment matches (case-insensitively when `fold`), or None when it is too complex to
+    match or its regex will not compile (redirect_globs._segment_regex): more than the hook can read."""
     if glob_too_complex(segment):
         return None
     rx = redirect_globs._segment_regex(_STAR_RUN_RE.sub("*", segment))
+    if rx is None:
+        return None
     if fold:
         rx = re.compile(rx.pattern, re.IGNORECASE)
     return frozenset(s for s in GLOB_SAMPLES if rx.match(s))
@@ -163,7 +187,7 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False,
     - a brace list: its words, each read again (`{git,push}` pushed in bash, `git {push,status}` in both);
     - a glob: as spelled (bash runs it when nothing matches, zsh runs nothing), and each name the hook checks that it can match,
       whether or not a file matches now, since the line may create one (`touch push; git p?sh` pushed).  A command word, or a
-      script, is matched on its last path segment and case-insensitively (macOS finds GIT as git), and a command word only
+      script, is matched on its last path segment, after its last `/` outside every group (partition_outside_groups), and case-insensitively (macOS finds GIT as git), and a command word only
       against the names a command dispatches on; any other word against every name, option and verb.  A trailing `(N)` may
       drop the word (`git nomatch(N) push` pushed in zsh with bareglobqual); `dash`: a glob that may start with `-` may be an
       option (GLOB_OPTION); `shift`: a word at a place the command may skip as an option's value is also read with each name
@@ -190,7 +214,7 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False,
     readings, names = [[literal]], set()
     ambiguous = glob_too_complex(word)
     for pattern in ([] if ambiguous else redirect_globs.qualifier_readings(word)):
-        head, sep, segment = pattern.rpartition("/") if (command or script) else ("", "", pattern)
+        head, sep, segment = partition_outside_groups(pattern, "/", True) if (command or script) else ("", "", pattern)
         matched = glob_sample_matches(segment, command or script)
         if matched is None:
             ambiguous = True
@@ -198,7 +222,7 @@ def glob_readings(word, a, command=False, script=False, dash=False, shift=False,
         names.update(matched)
         readings += [[literalize(head + sep) + s] for s in sorted(matched & GLOB_COMMAND_SAMPLES if command else matched)]
     if options is not None:
-        key, sep, rest = word.partition("=")
+        key, sep, rest = partition_outside_groups(word, "=")
         matched = glob_sample_matches(key, False) if sep and active_glob_word(key) else None
         readings += [[s + sep + rest] for s in sorted(matched or ()) if s.startswith("-")]
         ambiguous = ambiguous or git_writes.may_become_file_option(word, *options)
