@@ -15,6 +15,10 @@ from hookcase import AGENT_A, AGENT_B, AGENT_C, GIT_DIR_WORDING, GIT_NESTED_WORD
 from hookcase import SPUD_PLANTED_WORDING, VARIABLE_WORDING, WORD_WORDING, BashHookCase, plant_git_dir
 
 
+# SPD-122: the refusal a member earns for git inside a trap's action, which runs later where the hook cannot say.
+TRAP_WORDING = "inside a trap's action"
+
+
 class ParameterExpansionCommandWordTest(BashHookCase):
     """SPD-043: a word the Bash hook dispatches on by name that the shell builds from an expansion the hook does not resolve
     exactly hid the command.  Probed in zsh 5.9 -f, zsh -f -o nobareglobqual (this Mac's Bash tool), bash 3.2 and sh, with a fake
@@ -231,7 +235,9 @@ class TrapActionTest(BashHookCase):
     'echo trapped >> rel.txt' EXIT; cd /tmp` wrote /tmp/rel.txt, and an EXIT action's `pwd` is the last directory of the
     line), a DEBUG action before every command.  It is therefore read with the directories unknown, as a sourced file is, so
     a relative redirection or tee inside it is refused for a member and left unchecked for Spud; the line's own directories
-    are restored afterwards, since defining a trap changes nothing on the line.  The action's own assignments do not reach
+    are restored afterwards, since defining a trap changes nothing on the line (unless the action runs inside the line and
+    moves it, SPD-252; and a git call in it is refused a member and read where it may run for Spud, SPD-122,
+    TrapRepositoryTest).  The action's own assignments do not reach
     the rest of the line either -- they run later, and SPD-043's `a.all_doubt` after `trap`, which this ticket leaves alone,
     already doubts every variable (probed: a DEBUG action's `X=git` did reach the next command's expansion in all four
     shells, so the doubt, not the value, is what the hook keeps).  An action word holding an expansion the hook cannot
@@ -283,12 +289,17 @@ class TrapActionTest(BashHookCase):
     def test_the_forms_that_run_nothing_stay_silent(self):
         for ok in ("trap", "trap -p", "trap -l", "trap -lp", "trap -p EXIT", "trap -P EXIT", "trap -",
                    "trap - EXIT", "trap - INT TERM", "trap '' EXIT", 'trap "" INT TERM', "trap -- '' EXIT",
-                   "trap -- - EXIT", "trap EXIT", "trap git", "trap 'echo done' EXIT", "trap 'git status' EXIT",
-                   "trap 'git log --oneline -5' EXIT", "trap 'rm -f /tmp/x' EXIT", "trap 'cd /tmp' EXIT",
-                   "trap 'X=1' EXIT", "trap 'echo x > /tmp/out.txt' EXIT", "echo trap", "grep -n trap tests/keep.py"):
+                   "trap -- - EXIT", "trap EXIT", "trap 'echo done' EXIT", "trap 'rm -f /tmp/x' EXIT",
+                   "trap 'cd /tmp' EXIT", "trap 'X=1' EXIT", "trap 'echo x > /tmp/out.txt' EXIT", "echo trap",
+                   "grep -n trap tests/keep.py"):
             self.silent_for_everyone(ok)
         self.assertEqual(self.findings("trap -p"), [])
         self.assertEqual(self.findings("trap - EXIT"), [])
+        # SPD-122: a read verb in the action is no Law 7 write, but git in a trap is refused a member all the same
+        # (TrapRepositoryTest); Spud's is read where the action runs.  `trap git` sets nothing, and is read fail closed as
+        # the single-argument form is.
+        for cmd in ("trap 'git status' EXIT", "trap 'git log --oneline -5' EXIT", "trap git"):
+            self.refused_for_members(cmd, TRAP_WORDING)
 
     def test_both_action_positions_are_read(self):
         """`--` and bash's options are skipped, and the word right after `trap` is read too, since zsh takes it for the
@@ -394,6 +405,96 @@ class TrapActionTest(BashHookCase):
         self.assertIn("may not hold", self.refused_for_members("X=ls; trap 'X=git' DEBUG; $X push", "").reason)
         self.assertIn("Law 7", self.refused_for_members("X=git; trap 'X=ls' DEBUG; $X push", "").reason)
         self.assertIn("may not hold", self.refused_for_members("X=ls; trap 'echo hi' EXIT; $X push", "").reason)
+
+
+class TrapRepositoryTest(BashHookCase):
+    """SPD-122 (Joanna's SPD-066 proposal): SPD-054 reads a trap's action as the shell text it is, at a directory the hook
+    treats as unknown, and SPD-063 then dropped the action's git calls from the repository check, since `trap 'git status'
+    EXIT` names no repository and the unresolvable-directory refusal would have fallen on every trap mentioning git.
+    SPD-066's and SPD-123's check of the repository a git call reads inherited the drop.  But an EXIT action runs at the
+    line's last directory (SPD-054's probe), so `cd tests/fake; trap 'git status' EXIT` and `trap 'git status' EXIT; cd
+    tests/fake` ran git in a planted repository -- its post-index-change hook and its config -- with nothing checked,
+    while `cd tests/fake && git status` is refused.
+
+    Probed with tests/probes/shell_probe.py (zsh 5.9 -f -o nobareglobqual, zsh 5.9 -f, bash 3.2.57), `pwd` in the action:
+    an EXIT action ran in the line's last directory; one set in a subshell ran at the subshell's end, in its last
+    directory, and zsh ran one set in a function as the function returned, in its directory -- both before the line was
+    over; DEBUG ran before each command in the directory it stood in, ZERR after a failing one.  So an action runs in some
+    directory the line passes through, and which one the hook cannot say.
+
+    Both of the ticket's options, by caller.  A member is refused any git call inside a trap's action -- every signal,
+    EXIT, DEBUG, ERR, ZERR and RETURN included, and a trap set in a function body the line calls -- fail closed as SPD-217
+    refuses what the reader cannot place, naming the respelling (git as its own command on the line); nobody needs git in
+    a trap.  Spud's is held to the repository check SPD-066 and SPD-123 apply, read in every directory the hook sees the
+    line stand in -- where the trap is set, where the line ends, and wherever a git call or a write of the line runs --
+    since the action may run in any of them.  Law 7's verb check inside the action is unchanged (TrapActionTest).
+    AGENT_A plans home:tests/** and home:bin/spud, AGENT_C home:**; the home is a git repository with a hand-built one at
+    tests/fake holding a hook that is not a sample, as WrapperDirectoryTest's."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        scratch_git(home, "init", "-q", "-b", "main")
+        scratch_git(home, "commit", "-q", "--allow-empty", "-m", "root")
+        self.nested = home / "tests" / "fake"
+        plant_git_dir(self.nested / ".git")
+        (self.nested / ".git" / "hooks").mkdir()
+        hook = self.nested / ".git" / "hooks" / "post-index-change"
+        hook.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        hook.chmod(0o755)
+
+    def members_refused(self, command, needle=TRAP_WORDING):
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+
+    def spud_refused(self, command):
+        with self.subTest(command=command, agent_id="spud"):
+            r = self.assertRefused(command, SPUD_PLANTED_WORDING, agent_id=None)
+            self.assertIn(str(self.nested), r.reason)
+
+    def test_the_tickets_lines_are_refused_for_every_caller(self):
+        """Silent on main for both members and for Spud."""
+        for command in ("cd tests/fake; trap 'git status' EXIT", "trap 'git status' EXIT; cd tests/fake"):
+            self.members_refused(command)
+            self.spud_refused(command)
+        # ... as the plain spelling already was
+        self.members_refused("cd tests/fake && git status", GIT_NESTED_WORDING)
+        self.spud_refused("cd tests/fake && git status")
+
+    def test_git_in_a_trap_is_refused_a_member_and_left_to_spud_in_a_clean_checkout(self):
+        for command in ("trap 'git status' EXIT", "trap 'git log --oneline -5' EXIT", "trap -- 'git diff' EXIT",
+                        "trap 'git status' INT TERM", "trap 'git status' 0", "trap 'git status' DEBUG",
+                        "trap 'git status' ERR", "trap 'git status' ZERR", "trap 'git status' RETURN",
+                        "trap 'git status' SIGHUP", "trap 'git show HEAD' 15", "f() { trap 'git status' EXIT; }; f",
+                        "( trap 'git status' EXIT )", "{ trap 'git status' EXIT; }", "eval \"trap 'git status' HUP\"",
+                        "trap \"trap 'git status' EXIT\" DEBUG", "trap 'sh -c \"git status\"' USR1",
+                        "trap 'cd /tmp && git status' EXIT", "trap 'eval git status' EXIT", "cd tests; trap 'git status' EXIT",
+                        "trap 'git status' EXIT; cd /tmp", "git status; trap 'git status' EXIT"):
+            self.members_refused(command)
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+
+    def test_a_trap_with_no_git_is_unchanged(self):
+        for command in ("trap 'echo done' EXIT; cd tests/fake", "cd tests/fake; trap 'rm -f /tmp/spd-122' EXIT",
+                        "trap 'cd /tmp' EXIT", "trap - EXIT; cd tests/fake", "trap '' INT; cd tests/fake",
+                        "git status; trap 'echo done' EXIT", "trap 'echo done' EXIT; git log --oneline -1"):
+            for agent_id in (AGENT_C, AGENT_A, None):
+                with self.subTest(command=command, agent_id=agent_id):
+                    self.assertSilent(command, agent_id)
+
+    def test_spud_is_checked_wherever_the_action_may_run(self):
+        """Where the trap is set, where the line ends, where a git call or a write of the line runs, and where the action's
+        own cd or -C takes git."""
+        for command in ("cd tests/fake; trap 'git status' TERM; cd ..", "trap 'git status' INT; cd tests/fake",
+                        "trap 'git status' USR1; cd tests/fake && echo x >> /tmp/spd-122.txt; cd ..",
+                        "trap 'git status' DEBUG; cd tests/fake && git -C /tmp log; cd ..",
+                        "( cd tests/fake; trap 'git status' EXIT )", "f() { cd %s; trap 'git status' EXIT; }; f" % self.nested,
+                        "trap 'cd %s && git status' EXIT" % self.nested, "trap 'git -C tests/fake status' EXIT",
+                        "trap 'git status' ERR; cd tests/fake"):
+            self.spud_refused(command)
+            self.members_refused(command, "Law 7")
 
 
 # SPD-189: the words in which zsh's (e) flag evaluates the value of x, which the line settles, each read as the text zsh

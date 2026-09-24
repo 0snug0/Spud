@@ -2,7 +2,7 @@
 
 import os
 
-from . import analyse, arg_writes, git_config, prepare, redirect_globs, runner_files, script_files, spud_calls, syntax
+from . import analyse, arg_writes, expansions, git_config, prepare, redirect_globs, runner_files, script_files, spud_calls, syntax
 from ..hooks import hookio, pathrule, worktrees
 from ..state import lookup
 
@@ -148,6 +148,16 @@ GIT_INPUT_REASON = (
     " it stands. Spell the verb, then end git's own words with `--` so every word xargs adds is a path (`xargs git log"
     " --`), give git the revisions on its standard input where it reads them there (`git log --stdin`, `git cat-file"
     " --batch`), or spell the words out; Spud commits, after the outcome is recorded")
+
+
+# A git call inside a trap's action (expansions.TrapDirs, SPD-122), refused a member after every reason the words as
+# spelled earn, so Law 7's verb check inside the action keeps its own reason.
+TRAP_GIT_REASON = (
+    "Law 7: this line runs git inside a trap's action (`trap '...' <signal>`), which the shell runs later -- on exit, on a"
+    " signal, around a command under DEBUG, ERR, ZERR or RETURN, as a subshell or a function ends -- in whichever directory"
+    " it stands in then, so the hook cannot tell which repository that git reads, nor whose hooks and config it runs"
+    " (post-index-change under `git status`). Nobody needs git in a trap: run git as its own command on the line, where"
+    " the hook reads the directory it runs in; Spud commits, after the outcome is recorded")
 
 
 # The reason for an (e) expansion whose text the hook cannot read (shell/reevaluation, SPD-189).
@@ -578,6 +588,10 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         # itself, which git reads with nothing on the line, is held to the program allowlist; and it holds no hook
         # a member planted.  After the findings, so a refusal the words as spelled already earn (a write verb, a program
         # key, an unknown verb, a repository outside every known checkout) keeps its own reason.
+        # A git call inside a trap's action runs later, in whichever directory the line stands in then (SPD-122): refused
+        # outright, since nobody needs git in a trap.
+        if any(isinstance(target_cwds, expansions.TrapDirs) for _targets, target_cwds in analysis.git_calls):
+            return TRAP_GIT_REASON, analysis
         for targets, target_cwds in analysis.git_calls:
             reason = git_config.git_repository_reason(ctx, con, targets, target_cwds)
             if reason:
@@ -585,8 +599,10 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
     elif not caller_agent_id and not plain:
         # Spud's own git call, which runs as Eric's, reads the same repository for what a member could have
         # planted there through a program the hook cannot read.  A plain session's calls and its own subagents never reach
-        # this: they keep the answers they had.
+        # this: they keep the answers they had.  One inside a trap's action is read in every directory it may run in.
         for targets, target_cwds in analysis.git_calls:
+            if isinstance(target_cwds, expansions.TrapDirs):
+                target_cwds = target_cwds.dirs()
             reason = git_config.git_spud_repository_reason(ctx, con, targets, target_cwds)
             if reason:
                 return reason, analysis
