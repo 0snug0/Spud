@@ -641,7 +641,7 @@ def chunks(tests, size):
 
 
 def name_of(arg):
-    """A module, class or test name as unittest spells it; tests/test_hooks.py is test_hooks."""
+    """A module, class or test name as unittest spells it; tests/test_hooks_session.py is test_hooks_session."""
     if arg.endswith(".py"):
         arg = arg[:-3]
     parts = arg.replace(os.sep, ".").split(".")
@@ -696,7 +696,7 @@ def report(run, wall, scope_text, tree_digest, workers):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="tests/suite.py", description="The suite in parallel, over a snapshot of the checkout (SPD-102).")
-    parser.add_argument("names", nargs="*", metavar="NAME", help="modules, classes or tests to run (test_hooks, tests/test_hooks.py, test_hooks.StopTest); default all")
+    parser.add_argument("names", nargs="*", metavar="NAME", help="modules, classes or tests to run (test_hooks_session, tests/test_hooks_session.py, test_hooks_session.StopTest); default all")
     parser.add_argument("-j", "--workers", type=int, default=DEFAULT_WORKERS, help="worker interpreters (default %d)" % DEFAULT_WORKERS)
     parser.add_argument("--chunk", type=int, default=DEFAULT_CHUNK, help="most tests of one class a worker takes at once (default %d)" % DEFAULT_CHUNK)
     parser.add_argument("--cold", action="store_true", help="no warm bytecode cache: every scratch home compiles the program itself")

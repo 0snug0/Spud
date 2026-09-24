@@ -95,6 +95,8 @@ Main's launcher first, your branch's second; each gets its own scratch home, so 
 
 One more property worth not breaking: a handler module that fails to import is spooled and `PreToolUse` fails closed, because `cmd_hook` imports it inside its own `try`. Importing handlers eagerly to "simplify" dispatch would both cost the path and lose that.
 
+**A cache on the hook path is per process, and the suite runs the hook in its own.** A `spud hook` process starts with every module-level cache empty (`_WORKTREES`, `_TABLES`, `_GIT_OWN_COMMANDS`, an `lru_cache` ...), but the Bash and edit tools' tests call the hook's main in the test process (`tests/hookcase.run_main`, SPD-231), which empties before each call the caches `tests/hookcase.HOOK_CACHES` and `HOOK_MEMOS` name. A new one belongs there, or in `PURE_TABLES` when nothing it holds could change a later run's answer; `InProcessParityTest` fails on a table a run changes that none of the three names: one a module holds by name, or one its own functions and classes keep (a default argument, a closure cell, a function's or class's attribute, a method's defaults), followed into the containers and objects' `__dict__` they hold. A memo kept anywhere but at module level cannot be emptied by name, so keep it there; one inside a `__slots__` object is not seen.
+
 ## 4. The launcher, the finder, and where bytecode goes
 
 - Everything runs as **`python3.14 -I -S`**: isolated, no `site`, nothing on `sys.path` but the interpreter's own. **Standard library only** — there is no third-party dependency and there will not be one — and no directory of this repository is importable by name.
@@ -160,7 +162,7 @@ Its reach has known gaps (SPD-079): it does not see an alias shadowed by a neste
 
 ## 9. Before you call the work done
 
-1. Run the modules you touched by name while you work (`tests/suite.py test_package test_hooks`), and `tests/suite.py --changed` at the end; put its final line, with the tree's digest, in your result. The full suite is for Spud's run at landing, or when your brief asks for it. The serial fallback, `python3.14 -I -S -m unittest discover -s tests -t tests`, prints no digest and wants the checkout to itself.
+1. Run the modules you touched by name while you work (`tests/suite.py test_package test_hooks_bash`), and `tests/suite.py --changed` at the end; put its final line, with the tree's digest, in your result. The full suite is for Spud's run at landing, or when your brief asks for it. The serial fallback, `python3.14 -I -S -m unittest discover -s tests -t tests`, prints no digest and wants the checkout to itself.
 2. `find bin tests -name '*.pyc' -o -name __pycache__` prints nothing.
 3. If you touched the hook path: `HOOK_PATH` updated, and `tests/probes/hook_timing.py` within 1 ms of main.
 4. If you changed how the program is loaded or how a hook answers: `python3.14 -I -S tests/probes/session_diff.py "$main/bin/spud" "$PWD/bin/spud"` — main's launcher (`$main` as in §3) and this worktree's, scripted CLI and hook calls against both, every step identical after masking.

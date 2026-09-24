@@ -209,7 +209,7 @@ def command_input(tokens, bodies, piped, pipe_feeds, a=None):
     pipe that feeds the command itself (its MULTIOS option, on by default: zshmisc(1) calls a pipe an implicit
     redirection), and bash reads the last alone; with none, both read `piped`.  Where the two differ the text is a
     MultiosText, bash's holding zsh's (SPD-209, probed through tests/probes/shell_probe.py in zsh 5.9 -f and -f -o
-    nobareglobqual and bash 3.2.57: tests/test_hooks.py MultiosInputTest).  A pipe into a compound command is no input
+    nobareglobqual and bash 3.2.57: tests/test_hooks_input.py MultiosInputTest).  A pipe into a compound command is no input
     of a command inside it that has one of its own (probed: `printf 'touch p1\\n' | { sh <<'EOF' ...; }` ran the body
     alone)."""
     inputs, pending = [], iter(bodies)

@@ -25,8 +25,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from helpers import EXIT_ERROR, SPUD, HookResult, spawn_type
-from test_hooks import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split
-from test_hooks import GIT_DIR_WORDING, GIT_HOOK_WORDING, GIT_NESTED_WORDING, GIT_SCOPE_WORDING, RUNNER_WORDING, SCRIPT_WORDING, SPUD_PLANTED_WORDING, plant_git_dir
+from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split
+from hookcase import GIT_DIR_WORDING, GIT_HOOK_WORDING, GIT_NESTED_WORDING, GIT_SCOPE_WORDING, RUNNER_WORDING, SCRIPT_WORDING, SPUD_PLANTED_WORDING, plant_git_dir
 
 KEY = "badtakes"
 TICKET_PREFIX = "BAD"

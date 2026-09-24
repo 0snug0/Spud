@@ -20,7 +20,7 @@ import unittest
 from pathlib import Path
 
 from helpers import load_spud_module
-from test_hooks import AGENT_A, SESSION, common
+from hookcase import AGENT_A, SESSION, common
 from test_hooks_projects import KEY, LAW_1, NOT_SPUD, SESSION_CLAIMED, SESSION_PLAIN, ProjectHookCase, Session
 
 spud = load_spud_module()

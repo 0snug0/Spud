@@ -9,7 +9,7 @@ out of the text, in the order its operator stands, since the walk reads the word
 meets (ShellWalk.consume); a body inside a `$( )` or backticks stays in the text, which split_substitutions hands to that
 substitution's own analysis.  A `$( )` ends where zsh ends it, past its bodies and quotes; bash 3.2 ends it at a body
 line's `)` (probed), and so does split_substitutions, which counts parentheses (proposal 299), so the text between is read
-as the outer line's commands, bash's reading.  tests/test_hooks.py HereDocumentBodyTest has the probes.  For each body it
+as the outer line's commands, bash's reading.  tests/test_hooks_input.py HereDocumentBodyTest has the probes.  For each body it
 takes out the scan also says whether any character of its delimiter is quoted: a body whose delimiter has none is expanded
 before its command reads it, and ShellWalk.consume reads its substitutions (SPD-192, HereDocumentExpansionTest), then
 hands the command the text that expansion leaves, received_body (SPD-206, HereDocumentInputTest), with each value the
@@ -88,7 +88,7 @@ def received_body(body, values=None):
     the backslash taken off before a `$`, a backtick or a backslash, a backslash-newline taken out whole, which joins the
     two lines, and every other backslash kept, as zsh and bash expand it -- a default word's text included (probed
     through tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: `cat` fed `[\\$] [\\\\]
-    [\\x] [a\\<newline>b]` printed `[$] [\\] [\\x] [ab]`, and sh fed `\\$(echo RAN > l/h1)` ran it; tests/test_hooks.py
+    [\\x] [a\\<newline>b]` printed `[$] [\\] [\\x] [ab]`, and sh fed `\\$(echo RAN > l/h1)` ran it; tests/test_hooks_input.py
     HereDocumentInputTest).  Each `$( )` and backtick substitution keeps its text as spelled, since that text is the
     substitution's own and what the command reads is its output: the substitution is read where it runs
     (reevaluation.read_expanded_body), and read again, fail closed, by a shell fed the body.
@@ -175,7 +175,7 @@ class OutputBody(str):
     """The text a command reads from an unquoted here-document whose expansion runs a command substitution (SPD-207):
     received_body's text, each substitution as spelled, where the command reads that substitution's output, which the
     line does not spell -- and a shell fed it runs that output as commands, a newline in it starting another (probed
-    through tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: tests/test_hooks.py
+    through tests/probes/shell_probe.py in zsh 5.9 -f, -f -o nobareglobqual and bash 3.2.57: tests/test_hooks_input.py
     HereDocumentOutputTest).  So the command's standard input is unknown (stdin_text.command_input), and a shell that
     runs its standard input is refused a member as SPD-145 refuses one fed a pipe the line does not spell
     (script_files.read_shell); the text is still read as that shell's commands for what it does spell.  A parameter
