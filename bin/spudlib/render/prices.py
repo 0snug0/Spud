@@ -11,7 +11,9 @@ def token_counts(usage_json):
     """{out, in, cached} from a run's transcript sum: output_tokens; input_tokens plus
     cache_creation_input_tokens; cache_read_input_tokens (a missing key counts 0).  A sum counts each API
     request once ("counting": "request"); one stored by an older spud added every transcript entry,
-    reads the same way, and runs four to five times too high until `spud member resum` re-sums it.  The
+    reads the same way, and runs four to five times too high until `spud member resum` re-sums it.  A
+    request billed per attempt counts every attempt it billed since SPD-220 (transcripts.request_attempts), as
+    its breakdown prices them; one stored before counted its serving attempt alone until `spud member resum`.  The
     completion kept beside the sum under "completion" is never read: its figures cover only its final
     request.  None for any other source (a completion alone), a figure that is not a
     non-negative integer, or JSON of another shape."""
@@ -41,9 +43,12 @@ def token_counts(usage_json):
 # The table: models, each id as the transcripts write message.model, with its input, output, cache_read, cache_write_5m
 # and cache_write_1h prices in USD per 1M tokens and its fast-mode prices where fast mode is sold; server_tools, a fee per
 # `per` requests of a usage.server_tool_use key; multipliers on every token price for usage.service_tier and
-# usage.inference_geo values, an absent value meaning the API's default (standard, global).  Whatever a breakdown holds
-# that the table does not price (a model, a speed, a tier, a geography, a cache TTL, a server tool, a request billed per
-# attempt) leaves the run without a cost and names the reason, rather than pricing it at a guess.
+# usage.inference_geo values, an absent value meaning the API's default (standard, global).  A request billed per attempt
+# (a server-side fallback, a compaction) is in the breakdown as the attempts it billed, each on the model that ran it
+# (transcripts.request_attempts, SPD-220), so it is priced like any other usage.  Whatever a breakdown holds that the table
+# or that rule does not price (a model, a speed, a tier, a geography, a cache TTL, a server tool, an attempt that names no
+# model, an iteration type the rule does not cover, a request billed per attempt that a breakdown stored before SPD-220
+# kept whole) leaves the run without a cost and names the reason, rather than pricing it at a guess.
 PRICE_RATES = ("input", "output", "cache_read", "cache_write_5m", "cache_write_1h")
 SPLIT_RATES = {"ephemeral_5m_input_tokens": "cache_write_5m", "ephemeral_1h_input_tokens": "cache_write_1h"}
 UNSPLIT_RATE = "cache_write_5m"  # cache writes a transcript does not split by TTL: the API's default cache TTL is five minutes
@@ -52,6 +57,7 @@ PRICE_DATE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 COST_USD = re.compile(r"[0-9]{1,15}(?:\.[0-9]{1,2})?")  # a member note's cost_usd as the importer reads it back
 NO_TABLE = "no price table in spud.config.json"
 NO_BREAKDOWN = "no breakdown, which `spud member resum` adds"
+NOT_SPLIT = "a request billed per attempt kept whole, which `spud member resum` splits"
 
 
 def price_number(value):
@@ -141,22 +147,27 @@ def price_table(config):
 
 
 def bucket_cost(bucket, table):
-    """(one breakdown entry at the table's list prices, an exact fraction of a dollar, or None; the reasons it has none)."""
+    """(one breakdown entry at the table's list prices, an exact fraction of a dollar, or None; the reasons it has none).
+    An entry holds the attempts its model ran (transcripts.usage_breakdown), a declined attempt or a compaction among
+    them, so its tokens are priced at its model's rates whichever request they came from.  An entry that names no model
+    (usage without one, or an attempt of a request that fell back naming none), one counting unpriced_iterations (a
+    request kept whole for an iteration type the per-attempt rule does not cover) and one stored before SPD-220 that kept
+    a request billed per attempt whole (transcripts.KEPT_WHOLE, until `spud member resum` splits it) have no cost."""
     if not isinstance(bucket, dict):
         return None, ["a breakdown entry that is not an object"]
-    split, tools, iterations = (bucket.get(key, {}) for key in ("cache_creation", "server_tool_use", "iterations"))
+    split, tools, unpriced, whole = (bucket.get(key, {}) for key in ("cache_creation", "server_tool_use", transcripts.UNPRICED_ITERATIONS, transcripts.KEPT_WHOLE))
     tokens = {key: bucket.get(key, 0) for key in transcripts.BREAKDOWN_TOKENS + ("cache_creation_unsplit_input_tokens",)}
-    if not all(isinstance(part, dict) for part in (split, tools, iterations)) or any(
+    if not all(isinstance(part, dict) for part in (split, tools, unpriced, whole)) or any(
             isinstance(v, bool) or not isinstance(v, int) or v < 0 for v in [*tokens.values(), *split.values(), *tools.values()]):
         return None, ["a breakdown figure that is not a count"]
-    if not any([*tokens.values(), *split.values(), *tools.values()]) and not iterations:
-        return lazy.fractions.Fraction(0), []  # nothing billed is free whatever the model says (a synthetic entry, an empty response)
+    if not any([*tokens.values(), *split.values(), *tools.values()]) and not unpriced and not whole:
+        return lazy.fractions.Fraction(0), []  # nothing billed is free whatever the model says (a synthetic entry, an empty response, a request declined before any output)
     reasons = []
     model = bucket.get("model")
     speeds = table["models"].get(model) if isinstance(model, str) else None
     rates = None
     if speeds is None:
-        reasons.append("no price for model %s" % model if isinstance(model, str) else "no price for requests that name no model")
+        reasons.append("no price for model %s" % model if isinstance(model, str) else "no price for usage that names no model")
     else:
         speed = bucket.get("speed", "standard")
         rates = speeds.get(speed) if isinstance(speed, str) else None
@@ -176,8 +187,9 @@ def bucket_cost(bucket, table):
             reasons.append("no price for server_tool_use.%s" % key)
         elif n:
             fees += n * table["server_tools"][key]
-    if iterations:
-        reasons.append("billed per attempt: usage.iterations holds %s" % ", ".join(sorted(iterations)))
+    reasons += ["no price for usage.iterations type %s" % kind for kind in sorted(unpriced)]
+    if whole:
+        reasons.append(NOT_SPLIT)
     if reasons:
         return None, reasons
     per_million = (tokens["input_tokens"] * rates["input"] + tokens["output_tokens"] * rates["output"]
