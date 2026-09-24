@@ -195,6 +195,8 @@ def read_evaluated_text(text, reading, depth):
         for m in syntax._ASSIGNING_EXPANSION_RE.finditer(text):
             a.doubt.add(m.group(1))
             a.sticky.add(m.group(1))
+            a.unseen_assigned.add(m.group(1))  # no loop body's basename settles it any more (SPD-221)
+            a.loop_derived.pop(m.group(1), None)
         i, n, closes = 0, len(text), None
         while i < n:
             c = text[i]

@@ -832,10 +832,10 @@ class InstallTailTest(MachineMixin, unittest.TestCase):
         self.assertIn("problems    none", self.spud("doctor").stdout)
         # 6. the home's own settings carry this home's ledger hooks.  The green doctor above is that assertion since
         # SPW-006, which gave doctor a `settings` check of its own -- a home one event short of the table is a problem
-        # there -- so this reads only what doctor does not: the nine lines init reported writing, and the allow rules.
+        # there -- so this reads only what doctor does not: the seven lines init reported writing, and the allow rules.
         spud = load_spud_module()
         settings = self.target / ".claude" / "settings.json"
-        self.assertEqual(out["settings"], {"path": str(settings), "written": True, "hooks": 9})
+        self.assertEqual(out["settings"], {"path": str(settings), "written": True, "hooks": 7})
         rules = json.loads(settings.read_text(encoding="utf-8"))["permissions"]["allow"]
         self.assertTrue(any(str(self.tool / "bin" / "spud") in rule for rule in rules), rules)
         # 7. every path project install writes is there, and the project's own hooks carry its key

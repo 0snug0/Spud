@@ -226,10 +226,11 @@ def doctor_home_settings(ctx, problems):
     7b -- which refuse on this report's problems -- are right to refuse until it is run.  An event short is an event
     whose hook never runs, so `partial` is a problem too, and it names the events rather than leaving Eric to diff.
 
-    The granularity is the event, not the matcher: one hook line is one event to every reader of such a file, so a file
-    carrying only the PreToolUse(Agent) line of that event's three rows reads as complete here.  That is the reading
-    `settings_hold_hooks` has always made for the project lines, not a choice of this line's, and it is a proposal of
-    its own.
+    The granularity is the event, not the matcher: one hook line is one event to every reader of such a file.  The table
+    has one row per event since SPD-223, so in a file the sync writes now an event is a row; a file an older sync wrote
+    carries PreToolUse in three rows, and one of them alone (the Agent row, say) reads as complete here.  That is the
+    reading `settings_hold_hooks` has always made for the project lines, not a choice of this line's, and it is a
+    proposal of its own; the next `settings sync` writes the one row in place of the three.
 
     The rendered line is in the report, as the `hooks` lines are, so `--json` says as much as the text does."""
     path = ctx.home / ".claude" / "settings.json"

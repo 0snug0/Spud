@@ -16044,7 +16044,6 @@ class LoopWordTargetTest(BashHookCase):
                         'basename() { echo ../../docs/x.md; }; touch "tests/$(basename a)"',
                         'PATH=/tmp/p:$PATH; touch "tests/$(basename $P)"',
                         'if true; then out=$(basename /x/z); fi; touch "tests/$out"',
-                        'for f in a b; do out=$(basename "$f"); touch "tests/$out"; done',
                         'out=$(basename /x/z); read out; touch "tests/$out"', 'out=$(basename /x/z) touch "tests/$out"'):
             with self.subTest(command):
                 self.assertRefused(command, VARIABLE_WORDING)
@@ -16054,6 +16053,106 @@ class LoopWordTargetTest(BashHookCase):
         self.assertEqual(self.writes('F=/x/.git; out=$(basename "$F"); F=/x/ok; touch "tests/$out"'), ["tests/.git"])
         self.assertRefused('F=/x/.git; out=$(basename "$F"); F=/x/ok; touch "tests/$out"', GIT_DIR_WORDING)
         self.assertEqual(self.writes('out=$(basename /x/z); out=tests/y; touch "$out"'), ["tests/y"])
+
+    # -- an assignment in a loop body (SPD-221) -------------------------------------------
+
+    def test_a_basename_assigned_in_a_loop_body_is_read_once_per_word(self):
+        """SPD-221: `out=$(basename "$f")` straight in a settled for loop's body, certain in every pass, gives `$out` the
+        value it printed for each of the loop's words, read with that word wherever the write names both."""
+        for command, recorded in (
+            ('for f in a b; do out=$(basename "$f"); touch "tests/$out"; done', ["tests/a", "tests/b"]),
+            ("for f in /x/a /y/b; do out=$(basename $f); touch tests/$out; done", ["tests/a", "tests/b"]),
+            ('for f in /x/a.txt /y/b.txt; do out=$(basename "$f" .txt); echo x > "tests/$out.md"; done',
+             ["tests/a.md", "tests/b.md"]),
+            ('for f in tests/glob/*.txt; do out=$(basename "$f" .txt); cp "$f" "tests/out/$out.bak"; done',
+             ["tests/out/g1.bak", "tests/out/g2.bak"]),
+            ('for a in x y; do for b in 1 2; do out=$(basename "/p/$a$b"); touch "tests/$out"; done; done',
+             ["tests/x1", "tests/x2", "tests/y1", "tests/y2"]),
+            ('for f in a b; do out=$(basename "$f")\n  touch "tests/$out"\ndone', ["tests/a", "tests/b"]),
+            ('for f in a b; do out=$(basename "$f") && touch "tests/$out"; done', ["tests/a", "tests/b"]),
+            ('for f in a b; do out=$(basename /x/z); touch "tests/$out$f"; done', ["tests/za", "tests/zb"]),
+            ('for f in /x/a /y/b; do out=$(basename "$f"); o2=$(basename "/q/$out.x"); touch "tests/$o2"; done',
+             ["tests/a.x", "tests/b.x"]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(self.writes(command), recorded)
+                self.assertSilent(command)
+
+    def test_a_loop_body_basename_keeps_its_own_word(self):
+        """One pass sets both names: a write naming the loop's word and the basename takes them from the same pass."""
+        a = self.analysis('for f in a b; do out=$(basename "/x/$f.in"); cp tests/$f.in "tests/out/$out"; done')
+        self.assertEqual([(w[1], w[3]) for w in a.arg_writes],
+                         [("tests/out/a.in", ("tests/a.in",)), ("tests/out/b.in", ("tests/b.in",))])
+
+    def test_each_loop_body_basename_is_held_to_the_path_rule(self):
+        r = self.assertRefused('for d in /x/tests /x/docs; do out=$(basename "$d"); echo x > "$out/x.md"; done', "deliverables")
+        self.assertIn("docs/x.md", r.reason)
+        self.assertRefused('for f in /x/a /x/.git; do out=$(basename "$f"); mkdir -p "tests/$out/hooks"; done', GIT_DIR_WORDING)
+        self.assertSilent('for f in a b; do out=$(basename "$P$f"); touch "tests/$out"; done')  # one name in tests/
+        self.assertRefused('for f in a b; do out=$(basename "$P$f"); touch "docs/$out"; done', "deliverables")
+        r = self.assertRefused('for f in tests/a /x/b; do out=$(basename "$f"); touch "$out"; done', "deliverables")
+        self.assertIn("home:a ", r.reason)
+
+    def test_a_loop_body_basename_holds_wherever_its_loop_is_read(self):
+        """The same reading in a function body's loop, a shell's `-c` text, a loop after another that assigned the same
+        name, and a line zsh and bash read apart."""
+        for command, recorded in (
+            ('g() { for f in a b; do out=$(basename "$f"); touch "tests/$out"; done; }', ["tests/a", "tests/b"]),
+            ("""sh -c 'for f in a b; do out=$(basename "$f"); touch "tests/$out"; done'""", ["tests/a", "tests/b"]),
+            ('for f in a; do out=$(basename "$f"); touch "tests/$out"; done; for g in b; do out=$(basename "$g"); touch "tests/$out"; done',
+             ["tests/a", "tests/b"]),
+            ('for f in a b; do out=$(basename "$f"); touch "tests/$out"; done; ls (a|b)', ["tests/a", "tests/b"]),
+        ):
+            with self.subTest(command):
+                self.assertEqual(sorted(set(self.writes(command))), recorded)
+                self.assertSilent(command)
+
+    def test_a_loop_body_basename_that_may_not_hold_stays_refused(self):
+        """Refused wherever the assignment may not have run in this pass, may not persist, or something may have
+        changed the name or the loop's word since: a condition, a pipe, the background, a subshell, a group, a function
+        body, a command's prefix, a later assignment, read, unset, an attribute, another loop over either name, eval,
+        code the hook does not read, and a write before the assignment or after the loop."""
+        for command in (
+            'for f in a b; do if true; then out=$(basename "$f"); fi; touch "tests/$out"; done',
+            'for f in a b; do true && out=$(basename "$f"); touch "tests/$out"; done',
+            'for f in a b; do false || out=$(basename "$f"); touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f") | cat; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f") & touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f") && true & touch "tests/$out"; done',
+            'for f in a b; do (out=$(basename "$f")); touch "tests/$out"; done',
+            'for f in a b; do { out=$(basename "$f"); }; touch "tests/$out"; done',
+            'for f in a b; do g() { out=$(basename "$f"); }; g; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f") true; touch "tests/$out"; done',
+            'for f in a b; do touch "tests/$out"; out=$(basename "$f"); done',
+            'for f in a b; do out=$(basename "$f"); done; touch "tests/$out"',
+            'for f in a b; do out=$(basename "$f"); out=$X; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); out+=x; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); read out; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); unset out; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); declare -n out=X; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); for out in $X; do :; done; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); f=../docs; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); for f in b a; do touch "tests/$f/$out"; done; done',
+            "for f in a b; do out=$(basename \"$f\"); eval 'out=../docs/x'; touch \"tests/$out\"; done",
+            'for f in a b; do out=$(basename "$f"); source ./x.sh; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); touch "tests/$out"; done; echo ${out:=q}',
+            'g() { out=../docs; }; for f in a b; do out=$(basename "$f"); g; touch "tests/$out"; done',
+            'basename() { echo ../../docs/x.md; }; for f in a b; do out=$(basename "$f"); touch "tests/$out"; done',
+            'PATH=/tmp/p:$PATH; for f in a b; do out=$(basename "$f"); touch "tests/$out"; done',
+            'for f in a b; do out=$(basename -a "$f"); touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f" | tr a b); touch "tests/$out"; done',
+            'for f in a b; do out=$(dirname "$f"); touch "tests/$out"; done',
+            'for f in "$@"; do out=$(basename "$f"); touch tests/$out; done',
+            'while read f; do out=$(basename "$f"); touch tests/$out; done',
+            'for f in a b; do out=$(basename "$P"); touch tests/$out; done',
+            'for f in a b; do out=$(basename "$P"); touch "$out"; done',
+            'for f in a b; do coproc out=$(basename "$f"); touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); let out=3; touch "tests/$out"; done',
+            'for f in a b; do out=$(basename "$f"); x=$(out=zz); : "${out:=q}"; touch "tests/$out"; done',
+            """sh -c 'for f in a b; do out=$(basename "$f")'; touch "tests/$out\"""",
+        ):
+            with self.subTest(command):
+                self.assertRefused(command, VARIABLE_WORDING)
 
     # -- the differential's own lines ---------------------------------------------------
 
@@ -16065,6 +16164,9 @@ class LoopWordTargetTest(BashHookCase):
             ('S=%s; for p in /data/x/a.tar.gz /data/y/b.zip; do curl -sSf -o "$S/$(basename $p)" "https://example.com$p"; done' % s,
              ["%s/a.tar.gz" % s, "%s/b.zip" % s]),
             ('S=%s; f=/data/x/c.tar; out=$(basename "$f"); curl -sSfL https://example.com/c -o "$S/$out"' % s, ["%s/c.tar" % s]),
+            # SPD-221: the assignment in the loop's body, which SPD-146 left refused
+            ('S=%s; for f in /data/x/a.tar.gz /data/y/b.zip; do out=$(basename "$f"); curl -sSfL -o "$S/$out" "https://example.com$f"; done' % s,
+             ["%s/a.tar.gz" % s, "%s/b.zip" % s]),
         ):
             with self.subTest(command):
                 self.assertEqual(self.writes(command), recorded)
