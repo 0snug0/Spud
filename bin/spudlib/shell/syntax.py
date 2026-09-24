@@ -195,7 +195,7 @@ UNSET = object()
 # pkill and rg each dispatch through `"$_cc_bin"`, so reading those as refusals would refuse every `grep` a member runs.
 # Everything the hook *can* read there -- a git verb, a program git runs, a database call, a spud call, a file the text
 # names and writes -- is the finding it would be on the line, and so is one the member's own words there earn: a word
-# after the alias's name, or a call's words in a function's body (analyse.analyse_shell_text, SPD-203).
+# after the alias's name, or a call's words in a function's body (held_text.analyse_shell_text, SPD-203).
 SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias", "eval-flag"})
 # A positional parameter, which is how a function receives the words the member wrote (`mkdir -p $@` in a body is
 # the member's own path).  A write target holding one is never pruned from text the shell holds, whatever else is: `$@`,
@@ -683,14 +683,14 @@ class ShellAnalysis:
         # say what the word it names actually was; `expanding`, the alias names whose expansion is in flight, which zsh
         # does not expand again inside their own body (`alias ls='ls -G'` terminates); `bodies_read`, each function name ->
         # the (text, call's words, (standard input, starting state)) its body was read as on this line, once each however
-        # often the line calls it so (analyse.read_shell_name); `shell_reading`, how deep inside such text the reading is,
+        # often the line calls it so (held_text.read_shell_name); `shell_reading`, how deep inside such text the reading is,
         # so the outermost of them prunes once, against the member's own words; `shell_words`, those words, while the
         # outermost reading is under way; `shell_kept`, the indices of the findings a function's body earned that the
         # member's words reach where the hook cannot follow them (SPD-203), which that prune keeps.
         self.shell_expanded, self.expanding, self.bodies_read = [], [], {}
         # `body_dirs`, (a function name, one of its bodies_read) -> the directories that reading left the line's shell in
         # (SPD-252), which a call reading exactly the same again is given; while the reading is under way, a mark that
-        # analyse.read_shell_name reads for a call inside it.
+        # held_text.read_shell_name reads for a call inside it.
         self.body_dirs = {}
         self.shell_reading, self.shell_words, self.shell_kept = 0, [], set()
         # The command names a `hash` line put in the shell's own command table, so a later bare call of one of them
@@ -719,7 +719,7 @@ class ShellAnalysis:
         # open around the assignment declared local; analyse_shell_text reads it as the line's variables (SPD-205).
         # `body_locals`, None outside such a body, else one dict per body being read, innermost last: each name the body
         # surely declared local (assignment_words.local_names) -> the value `vars` held for it before, UNSET for none,
-        # which analyse.read_body puts back when the body returns.  `line_members`, the member_vars no open body declared
+        # which held_text.read_body puts back when the body returns.  `line_members`, the member_vars no open body declared
         # local, which outlive the reading that filled them, where a body's local does not.
         self.line_assigned, self.body_locals, self.line_members = set(), None, set()
         # The names a `name () { ... }`/`function name` definition earlier on the line bound to a shell function, so
@@ -773,7 +773,7 @@ class ShellAnalysis:
         directories the shell may be in, the loop and function depth a relative cd repeats in, the line's variables with
         their doubt, the aliases' scope, what shell/loop_bindings settled (SPD-146, SPD-221), and whether an option
         builtin ran (arith_opaque, cdable).  analyse.analyse_isolated reads a body in its own process once per such state,
-        and analyse.read_shell_name a function's body once per call from one (SPD-252); a field that changes what a
+        and held_text.read_shell_name a function's body once per call from one (SPD-252); a field that changes what a
         reading finds belongs here."""
         return (self.cwds, self.loop_depth, tuple(sorted(self.vars.items())), frozenset(self.doubt), frozenset(self.sticky),
                 self.all_doubt, self.alias_scope, tuple(sorted(self.loop_words.items())), tuple(sorted(self.derived.items())),

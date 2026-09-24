@@ -76,7 +76,7 @@ def assign_unknown(a, name):
 def fill_from(a, names, text, bodies=(), arithmetic=False):
     """Record `names`, just assigned from `text` -- a value, a for or select list's word, an arithmetic expression, an
     assigning builtin's words -- as filled by what the member supplies wherever that text can carry it, so a finding naming
-    one of them is not pruned as a function body's own (analyse.analyse_shell_text).  `bodies`: the substitutions the text
+    one of them is not pruned as a function body's own (held_text.analyse_shell_text).  `bodies`: the substitutions the text
     holds, as the command lifted them (value_bodies); None for one the hook cannot pair with its text.
 
     The call's words (a.member_vars, SPD-205): a positional in the text or a substitution's; a substitution shell/positional
@@ -401,7 +401,7 @@ def shell_aliased(words, a):
 
 def shell_function(name, a):
     """The shell text a function the shell already defines runs for this command word, or None; an alias of the same name
-    is expanded first, as the shell does it (shell_aliased runs before this).  analyse.read_shell_name reads it once per
+    is expanded first, as the shell does it (shell_aliased runs before this).  held_text.read_shell_name reads it once per
     call's words and starting state, so a body that calls itself with them from where it started reads it no further."""
     found = snapshots.shell_table(a.home)
     return found.body(name) if name in found.functions else None

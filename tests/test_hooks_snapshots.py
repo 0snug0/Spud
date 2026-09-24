@@ -1067,7 +1067,7 @@ class FunctionWordsTest(ShellSnapshotCase):
     commit -m x` passed a member.  After an alias the member's words are the line's own: `_ $(echo git) push` (`_='sudo
     '`) recorded no finding at all, where `sudo $(echo git) push` records ('var', '$(...)').
 
-    The rule now (shell/positional, analyse.analyse_shell_text):
+    The rule now (shell/positional, held_text.analyse_shell_text):
 
     - a function's body is read with the call's words set where it reads its parameters, each quoted again as the line
       spelled it, so `gitfn push` reads as `git push` and `gitfn status` as `git status`;
@@ -1383,7 +1383,7 @@ class ReaderFailsClosedTest(ShellSnapshotCase):
 
     # -- SPD-215: a snapshot alias or function is read with the standard input its call is given ----------------------
     def test_215_a_snapshot_alias_or_function_reads_the_calls_standard_input(self):
-        """(proposal by SPUD-212/Bender) analyse.read_shell_name read an alias's or a snapshot function's body with no
+        """(proposal by SPUD-212/Bender) held_text.read_shell_name read an alias's or a snapshot function's body with no
         standard input, so with a profile alias to a shell or an interpreter, or a function whose body runs one, a
         member's `xs < x.sh` or `pyx < x.py` ran a file's program, past SPD-145 and SPD-150.  SPD-212 covered a function
         the line itself defines; the snapshot side is the same shape through analyse_shell_text.  Probed on the SPD-212
