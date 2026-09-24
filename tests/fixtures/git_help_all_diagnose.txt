@@ -1,0 +1,9 @@
+usage: git diagnose [(-o | --output-directory) <path>] [(-s | --suffix) <format>]
+                    [--mode=<mode>]
+
+    -o, --[no-]output-directory <path>
+                          specify a destination for the diagnostics archive
+    -s, --[no-]suffix <format>
+                          specify a strftime format suffix for the filename
+    --mode (stats|all)    specify the content of the diagnostic archive
+

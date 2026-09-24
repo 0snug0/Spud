@@ -256,6 +256,10 @@ class HeadingRefusalTest(SpudTestCase):
         self.home.json("ticket", "edit", key, "--brief", "B.\n\n## Log\nx\n\n### Outcome\ny", actor="spud")
         self.assertEqual(self.home.json("ticket", "show", key)["ticket"]["brief"], "B.\n\n## Log\nx\n\n### Outcome\ny")
 
+
+class HeadingSplitTest(unittest.TestCase):
+    """The refusal's reading of a line, against the program's own split: functions of the text alone, no home."""
+
     def test_the_line_is_read_as_the_split_reads_a_heading(self):
         with self.assertRaises(spud.SpudError):
             spud.check_prose_headings("x\n##  Result  ", spud.IMPORT_MEMBER_SECTIONS, "the Result")

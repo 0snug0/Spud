@@ -389,44 +389,54 @@ def entry(path, text=""):
     return (path.encode(), "f", 0o644, text.encode())
 
 
+CHECKOUT = TESTS.parent
+DEPS = TESTS / "suite_deps.json"
+
+
 def this_tree():
-    """This checkout's tests/*.py and its map, as suite.tree would list them: the modules a selection expands against."""
-    return [entry("tests/" + p.name, p.read_text(encoding="utf-8")) for p in sorted(TESTS.glob("*.py"))] + \
-        [entry("tests/suite_map.json", MAP.read_text(encoding="utf-8"))]
+    """This checkout's tests/*.py, its map and its dependency table, and every file under bin/ and share/, as suite.tree
+    would list them: what a selection expands against."""
+    files = [entry("tests/" + p.name, p.read_text(encoding="utf-8")) for p in sorted(TESTS.glob("*.py"))]
+    files += [entry("tests/suite_map.json", MAP.read_text(encoding="utf-8")), entry("tests/suite_deps.json", DEPS.read_text(encoding="utf-8"))]
+    for top in ("bin", "share"):
+        for p in sorted((CHECKOUT / top).rglob("*")):
+            if p.is_file() and "__pycache__" not in p.parts:
+                files.append(entry(str(p.relative_to(CHECKOUT)), p.read_text(encoding="utf-8") if p.suffix == ".py" or p.name == "spud" else ""))
+    return files
 
 
 def modules_of(files):
     return sorted(p.decode()[len("tests/"):-3] for p, *_ in files if fnmatch.fnmatchcase(p.decode(), "tests/test*.py"))
 
 
-# The ticket's two safe rules, from the audit of 2026-09-23: what the modules a map rule names must come to.  test_hookcase
-# joined the shell rule with SPD-231: it reads shell/bash_rule.py's source.
-SHELL_NAMED = {"test_hookcase", "test_ticket_worktree", "test_home", "test_launcher", "test_package", "test_cost", "test_team_card",
-               "test_resum"}
 PROBES = ["test_module_sizes", "test_probe_env", "test_shell_probe"]
-# What the fixture, or every test, depends on: each of these runs the full suite whatever else changed.
+# What every test depends on: each of these runs the full suite whatever else changed, by the map's own `full` or, for a
+# module of bin/spudlib, because the fixture's `spud init` ran it (SPD-233).
 CORE = ["bin/spud", "bin/spud_ledger.py", "bin/spudlib/core/kernel.py", "bin/spudlib/state/ledgerdb.py", "bin/spudlib/cli/cliparser.py",
-        "tests/helpers.py", "tests/suite.py", "tests/suite_map.json", "share/spud.config.json"]
+        "tests/helpers.py", "tests/suite.py", "tests/suite_map.json", "tests/suite_deps.json", "share/spud.config.json"]
 
 
 class MapTest(unittest.TestCase):
-    """The map itself: data, well formed, and naming only modules this tree has."""
+    """The map itself: data, well formed, and naming only modules and tables this tree has."""
 
     def test_the_map_is_a_data_file_with_full_patterns_and_named_rules(self):
         table = json.loads(MAP.read_text(encoding="utf-8"))
         self.assertIsInstance(table["full"], list)
         for rule in table["rules"]:
-            self.assertEqual(set(rule) - {"name", "paths", "modules", "importers"}, set(), rule)
+            self.assertEqual(set(rule) - {"name", "paths", "modules", "importers", "table"}, set(), rule)
             self.assertTrue(rule["name"] and rule["paths"], rule)
+            self.assertEqual(len({"modules", "table"} & set(rule)), 1, "a rule names its modules or a table, not both: %r" % rule)
         self.assertEqual(len({r["name"] for r in table["rules"]}), len(table["rules"]))
         self.assertEqual(suite.load_map(this_tree()), table)
 
     def test_every_module_the_map_names_exists_and_every_pattern_matches_one(self):
         present = modules_of(this_tree())
         for rule in json.loads(MAP.read_text(encoding="utf-8"))["rules"]:
-            for name in rule["modules"]:
+            for name in rule.get("modules", []):
                 with self.subTest(rule=rule["name"], module=name):
                     self.assertTrue(fnmatch.filter(present, name), "the map names %s, which no tests/*.py module is" % name)
+            if "table" in rule:
+                self.assertTrue((CHECKOUT / rule["table"]).is_file(), rule)
 
     def test_a_tree_with_no_map_is_refused(self):
         with self.assertRaises(SystemExit) as cm:
@@ -435,47 +445,148 @@ class MapTest(unittest.TestCase):
 
 
 class SelectTest(unittest.TestCase):
-    """suite.select over this checkout's own tests and map, and over small trees built to show one property each."""
+    """suite.select over this checkout's own tests, map and table, and over small trees built to show one property each."""
 
-    def setUp(self):
-        self.files = this_tree()
-        self.present = modules_of(self.files)
+    @classmethod
+    def setUpClass(cls):
+        cls.files = this_tree()
+        cls.present = modules_of(cls.files)
+        cls.deps = json.loads(DEPS.read_text(encoding="utf-8"))
+        cls.readers = suite.data_readers(cls.files)
 
     def select(self, *paths, files=None):
-        return suite.select(list(paths), self.files if files is None else files)
+        return suite.select(list(paths), self.files if files is None else files, readers=None if files else self.readers)
 
-    def test_a_shell_only_change_runs_the_hook_tests_and_the_shells_consumers(self):
+    def by_the_table(self, path):
+        """What the table says a change to `path` runs, spelled out from the table itself: every test module whose entry
+        meets the file's reach, and every module the table does not name."""
+        reached = suite.reach(path, self.readers)
+        return sorted(t for t in self.present if t not in self.deps["modules"] or reached & set(self.deps["modules"][t]))
+
+    def test_a_change_to_a_command_the_fixture_never_runs_selects_the_modules_that_run_it(self):
+        """SPD-233's own example: `spud init` builds the parser, which names every command, but runs none of member's, so a
+        change there runs what the table says ran it -- the member tests, and every hook test whose class plans members --
+        and none of the tests that plan none."""
+        for path, runs, never in (("bin/spudlib/commands/membercmds.py", "test_members", "test_markdown"),
+                                  ("bin/spudlib/render/teamcard.py", "test_team_card", "test_hooks_globs")):
+            with self.subTest(path=path):
+                sel = self.select(path)
+                self.assertFalse(sel.full, sel.why)
+                self.assertEqual((sel.rules, sel.why), (["deps"], [(path, "deps")]))
+                self.assertEqual(sel.modules, self.by_the_table(path))
+                self.assertIn(runs, sel.modules)
+                self.assertNotIn(never, sel.modules)
+                self.assertLess(len(sel.modules), len(self.present))
+
+    def test_a_shell_only_change_runs_the_modules_that_ran_the_shell_and_is_no_full_run(self):
         sel = self.select("bin/spudlib/shell/walk.py", "bin/spudlib/shell/zsh.py")
-        self.assertFalse(sel.full)
-        self.assertEqual(sel.rules, ["shell"])
-        hooks = {m for m in self.present if m.startswith("test_hooks")}
-        self.assertIn("test_hooks_resume", hooks)
-        self.assertEqual(set(sel.modules), hooks | SHELL_NAMED)
-        self.assertEqual(sel.why, [("bin/spudlib/shell/walk.py", "shell"), ("bin/spudlib/shell/zsh.py", "shell")])
+        self.assertFalse(sel.full, sel.why)
+        self.assertEqual(sel.rules, ["deps"])
+        self.assertEqual(sel.modules, sorted(set(self.by_the_table("bin/spudlib/shell/walk.py")) | set(self.by_the_table("bin/spudlib/shell/zsh.py"))))
+        self.assertIn("test_hooks_bash", sel.modules)
+        self.assertNotIn("test_markdown", sel.modules)
+        # test_hookcase reads shell/bash_rule.py's source as text, and the table records a read as it records a run
+        self.assertIn("test_hookcase", self.select("bin/spudlib/shell/bash_rule.py").modules)
 
-    def test_the_shell_rule_names_the_hook_modules_by_prefix_so_the_split_needs_no_edit(self):
-        split = [entry("tests/suite_map.json", MAP.read_text(encoding="utf-8")), entry("tests/hookcase.py")] + \
-            [entry("tests/%s.py" % m) for m in ("test_hooks_bash", "test_hooks_git", "test_hooks_projects", "test_members") + tuple(SHELL_NAMED)]
-        sel = self.select("bin/spudlib/shell/walk.py", files=split)
-        self.assertEqual(set(sel.modules), {"test_hooks_bash", "test_hooks_git", "test_hooks_projects"} | SHELL_NAMED)
+    def test_what_the_fixtures_init_runs_or_reads_runs_the_full_suite(self):
+        fixture = [p for p in self.deps["fixture"] if p.startswith(("bin/spudlib/", "share/"))]
+        self.assertTrue(fixture)
+        for path in fixture:
+            with self.subTest(path=path):
+                sel = self.select(path)
+                self.assertTrue(sel.full)
+                self.assertEqual(sel.why, [(path, "full" if path == "share/spud.config.json" else "fixture")])
+
+    def test_a_module_whose_data_the_fixture_reads_runs_the_full_suite_though_init_ran_none_of_it(self):
+        """state/schema holds the DDL and runs no function of its own when init applies it: the data edge reaches it."""
+        schema = "bin/spudlib/state/schema.py"
+        self.assertNotIn(schema, self.deps["fixture"])
+        self.assertTrue(suite.reach(schema, self.readers) & set(self.deps["fixture"]))
+        self.assertEqual(self.select(schema).why, [(schema, "fixture")])
+
+    def test_nothing_under_bin_or_share_escapes_to_fewer_than_the_table_says(self):
+        """Every file under bin/ and share/ is `full`, reached by the fixture, or selects exactly what the table says; a file
+        the table never saw runs the full suite."""
+        for rel, *_ in self.files:
+            path = rel.decode()
+            if not path.startswith(("bin/", "share/")):
+                continue
+            with self.subTest(path=path):
+                sel = self.select(path)
+                if not sel.full:
+                    self.assertEqual(sel.modules, self.by_the_table(path))
+                elif path not in self.deps["files"]:
+                    self.assertEqual(sel.why, [(path, None)])
+        for new in ("bin/spudlib/commands/brand_new.py", "share/skills/brand-new/SKILL.md", "bin/spud_helper.py"):
+            with self.subTest(new=new):
+                sel = self.select(new)
+                self.assertTrue(sel.full)
+                self.assertIn(sel.why, ([(new, None)], [(new, "full")]))
+
+    def test_a_test_module_the_table_does_not_name_runs_for_every_change_the_table_decides(self):
+        files = self.files + [entry("tests/test_brand_new.py", "import unittest\n")]
+        self.assertNotIn("test_brand_new", self.deps["modules"])
+        self.assertIn("test_brand_new", suite.select(["bin/spudlib/commands/membercmds.py"], files).modules)
+
+    def test_the_data_edge_is_a_read_of_anything_but_a_top_level_function(self):
+        files = [entry("bin/spudlib/state/tables.py", "ROWS = (1, 2)\n\n\nclass Shape:\n    pass\n\n\ndef count():\n    return len(ROWS)\n"),
+                 entry("bin/spudlib/state/reads.py", "from . import tables\n\n\ndef total():\n    return sum(tables.ROWS)\n"),
+                 entry("bin/spudlib/commands/shapes.py", "from ..state import tables\n\n\ndef make():\n    return tables.Shape()\n"),
+                 entry("bin/spudlib/commands/calls.py", "from ..state import reads, tables\n\n\ndef run():\n    return tables.count() + reads.total()\n"),
+                 entry("bin/spudlib/commands/broken.py", "def (\n")]
+        readers = suite.data_readers(files)
+        self.assertEqual(readers["bin/spudlib/state/tables.py"], {"bin/spudlib/state/reads.py", "bin/spudlib/commands/shapes.py"})
+        self.assertNotIn("bin/spudlib/state/reads.py", readers)  # calls.py only calls reads.total
+        self.assertEqual(suite.reach("bin/spudlib/state/tables.py", readers),
+                         {"bin/spudlib/state/tables.py", "bin/spudlib/state/reads.py", "bin/spudlib/commands/shapes.py"})
+
+    def test_a_table_measured_on_another_program_is_named_in_a_warning(self):
+        """SPD-233 review F3: the table records the digest of the bin/ and share/ it was measured on (`code`), and a
+        selection that reads the table says when the tree's differ, and how to measure again; one that matches, or a
+        selection that never reads the table, says nothing."""
+        program = [entry("bin/spudlib/a.py", "def f():\n    return 1\n"), entry("share/x.md", "x\n")]
+        rest = [entry("tests/suite_map.json", MAP.read_text(encoding="utf-8")), entry("tests/test_a.py", "import unittest\n")]
+
+        def tree(code, *changed):
+            table = {"files": ["bin/spudlib/a.py", "share/x.md"], "fixture": [], "modules": {"test_a": ["bin/spudlib/a.py"]}}
+            if code is not None:
+                table["code"] = code
+            return [f for f in program if f[0].decode() not in changed] + [entry(p, "changed\n") for p in changed] + rest + [
+                entry("tests/suite_deps.json", json.dumps(table))]
+
+        measured = suite.code_digest(program)
+        current = self.select("bin/spudlib/a.py", files=tree(measured))
+        self.assertEqual((current.modules, current.stale), (["test_a"], None))
+        self.assertFalse([line for line in suite.explain(current, "main", "0" * 40) if "warning" in line])
+        for changed in ("bin/spudlib/a.py", "share/x.md"):
+            with self.subTest(changed=changed):
+                files = tree(measured, changed)
+                sel = self.select("bin/spudlib/a.py", files=files)
+                self.assertEqual(sel.modules, ["test_a"])  # a warning, never a different selection
+                self.assertEqual(suite.explain(sel, "main", "0" * 40)[-1], sel.stale)
+                self.assertIn("tests/suite_deps.json was measured on bin/ and share/ at %s" % measured, sel.stale)
+                self.assertIn("are %s" % suite.code_digest(files), sel.stale)
+                self.assertIn("python3.14 -I -S tests/suite_deps.py", sel.stale)
+        self.assertIn("before it recorded what it was measured on", self.select("bin/spudlib/a.py", files=tree(None)).stale)
+        self.assertIsNone(self.select("tests/probes/hook_timing.py", files=tree(None)).stale)  # no rule read the table
 
     def test_a_probes_only_change_runs_the_probe_tests(self):
         sel = self.select("tests/probes/hook_timing.py", "tests/probes/a_new_probe.py")
         self.assertEqual((sel.full, sel.rules, sel.modules), (False, ["probes"], PROBES))
 
     def test_an_unmapped_path_runs_the_full_suite(self):
-        for path in ("bin/spudlib/commands/doctor.py", "bin/spudlib/hooks/pretool.py", "share/CLAUDE.md", "README.md", "a/new/file.txt"):
+        for path in ("README.md", "a/new/file.txt", "docs/x.md"):
             with self.subTest(path=path):
-                sel = self.select("bin/spudlib/shell/walk.py", path)
+                sel = self.select("tests/probes/hook_timing.py", path)
                 self.assertTrue(sel.full)
-                self.assertEqual(sel.why, [("bin/spudlib/shell/walk.py", "shell"), (path, None)])
+                self.assertEqual(sel.why, [("tests/probes/hook_timing.py", "probes"), (path, None)])
 
     def test_a_core_path_runs_the_full_suite(self):
         for path in CORE:
             with self.subTest(path=path):
                 sel = self.select("tests/probes/hook_timing.py", path)
                 self.assertTrue(sel.full)
-                self.assertIn((path, "full"), sel.why)
+                self.assertTrue((path, "full") in sel.why or (path, "fixture") in sel.why, sel.why)
 
     def test_a_changed_test_module_runs_itself_and_every_module_importing_it(self):
         files = [entry("tests/suite_map.json", MAP.read_text(encoding="utf-8")),
@@ -507,10 +618,14 @@ class SelectTest(unittest.TestCase):
                      "test_ticket_worktree", "test_hookcase"}
         self.assertTrue(importers | {m for m in self.present if m.startswith("test_hooks")} <= set(sel.modules))
 
+    def test_the_tracing_tools_run_their_own_tests(self):
+        sel = self.select("tests/suite_trace.py", "tests/suite_deps.py")
+        self.assertEqual((sel.full, sel.rules, sel.modules), (False, ["tracing"], ["test_suite_deps"]))
+
     def test_rules_add_up_and_nothing_changed_selects_nothing(self):
         sel = self.select("tests/probes/probe_env.py", "bin/spudlib/shell/zsh.py", "tests/test_members.py")
-        self.assertEqual(sel.rules, ["probes", "shell", "tests"])
-        self.assertTrue(set(PROBES) | SHELL_NAMED | {"test_members"} <= set(sel.modules))
+        self.assertEqual(sel.rules, ["probes", "deps", "tests"])
+        self.assertTrue(set(PROBES) | set(self.by_the_table("bin/spudlib/shell/zsh.py")) | {"test_members"} <= set(sel.modules))
         empty = self.select()
         self.assertEqual((empty.full, empty.rules, empty.modules, empty.why), (False, [], [], []))
 
@@ -541,6 +656,11 @@ class ChangedLineTest(unittest.TestCase):
                          " in 1.5 s on 4 workers; tree 0123456789abcdef\n")
         only = suite.Selection(["README.md"], [("README.md", None)], True, [], [])
         self.assertEqual(suite.scope(only, "main"), " (full, --changed against main: README.md unmapped)")
+
+    def test_a_path_the_fixture_reaches_says_so(self):
+        sel = suite.Selection(["bin/spudlib/state/schema.py"], [("bin/spudlib/state/schema.py", "fixture")], True, [], [])
+        self.assertEqual(suite.scope(sel, "main"), " (full, --changed against main: bin/spudlib/state/schema.py reached by the fixture's init)")
+        self.assertIn("  bin/spudlib/state/schema.py: full: the fixture's init reaches it", suite.explain(sel, "main", "0" * 40))
 
     def test_nothing_changed_says_so(self):
         self.assertEqual(suite.scope(suite.Selection([], [], False, [], []), "main"), " (affected: nothing changed against main)")

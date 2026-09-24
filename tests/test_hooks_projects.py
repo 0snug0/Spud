@@ -7,7 +7,7 @@ bullets of 7.3.  Eric's answers of 2026-09-14 replace the design's assumptions: 
 prefix BAD and the team prefix BADS (tickets BAD-001, teams BADS-001).
 
 Every run is against a scratch SPUD_HOME (tests/helpers.py).  The other repository is a scratch git repository built
-in setUp beside it, with one linked worktree elsewhere, the way WorktreeElsewhereTest builds the home's.  A hook runs
+beside it once per class (ProjectHookCase.build_home), with one linked worktree elsewhere.  A hook runs
 the way a project's installed hook line runs it: SPUD_HOME in the environment, CLAUDE_PROJECT_DIR the session's launch
 directory (it stays there after EnterWorktree, probe P5), CLAUDE_CODE_SESSION_ID equal to the payload's session_id,
 the process working directory the payload's cwd, and `--project badtakes` on the command line when the session was
@@ -26,7 +26,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from helpers import EXIT_ERROR, SPUD, HookResult, spawn_type
-from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split
+from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, TRANSCRIPT, HookCase, quote_split, run_main
 from hookcase import GIT_DIR_WORDING, GIT_HOOK_WORDING, GIT_NESTED_WORDING, GIT_SCOPE_WORDING, RUNNER_WORDING, SCRIPT_WORDING, SPUD_PLANTED_WORDING, plant_git_dir
 
 KEY = "badtakes"
@@ -66,10 +66,18 @@ def ago(minutes):
 class ProjectHookCase(HookCase):
     """A scratch home with SPD-001 (HookCase), a scratch repository registered as project badtakes with a linked worktree
     elsewhere, its ticket BAD-001, and three sessions: one launched in the home, one launched in badtakes that claimed,
-    and one launched in badtakes that did not."""
+    and one launched in badtakes that did not.
 
-    def setUp(self):
-        super().setUp()
+    SPD-233: in process (HookCase.in_process), one home per class: build_home makes all of that once, under the home's
+    scratch root so the class's snapshot holds it, and hook_in and cli call bin/spud's main in this process
+    (hookcase.run_main) with the environment, standard input and working directory a process would get.  A test that
+    asserts what only a process shows -- a project hook line's exit codes under the failure policy, the spool, what the
+    launcher imports -- passes process=True, and a class that leaves in_process unset runs every call as a process."""
+
+    in_process = True
+
+    def build_home(self):
+        super().build_home()
         # A suite run from a Claude Code session inherits its launch directory: no hook here sees it unless a test sets it.
         self.home.env.pop("CLAUDE_PROJECT_DIR", None)
         self.outside = self.scratch_dir("spud-outside-")
@@ -85,7 +93,9 @@ class ProjectHookCase(HookCase):
 
     # -- scratch repositories -------------------------------------------------------
     def scratch_dir(self, prefix):
-        path = Path(tempfile.mkdtemp(prefix=prefix)).resolve()  # /var is /private/var: a project root is compared resolved
+        """A directory of its own under the home's scratch root (SPD-233), beside the home and the tool and inside neither:
+        the class home's snapshot restores what build_home put there, and the next restore removes what a test added."""
+        path = Path(tempfile.mkdtemp(prefix=prefix, dir=self.home.root))  # the root is resolved: a project root is compared resolved
         self.addCleanup(shutil.rmtree, path, True)
         return path
 
@@ -108,6 +118,14 @@ class ProjectHookCase(HookCase):
         return path
 
     # -- the CLI, run from a directory in a session ------------------------------------
+    def run_spud(self, env, argv, stdin, cwd, process=False):
+        """(exit code, stdout, stderr) of bin/spud `argv`: in this process for an in_process class (run_main), else, or with
+        process=True, as a process of its own."""
+        if self.in_process and not process:
+            return run_main(env, argv, stdin, cwd)
+        proc = subprocess.run([sys.executable, "-I", "-S", str(SPUD)] + argv, capture_output=True, text=True, env=env, cwd=str(cwd), input=stdin)
+        return proc.returncode, proc.stdout, proc.stderr
+
     def cli(self, *args, actor=None, cwd=None, session=SESSION, check=True, stdin=None):
         """bin/spud against the scratch home, from `cwd` (default the home) in `session` (None: outside every session)."""
         env = dict(self.home.env)
@@ -116,12 +134,11 @@ class ProjectHookCase(HookCase):
             env.pop("CLAUDE_CODE_SESSION_ID", None)
         else:
             env["CLAUDE_CODE_SESSION_ID"] = session
-        cmd = [sys.executable, "-I", "-S", str(SPUD)] + (["--as", actor] if actor else []) + [str(a) for a in args]
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=str(cwd or self.home.path), input=stdin)
-        if check and proc.returncode != 0:
-            raise AssertionError("spud %s (cwd %s) exited %d\nstdout: %s\nstderr: %s"
-                                 % (" ".join(cmd[4:]), cwd or self.home.path, proc.returncode, proc.stdout, proc.stderr))
-        return proc
+        argv = (["--as", actor] if actor else []) + [str(a) for a in args]
+        code, out, err = self.run_spud(env, argv, stdin, cwd or self.home.path)
+        if check and code != 0:
+            raise AssertionError("spud %s (cwd %s) exited %d\nstdout: %s\nstderr: %s" % (" ".join(argv), cwd or self.home.path, code, out, err))
+        return subprocess.CompletedProcess(["spud"] + argv, code, out, err)
 
     def cli_json(self, *args, **kw):
         proc = self.cli("--json", *args, **kw)
@@ -141,7 +158,8 @@ class ProjectHookCase(HookCase):
         return self.cli("session", "release", actor="spud", cwd=s.cwd, session=s.session)
 
     # -- hooks, run as a session's installed hook line runs them ------------------------
-    def hook_in(self, s, event, payload):
+    def hook_env(self, s, payload):
+        """The environment session s's installed hook line runs a hook in."""
         env = dict(self.home.env)
         if s.launch is None:
             env.pop("CLAUDE_PROJECT_DIR", None)
@@ -152,10 +170,14 @@ class ProjectHookCase(HookCase):
             env["CLAUDE_CODE_SESSION_ID"] = sid  # set in the hook environment and equal to the payload's (probe P5)
         else:
             env.pop("CLAUDE_CODE_SESSION_ID", None)
-        cmd = [sys.executable, "-I", "-S", str(SPUD), "hook", event] + (["--project", s.project] if s.project else [])
+        return env
+
+    def hook_in(self, s, event, payload, process=False):
+        """`spud hook <event> [--project <key>]` as session s's installed line runs it; process=True runs it as a process of
+        its own in an in_process class too."""
+        argv = ["hook", event] + (["--project", s.project] if s.project else [])
         stdin = payload if isinstance(payload, str) else json.dumps(payload)
-        proc = subprocess.run(cmd, capture_output=True, text=True, env=env, cwd=str(s.cwd), input=stdin)
-        return HookResult(proc.returncode, proc.stdout, proc.stderr)
+        return HookResult(*self.run_spud(self.hook_env(s, payload), argv, stdin, s.cwd, process=process))
 
     def place(self, s, payload):
         """A HookCase payload moved into session s: its cwd and its session."""
@@ -260,8 +282,8 @@ class PathTableTest(ProjectHookCase):
     BAD-001 whose globs are `src/**` (bare: relative to badtakes, in the worktree BAD-001 is bound to since SPD-098, and in
     no other checkout of it) and `home:docs/x.md` (qualified: the home's checkout), bound in the claimed session."""
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         self.member = self.spawn_in(self.CLAIMED, self.plan_bad(name="Russet"), AGENT_A)
         self.assertEqual((self.member["status"], self.member["agent_id"]), ("active", AGENT_A), self.member)
         home, bad, wt, out = self.home.path, self.bad, self.bad_wt, self.outside
@@ -567,10 +589,10 @@ class AgentHookProjectTest(ProjectHookCase):
 
 
 class BashHookProjectTest(ProjectHookCase):
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         # the home's own launcher (HookCase copies it), through the interpreter the hook runs on: a call the hook vouches for
-        self.spud_cli = "%s -I -S %s" % (sys.executable, self.home.path / "bin" / "spud")
+        self.spud_cli = "%s -I -S %s" % (sys.executable, self.home.launcher)
 
     def bash(self, s, command, agent_id=None):
         return self.hook_in(s, "PreToolUse", self.bash_p(s, command, agent_id))
@@ -671,8 +693,8 @@ class PlantedRepositoryTest(ProjectHookCase):
 
     SPUD_COMMANDS = ("git status", "git commit -m x", "git merge --no-ff b", "git fetch")
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         self.common = self.bad / ".git"  # the common git directory of the checkout and of its worktree
         self.wt_gitdir = Path((self.bad_wt / ".git").read_text(encoding="utf-8").split(":", 1)[1].strip())
         self.IN_WT = self.CLAIMED._replace(label="claimed, cwd in the worktree", cwd=self.bad_wt)
@@ -873,14 +895,15 @@ class PlantedRepositoryTest(ProjectHookCase):
 
     def test_the_check_runs_no_git_once_its_caches_are_warm(self):
         """The cost rule: the repository check adds no subprocess to a hook beyond the config scopes' own git run, which
-        happens only after a config file changes; the hooks listing is a scandir.  The repository is settled before each
+        happens only after a config file changes; the hooks listing is a scandir.  What a hook process imports is the
+        launcher's, so the warming run is a process too, as the one before it in a session would be.  The repository is settled before each
         warming (settle): an entry is kept only under stamps two seconds old."""
         self.settle()
         for s, event, payload in ((self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")),
                                   (self.CLAIMED, "PreToolUse", self.bash_p(self.CLAIMED, "git -C %s log" % self.bad_wt)),
                                   (self.CLAIMED, "SessionStart", self.session_start_p(self.CLAIMED))):
             with self.subTest(event=event, cwd=str(s.cwd)):
-                self.hook_in(s, event, payload)  # warms the worktree list, git's command list and the config scopes
+                self.hook_in(s, event, payload, process=True)  # warms the worktree list, git's command list and the config scopes
                 self.assertNotIn("subprocess", self.imports_of(s, event, payload))
         self.plant_local("[core]\n\tfsmonitor = /bin/echo\n")  # a config edit: the one git run, then warm again
         self.settle()  # its new ctime still moves the stamp, so the next call misses and runs git, and keeps what it read
@@ -1019,6 +1042,11 @@ class PlantedCacheTest(ProjectHookCase):
     # -- the cache is read ------------------------------------------------------------------------
     def test_a_settled_read_is_kept_and_answers_the_next_one(self):
         """The cache is real: a finding only the entry holds is shown, so every invalidation test below reads a warm entry."""
+        # SPD-233: every checkout is restored from the class's snapshot, so its files carry that build's mtimes, settled
+        # by now; setUp wrote badtakes' hooks/ this second, and the config and the tool checkout's (project spud's) own
+        # stamps are touched to now here, so no known checkout's entry may be kept by the first read.
+        for path in (self.common / "config", self.home.tool / ".git" / "config", self.home.tool / ".git" / "hooks"):
+            os.utime(path)
         self.assertIsNone(self.planted())
         self.assertFalse(self.stored(), "hooks/ and the config were written this second: nothing is kept yet")
         stored = self.warm()
@@ -1250,8 +1278,8 @@ class DirectoryWriteProjectTest(ProjectHookCase):
     `mkdir -p src` and `rm -rf src` in the worktree BAD-001 is bound to, and nowhere else -- not the same path in the main
     checkout (SPD-098), not the home's own `src`, and not `docs`, whose glob names a file in another scope."""
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         self.spawn_in(self.CLAIMED, self.plan_bad(name="Russet"), AGENT_A)
 
     def run_line(self, s, line, agent_id=AGENT_A):
@@ -1285,8 +1313,8 @@ class TreeWriteProjectTest(ProjectHookCase):
     holds both: SPD-066's rule refuses the write before the globs are asked.  A copied source holding a git directory is
     refused wherever it lands."""
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         self.spawn_in(self.CLAIMED, self.plan_bad(name="Russet", deliverables=("src/**",)), AGENT_A)
         self.spawn_in(self.CLAIMED, self.plan_bad(name="Yukon", deliverables=("**",)), AGENT_B)
         for checkout in (self.bad, self.bad_wt):
@@ -1324,10 +1352,10 @@ class StopProjectTest(ProjectHookCase):
     """A member with no known session holds every Spud session once it has waited ten minutes (SPD-018); a plain session
     it never holds."""
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         self.sessionless = self.cli_json("member", "new", "--ticket", self.t["key"], "--persona", "scout", "--model", "haiku", "--brief", "Do the thing.",
-                                         "--deliverable", "tests/**", actor="spud", session=None)["member"]
+                                         "--deliverable", "home:tests/**", actor="spud", session=None)["member"]
         self.assertIsNone(self.home.scalar("SELECT session_id FROM members WHERE id = ?", self.sessionless["id"]))
         self.set_member(self.sessionless["id"], planned_at=ago(11))
 
@@ -1352,6 +1380,11 @@ class StopProjectTest(ProjectHookCase):
 
 
 class FailurePolicyProjectTest(ProjectHookCase):
+    """A project hook line's exit codes when the ledger is broken, and the gap it spools: what the harness reads from the
+    hook's process, so every call here is one (SPD-233 keeps this class out of process)."""
+
+    in_process = False
+
     def break_database(self):
         con = self.home.connect()
         con.execute("PRAGMA user_version = 99")
@@ -1399,8 +1432,8 @@ class ScriptFileProjectTest(ProjectHookCase):
 
     SCRIPT = "scripts/worktree-init.sh"
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         self.other_wt = self.add_worktree(self.bad, "bad-002-other")
         for root in (self.bad, self.bad_wt, self.other_wt):
             for rel in (self.SCRIPT, "scripts/other.sh", "src/run.sh"):
@@ -1451,8 +1484,8 @@ class ScriptRunnerProjectTest(ProjectHookCase):
     PACKAGE = {"name": "bad-takes", "scripts": {"test": "node --test", "check:functions": "node scripts/deno-check.mjs",
                                                 "dist": "node build/dist-mac.js", "smoke": "electron . --smoke"}}
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
+        super().build_home()
         self.other_wt = self.add_worktree(self.bad, "bad-002-other")
         for root in (self.bad, self.bad_wt, self.other_wt):
             (root / "package.json").write_text(json.dumps(self.PACKAGE), encoding="utf-8")

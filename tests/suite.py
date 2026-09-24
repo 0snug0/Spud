@@ -54,8 +54,13 @@ Standard library only, and unittest discovery never collects this file (it is no
 tests/suite_map.json names for the files changed against the merge base of BASE and HEAD: committed on the branch,
 staged, unstaged, deleted (both sides of a rename), and untracked but not ignored.  The map is data, read from the tree
 the run covers; its `about` says how a path is matched.  A path the map sends to `full`, or that no rule names, runs the
-full suite.  Before running, the run says on stderr each path and the rule that took it.  The final line then says
-`affected`, the rules and the base, `(affected: shell+tests against main, <n> modules)`, or, when it fell back,
+full suite.  Under bin/spudlib/ and share/ the map's rule is the dependency table, tests/suite_deps.json (SPD-233), which
+tests/suite_deps.py measures by running each test module traced: a file the fixture's `spud init` runs or reads, or whose
+data a module of it reads, runs the full suite (`reached by the fixture's init`), and any other runs the test modules
+that ran or read it.  The table records the digest of the bin/ and share/ it was measured on (`code`); when the tree's
+differ, the run warns that the selection may be short and names the command that measures the table again.  Before
+running, the run says on stderr each path and the rule that took it.  The final line then
+says `affected`, the rules and the base, `(affected: deps+tests against main, <n> modules)`, or, when it fell back,
 `(full, --changed against main: bin/spud by rule full)`; either way it ends with the digest, so a landing never takes a
 selection for a full run.  Nothing changed runs nothing, and says so.  --dry-run prints the paths, their rules and the
 modules on stdout and runs nothing, taking no lock.
@@ -161,8 +166,10 @@ def snapshot(files, dest, admin):
 
 
 # paths: every changed path; why: [(path, the rule that took it, "full", or None when no rule names it)]; full: whether
-# the full suite runs; rules: the rules that chose modules, in the order the paths met them; modules: the test modules.
-Selection = collections.namedtuple("Selection", "paths why full rules modules")
+# the full suite runs; rules: the rules that chose modules, in the order the paths met them; modules: the test modules;
+# stale: when a rule read the dependency table and the table was measured on another bin/ and share/, the warning to say.
+Selection = collections.namedtuple("Selection", "paths why full rules modules stale", defaults=(None,))
+TABLE_ROOTS = ("bin/", "share/")  # what the dependency table measures, and the part of the tree its `code` digest covers
 
 
 def changed(root, base):
@@ -195,11 +202,90 @@ def imports(source):
     return names
 
 
-def select(paths, files, table=None):
+def load_table(files, rel):
+    """The dependency table a rule names (tests/suite_deps.json, SPD-233), read from the tree the run covers."""
+    for path, _, _, content in files:
+        if path == rel.encode():
+            return json.loads(content)
+    raise SystemExit("suite: --changed: the tree has no %s, which %s names" % (rel, MAP))
+
+
+def code_digest(files):
+    """The digest (as `digest` makes it) of the files under bin/ and share/ alone: what the dependency table records as
+    `code` when it is measured, so that --changed can tell a table measured on another program from one measured on this."""
+    return digest([f for f in files if os.fsdecode(f[0]).startswith(TABLE_ROOTS)])
+
+
+def stale_table(deps, files, rel):
+    """None when the table `rel` was measured on the bin/ and share/ of the tree `files`, else the warning --changed says.
+    A change since may reach a module the table does not say it reaches, so a selection can be short; the full suite at
+    landing is never a selection."""
+    now = code_digest(files)
+    if deps.get("code") == now:
+        return None
+    measured = "on bin/ and share/ at %s" % deps["code"] if deps.get("code") else "before it recorded what it was measured on"
+    return ("suite: warning: %s was measured %s, and this tree's bin/ and share/ are %s: the selection may miss a module a "
+            "change since reaches; measure it again with `python3.14 -I -S tests/suite_deps.py`" % (rel, measured, now))
+
+
+PACKAGE = "bin/spudlib/"
+
+
+def data_readers(files):
+    """{module path: the modules of bin/spudlib that read its data} over the tree `files` (SPD-233).
+
+    A module reads another's data when it names, anywhere in its source, an attribute of that module other than one of
+    its top-level functions: a table, a constant, a class.  A function only called is measured where it runs (the
+    dependency table records whose functions a test ran), and a reference to one changes nothing until it is called;
+    what the table cannot see is a value one module holds and another reads, and this is that edge, read from the source
+    so that it is the tree's own however the imports moved since the table was measured."""
+    trees, functions = {}, {}
+    for rel, kind, _, content in files:
+        path = os.fsdecode(rel)
+        if path.startswith(PACKAGE) and path.endswith(".py") and kind != "l":
+            try:
+                trees[path] = ast.parse(content)
+            except SyntaxError:
+                continue
+            functions[path] = {n.name for n in trees[path].body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+    readers = collections.defaultdict(set)
+    for path, parsed in trees.items():
+        package = path[:-3].split("/")[:-1]  # bin/spudlib/shell/walk.py: [bin, spudlib, shell]
+        bound = {}
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.ImportFrom) and node.level:
+                base = package[:len(package) - (node.level - 1)] + (node.module.split(".") if node.module else [])
+                for alias in node.names:
+                    target = "/".join(base + [alias.name]) + ".py"
+                    if target in trees:
+                        bound[alias.asname or alias.name] = target
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in bound:
+                target = bound[node.value.id]
+                if node.attr not in functions[target]:
+                    readers[target].add(path)
+    return readers
+
+
+def reach(path, readers):
+    """The changed file and every module that reads its data, directly or through another's (data_readers)."""
+    reached, todo = {path}, [path]
+    while todo:
+        for reader in readers.get(todo.pop(), ()):
+            if reader not in reached:
+                reached.add(reader)
+                todo.append(reader)
+    return reached
+
+
+def select(paths, files, table=None, readers=None):
     """The Selection the map makes for `paths` over the tree `files`: each path goes to `full` if a full pattern matches
     it, else to the first rule one of whose patterns does, else nowhere, which is the full suite too.  A rule's module
     names and patterns expand against the tree's test modules; with `importers`, the changed file's own module joins
-    them, and every test module that imports it, directly or through another module of tests/."""
+    them, and every test module that imports it, directly or through another module of tests/.  A rule with a `table`
+    (SPD-233) chooses from the dependency table instead: a path the table never saw runs the full suite, and so does one
+    whose reach (the file and the modules that read its data) meets what the fixture's init ran or read; else every test
+    module whose entry meets that reach runs, and every test module the table does not name."""
     table = load_map(files) if table is None else table
     matches = lambda path, patterns: any(fnmatch.fnmatchcase(path, p) for p in patterns)
     sources = {}
@@ -208,13 +294,28 @@ def select(paths, files, table=None):
         if folder == "tests" and name.endswith(".py") and kind != "l":
             sources[name[:-3]] = content
     tests = sorted(n for n in sources if fnmatch.fnmatchcase(n + ".py", "test*.py"))
-    graph = None
+    graph = deps = stale = None  # read on first use, as `readers` is when the caller has not read it already
     why, rules, modules, full = [], [], set(), False
     for path in paths:
         rule = None if matches(path, table["full"]) else next((r for r in table["rules"] if matches(path, r["paths"])), None)
         if rule is None:
             full = True
             why.append((path, "full" if matches(path, table["full"]) else None))
+            continue
+        if "table" in rule:
+            if deps is None:
+                deps = load_table(files, rule["table"])
+                stale = stale_table(deps, files, rule["table"])
+            readers = readers if readers is not None else data_readers(files)
+            reached = reach(path, readers)
+            if path not in deps["files"] or reached & set(deps["fixture"]):
+                full = True
+                why.append((path, None if path not in deps["files"] else "fixture"))
+                continue
+            why.append((path, rule["name"]))
+            if rule["name"] not in rules:
+                rules.append(rule["name"])
+            modules.update(t for t in tests if t not in deps["modules"] or reached.intersection(deps["modules"][t]))
             continue
         why.append((path, rule["name"]))
         if rule["name"] not in rules:
@@ -233,7 +334,11 @@ def select(paths, files, table=None):
                         reached.add(n)
                         todo.append(n)
             modules.update(reached.intersection(tests))
-    return Selection(list(paths), why, full, rules, sorted(modules))
+    return Selection(list(paths), why, full, rules, sorted(modules), stale)
+
+
+# The three answers that send a path to the full suite, as the final line and --dry-run spell them.
+FORCED = {"full": "by rule full", "fixture": "reached by the fixture's init", None: "unmapped"}
 
 
 def scope(selection, base):
@@ -241,10 +346,10 @@ def scope(selection, base):
     if not selection.paths:
         return " (affected: nothing changed against %s)" % base
     if selection.full:
-        forced = [(p, r) for p, r in selection.why if r in ("full", None)]
+        forced = [(p, r) for p, r in selection.why if r in FORCED]
         path, rule = forced[0]
         more = ", and %d more" % (len(forced) - 1) if len(forced) > 1 else ""
-        return " (full, --changed against %s: %s %s%s)" % (base, path, "by rule full" if rule == "full" else "unmapped", more)
+        return " (full, --changed against %s: %s %s%s)" % (base, path, FORCED[rule], more)
     n = len(selection.modules)
     return " (affected: %s against %s, %d module%s)" % ("+".join(selection.rules), base, n, "" if n == 1 else "s")
 
@@ -252,11 +357,14 @@ def scope(selection, base):
 def explain(selection, base, merge):
     """The lines that say, before a --changed run, what changed and which rule took each path."""
     lines = ["suite: --changed against %s (merge base %s): %d changed file%s" % (base, merge[:12], len(selection.paths), "" if len(selection.paths) == 1 else "s")]
-    lines += ["  %s: %s" % (p, "unmapped" if r is None else r) for p, r in selection.why]
+    lines += ["  %s: %s" % (p, "unmapped" if r is None else "full: the fixture's init reaches it" if r == "fixture" else r)
+              for p, r in selection.why]
     if selection.full:
         lines.append("suite: the full suite")
     else:
         lines.append("suite: %d module%s: %s" % (len(selection.modules), "" if len(selection.modules) == 1 else "s", " ".join(selection.modules) or "none"))
+    if selection.stale:
+        lines.append(selection.stale)
     return lines
 
 

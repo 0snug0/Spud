@@ -1,7 +1,7 @@
 """spud hook <event>: the six harness events (SPD-008).
 
-Payload shapes follow the spike's verbatim captures (docs/spikes/2026-09-12-ledger-database.md,
-Enforcement plan, facts 1 to 9; Claude Code 2.1.269) and the hooks reference.  Every run is
+Payload shapes follow the verbatim captures of the ledger-database spike of 2026-09-12 (its Enforcement plan, facts 1
+to 9; Claude Code 2.1.269), which went to Spud's home with docs/ at SPD-097, and the hooks reference.  Every run is
 against a scratch SPUD_HOME.  Enforcing hooks (PreToolUse for Agent, Bash and the edit tools)
 fail closed: a planned refusal is `permissionDecision: deny` on exit 0, anything unexpected is
 exit 2.  Recording hooks (PostToolUse for Agent, SubagentStart, SubagentStop, SessionStart) fail
@@ -26,7 +26,7 @@ import traceback
 from pathlib import Path
 from unittest import mock
 
-from helpers import SPUD, Home, HookResult, SpudTestCase, load_spud_module, spawn_type
+from helpers import HOOK_CACHES, HOOK_MEMOS, PURE_TABLES, Home, HookResult, Snapshot, SpudTestCase, git, load_spud_module, spawn_type
 
 
 def case_insensitive_fs(path):
@@ -93,16 +93,8 @@ def common(cwd, agent_id=None, agent_type=None, session=SESSION):
 
 ENTRY = load_spud_module()  # bin/spud_ledger.py, whose main the launcher calls; never patched here (PatchTargetTest)
 
-# (the module, the name) of every per-process cache on the hook path: each is empty when a `spud hook` process starts.
-HOOK_CACHES = (("spudlib.hooks.snapshots", "_TABLES"), ("spudlib.hooks.worktrees", "_WORKTREES"), ("spudlib.hooks.worktrees", "_CASE_CACHE"),
-               ("spudlib.hooks.gitrepos", "_SCOPES_READ"), ("spudlib.hooks.gitrepos", "_PROGRAM_KEYS"))
-# ... and the two that are not a container: git's own command set (None until read) and the glob sampler's lru_cache.
-HOOK_MEMOS = (("spudlib.shell.git_verbs", "_GIT_OWN_COMMANDS"), ("spudlib.shell.globbing", "glob_sample_matches"))
-# The module-level tables a run fills that hold nothing a later run could read differently: a pure function of the text
-# (loop_bindings' basename specs), tables built from constants on first use (downloads' option tables), and the Ctx main
-# sets before every command (actors.ACTIVE_CTX).  InProcessParityTest fails on any other table a run changes.
-PURE_TABLES = (("spudlib.shell.loop_bindings", "_BASENAME_SPECS"), ("spudlib.shell.downloads", "_OPTION_TABLES"),
-               ("spudlib.state.actors", "ACTIVE_CTX"))
+# HOOK_CACHES, HOOK_MEMOS and PURE_TABLES (imported above) are tests/helpers' since SPD-233: a home restored at the fixture's
+# path must forget what an in-process call cached about that path, whatever class made the call.
 
 
 def fresh_process():
@@ -161,75 +153,23 @@ class InProcessHome(Home):
         return HookResult(proc.returncode, proc.stdout, proc.stderr)
 
 
-def copy_home(home, into):
-    """A copy of a home's directory, less the launcher's bytecode cache (never written by a test, and left in place)."""
-    shutil.copytree(home, into, symlinks=True, ignore=lambda d, names: ["pycache"] if os.path.basename(d) == ".spud" else [])
-
-
-def _remove(path, opened=()):
-    """Remove a file, a link or a tree, opening on the way a directory a test locked (chmod 000) and did not unlock; a
-    path that still resists once its directory is open raises."""
-    def unlocked(function, p, exc):
-        if p in opened:
-            raise exc
-        for d in (p, os.path.dirname(p)):
-            with contextlib.suppress(OSError):
-                os.chmod(d, 0o700)
-        _remove(p, opened + (p,))
-    if os.path.isdir(path) and not os.path.islink(path):
-        shutil.rmtree(path, onexc=unlocked)
-    else:
-        os.unlink(path)
-
-
-def restore_home(copied, home):
-    """Put a home back as copy_home copied it: everything else removed, everything copied put back, the bytecode cache kept."""
-    for entry in os.scandir(home):
-        if entry.name == ".spud" and entry.is_dir(follow_symlinks=False):
-            for inner in os.scandir(entry.path):
-                if inner.name != "pycache":
-                    _remove(inner.path)
-        else:
-            _remove(entry.path)
-    for entry in os.scandir(copied):
-        target = os.path.join(home, entry.name)
-        if entry.name == ".spud" and entry.is_dir(follow_symlinks=False):
-            os.makedirs(target, exist_ok=True)
-            for inner in os.scandir(entry.path):
-                if inner.is_dir(follow_symlinks=False):
-                    shutil.copytree(inner.path, os.path.join(target, inner.name), symlinks=True)
-                else:
-                    shutil.copy2(inner.path, os.path.join(target, inner.name), follow_symlinks=False)
-        elif entry.is_dir(follow_symlinks=False):
-            shutil.copytree(entry.path, target, symlinks=True)
-        else:
-            shutil.copy2(entry.path, target, follow_symlinks=False)
-
-
-class ClassHome:
-    """A class's home as its first test built it (SPD-231): the InProcessHome, a copy of its directory, its environment and
-    config, and the attributes the build set on the test, each put back before every later test of the class."""
+class ClassHome(Snapshot):
+    """A class's home as its first test built it (SPD-231): a Snapshot of the InProcessHome's root taken after build_home,
+    with the attributes the build set on the test, each put back before every later test of the class.  Its first test
+    starts from the process's fixture (helpers.fixture, SPD-233), so the class home lives at the fixture's path."""
 
     def __init__(self, home, attrs):
-        self.home = home
+        super().__init__(home)
         self.attrs = copy.deepcopy(attrs)
-        self.env = dict(home.env)
-        self.config = copy.deepcopy(home.config)
-        self._scratch = tempfile.TemporaryDirectory(prefix="spud-test-class-home-")
-        self.copied = Path(self._scratch.name) / "home"
-        copy_home(home.path, self.copied)
 
     def restore(self, test):
-        restore_home(self.copied, self.home.path)
-        self.home.env = dict(self.env)
-        self.home.config = copy.deepcopy(self.config)
-        test.home = self.home
+        test.home = super().restore()
         for name, value in copy.deepcopy(self.attrs).items():
             setattr(test, name, value)
 
     def cleanup(self):
-        self.home.cleanup()
-        self._scratch.cleanup()
+        self.home.cleanup()  # a home of its own (warm_cache False); the fixture's is the fixture's to remove
+        super().cleanup()
 
 
 class HookCase(SpudTestCase):
@@ -238,9 +178,18 @@ class HookCase(SpudTestCase):
     SPD-231: a class that sets `in_process` runs its CLI calls and hooks in this process (InProcessHome) against one home per
     class: its first test builds it exactly as setUp builds one for every test of any other class, and each later test
     starts from that home restored (ClassHome).  What a subclass's own setUp adds after super().setUp() is added per test, as
-    before.  A test that must reach the launcher itself uses self.home.process() or self.home.hook_process()."""
+    before.  A test that must reach the launcher itself uses self.home.process() or self.home.hook_process().
+
+    SPD-233: the class home is the process's fixture (helpers.fixture) with build_home run over it, so it lives at the
+    fixture's path, and the snapshot restores the fixture's root -- the home, the tool, and whatever else build_home put
+    under `self.home.root`.  A repository or directory build_home makes elsewhere (tempfile, RepoMixin.scratch_dir) is no
+    part of the snapshot, and the first test's cleanups remove it: build it under self.home.root instead."""
 
     in_process = False
+    # The fixture's project spud has init's default sessions, `claim`, as the live one does: a session in the tool or a
+    # worktree of it is Spud's only once claimed.  A class whose payloads run Spud's calls there and read them as Spud's
+    # sets this, and build_home makes every session there Spud's (`--sessions always`) rather than claim one per test.
+    tool_sessions_always = False
 
     @classmethod
     def tearDownClass(cls):
@@ -260,9 +209,8 @@ class HookCase(SpudTestCase):
             held.restore(self)
             return
         before = set(vars(self))
-        self.home = InProcessHome(config=self.config, name=self.home_name, warm=self.warm_cache)
+        self.home = self.fresh_home(InProcessHome)
         try:
-            self.home.init(project=self.seed_project)
             self.build_home()
             type(self).class_home = ClassHome(self.home, {k: v for k, v in vars(self).items() if k not in before and k != "home"})
         except BaseException:
@@ -276,10 +224,8 @@ class HookCase(SpudTestCase):
     def build_home(self):
         """What every hook test's home holds before its first payload."""
         self.cwd = str(self.home.path)
-        # The ledger root's own launcher, which the Bash hook's allow is for (SPD-032).  A copy, never a link: a test that
-        # writes it must not write through to the repository's.
-        (self.home.path / "bin").mkdir(exist_ok=True)
-        shutil.copyfile(SPUD, self.home.path / "bin" / "spud")
+        if self.tool_sessions_always:
+            self.home.json("project", "edit", "spud", "--sessions", "always", actor="spud")
         self.t = self.new_ticket("Hooks", status="active")
         self.team = self.t["team_key"]
         # Spud's Bash runs in the session the payloads name, and `member new` records it (SPD-018).
@@ -331,7 +277,7 @@ class HookCase(SpudTestCase):
         p = common(self.cwd, session=session)
         p.update({
             "hook_event_name": "SubagentStop", "stop_hook_active": stop_hook_active, "agent_id": agent_id, "agent_type": agent_type,
-            "agent_transcript_path": transcript or (str(self.home.path / "transcripts" / SESSION / "subagents" / ("agent-%s.jsonl" % agent_id))),
+            "agent_transcript_path": transcript or str(self.transcript_root() / SESSION / "subagents" / ("agent-%s.jsonl" % agent_id)),
             "last_assistant_message": last,
             "background_tasks": [{"id": agent_id, "type": "subagent", "status": "running", "description": "x", "agent_type": agent_type}],
             "session_crons": [],
@@ -361,9 +307,20 @@ class HookCase(SpudTestCase):
         return p
 
     # -- transcripts --------------------------------------------------------------
+    def transcript_root(self):
+        """Where the transcripts of a test are written: under its home, or, for a test that builds none (a class whose setUp
+        does not call HookCase's, SPD-233), in a scratch directory of its own."""
+        home = getattr(self, "home", None)
+        if home is not None:
+            return home.path / "transcripts"
+        if "_transcripts" not in self.__dict__:
+            self._transcripts = Path(tempfile.mkdtemp(prefix="spud-transcripts-")).resolve()
+            self.addCleanup(shutil.rmtree, self._transcripts, True)
+        return self._transcripts
+
     def write_transcript(self, agent_id, messages):
         """The subagent's own transcript, where sub_stop's agent_transcript_path points by default."""
-        path = self.home.path / "transcripts" / SESSION / "subagents" / ("agent-%s.jsonl" % agent_id)
+        path = self.transcript_root() / SESSION / "subagents" / ("agent-%s.jsonl" % agent_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             for m in messages:
@@ -435,10 +392,12 @@ class HookCase(SpudTestCase):
         ]
 
     # -- team ---------------------------------------------------------------------
+    # SPD-097: these members write inside the home, which is no project, so their globs name it: `home:<glob>`.  A bare glob
+    # is relative to the ticket's project checkout, the tool (project spud) here; ProjectCheckoutCase's members write there.
+    deliverables = ("home:tests/**", "home:bin/spud")
+
     def plan(self, actor="spud", persona="scout", model="haiku", name=None, **kw):
-        # SPD-097: these members write inside the home, which is no project, so their globs name it: `home:<glob>`.
-        # A bare glob is relative to the ticket's project checkout, which after `home move` is the tool repository.
-        kw.setdefault("deliverable", ["home:tests/**", "home:bin/spud"])
+        kw.setdefault("deliverable", list(self.deliverables))
         if name:
             kw["name"] = name
         return self.new_member(self.t["key"], actor=actor, persona=persona, model=model, **kw)
@@ -473,7 +432,7 @@ class HookCase(SpudTestCase):
             "agentType": spawn_type(m), "description": description, "toolUseId": tool_use_id, "spawnDepth": 1,
             "requestShape": "foreground", "requestNonInteractive": False, "model": m["model"]}), encoding="utf-8")
         first_call = self.pre_bash("ls", agent_id=agent_id)
-        first_call["transcript_path"] = str(self.home.path / "transcripts" / ("%s.jsonl" % SESSION))
+        first_call["transcript_path"] = str(self.transcript_root() / ("%s.jsonl" % SESSION))
         self.assertEqual(self.home.hook("PreToolUse", first_call).code, 0)
         self.home.json("member", "result", "Built it.", actor=agent_id)
         events = [("SubagentStop", self.sub_stop(agent_id, agent_type=spawn_type(m), transcript=str(transcript))),
@@ -517,7 +476,7 @@ class BashHookCase(HookCase):
         super().build_home()
         self.lead = self.spawn(self.plan(persona="engineer", model="opus"), AGENT_A)
         self.other = self.spawn(self.plan(persona="engineer", model="opus"), AGENT_B)
-        self.spud_cli = "python3.14 -I -S %s/bin/spud" % self.home.path
+        self.spud_cli = "python3.14 -I -S %s" % self.home.launcher
 
     def bash(self, command, agent_id=AGENT_A, cwd=None):
         return self.decide(self.pre_bash(command, agent_id=agent_id, cwd=cwd))
@@ -606,6 +565,26 @@ class BashHookCase(HookCase):
     def assertAllowed(self, command, agent_id=AGENT_A, cwd=None):
         r = self.bash(command, agent_id, cwd)
         self.assertEqual((r.code, r.decision), (0, "allow"), (command, r))
+
+
+class ProjectCheckoutCase(BashHookCase):
+    """A BashHookCase whose shell is in a checkout of project spud, the tool beside the home (SPD-233): where a repository
+    script, a runner's files and a project's own programs live, which the home -- no project -- never holds.  The ticket is
+    bound to `checkout`, a linked worktree of the tool, by planning AGENT_A and AGENT_B from it with tests/** and bin/spud,
+    as a session that entered the worktree plans them (SPD-098), and every payload's cwd is that worktree."""
+
+    deliverables = ("tests/**", "bin/spud")
+    tool_sessions_always = True  # every payload's shell is in the worktree, and Spud's calls there are his without a claim
+
+    def build_home(self):
+        self.checkout = self.home.tool / ".claude" / "worktrees" / "spd-001-hooks"
+        git(self.home.tool, "worktree", "add", "-q", "-b", "worktree-spd-001-hooks", self.checkout)
+        super().build_home()
+        self.cwd = str(self.checkout)
+
+    def plan(self, *args, **kw):
+        kw.setdefault("cwd", self.checkout)
+        return super().plan(*args, **kw)
 
 
 def spellings(word):

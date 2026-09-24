@@ -5,8 +5,10 @@ import os
 import unittest
 from datetime import datetime, timedelta
 
-from helpers import EXIT_ERROR, EXIT_USAGE, spawn_type, SpudTestCase
+from helpers import EXIT_ERROR, EXIT_USAGE, load_spud_module, spawn_type, SpudTestCase
 from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, HookCase
+
+SCHEMA_VERSION = load_spud_module().SCHEMA_VERSION  # the version a fresh init applies (SPD-233: never spelled here)
 
 
 SESSION_B = "7d1e6a0c-5b2f-4c8d-9e3a-1f2b3c4d5e6f"  # a second Spud session working in parallel (SPD-018)
@@ -18,6 +20,8 @@ SESSION_B = "7d1e6a0c-5b2f-4c8d-9e3a-1f2b3c4d5e6f"  # a second Spud session work
 
 
 class SessionStartTest(HookCase):
+    in_process = True  # SPD-233: the hooks and the CLI in this process, one home per class (hookcase.ClassHome)
+
     def test_board_brief_is_injected(self):
         m = self.plan(name="Kestrel")
         r = self.home.hook("SessionStart", self.session_start())
@@ -53,6 +57,8 @@ class SessionStartTest(HookCase):
 
 
 class StopTest(HookCase):
+    in_process = True  # SPD-233
+
     def returned_unrecorded(self, name=None):
         m = self.spawn(self.plan(name=name), AGENT_A if name != "Yukon" else AGENT_B)
         agent = m["agent_id"]
@@ -111,6 +117,8 @@ class StopSessionTest(HookCase):
     held only for what it owes: the members of the trees it spawned, and a row with no known session (from before
     sessions were recorded).  Three kinds, in one block: returned and unrecorded, planned and never spawned, and
     still running under a finished parent (told once per session)."""
+
+    in_process = True  # SPD-233
 
     # Today's reason when only returned members are listed, kept byte for byte for a root member; since SPD-027 the
     # printed command also carries --next (member finish's own Next line, since a root member's finish is the one
@@ -503,6 +511,9 @@ class StopSessionTest(HookCase):
 
 
 class FailurePolicyTest(HookCase):
+    """The enforcing hooks' exit 2 and the recording hooks' exit 0 with the gap spooled, drained by a later process: what
+    the harness reads from a hook's process, so this class keeps it (in_process unset, SPD-231 and SPD-233)."""
+
     def break_database(self):
         con = self.home.connect()
         con.execute("PRAGMA user_version = 99")
@@ -588,7 +599,7 @@ class SqlTest(SpudTestCase):
             proc = self.home.run("sql", "--readonly", stmt, check=False)
             self.assertEqual(proc.returncode, EXIT_ERROR, stmt)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM name_pool WHERE name = 'X'"), 0)
-        self.assertEqual(self.home.scalar("PRAGMA user_version"), 9)
+        self.assertEqual(self.home.scalar("PRAGMA user_version"), SCHEMA_VERSION)  # the schema's own, not 77 (SPD-233: derived)
 
     def test_one_statement_no_flag_no_actor_needed(self):
         proc = self.home.run("sql", "SELECT 1", check=False)
@@ -605,6 +616,8 @@ class SqlTest(SpudTestCase):
 class LateBindingTest(HookCase):
     """A foreground spawn is bound at its first tool call from agent-<id>.meta.json beside
     the session's subagent transcripts, so it can write its deliverables before its stop."""
+
+    in_process = True  # SPD-233
 
     def write_meta(self, agent_id, tool_use_id, description):
         """What the harness writes beside the subagent transcript (spike fact 6)."""
@@ -631,7 +644,7 @@ class LateBindingTest(HookCase):
         p["transcript_path"] = transcript
         r = self.home.hook("PreToolUse", p)
         self.assertEqual((r.code, r.stdout), (0, ""), r)
-        p = self.pre_bash("%s --as %s member log hi" % ("python3.14 -I -S %s/bin/spud" % self.home.path, AGENT_B), agent_id=AGENT_B)
+        p = self.pre_bash("%s --as %s member log hi" % ("python3.14 -I -S %s" % self.home.launcher, AGENT_B), agent_id=AGENT_B)
         r = self.home.hook("PreToolUse", p)
         self.assertEqual(r.decision, "allow", r)
         status = [e for e in self.events("member.status") if e["member"] == m["ref"]]
@@ -688,7 +701,7 @@ class LateBindingTest(HookCase):
     def test_help_and_version_are_well_formed(self):
         m = self.plan()
         self.spawn(m, AGENT_A)
-        cli = "python3.14 -I -S %s/bin/spud" % self.home.path
+        cli = "python3.14 -I -S %s" % self.home.launcher
         for tail in ("--help", "-h", "member --help", "member finish --help", "--version"):
             r = self.home.hook("PreToolUse", self.pre_bash("%s %s" % (cli, tail), agent_id=AGENT_A))
             self.assertEqual((r.code, r.decision), (0, "allow"), (tail, r))
@@ -718,11 +731,10 @@ class ArgvAnywhereTest(SpudTestCase):
 
 
 class ActorEpilogTest(SpudTestCase):
-    def test_help_no_longer_defers_to_spd_008(self):
-        text = self.home.run("--help").stdout
-        self.assertNotIn("Until SPD-008", text)
-        self.assertNotIn("unresolvable until then", text)
-        self.assertIn("hook", text)
+    # SPD-233: the --help half is gone.  It searched for wording df50df1 removed, so it could only ever pass; that --help
+    # names `spud hook` and no longer SPD-008 is test_init.InitTest.test_help_says_the_hooks_bind_and_check_as.  The
+    # refusal of an unbound agent_id stays.
+    def test_an_unbound_agent_id_is_refused_without_deferring_to_spd_008(self):
         proc = self.home.run("member", "log", "x", actor=AGENT_D, check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertNotIn("SPD-008", proc.stderr)

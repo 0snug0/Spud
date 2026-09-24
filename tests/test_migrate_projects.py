@@ -4,13 +4,16 @@ A v1 database, built here from the module's own DDL_0001 and the v1 views as the
 it, is migrated by `spud migrate`: the pre-migration backup, project 1's defaults, the sessions table, the widened event
 kinds on the rebuilt append-only events table, and the views that carry `project`.  The design marks `ADD COLUMN` with a
 CHECK on a STRICT table as assumed for SQLite 3.53.4; the CHECK tests below settle it.
+
+The oldest database is also where the CLI's refusal of any older one is tested, once for every version (SPD-233).
 """
 
 import json
 import sqlite3
 import unittest
 
-from helpers import EXIT_ERROR, Home, load_spud_module
+from helpers import EXIT_ERROR, load_spud_module
+from test_migrations import MigrationCase
 
 spud = load_spud_module()
 
@@ -45,54 +48,31 @@ CREATE TRIGGER events_no_delete BEFORE DELETE ON events BEGIN SELECT RAISE(ABORT
 AT = "2026-09-12T10:00:00-07:00"
 
 
-class MigrateProjectsTest(unittest.TestCase):
-    def setUp(self):
-        self.home = Home()
-        self.addCleanup(self.home.cleanup)
-        self.home.db.parent.mkdir(parents=True)
-        con = sqlite3.connect(self.home.db, autocommit=True)
-        try:
-            con.execute("PRAGMA journal_mode = WAL")
-            con.executescript(spud.DDL_0001)
-            con.executescript(V1_VIEWS_AND_TRIGGERS)
-            con.execute("PRAGMA user_version = 1")
-            con.execute("INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at) VALUES (1, 'spud', 'Spud', ?, 'SPD', 'SPUD', ?)",
-                        (str(self.home.path), AT))
-            for name in self.home.config["naming"]["pool"]:
-                con.execute("INSERT INTO name_pool (name) VALUES (?)", (name,))
-            con.execute("INSERT INTO tickets (project_id, number, key, team_key, title, priority, status, origin, created_at, updated_at)"
-                        " VALUES (1, 1, 'SPD-001', 'SPUD-001', 'Old ticket', 'P1', 'active', 'eric', ?, ?)", (AT, AT))
-            con.execute("INSERT INTO members (ticket_id, lineage, depth, name, persona, model, status, brief, planned_at)"
-                        " VALUES (1, '01', 1, 'Russet', 'scout', 'haiku', 'planned', 'Do it.', ?)", (AT,))
-            for kind, member in (("ticket.created", None), ("member.planned", 1), ("commit", None), ("report.entry", None)):
-                con.execute("INSERT INTO events (at, actor, ticket_id, member_id, kind, body, data) VALUES (?, 'spud', 1, ?, ?, ?, ?)",
-                            (AT, member, kind, "old " + kind, json.dumps({"title": "Old"}) if kind == "report.entry" else None))
-        finally:
-            con.close()
+class MigrateProjectsTest(MigrationCase):
+    MIGRATION, VERSION, VIEWS, AT = "0002_projects", 1, V1_VIEWS_AND_TRIGGERS, AT
 
-    def migrate(self):
-        return self.home.json("migrate")
+    def seed(self, con):
+        con.execute("INSERT INTO tickets (project_id, number, key, team_key, title, priority, status, origin, created_at, updated_at)"
+                    " VALUES (1, 1, 'SPD-001', 'SPUD-001', 'Old ticket', 'P1', 'active', 'eric', ?, ?)", (AT, AT))
+        con.execute("INSERT INTO members (ticket_id, lineage, depth, name, persona, model, status, brief, planned_at)"
+                    " VALUES (1, '01', 1, 'Russet', 'scout', 'haiku', 'planned', 'Do it.', ?)", (AT,))
+        for kind, member in (("ticket.created", None), ("member.planned", 1), ("commit", None), ("report.entry", None)):
+            con.execute("INSERT INTO events (at, actor, ticket_id, member_id, kind, body, data) VALUES (?, 'spud', 1, ?, ?, ?, ?)",
+                        (AT, member, kind, "old " + kind, json.dumps({"title": "Old"}) if kind == "report.entry" else None))
 
-    def test_the_cli_refuses_a_v1_database_until_migrate(self):
+    def test_the_cli_refuses_an_older_database_until_migrate(self):
+        """Every version behind SCHEMA_VERSION meets the one check in ledgerdb.connect, so the oldest stands for them all."""
         proc = self.home.run("board", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
-        self.assertIn("behind", proc.stderr)
+        self.assertIn("the database is behind (user_version %d < %d)" % (self.VERSION, spud.SCHEMA_VERSION), proc.stderr)
         self.migrate()
         self.assertIn("SPD-001", self.home.run("board").stdout)
 
     def test_migrate_writes_the_pre_migration_backup_and_keeps_every_row(self):
         events_before = self.home.rows("SELECT * FROM events ORDER BY id")
-        out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9))
-        self.assertEqual(len(out["backups"]), 8)
-        self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0002_projects\.db$")
-        backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
-        try:
-            self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 1)
-            self.assertEqual(backup.execute("SELECT count(*) FROM events").fetchone()[0], len(events_before))
-        finally:
-            backup.close()
-        self.assertEqual(self.home.rows("SELECT * FROM events ORDER BY id"), events_before)
+        backup = self.assert_migrated(self.migrate())
+        self.assertEqual(backup.execute("SELECT count(*) FROM events").fetchone()[0], len(events_before))
+        self.assertEqual(self.as_before(self.home.rows("SELECT * FROM events ORDER BY id"), events_before), events_before)
         self.assertEqual(self.home.scalar("SELECT count(*) FROM tickets WHERE project_id = 1"), 1)
         self.assertEqual(self.home.rows("SELECT default_branch, landing, sessions, installed, archived_at FROM projects WHERE id = 1"),
                          [{"default_branch": "main", "landing": "merge", "sessions": "always", "installed": None, "archived_at": None}])
@@ -165,15 +145,6 @@ class MigrateProjectsTest(unittest.TestCase):
         self.assertIn("\norigin: owner\nproject: spud\n", ticket)
         member = (self.home.path / "ledger" / "teams" / "SPUD-001" / "Russet.md").read_text(encoding="utf-8")
         self.assertIn('\nticket: "[[SPD-001]]"\nproject: spud\n', member)
-
-    def test_a_fresh_init_applies_every_migration(self):
-        other = Home()
-        self.addCleanup(other.cleanup)
-        out = other.init()
-        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9, []))
-        # SPW-001: the row is the suite's seed (helpers.Home.init), which is what init inserted before phase 2; the
-        # columns asserted are migration 0002_projects', which is what this test is about.
-        self.assertEqual(other.rows("SELECT key, landing, sessions FROM projects"), [{"key": "spud", "landing": "merge", "sessions": "always"}])
 
 
 if __name__ == "__main__":

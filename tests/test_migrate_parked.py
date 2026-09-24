@@ -10,9 +10,7 @@ DDL in four settings before it was written; these are the same assertions on the
 import sqlite3
 import unittest
 
-from helpers import EXIT_ERROR, Home, load_spud_module
-
-spud = load_spud_module()
+from test_migrations import MigrationCase
 
 # The views and triggers of schema v2, verbatim from bin/spudlib/state/schema.py before SPD-096.
 V2_VIEWS_AND_TRIGGERS = """
@@ -54,66 +52,35 @@ TICKETS = [(1, "active", "P1", "Active one"), (2, "queued", "P2", "Queued one"),
            (4, "declined", "P3", "Declined one")]
 
 
-class MigrateParkedTest(unittest.TestCase):
-    def setUp(self):
-        self.home = Home()
-        self.addCleanup(self.home.cleanup)
-        self.home.db.parent.mkdir(parents=True)
-        con = sqlite3.connect(self.home.db, autocommit=True)
-        try:
-            con.execute("PRAGMA journal_mode = WAL")
-            con.executescript(spud.DDL_0001)
-            con.executescript(spud.DDL_0002)
-            con.executescript(V2_VIEWS_AND_TRIGGERS)
-            con.execute("PRAGMA user_version = 2")
-            con.execute("INSERT INTO projects (id, key, name, root_path, ticket_prefix, team_prefix, created_at) VALUES (1, 'spud', 'Spud', ?, 'SPD', 'SPUD', ?)",
-                        (str(self.home.path), AT))
-            for name in self.home.config["naming"]["pool"]:
-                con.execute("INSERT INTO name_pool (name) VALUES (?)", (name,))
-            for number, status, priority, title in TICKETS:
-                con.execute("INSERT INTO tickets (project_id, number, key, team_key, title, priority, status, origin, created_at, updated_at)"
-                            " VALUES (1, ?, ?, ?, ?, ?, ?, 'eric', ?, ?)",
-                            (number, "SPD-%03d" % number, "SPUD-%03d" % number, title, priority, status, AT, AT))
-            con.execute("INSERT INTO members (ticket_id, lineage, depth, name, persona, model, status, brief, planned_at)"
-                        " VALUES (1, '01', 1, 'Russet', 'scout', 'haiku', 'planned', 'Do it.', ?)", (AT,))
-            con.execute("UPDATE tickets SET lead_id = 1 WHERE id = 1")
-            con.execute("INSERT INTO events (at, actor, ticket_id, member_id, kind, body) VALUES (?, 'spud', 1, 1, 'member.planned', 'planned Russet')", (AT,))
-            con.execute("INSERT INTO handoffs (ticket_id, at, from_member_id, what) VALUES (1, ?, 1, 'the spike')", (AT,))
-            con.execute("INSERT INTO proposals (ticket_id, origin_member_id, title, why, evidence, filed_at, status)"
-                        " VALUES (1, 1, 'A proposal', 'because', 'the code', ?, 'open')", (AT,))
-            con.execute("UPDATE tickets SET origin = 'proposal', proposal_id = 1 WHERE id = 2")
-            con.execute("INSERT INTO proposal_decisions (proposal_id, at, decision, reason) VALUES (1, ?, 'escalate', 'Spud decides')", (AT,))
-        finally:
-            con.close()
+class MigrateParkedTest(MigrationCase):
+    MIGRATION, VERSION, VIEWS, AT = "0003_parked", 2, V2_VIEWS_AND_TRIGGERS, AT
 
-    def migrate(self):
-        return self.home.json("migrate")
+    def seed(self, con):
+        for number, status, priority, title in TICKETS:
+            con.execute("INSERT INTO tickets (project_id, number, key, team_key, title, priority, status, origin, created_at, updated_at)"
+                        " VALUES (1, ?, ?, ?, ?, ?, ?, 'eric', ?, ?)",
+                        (number, "SPD-%03d" % number, "SPUD-%03d" % number, title, priority, status, AT, AT))
+        con.execute("INSERT INTO members (ticket_id, lineage, depth, name, persona, model, status, brief, planned_at)"
+                    " VALUES (1, '01', 1, 'Russet', 'scout', 'haiku', 'planned', 'Do it.', ?)", (AT,))
+        con.execute("UPDATE tickets SET lead_id = 1 WHERE id = 1")
+        con.execute("INSERT INTO events (at, actor, ticket_id, member_id, kind, body) VALUES (?, 'spud', 1, 1, 'member.planned', 'planned Russet')", (AT,))
+        con.execute("INSERT INTO handoffs (ticket_id, at, from_member_id, what) VALUES (1, ?, 1, 'the spike')", (AT,))
+        con.execute("INSERT INTO proposals (ticket_id, origin_member_id, title, why, evidence, filed_at, status)"
+                    " VALUES (1, 1, 'A proposal', 'because', 'the code', ?, 'open')", (AT,))
+        con.execute("UPDATE tickets SET origin = 'proposal', proposal_id = 1 WHERE id = 2")
+        con.execute("INSERT INTO proposal_decisions (proposal_id, at, decision, reason) VALUES (1, ?, 'escalate', 'Spud decides')", (AT,))
 
     def park(self, key, reason, until=None):
         args = ["ticket", "move", key, "--status", "parked", "--reason", reason]
         return self.home.json(*args, *(["--until", until] if until else []), actor="spud")["ticket"]
 
-    def test_the_cli_refuses_a_v2_database_until_migrate(self):
-        proc = self.home.run("board", check=False)
-        self.assertEqual(proc.returncode, EXIT_ERROR)
-        self.assertIn("behind", proc.stderr)
-        self.migrate()
-        self.assertIn("SPD-001", self.home.run("board").stdout)
-
     def test_migrate_writes_the_pre_migration_backup_and_keeps_every_row_and_id(self):
         before = self.home.rows("SELECT * FROM tickets ORDER BY id")
-        out = self.migrate()
-        self.assertEqual((out["applied"], out["user_version"]), (["0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9))
-        self.assertEqual(len(out["backups"]), 7)
-        self.assertRegex(out["backups"][0], r"/ledger-\d{8}T\d{6}-pre-0003_parked\.db$")
-        backup = sqlite3.connect("file:%s?mode=ro" % out["backups"][0], uri=True)
-        try:
-            self.assertEqual(backup.execute("PRAGMA user_version").fetchone()[0], 2)
-            self.assertEqual(backup.execute("SELECT count(*) FROM tickets").fetchone()[0], len(TICKETS))
-        finally:
-            backup.close()
+        backup = self.assert_migrated(self.migrate())
+        self.assertEqual(backup.execute("SELECT count(*) FROM tickets").fetchone()[0], len(TICKETS))
         after = self.home.rows("SELECT * FROM tickets ORDER BY id")
-        self.assertEqual([{k: v for k, v in r.items() if k not in ("parked_until", "parked_reason", "worktree")} for r in after], [dict(r, origin="owner") if r["origin"] == "eric" else r for r in before])
+        # 0006_owner_origin, later in the chain, writes 'eric' as 'owner'
+        self.assertEqual(self.as_before(after, before), [dict(r, origin="owner") if r["origin"] == "eric" else r for r in before])
         self.assertTrue(all(r["parked_until"] is None and r["parked_reason"] is None for r in after))
         self.assertEqual(self.home.rows("PRAGMA foreign_key_check"), [])
         self.assertEqual(self.home.scalar("SELECT count(*) FROM handoffs"), 1)
@@ -190,13 +157,6 @@ class MigrateParkedTest(unittest.TestCase):
         self.home.json("ticket", "new", "--title", "Fresh", "--priority", "P3", actor="spud")
         self.assertEqual([r["key"] for r in self.home.rows("SELECT key FROM v_board WHERE status IN ('queued','parked')")],
                          ["SPD-005", "SPD-002"])
-
-    def test_a_fresh_init_applies_every_migration(self):
-        other = Home()
-        self.addCleanup(other.cleanup)
-        out = other.init()
-        self.assertEqual((out["applied"], out["user_version"], out["backups"]), (["0001_init", "0002_projects", "0003_parked", "0004_ticket_worktree", "0005_pull_requests", "0006_owner_origin", "0007_project_scripts", "0008_project_runners", "0009_member_effort"], 9, []))
-        self.assertEqual(other.scalar("SELECT count(*) FROM pragma_table_info('tickets') WHERE name IN ('parked_until','parked_reason')"), 2)
 
 
 if __name__ == "__main__":

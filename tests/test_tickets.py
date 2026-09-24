@@ -197,9 +197,10 @@ class TicketTest(SpudTestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             con.execute("DELETE FROM events")
         con.close()
-        # What an init and one `ticket new` leave: init's report entry, the config.synced of its settings sync and the
-        # render event of its own pass (SPW-001 steps 3, 6 and 9), then ticket.created and the entry it writes (SPD-011).
-        self.assertEqual(self.home.scalar("SELECT count(*) FROM events"), 5)
+        # What an init and one `ticket new` leave: init's project.added and report entry, the config.synced of its settings
+        # sync, the project.installed of its install and the render event of its own pass (SPW-001 steps 3, 6, 7 and 9), then
+        # ticket.created and the entry it writes (SPD-011).
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM events"), 7)
 
     def test_show_unknown_ticket(self):
         proc = self.home.run("ticket", "show", "SPD-404", check=False)

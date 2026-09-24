@@ -2082,12 +2082,14 @@ class WrapperDirectoryTest(BashHookCase):
 
     def test_a_spud_call_is_read_where_the_wrapper_moves_it(self):
         """A launcher reached by a relative path under another name (SPD-029: a symlink runs it whatever it is called) is
-        the file in the directory the command runs in: from tests/, bin/launch behind `env -C ..` is the home's launcher,
+        the file in the directory the command runs in: from tests/, bin/launch behind `env -C ..` is the tool's launcher,
         where main read tests/bin/launch, no file at all, and let `--as spud` through."""
-        (self.home.path / "bin" / "launch").symlink_to(self.home.path / "bin" / "spud")
-        tests = str(self.home.path / "tests")
+        tool = self.home.tool
+        (tool / "bin" / "launch").symlink_to(self.home.launcher)
+        (tool / "tests").mkdir(exist_ok=True)
+        tests = str(tool / "tests")
         for command in ("env -C .. bin/launch --as spud ticket new x", "env -C .. python3.14 -I -S bin/launch --as spud board",
-                        "sudo -D .. python3.14 -I -S bin/launch --as spud board", "env -C %s ./bin/launch --as spud board" % self.home.path):
+                        "sudo -D .. python3.14 -I -S bin/launch --as spud board", "env -C %s ./bin/launch --as spud board" % tool):
             with self.subTest(command):
                 self.assertRefused(command, "Law 6", cwd=tests)
         self.assertSilent("env -C .. python3.14 -I -S bin/launch --as %s board" % AGENT_A, cwd=tests)

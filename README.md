@@ -84,11 +84,19 @@ python3.14 -I -S tests/suite.py --changed main
 ```
 
 It takes every file changed since the branch left `main`, committed or not, and runs the test modules
-that `tests/suite_map.json`, a plain data file, names for them. A file the map does not name, or one
-that every test depends on, runs the full suite instead. The last line says `affected` and which rules
-chose the modules, so it is never mistaken for a full run; `--dry-run` shows the choice without
-running anything. A contributor verifies a change this way, and the full suite runs once, at landing,
-on the tree that merges.
+that `tests/suite_map.json`, a plain data file, names for them. For the program's own code and the
+shipped files, the map defers to a measured dependency table, `tests/suite_deps.json`: which test
+modules ran or read each file. A file the map does not name, or one that every test depends on, runs
+the full suite instead. The last line says `affected` and which rules chose the modules, so it is never
+mistaken for a full run; `--dry-run` shows the choice without running anything. A contributor verifies
+a change this way, and the full suite runs once, at landing, on the tree that merges. After a change
+that moves what the tests exercise, such as a new test module or a new module of the program, measure
+the table again; `--changed` warns when the program's files differ from the ones the table was
+measured on:
+
+```bash
+python3.14 -I -S tests/suite_deps.py
+```
 
 Only one run goes at a time on a machine, since two side by side would each take every core. A
 second run waits for the first and says whose run it is waiting for; `--no-wait` makes it exit at once
@@ -104,8 +112,10 @@ python3.14 -I -S -m unittest discover -s tests -t tests
 ```
 
 Either way, every test runs against a scratch home built from this repository's own shipped config, so
-a test run never touches a real Spud home. See `CLAUDE.md` for the full verification and landing
-process, including the standalone probes under `tests/probes/`.
+a test run never touches a real Spud home. Each worker builds that home once, the way `spud init`
+builds a real one beside a checkout of the tool, and puts a copy of it back before every test. See
+`CLAUDE.md` for the full verification and landing process, including the standalone probes under
+`tests/probes/`.
 
 ## License
 

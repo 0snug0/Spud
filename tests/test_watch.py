@@ -17,7 +17,7 @@ import sys
 import time
 import unittest
 
-from helpers import (EXIT_ERROR, EXIT_OK, SPUD, LaunchdMixin, SpudTestCase, aged_event, hold_watch_lock,
+from helpers import (EXIT_ERROR, EXIT_OK, LAUNCHER, SPUD, LaunchdMixin, SpudTestCase, aged_event, hold_watch_lock,
                      install_watcher_plist, load_spud_module)
 
 spud = load_spud_module()
@@ -278,7 +278,7 @@ class DeployTest(WatchCase):
 
     def test_a_watcher_whose_program_changed_on_disk_ends(self):
         tool = self.home.path / "deployed"
-        shutil.copytree(SPUD.parent, tool / "bin", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(LAUNCHER.parent, tool / "bin", ignore=shutil.ignore_patterns("__pycache__"))
         self.new_ticket("Before")
         base = self.render_events()
         proc = subprocess.Popen([sys.executable, "-I", "-S", str(tool / "bin" / "spud"), "--as", "spud", "render", "--watch", "--interval", "0.05"],

@@ -1,5 +1,6 @@
-"""Unit tests for the markdown-v0 parser and emitter inside bin/spud, imported
-as a module (bin/spud has no .py suffix)."""
+"""Unit tests for the markdown-v0 parser and emitter, bin/spudlib/core/markdown.py, and the
+timestamp helpers they write with (core/kernel.py), reached through the program bin/spud_ledger.py
+as helpers.load_spud_module imports it."""
 
 import os
 import unittest

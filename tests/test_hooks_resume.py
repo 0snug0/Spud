@@ -25,6 +25,8 @@ from hookcase import AGENT_A, AGENT_B, AGENT_D, SESSION, HookCase
 class ResumeCase(HookCase):
     """A member taken to its first return, and the second SubagentStart that resumes it."""
 
+    in_process = True  # SPD-233: the hooks and the CLI in this process, one home per class (hookcase.ClassHome)
+
     def returned(self, agent_id=AGENT_A, result="Round 1 done.", **kw):
         """A root member spawned and bound, its Result recorded unless result is None, and its return stamped."""
         m = self.spawn(self.plan(**kw), agent_id)
