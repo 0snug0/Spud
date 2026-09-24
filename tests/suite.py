@@ -2,6 +2,8 @@
 
   python3.14 -I -S tests/suite.py [-j N] [--chunk N] [--cold] [--no-wait] [--background] [NAME ...]
                                                    the suite, or the modules, classes or tests named
+  python3.14 -I -S tests/suite.py --changed [BASE] [--dry-run] [-j N] ...
+                                                   the modules tests/suite_map.json names for what changed against BASE
   python3.14 -I -S tests/suite.py --digest         the digest of the checkout's tree alone; runs nothing, waits for nothing
 
 Standard library only, and unittest discovery never collects this file (it is not test*.py).  The serial command,
@@ -47,10 +49,23 @@ Standard library only, and unittest discovery never collects this file (it is no
    failure, error, crashed worker or test never reported, 75 when --no-wait found another run, 128 plus the signal's
    number when SIGINT, SIGTERM or SIGHUP ended it, else 0.  Nothing is written into the checkout; bytecode is never
    written at all, and the scratch directory is removed by this process alone, or by the next run if this one was killed.
+
+--changed [BASE] (SPD-234; BASE defaults to main) runs, in place of the whole suite, the test modules the path map
+tests/suite_map.json names for the files changed against the merge base of BASE and HEAD: committed on the branch,
+staged, unstaged, deleted (both sides of a rename), and untracked but not ignored.  The map is data, read from the tree
+the run covers; its `about` says how a path is matched.  A path the map sends to `full`, or that no rule names, runs the
+full suite.  Before running, the run says on stderr each path and the rule that took it.  The final line then says
+`affected`, the rules and the base, `(affected: shell+tests against main, <n> modules)`, or, when it fell back,
+`(full, --changed against main: bin/spud by rule full)`; either way it ends with the digest, so a landing never takes a
+selection for a full run.  Nothing changed runs nothing, and says so.  --dry-run prints the paths, their rules and the
+modules on stdout and runs nothing, taking no lock.
 """
 
 import argparse
+import ast
+import collections
 import fcntl
+import fnmatch
 import hashlib
 import io
 import json
@@ -83,6 +98,8 @@ DEFAULT_WORKERS = os.cpu_count() or 4  # 18 on this Mac, where 6 and 12 were slo
 DEFAULT_CHUNK = 4
 KINDS = ("errors", "failures", "skipped", "expectedFailures", "unexpectedSuccesses")
 MARKS = {"errors": "E", "failures": "F", "skipped": "s", "expectedFailures": "x", "unexpectedSuccesses": "u"}
+MAP = "tests/suite_map.json"  # the path map --changed selects by, read from the tree a run covers
+DEFAULT_BASE = "main"
 
 
 # -- the tree ---------------------------------------------------------------------------------------------------------
@@ -138,6 +155,109 @@ def snapshot(files, dest, admin):
     (admin / "commondir").write_text(common + "\n", encoding="utf-8")
     (admin / "HEAD").write_text(head + "\n", encoding="utf-8")
     (dest / ".git").write_text("gitdir: %s\n" % admin, encoding="utf-8")
+
+
+# -- what changed, and the modules it reaches (SPD-234) ---------------------------------------------------------------
+
+
+# paths: every changed path; why: [(path, the rule that took it, "full", or None when no rule names it)]; full: whether
+# the full suite runs; rules: the rules that chose modules, in the order the paths met them; modules: the test modules.
+Selection = collections.namedtuple("Selection", "paths why full rules modules")
+
+
+def changed(root, base):
+    """(merge base, [path]): every file changed in `root` against the merge base of `base` and HEAD -- committed on the
+    branch, staged, unstaged, deleted, both sides of a rename -- and every untracked file git does not ignore, sorted."""
+    merge = git(root, "merge-base", base, "HEAD").decode().strip()
+    listed = git(root, "diff", "--name-only", "--no-renames", "-z", merge, "--") + git(root, "ls-files", "-z", "-o", "--exclude-standard")
+    return merge, sorted({os.fsdecode(p) for p in listed.split(b"\0") if p and not p.endswith(b"/")})  # `dir/`: a nested repository
+
+
+def load_map(files):
+    for rel, _, _, content in files:
+        if rel == MAP.encode():
+            return json.loads(content)
+    raise SystemExit("suite: --changed: the tree has no %s" % MAP)
+
+
+def imports(source):
+    """The top-level names a module's source imports, anywhere in it; nothing for a source that does not parse."""
+    try:
+        parsed = ast.parse(source)
+    except SyntaxError:
+        return set()
+    names = set()
+    for node in ast.walk(parsed):
+        if isinstance(node, ast.Import):
+            names.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return names
+
+
+def select(paths, files, table=None):
+    """The Selection the map makes for `paths` over the tree `files`: each path goes to `full` if a full pattern matches
+    it, else to the first rule one of whose patterns does, else nowhere, which is the full suite too.  A rule's module
+    names and patterns expand against the tree's test modules; with `importers`, the changed file's own module joins
+    them, and every test module that imports it, directly or through another module of tests/."""
+    table = load_map(files) if table is None else table
+    matches = lambda path, patterns: any(fnmatch.fnmatchcase(path, p) for p in patterns)
+    sources = {}
+    for rel, kind, _, content in files:
+        folder, _, name = os.fsdecode(rel).rpartition("/")
+        if folder == "tests" and name.endswith(".py") and kind != "l":
+            sources[name[:-3]] = content
+    tests = sorted(n for n in sources if fnmatch.fnmatchcase(n + ".py", "test*.py"))
+    graph = None
+    why, rules, modules, full = [], [], set(), False
+    for path in paths:
+        rule = None if matches(path, table["full"]) else next((r for r in table["rules"] if matches(path, r["paths"])), None)
+        if rule is None:
+            full = True
+            why.append((path, "full" if matches(path, table["full"]) else None))
+            continue
+        why.append((path, rule["name"]))
+        if rule["name"] not in rules:
+            rules.append(rule["name"])
+        for pattern in rule["modules"]:
+            modules.update(t for t in tests if fnmatch.fnmatchcase(t, pattern))
+        if rule.get("importers"):
+            graph = graph if graph is not None else {n: imports(s) for n, s in sources.items()}
+            folder, _, name = path.rpartition("/")
+            own = name[:-3] if folder == "tests" and name.endswith(".py") else None
+            reached, todo = ({own}, [own]) if own else (set(), [])
+            while todo:
+                done = todo.pop()
+                for n, names in graph.items():
+                    if done in names and n not in reached:
+                        reached.add(n)
+                        todo.append(n)
+            modules.update(reached.intersection(tests))
+    return Selection(list(paths), why, full, rules, sorted(modules))
+
+
+def scope(selection, base):
+    """What the final line of a --changed run says after its count."""
+    if not selection.paths:
+        return " (affected: nothing changed against %s)" % base
+    if selection.full:
+        forced = [(p, r) for p, r in selection.why if r in ("full", None)]
+        path, rule = forced[0]
+        more = ", and %d more" % (len(forced) - 1) if len(forced) > 1 else ""
+        return " (full, --changed against %s: %s %s%s)" % (base, path, "by rule full" if rule == "full" else "unmapped", more)
+    n = len(selection.modules)
+    return " (affected: %s against %s, %d module%s)" % ("+".join(selection.rules), base, n, "" if n == 1 else "s")
+
+
+def explain(selection, base, merge):
+    """The lines that say, before a --changed run, what changed and which rule took each path."""
+    lines = ["suite: --changed against %s (merge base %s): %d changed file%s" % (base, merge[:12], len(selection.paths), "" if len(selection.paths) == 1 else "s")]
+    lines += ["  %s: %s" % (p, "unmapped" if r is None else r) for p, r in selection.why]
+    if selection.full:
+        lines.append("suite: the full suite")
+    else:
+        lines.append("suite: %d module%s: %s" % (len(selection.modules), "" if len(selection.modules) == 1 else "s", " ".join(selection.modules) or "none"))
+    return lines
 
 
 # -- one run per machine (SPD-232) ------------------------------------------------------------------------------------
@@ -539,7 +659,9 @@ def place(order):
     return lambda entry: index.get(entry[1], index.get(entry[1].rpartition("(")[2].rstrip(")"), len(index)))
 
 
-def report(run, wall, names, tree_digest, workers):
+def report(run, wall, scope_text, tree_digest, workers):
+    """unittest's report on stderr, then the final line on stdout; `scope_text` follows the count: empty for the full
+    suite, ` (partial: NAME ...)` for a named run, and what scope() says for --changed."""
     entries = sorted(run.entries, key=place(run.order))
     home = str(run.snap)
     spelled = lambda text: None if text is None else text.replace(home, str(CHECKOUT)).replace(home.replace("/private/", "/", 1), str(CHECKOUT))
@@ -567,8 +689,7 @@ def report(run, wall, names, tree_digest, workers):
     status = ("OK" if ok else "FAILED") + (" (%s)" % ", ".join(infos) if infos else "")
     out.writeln(status)
     out.stream.flush()
-    scope = " (partial: %s)" % " ".join(names) if names else ""
-    sys.stdout.write("%s: %d tests%s in %.1f s on %d worker%s; tree %s\n" % (status, run.run, scope, wall, workers, "" if workers == 1 else "s", tree_digest))
+    sys.stdout.write("%s: %d tests%s in %.1f s on %d worker%s; tree %s\n" % (status, run.run, scope_text, wall, workers, "" if workers == 1 else "s", tree_digest))
     sys.stdout.flush()
     return ok
 
@@ -582,6 +703,9 @@ def main(argv=None):
     parser.add_argument("--digest", action="store_true", help="print the digest of the checkout's tree and exit, running nothing")
     parser.add_argument("--no-wait", action="store_true", help="exit %d at once if another run holds the machine's suite lock, rather than wait for it" % EXIT_BUSY)
     parser.add_argument("--background", action="store_true", help="run at macOS's background priority, workers included: quieter and slower (the wall_clock tests run at normal priority)")
+    parser.add_argument("--changed", nargs="?", const=DEFAULT_BASE, metavar="BASE",
+                        help="run only the test modules %s names for the files changed against the merge base of BASE (default %s) and HEAD; the full suite for a path it sends there or does not name" % (MAP, DEFAULT_BASE))
+    parser.add_argument("--dry-run", action="store_true", help="with --changed: print the changed paths, their rules and the modules, and run nothing")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
     if args.worker:
@@ -591,6 +715,15 @@ def main(argv=None):
         return 0
     if args.workers < 1 or args.chunk < 1:
         parser.error("-j and --chunk take a positive number")
+    if args.changed is not None and args.names:
+        parser.error("--changed chooses the modules itself, and takes no NAME")
+    if args.dry_run:
+        if args.changed is None:
+            parser.error("--dry-run goes with --changed")
+        files = tree(CHECKOUT)
+        merge, paths = changed(CHECKOUT, args.changed)
+        sys.stdout.write("\n".join(explain(select(paths, files), args.changed, merge)) + "\n")
+        return 0
     caught = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
     before = {s: signal.getsignal(s) for s in caught}
 
@@ -638,6 +771,18 @@ def run_locked(args, lock):
         os.environ["TMPDIR"] = str(tmp)
         files = tree(CHECKOUT)
         tree_digest = digest(files)
+        names = [name_of(n) for n in args.names]
+        scope_text = " (partial: %s)" % " ".join(args.names) if args.names else ""
+        if args.changed is not None:
+            merge, paths = changed(CHECKOUT, args.changed)
+            selection = select(paths, files)
+            sys.stderr.write("\n".join(explain(selection, args.changed, merge)) + "\n")
+            scope_text = scope(selection, args.changed)
+            if not selection.full:
+                names = selection.modules
+                if not names:  # nothing changed, or no module left to run: an empty list must not become discovery's all
+                    sys.stdout.write("OK: 0 tests%s in %.1f s on 0 workers; tree %s\n" % (scope_text, time.perf_counter() - started, tree_digest))
+                    return 0
         snap = scratch / "tree"
         snapshot(files, snap, scratch / "git")
         env = dict(ENV)
@@ -647,7 +792,6 @@ def run_locked(args, lock):
         os.environ[PYCACHE_ENV] = env[PYCACHE_ENV]  # this process imports tests/helpers too, and leaves the cleanup to itself
         sys.path.insert(0, str(snap / "tests"))
         loader = unittest.TestLoader()
-        names = [name_of(n) for n in args.names]
         suite = load(loader, names, str(snap / "tests"))
         tests = list(flatten(suite))
         if not args.cold:
@@ -668,7 +812,7 @@ def run_locked(args, lock):
                 run.handle(here, json.loads(line))
         run.go(units, last)
         sys.stderr.write("\n")
-        return 0 if report(run, time.perf_counter() - started, args.names, tree_digest, min(args.workers, len(units) + len(last)) or 1) else 1
+        return 0 if report(run, time.perf_counter() - started, scope_text, tree_digest, min(args.workers, len(units) + len(last)) or 1) else 1
     finally:
         for s in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):  # a signal now would leave the scratch half removed
             signal.signal(s, signal.SIG_IGN)

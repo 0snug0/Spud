@@ -9,7 +9,7 @@ commands/settings_sync.settings_hold_hooks, whose question it is but which no ho
 import json
 import os
 
-from ..core import homeconf, kernel
+from ..core import homeconf, kernel, lazy
 from ..hooks import hookio, worktrees
 from ..state import actors, ledgerdb, lookup
 
@@ -199,6 +199,16 @@ def session_mode(ctx, con, payload, env=None):
 # (Eric's decision 2 on the package split); settings_hold_hooks asks that question of one file through settings_hook_events below, so
 # the reading of a settings file is written once.
 HOOK_MARK = "bin/spud hook"  # what marks a hook entry as the ledger's, whatever home it was generated for
+# The mark's blind spot (SPD-226): shlex.quote quotes a launcher path holding a space or a non-ASCII character, and the line
+# then reads `... '<tool>/bin/spud' hook <event>`, of which the mark is no substring.  Such a line is read by its whole
+# shape instead, the one every settings sync and project install has written since SPD-008 --
+# `SPUD_HOME=<w> <w> -I -S <w> hook <event>`, then ` --project <w>` or nothing -- where each word is one of the two
+# spellings shell_word_forms names and the launcher word names a path ending in /bin/spud.  Lazy, as every pattern a
+# hook-path module holds: no hook reads it.
+_SHELL_WORD = "(?:[\\w@%+=:,./-]+|'(?:[^']|'\"'\"')*')"
+_LAUNCHER_WORD = "(?:[\\w@%+=:,./-]*/bin/spud|'(?:[^']|'\"'\"')*/bin/spud')"
+HOOK_LINE = lazy.LazyPattern("(?a)SPUD_HOME=" + _SHELL_WORD + " " + _SHELL_WORD + " -I -S " + _LAUNCHER_WORD
+                             + " hook \\w+(?: --project " + _SHELL_WORD + ")?")
 HOOKS_LOADED = "this home's ledger hooks are loaded in this session, from %s"
 HOOKS_PARTIAL = ("some of this home's ledger hooks are not loaded in this session: no file it reads carries a line for %s,"
                  " so those events record and guard nothing")
@@ -226,6 +236,18 @@ def shell_word_forms(text):
     return (text, "'%s'" % text.replace("'", "'\"'\"'"))
 
 
+def is_ledger_command(command):
+    """Whether a hook entry's command is a ledger hook line, of any home: the one rule settings sync and project install
+    replace lines by, project uninstall and home move strip them by, and settings_hook_events reads them by.
+
+    HOOK_MARK as it has always been read, or HOOK_LINE matched against the whole command.  The mark stays exactly as
+    wide as it has been since SPD-008 (an unquoted `.../bin/spud hook` anywhere in the line: `spud hook` is the harness's
+    entry point, and older spellings count); a quoted launcher is taken only with the rest of the generated shape around
+    it, so a hook of the user's own that runs some quoted `.../bin/spud' hook ...` by itself, carries more after the
+    line, or merely quotes one is theirs and is kept."""
+    return isinstance(command, str) and (HOOK_MARK in command or HOOK_LINE.fullmatch(command) is not None)
+
+
 def settings_hook_events(ctx, path, key=None):
     """The hook events a settings file carries a ledger hook line of *this home* for (`key`: of this project's lines,
     which end in `--project <key>`); the empty set for a file that is absent, unreadable, or not the shape settings sync
@@ -246,7 +268,7 @@ def settings_hook_events(ctx, path, key=None):
         for group in groups if isinstance(groups, list) else []:
             for h in (group.get("hooks") if isinstance(group, dict) and isinstance(group.get("hooks"), list) else []):
                 command = h.get("command") if isinstance(h, dict) else None
-                if isinstance(command, str) and HOOK_MARK in command and command.startswith(prefixes) and (suffixes is None or command.endswith(suffixes)):
+                if is_ledger_command(command) and command.startswith(prefixes) and (suffixes is None or command.endswith(suffixes)):
                     found.add(event)
     return found
 

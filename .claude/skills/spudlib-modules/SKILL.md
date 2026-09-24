@@ -162,7 +162,7 @@ Its reach has known gaps (SPD-079): it does not see an alias shadowed by a neste
 
 ## 9. Before you call the work done
 
-1. `python3.14 -I -S tests/suite.py` — the whole suite on every core, about 80 seconds; run the modules you touched by name while you work (`tests/suite.py test_package test_hooks_bash`) and the whole suite once at the end, and put its final line, with the tree's digest, in your result. The serial fallback, `python3.14 -I -S -m unittest discover -s tests -t tests`, takes about eleven minutes, prints no digest, and wants the checkout to itself.
+1. Run the modules you touched by name while you work (`tests/suite.py test_package test_hooks_bash`), and `tests/suite.py --changed` at the end; put its final line, with the tree's digest, in your result. The full suite is for Spud's run at landing, or when your brief asks for it. The serial fallback, `python3.14 -I -S -m unittest discover -s tests -t tests`, prints no digest and wants the checkout to itself.
 2. `find bin tests -name '*.pyc' -o -name __pycache__` prints nothing.
 3. If you touched the hook path: `HOOK_PATH` updated, and `tests/probes/hook_timing.py` within 1 ms of main.
 4. If you changed how the program is loaded or how a hook answers: `python3.14 -I -S tests/probes/session_diff.py "$main/bin/spud" "$PWD/bin/spud"` — main's launcher (`$main` as in §3) and this worktree's, scripted CLI and hook calls against both, every step identical after masking.
@@ -173,4 +173,4 @@ Its reach has known gaps (SPD-079): it does not see an alias shadowed by a neste
    python3.14 -I -S tests/probes/shell_probe.py snippet.sh   # zsh -f -o nobareglobqual, zsh -f, /bin/bash; or the snippet on stdin
    ```
 
-   Pass the snippet as a file (a scratchpad path) when its text names git: the Bash hook reads a here-document fed to the probe and refuses one that does. Cite the versions it prints with what it printed.
+   Pass the snippet as a file (a scratchpad path) when its text names git: the Bash hook reads a here-document fed to the probe and refuses one that does. In a worktree session a second guard sits above the Bash hook: Claude Code itself refuses a command it cannot verify stays inside the worktree, and a chain like `mkdir -p <scratchpad>/probes && cd <scratchpad>/probes && cat > snippet.sh <<'EOF' ... EOF` run together with the probe call meets it, refused as too complex to verify and told to split into plain, separate commands run from the worktree. The form that runs: write the snippet into the scratchpad with the Write tool, then call the probe on it, or on a here-document, as one plain command from the worktree root. Cite the versions it prints with what it printed.
