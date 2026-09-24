@@ -535,6 +535,7 @@ UNWALKED_WORDING = "could not read whole"  # SPD-126: a copied tree the walk for
 SCRIPT_WORD_WORDING = "runs a program or script the line does not spell"  # SPD-260: an awk program or sed script unread
 SCRIPT_OPTION_WORDING = "where awk still reads its options"  # SPD-266: xargs's input where awk may read one more -f
 SCRIPT_WORD_KINDS = ("script-word", "script-input", "script-option")  # SPD-260's finding, as SPD-265 and SPD-266 split it
+SCRIPT_WRITTEN_WORDING = "the line may write that file before"  # SPD-151: a -f file the hook read is not the one that runs
 
 
 class TreeWriteCase(BashHookCase):
@@ -1761,6 +1762,104 @@ class ScriptOptionTest(TreeWriteCase):
                 self.assertSilent(command, agent_id=None)
 
 
+class ScriptFileWrittenTest(TreeWriteCase):
+    """SPD-151 (proposal by SPUD-139/Mario): SPD-139 reads a sed or awk -f script file from disk at hook time
+    (script_text.script_file), but the file the tool runs is not always that file: `echo 'w ledger/tickets/SPD-001.md' >
+    p.sed && sed -f p.sed x` is one Bash call, and the hook read p.sed as it stood before the echo wrote it -- missing, and
+    so unread, or holding a harmless script -- so a member ran a script the hook never read (Law 5 here, Law 7 through
+    awk's system()).  On this branch before the change each line in test_a_script_the_line_writes_first_is_refused was
+    silent for AGENT_G.
+
+    SPD-217's rule, as SPD-260 applied it: where the reader cannot read what will run, it refuses the member and names a
+    respelling.  A -f file the line may write before the command reads it -- a redirection (the command's own included), a
+    here-document, tee, cp, mv or ln onto it, an earlier command, a command beside it in a pipeline or a background job, a
+    loop's or a function's next pass, a nested reading's -- is refused a member, the reason naming the two-call respelling.
+    A script the line only reads, or writes after the command that runs it, reads as before; Spud is not refused.  SPD-145's
+    allow-listed shell scripts were already held against every write of the line (ScriptFileTest in
+    tests/test_hooks_programs.py), and the hook opens no interpreter's program file (SPD-150)."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "out" / "clean.sed").write_text("p\n", encoding="utf-8")
+        (self.home.path / "out" / "clean.awk").write_text("{n++} END{print n}\n", encoding="utf-8")
+
+    def forms(self, command):
+        """The forms of the "script" findings the line records."""
+        return [detail[0] for kind, detail in self.analysis(command).findings if kind == "script"]
+
+    def assertSpudUnchanged(self, command):
+        """Spud's own reading: never this refusal (he is refused a write into out/ by Law 1, as before, and nothing else)."""
+        r = self.bash(command, None, None)
+        self.assertEqual((r.code, r.stderr), (0, ""), (command, r))
+        if r.stdout:
+            self.assertIn("Spud never produces a deliverable", r.reason, (command, r))
+
+    def test_the_tickets_line_is_refused_naming_the_respelling(self):
+        for command in ("echo 'w ledger/tickets/SPD-001.md' > out/new.sed && sed -f out/new.sed out/keep.txt",
+                        "echo 'w ledger/tickets/SPD-001.md' > out/clean.sed && sed -f out/clean.sed out/keep.txt"):
+            with self.subTest(command):
+                r = self.assertRefused(command, SCRIPT_WRITTEN_WORDING, agent_id=AGENT_G)
+                self.assertIn("one Bash call", r.reason)  # the respelling: write it in one call, run it in the next
+                self.assertIn("`sed`", r.reason)
+                self.assertIn("out/", r.reason)
+                self.assertSpudUnchanged(command)
+                self.assertEqual(self.forms(command), ["written"])
+
+    def test_a_script_the_line_writes_first_is_refused(self):
+        for command in ("cat > out/new.awk <<'EOF'\nBEGIN{system(\"git push\")}\nEOF\nawk -f out/new.awk out/keep.txt",
+                        "tee out/new.sed < list | sed -f out/new.sed out/keep.txt",
+                        "cp out/clean.sed out/new.sed && sed -f out/new.sed out/keep.txt",
+                        "mv out/keep.txt out/clean.sed; sed -n -f out/clean.sed out/keep.txt",
+                        "ln -sf ../list out/clean.awk && awk -f out/clean.awk out/keep.txt",
+                        "printf 'p\\n' >> out/clean.sed; sed -e p -f out/clean.sed out/keep.txt",
+                        "cd out && echo 'w x' > clean.sed && sed -f clean.sed keep.txt",
+                        "echo p > out/clean.sed; sed -f ./out/clean.sed out/keep.txt",
+                        "echo p > out/cle*.sed; sed -f out/clean.sed out/keep.txt",
+                        "echo p > out/new.sed; sed -f out/ne*.sed out/keep.txt",
+                        "echo p > out/new.sed; sed -f out/missing.sed -f out/new.sed out/keep.txt",
+                        "echo p > out/new.awk; awk -f out/new.awk out/keep.txt",
+                        "echo p > out/new.sed; sh -c 'sed -f out/new.sed out/keep.txt'"):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WRITTEN_WORDING, agent_id=AGENT_G)
+                self.assertSpudUnchanged(command)
+
+    def test_a_script_the_line_may_write_while_the_command_runs_is_refused(self):
+        """A write that is later on the line but may land before the command reads its script: its own redirection, the
+        pipeline it runs in, a background job beside it, a loop's next pass, a function called again, a nested reading."""
+        for command in ("sed -f out/clean.sed out/keep.txt > out/clean.sed",
+                        "sed -f out/clean.sed out/keep.txt | tee out/clean.sed",
+                        "awk -f out/clean.awk out/keep.txt | cat > out/clean.awk",
+                        "sed -f out/clean.sed out/keep.txt & cp list out/clean.sed",
+                        "for i in 1 2; do sed -f out/clean.sed out/keep.txt; echo 'w x' > out/clean.sed; done",
+                        "f() { awk -f out/clean.awk out/keep.txt; }; f; echo x > out/clean.awk; f",
+                        "sh -c 'sed -f out/clean.sed out/keep.txt' | tee out/clean.sed"):
+            with self.subTest(command):
+                self.assertRefused(command, SCRIPT_WRITTEN_WORDING, agent_id=AGENT_G)
+                self.assertSpudUnchanged(command)
+
+    def test_a_script_written_after_or_never_is_read_as_before(self):
+        for command in ("sed -f out/clean.sed out/keep.txt; echo 'w x' > out/clean.sed",
+                        "sed -f out/clean.sed out/keep.txt && cp list out/clean.sed",
+                        "awk -f out/clean.awk out/keep.txt > out/count.txt",
+                        "echo x > out/other.txt; sed -f out/clean.sed out/keep.txt",
+                        "sed -f out/clean.sed out/keep.txt | tee out/copy.txt",
+                        "cp out/keep.txt out/tmp/; awk -f out/clean.awk out/keep.txt",
+                        "sed -n -f out/clean.sed out/keep.txt", "awk -f out/clean.awk out/keep.txt",
+                        "sed -f out/missing.sed out/keep.txt"):
+            with self.subTest(command):
+                self.assertNotIn("written", self.forms(command))  # a pipeline's is "rewritable", held against its writes
+                self.assertSilent(command, agent_id=AGENT_G)
+                self.assertSpudUnchanged(command)
+
+    def test_an_earlier_reason_on_the_line_is_kept(self):
+        """Read last, as SPD-145's script shapes are: a write the path rule refuses and a git verb keep their own reasons."""
+        r = self.assertRefused("echo x > docs/y.txt; echo p > out/new.sed; sed -f out/new.sed out/keep.txt", "deliverables",
+                               agent_id=AGENT_G)
+        self.assertNotIn(SCRIPT_WRITTEN_WORDING, r.reason)
+        r = self.assertRefused("git push; echo p > out/new.sed; sed -f out/new.sed out/keep.txt", "Law 7", agent_id=AGENT_G)
+        self.assertNotIn(SCRIPT_WRITTEN_WORDING, r.reason)
+
+
 # SPD-265: profile functions whose own body runs a program the line does not settle, in the shape Claude Code's shell
 # snapshot prints them (tests/test_hooks_snapshots.py's SHELL_SNAPSHOT).
 PROFILE_SCRIPTS = """\
@@ -1836,7 +1935,7 @@ class ProfileScriptWordTest(TreeWriteCase):
 
 
 class UnreadFormsTest(unittest.TestCase):
-    """SPD-262 (SPUD-262/Charlotte): held_text.line_options records ("unread", ("option", shown)) for an option Claude Code's
+    """SPD-262 (SPUD-262/Charlotte): held_options.line_options records ("unread", ("option", shown)) for an option Claude Code's
     shell snapshot sets that the reader does not model, and bash_rule.UNREAD_MESSAGES had no "option", so a member's line
     under such an option failed with a KeyError instead of a reason.  Every form a module of the program records has its
     message."""
