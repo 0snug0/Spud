@@ -860,9 +860,22 @@ class PlantedRepositoryTest(ProjectHookCase):
         self.assertEqual(proc.returncode, 0, proc)
         return {line.rsplit("|", 1)[-1].strip() for line in proc.stderr.splitlines() if line.startswith("import time:")}
 
+    def settle(self):
+        """Every file and directory in the common git directory and in the worktree's git directory an hour old by mtime
+        (ctime stays now: nothing but the kernel sets it).  Both caches keep an entry only once every stamp it is kept
+        under is SETTLED_NS old (SPD-131's findings cache, SPD-238's scopes cache), so a test that wants them warm settles
+        the repository it built first, as PlantedCacheTest.settle does."""
+        then = time.time() - 3600
+        for gitdir in (self.common, self.wt_gitdir):
+            for path in (gitdir, *gitdir.iterdir()):
+                os.utime(path, (then, then))
+        os.utime(self.bad_wt / ".git", (then, then))
+
     def test_the_check_runs_no_git_once_its_caches_are_warm(self):
         """The cost rule: the repository check adds no subprocess to a hook beyond the config scopes' own git run, which
-        happens only after a config file changes; the hooks listing is a scandir."""
+        happens only after a config file changes; the hooks listing is a scandir.  The repository is settled before each
+        warming (settle): an entry is kept only under stamps two seconds old."""
+        self.settle()
         for s, event, payload in ((self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")),
                                   (self.CLAIMED, "PreToolUse", self.bash_p(self.CLAIMED, "git -C %s log" % self.bad_wt)),
                                   (self.CLAIMED, "SessionStart", self.session_start_p(self.CLAIMED))):
@@ -870,6 +883,7 @@ class PlantedRepositoryTest(ProjectHookCase):
                 self.hook_in(s, event, payload)  # warms the worktree list, git's command list and the config scopes
                 self.assertNotIn("subprocess", self.imports_of(s, event, payload))
         self.plant_local("[core]\n\tfsmonitor = /bin/echo\n")  # a config edit: the one git run, then warm again
+        self.settle()  # its new ctime still moves the stamp, so the next call misses and runs git, and keeps what it read
         self.assertIn("subprocess", self.imports_of(self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")))
         self.assertNotIn("subprocess", self.imports_of(self.IN_WT, "PreToolUse", self.bash_p(self.IN_WT, "git status")))
 
