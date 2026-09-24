@@ -78,7 +78,7 @@ Its `hook.denied` data lists `returned`, `planned`, `unbound`, `running` and `se
 - There is no ledger commit. Code deliverables are committed on the worktree branch and pushed; every commit names the ticket.
 - `member new` records the session it runs in (`CLAUDE_CODE_SESSION_ID`), which is why a plan must be made in the session that spawns: a row left planned holds that session's `Stop`.
 - Report entries write themselves: `member finish` of {{identity_name}}'s own child, `proposal decide`, `ticket new`, `ticket move` and a priority change in `ticket edit` each add one, titled from the record, with the `--next` line {{identity_name}} types. `report add "<title>" --next "…"` is for what no command records, such as a merge or an install.
-- Landing without asking dates to 2026-09-14. The suite rule (2026-09-16): the full suite must be green on the branch, a member's recorded green run counts, and it is rerun only when the branch changed after that run or the default branch moved since the branch was cut. In the tool, `python3.14 -I -S tests/suite.py --digest` says whether the tree changed.
+- Landing without asking dates to 2026-09-14. The suite rule (2026-09-16, narrowed on 2026-09-24): a member verifies with the tests its change reaches and records the final line, and runs the full suite only when its brief says so; {{identity_name}} runs the full suite once at landing, on the tree that merges (the default branch merged in when it moved), and never reruns it on an unchanged tree. The reason: a ticket used to get two full runs, the member's and a rerun at landing once the default branch had moved, and only the second proved anything about what deploys. In the tool, `python3.14 -I -S tests/suite.py --changed` is the member's run: it selects modules by the path map `tests/suite_map.json`, falls back to the full suite for any path the map sends there or does not name, and its final line says `affected` (or `full`) and the tree's digest, so it is never taken for a landing run; `tests/suite.py --digest` says whether the tree changed since a full run.
 - A tool ticket that adds a migration merges and runs `spud migrate` in the same shell call, undoing the merge if the migration fails, since every hook runs the main checkout's code and refuses a database behind it.
 - After a merge into the tool: `spud --as spud settings sync` after a hook change; `spud --as spud project sync --all` after `spudagent.md`, the `/spud` skill or the installed hook wiring changes.
 - `ExitWorktree` stays `keep`, because the merge runs at the main checkout after the exit and `remove` would delete the branch before it lands.
@@ -142,7 +142,7 @@ A ticket that is important but deliberately not-now is parked: `spud --as spud t
 
 `EnterWorktree` with name `<ticket key>-<slug>` — the key lower-cased, the slug a few words of the title — creates `.claude/worktrees/<name>` on branch `worktree-<name>` from `origin/<default branch>` and moves the session there. Spudagents inherit that working directory, so their bare deliverable globs are relative to it, and they share it: never pass `isolation: worktree`. Code lives in a project's checkout and never on its default branch; the home holds no code and takes no branch.
 
-The tool checkout's `main` is the running copy: every hook line and both LaunchAgents run `{{launcher}}`, so a merge into that `main` changes the CLI and every hook for every session at once. The full suite passes on the branch before every merge, without exception, and `bin/` is never edited on `main`.
+The tool checkout's `main` is the running copy: every hook line and both LaunchAgents run `{{launcher}}`, so a merge into that `main` changes the CLI and every hook for every session at once. The full suite passes on the tree that merges before every merge, without exception, and `bin/` is never edited on `main`.
 
 One code ticket, one worktree and branch. A session already in a worktree stays there for its ticket; for a second code ticket it leaves with `ExitWorktree` (`keep`) and enters a new one, but only once no spudagent is working in the current worktree.
 
@@ -224,7 +224,7 @@ git -C {{tool}} log --oneline -20   # what has landed in the tool, by ticket
 ```
 
 ```bash
-python3.14 -I -S -m unittest discover -s tests -t tests   # in the tool repository: the serial fallback, about eleven minutes, one run at a time per checkout
+python3.14 -I -S -m unittest discover -s tests -t tests   # in the tool repository: the serial fallback, many times slower, one run at a time per checkout
 ```
 
 ```bash

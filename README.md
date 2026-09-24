@@ -77,6 +77,19 @@ iterating on a smaller area, name the modules, classes or tests to run instead o
 python3.14 -I -S tests/suite.py test_package test_hooks.StopTest
 ```
 
+To run only the tests a change reaches, name the branch it is compared against (default `main`):
+
+```bash
+python3.14 -I -S tests/suite.py --changed main
+```
+
+It takes every file changed since the branch left `main`, committed or not, and runs the test modules
+that `tests/suite_map.json`, a plain data file, names for them. A file the map does not name, or one
+that every test depends on, runs the full suite instead. The last line says `affected` and which rules
+chose the modules, so it is never mistaken for a full run; `--dry-run` shows the choice without
+running anything. A contributor verifies a change this way, and the full suite runs once, at landing,
+on the tree that merges.
+
 Only one run goes at a time on a machine, since two side by side would each take every core. A
 second run waits for the first and says whose run it is waiting for; `--no-wait` makes it exit at once
 with a non-zero status instead. `--background` runs the suite at macOS's background priority, so it is
