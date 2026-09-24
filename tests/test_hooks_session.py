@@ -5,8 +5,8 @@ import os
 import unittest
 from datetime import datetime, timedelta
 
-from helpers import EXIT_ERROR, EXIT_USAGE, load_spud_module, spawn_type, SpudTestCase
-from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, HookCase
+from helpers import EXIT_ERROR, EXIT_USAGE, load_spud_module, spawn_type
+from hookcase import AGENT_A, AGENT_B, AGENT_C, AGENT_D, SESSION, HookCase, InProcessCase
 
 SCHEMA_VERSION = load_spud_module().SCHEMA_VERSION  # the version a fresh init applies (SPD-233: never spelled here)
 
@@ -582,7 +582,7 @@ class FailurePolicyTest(HookCase):
 # =============================================================================
 
 
-class SqlTest(SpudTestCase):
+class SqlTest(InProcessCase):  # SPD-242: the CLI in this process, from the fixture's home (hookcase.InProcessCase)
     def test_readonly_queries_print_a_table_or_json(self):
         t = self.new_ticket("Query")
         proc = self.home.run("sql", "--readonly", "SELECT key, status FROM tickets")
@@ -707,7 +707,7 @@ class LateBindingTest(HookCase):
             self.assertEqual((r.code, r.decision), (0, "allow"), (tail, r))
 
 
-class ArgvAnywhereTest(SpudTestCase):
+class ArgvAnywhereTest(InProcessCase):  # SPD-242
     def test_as_and_json_are_accepted_after_the_subcommand(self):
         t = self.new_ticket("Argv")
         m = self.new_member(t["key"])
@@ -730,7 +730,7 @@ class ArgvAnywhereTest(SpudTestCase):
         self.assertEqual(logged[-1]["body"], "ran with --json and --as before")
 
 
-class ActorEpilogTest(SpudTestCase):
+class ActorEpilogTest(InProcessCase):  # SPD-242
     # SPD-233: the --help half is gone.  It searched for wording df50df1 removed, so it could only ever pass; that --help
     # names `spud hook` and no longer SPD-008 is test_init.InitTest.test_help_says_the_hooks_bind_and_check_as.  The
     # refusal of an unbound agent_id stays.

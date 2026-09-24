@@ -585,6 +585,20 @@ class HookCase(SpudTestCase):
         return self.events("hook.denied")
 
 
+class InProcessCase(HookCase):
+    """A SpudTestCase class whose CLI calls run in this process (SPD-242): HookCase's in-process class home with nothing built
+    over the fixture -- no ticket, no session -- so each test starts from the fixture's home, as a SpudTestCase's does, and
+    its calls answer as bin/spud's own process would (run_main).  A subclass that wants rows before every test makes them
+    in build_home, once per class.  HookCase rather than SpudTestCase, because the leak guard reads the commands it must
+    sample from the in-process HookCase classes (test_hookcase.in_process_commands): a class that runs the CLI in process
+    is one it reads."""
+
+    in_process = True
+
+    def build_home(self):
+        pass
+
+
 # =============================================================================
 # PreToolUse / Bash
 # =============================================================================

@@ -19,8 +19,8 @@ import unittest
 from fractions import Fraction
 from pathlib import Path
 
-from helpers import EXIT_ERROR, TEAM_TABLE_DELIMITER, TEAM_TABLE_HEADER, SpudTestCase, load_spud_module, real_config
-from hookcase import AGENT_A, AGENT_B, COMPLETION, TWO_REQUESTS_SUM, HookCase
+from helpers import EXIT_ERROR, TEAM_TABLE_DELIMITER, TEAM_TABLE_HEADER, load_spud_module, real_config
+from hookcase import AGENT_A, AGENT_B, COMPLETION, TWO_REQUESTS_SUM, HookCase, InProcessCase
 from test_team_card import MEMBER, TICKET_ONE, TICKET_TWO, YUKON_USAGE, cells, frontmatter, member_of, table_rows, team_section, total_row
 
 spud = load_spud_module()
@@ -665,7 +665,7 @@ class PriceTableTest(unittest.TestCase):
                     self.assertEqual(spud.run_cost(check[0], found), check[1])
 
 
-class PriceTableDoctorTest(SpudTestCase):
+class PriceTableDoctorTest(InProcessCase):  # SPD-242: the CLI in this process, from the fixture's home (hookcase.InProcessCase)
     def test_doctor_reports_the_table_and_flags_a_broken_one(self):
         self.home.write_config(config_with(PRICING))
         out = self.home.json("doctor")
@@ -928,7 +928,7 @@ class PriceChangeTest(PricedCase):
 # =============================================================================
 
 
-class CostImportTest(SpudTestCase):
+class CostImportTest(InProcessCase):  # SPD-242
     def write_tree(self, yukon_usage):
         """test_team_card's corpus, with Yukon's usage keys as given."""
         root = self.home.path / "corpus"

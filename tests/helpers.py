@@ -849,14 +849,15 @@ class Snapshot:
         self._scratch.cleanup()
 
 
-_FIXTURES = {}  # (config, home name, project 1): the process's initialised home at its fixed path, as a Snapshot
+_FIXTURES = {}  # (config, home name, project 1, slot): the process's initialised home at its fixed path, as a Snapshot
 
 
-def fixture(config=None, name=None, project=True):
+def fixture(config=None, name=None, project=True, slot=0):
     """The Snapshot of this process's initialised home for this config, home name and registry, built on first use: `spud
-    init` once per process and per key, never per test.  Removed when the process exits."""
+    init` once per process and per key, never per test.  Removed when the process exits.  `slot` 1 is a second home of the
+    same shape at a path of its own, for a test that needs two at once (SPD-242: an import from one home into another)."""
     config = config if config is not None else real_config()
-    key = (json.dumps(config, sort_keys=True), name, project)
+    key = (json.dumps(config, sort_keys=True), name, project, slot)
     if key not in _FIXTURES:
         home = Home(config=config, name=name, warm=True)
         try:

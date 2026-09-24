@@ -16,11 +16,10 @@ from helpers import (
     TEAM_TABLE_DELIMITER as DELIMITER,
     TEAM_TABLE_HEADER as HEADER,
     TEAM_VIEW_EMBED as EMBED,
-    SpudTestCase,
     load_spud_module,
     real_config,
 )
-from hookcase import AGENT_B, COMPLETION, PER_ENTRY_SUM, HookCase
+from hookcase import AGENT_B, COMPLETION, PER_ENTRY_SUM, HookCase, InProcessCase
 
 spud = load_spud_module()
 FIXTURE = json.loads((Path(__file__).resolve().parent / "fixtures" / "team_card.json").read_text(encoding="utf-8"))
@@ -99,8 +98,9 @@ def usage_lines(text):
     return [line for line in frontmatter(text) if line.split(":", 1)[0] in USAGE_KEYS]
 
 
-class TeamCardCase(SpudTestCase):
-    """Builders over the scratch home: direct row writes and a render into <home>/out."""
+class TeamCardCase(InProcessCase):
+    """Builders over the scratch home: direct row writes and a render into <home>/out.  SPD-242: the CLI in this process,
+    and a subclass's rows made once per class in build_home (hookcase.InProcessCase)."""
 
     def sql(self, statement, *params):
         con = self.home.connect()
@@ -251,8 +251,7 @@ class ThreeDeepTest(TeamCardCase):
 class RunAndTokensTest(TeamCardCase):
     CREATED = "2026-09-12T19:00:00-07:00"
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
         self.t = self.new_ticket("Runs")
         self.set("tickets", self.t["id"], created_at=self.CREATED)
 
@@ -345,8 +344,7 @@ class RunAndTokensTest(TeamCardCase):
 class WorkedOnTest(TeamCardCase):
     LINE = "- [[SPUD-001/Russet|Russet]] (01, scout, haiku)"
 
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
         self.t = self.new_ticket("Worked on")
         self.m = self.new_member(self.t["key"], name="Russet")
         self.home.json("member", "start", self.m["ref"], actor="spud")
@@ -413,8 +411,7 @@ class WorkedOnTest(TeamCardCase):
 
 
 class UsageKeysTest(TeamCardCase):
-    def setUp(self):
-        super().setUp()
+    def build_home(self):
         self.t = self.new_ticket("Usage")
         self.m = self.new_member(self.t["key"], name="Pompadour", persona="engineer", model="opus")
         self.set("members", self.m["id"], **POMPADOUR)
@@ -706,7 +703,7 @@ Do it.
 YUKON_USAGE = "duration_ms: 2127776\ntool_uses: 105\ntokens_out: 160812\ntokens_in: 2888805\ntokens_cached: 44345065\n"
 
 
-class TeamImportTest(SpudTestCase):
+class TeamImportTest(InProcessCase):  # SPD-242: the CLI in this process, from the fixture's home (hookcase.InProcessCase)
     def write_tree(self, yukon_usage=YUKON_USAGE):
         root = self.home.path / "corpus"
         tickets = root / "ledger" / "tickets"
