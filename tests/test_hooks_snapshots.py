@@ -11,7 +11,7 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import load_spud_module, wall_clock
-from hookcase import AGENT_A, AGENT_B, AGENT_C, INLINE_WORDING, SCRIPT_WORDING, BashHookCase
+from hookcase import AGENT_A, AGENT_B, AGENT_C, INLINE_WORDING, SCRIPT_WORDING, VARIABLE_WORDING, BashHookCase
 
 
 # A snapshot of the shape Claude Code writes (SPD-133), with a name for each reading the hook makes of one.  The real
@@ -1894,6 +1894,213 @@ class AssignedNameThroughFunctionTest(ShellSnapshotCase):
                      "countgit", "countgit a b"):
             with self.subTest(line=line):
                 self.silent_for_everyone(line)
+
+
+# Profile functions whose variables the call's words or the line's own variables fill through a substitution, a copy, a
+# loop or arithmetic (SPD-258, SPD-253, SPD-248), and ones that fill theirs from their own literals alone.
+MEMBER_FILLED_FUNCTIONS = HARNESS_SHADOWS.replace("# Shadow find/grep", """\
+subgit () {
+\tV=$(echo "$1")
+\tgit $V
+}
+sublocal () {
+\tlocal V=$(echo "$1")
+\tgit $V
+}
+subquoted () {
+\tV="$(echo "$1" | tr a-z a-z)"
+\tgit "$V"
+}
+subglued () {
+\tV=$(echo "x$1" | cut -c2-)
+\tgit $V
+}
+subnested () {
+\tV=$(echo $(echo "$1"))
+\tgit $V
+}
+chainlit () {
+\tV="$1"
+\tW=$(echo $V)
+\tgit $W
+}
+chaincopy () {
+\tV=$(echo "$1")
+\tW=$V
+\tgit $W
+}
+appendgit () {
+\tV=
+\tV+=$(echo "$1")
+\tgit $V
+}
+arithgit () {
+\t(( N = $1 ))
+\tgit $N
+}
+linesub () {
+\tV=$(echo $GITVERB)
+\tgit $V
+}
+linecopy () {
+\tlocal V="${GITVERB:-status}"
+\t[[ -n $X ]] || V=status
+\tgit $V
+}
+linedefault () {
+\t: ${V:=$GITVERB}
+\tgit $V
+}
+lineprint () {
+\tprintf -v V %s "$GITVERB"
+\tgit $V
+}
+loopcmd () {
+\tfor f in "$@"; do $f push; done
+}
+zloopcmd () {
+\tfor f ("$@") $f push
+}
+loopsub () {
+\tfor f in $(echo "$@"); do git $f; done
+}
+loopvar () {
+\tV=$(echo "$1")
+\tfor f in $V; do git $f; done
+}
+subwrite () {
+\tV=$(echo "$1")
+\ttouch $V
+}
+linewrite () {
+\ttouch $OUTFILE
+}
+readstdin () {
+\tread V
+\tgit $V
+}
+ownsub () {
+\tV=$(echo status)
+\tgit $V
+}
+ownloop () {
+\tfor f in git; do $f status; done
+}
+ownarith () {
+\t(( N = RANDOM % 2 ))
+\tgit $N
+}
+# Shadow find/grep""")
+
+
+class MemberFilledValueTest(ShellSnapshotCase):
+    """SPD-258 (proposal by SPUD-225/Bertha), with SPD-253 (SPUD-246/Oliver) and SPD-248 (SPUD-134/Billie) folded in: the
+    prune in analyse_shell_text keeps a function body's finding that names a variable the member filled -- SPD-205's for
+    list over `$@`, a value holding a positional, SPD-254's builtin -- and dropped every other as the body's own.  Three
+    more ways the member's words or the line's own variables reach a body variable were read as the body's:
+
+    - SPD-258: a substitution of a positional, `subgit () { V=$(echo "$1"); git $V }`.  shell/positional sets the call's
+      words in the body before it is read, so the value is a lifted substitution holding no positional any more, and
+      `subgit push` passed a member while the shell ran git push;
+    - SPD-253: a value naming a line variable.  The harness's own shadows copy `${CLAUDE_CODE_EXECPATH:-}` into their
+      `_cc_bin` and run it when it is executable, but the hook kept only `_cc_bin`'s last value, the installed claude, and
+      pruned the doubt on `"$_cc_bin"`: `CLAUDE_CODE_EXECPATH=/tmp/x.sh grep a f` ran the member's own script unread
+      (SPD-145's rule for a file run by its path);
+    - SPD-248 (1): a loop variable over `"$@"` used as the command word, `loopcmd () { for f in "$@"; do $f push; done }`,
+      whose "var" finding the prune excluded by kind.
+
+    The rule now: a body variable is the member's whenever its value can hold what the call's words or the line's own
+    variables supply -- a positional, a substitution shell/positional set the words in, arithmetic that names them, a line
+    variable, another such variable, a variable holding one of the call's own words, and since the call's standard input
+    is the member's as much as its words are, a builtin that reads it -- and every finding kind that names such a
+    variable is kept, a write through one among them.  A variable the body fills from its own literals stays the body's,
+    so the harness's shadows still pass every plain grep, find, rg and pkill.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and -f,
+    and GNU bash 3.2.57, all three alike: `subcmd () { V=$(echo "$1"); printf '<%s>' $V; }; subcmd push` printed <push>, and
+    so did `V="$1"; W=$(echo $V)`; `for f in "$@"; do $f push; done` with `echo` ran `echo push`, and zsh's `for f ("$@") $f
+    zpush` ran it too; a function of the harness's shape run as `CLAUDE_CODE_EXECPATH=/bin/echo shadow a f` ran /bin/echo
+    with `-G a f` in place of its fallback; `echo push | readin` (`read V`) printed <push>.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud, and the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        path = self.write_snapshot("snapshot-zsh-1700000000026-258258.sh", MEMBER_FILLED_FUNCTIONS)
+        newest = path.stat().st_mtime + 60  # newer than SHELL_SNAPSHOT, whose one-line grep it replaces
+        os.utime(path, (newest, newest))
+        self.m = load_spud_module()
+
+    def analysis(self, command):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def refused_not_spud(self, line, needle):
+        with self.subTest(line=line):
+            self.refused_for_members(line, needle)
+            self.assertSilent(line, agent_id=None)
+
+    # -- SPD-258: a substitution of the call's words ------------------------------------------------------------------
+    def test_258_the_tickets_evidence(self):
+        self.assertIn(("var-word", "$V"), self.analysis("subgit push").findings)
+        self.refused_not_spud("subgit push", "cannot resolve")
+        self.refused_not_spud("subgit status", "cannot resolve")  # refused on doubt, a read verb too, as SPD-205's are
+
+    def test_258_every_way_a_substitution_carries_the_words(self):
+        for line in ("sublocal push", "subquoted push", "subglued push", "subnested push", "chainlit push", "chaincopy push",
+                     "appendgit push", "arithgit push", "loopsub push", "loopvar push", "subgit $(echo push)"):
+            self.refused_not_spud(line, "")
+
+    def test_258_a_write_through_a_filled_variable_is_the_member_s(self):
+        """Its target is one the hook cannot resolve, which refuses Spud too, as on a plain line (SPD-091)."""
+        self.refused_for_members("subwrite /tmp/spd-258-x", VARIABLE_WORDING)
+        self.assertRefused("subwrite /tmp/spd-258-x", VARIABLE_WORDING, agent_id=None)
+
+    def test_258_what_the_body_fills_from_its_own_literals_stays_the_body_s(self):
+        for line in ("ownsub", "ownsub x", "ownsub status", "ownloop", "ownloop x", "ownarith", "ownarith 1", "subgit",
+                     "subwrite", "loopcmd"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
+
+    # -- SPD-253: a value naming the line's own variable ----------------------------------------------------------------
+    def test_253_the_harness_s_shadow_runs_the_line_s_execpath(self):
+        for line in ("CLAUDE_CODE_EXECPATH=/tmp/x.sh grep a f", "CLAUDE_CODE_EXECPATH=$(echo /tmp/x.sh) grep a f",
+                     "CLAUDE_CODE_EXECPATH=/tmp/x.sh grep", "CLAUDE_CODE_EXECPATH=/tmp/x.sh find . -name x",
+                     "CLAUDE_CODE_EXECPATH=/tmp/x.sh rg x", "export CLAUDE_CODE_EXECPATH=/tmp/x.sh; grep a f",
+                     "X=/tmp/x.sh; CLAUDE_CODE_EXECPATH=$X grep a f", "grep a f | CLAUDE_CODE_EXECPATH=/tmp/x.sh grep b"):
+            self.refused_not_spud(line, "$_cc_bin")
+
+    def test_253_a_body_value_naming_a_line_variable_is_the_member_s(self):
+        for line in ("GITVERB=$(echo push); linesub", "GITVERB=$(echo push); linecopy", "GITVERB=push; linecopy",
+                     "GITVERB=$(echo push); linedefault", "GITVERB=push; lineprint", "GITVERB=$(echo push); lineprint"):
+            self.refused_not_spud(line, "")
+        self.refused_for_members("OUTFILE=$(echo /tmp/spd-258-x); linewrite", VARIABLE_WORDING)
+        self.assertRefused("OUTFILE=$(echo /tmp/spd-258-x); linewrite", VARIABLE_WORDING, agent_id=None)  # SPD-091
+
+    def test_253_the_shadows_and_the_environment_s_values_stay_silent(self):
+        for line in ("grep a f", "find . -name x | grep y", "grep a f | grep -v b", "grep -c a f; grep -c b f", "pkill -f x",
+                     "rg x", "rg x | grep y", "grep claude f", "grep x /Users/Someone/.local/bin/claude", "linesub",
+                     "linecopy", "linewrite", "linedefault", "lineprint", "X=/tmp/x.sh; grep a f", "cat f | grep x",
+                     "echo x | pkill -f y", "_cc_a=1; grep a f"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
+
+    # -- SPD-248 (1): a loop variable over the words as the command word ------------------------------------------------
+    def test_248_a_loop_variable_over_the_words_as_the_command_word(self):
+        self.refused_not_spud("loopcmd git", "comes from a variable")
+        self.refused_not_spud("loopcmd ls", "comes from a variable")  # refused on doubt, as SPD-205's loop is
+        self.refused_not_spud("zloopcmd git", "comes from a variable")  # zsh's `for f ( ... )` list, read as `in`'s is
+        for line in ("loopcmd", "zloopcmd", "ownloop x"):
+            with self.subTest(line=line):
+                self.silent_for_everyone(line)
+
+    # -- the call's standard input is the member's too -------------------------------------------------------------------
+    def test_a_builtin_reading_the_call_s_input_fills_the_member_s_variable(self):
+        for line in ("echo push | readstdin", "readstdin <<< push", "readstdin < f", "readstdin push"):
+            self.refused_not_spud(line, "cannot resolve")
+        self.silent_for_everyone("readstdin")
 
 
 if __name__ == "__main__":

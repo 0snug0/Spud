@@ -202,6 +202,10 @@ SHELL_TEXT_TOLERATED = frozenset({"var", "var-word", "var-doubt", "glob", "alias
 # `$*`, `$0`..`$9` and every braced form of them (`${@}`, `${@:2}`, `${@:$#}`, `${1:-x}`, `${#@}`, `${1+"$@"}`).  `$HOME`
 # and `$_cc_bin` are not matched -- a name never starts with a digit or one of those two characters.
 POSITIONAL_RE = lazy.LazyPattern(r"\$(?:[0-9@*]|\{[#!]?[0-9@*][^}]*\})")
+# The name a `$NAME` reads, in plain text: braced or not, after a length's `#`, bash's `!` indirection, zsh's flags in
+# parentheses and its `=`, `~`, `^` and `+` (`${#V}`, `${!V}`, `${(q)V}`, `${=V}`, `${+V}`).  What a finding or a value names
+# for the member-filled variables (SPD-205, SPD-258).
+READ_NAME_RE = lazy.LazyPattern(r"\$\{?(?:\([^)]*\))*[#!=~^+]*([A-Za-z_][A-Za-z0-9_]*)")
 # The entry ShellAnalysis.functions and .hashed hold when the line set an element of zsh's `functions` or
 # `commands` parameter whose name the hook cannot read (`functions[$k]=`, `functions+=($pairs)`), so every name the hook
 # reads may now be one.  No command name can hold it.
@@ -685,8 +689,15 @@ class ShellAnalysis:
         self.dashless_loops = set()
         # The variables the call's positional parameters fill inside a shell function's body: a `for`/`select` loop over
         # a list holding `$@`/`$1`.., and a variable a value holding a positional assigns.  A finding naming one of them
-        # is the member's own, so analyse_shell_text's prune keeps it rather than drop it as the body's (SPD-205).
+        # is the member's own, so analyse_shell_text's prune keeps it rather than drop it as the body's (SPD-205).  Since
+        # SPD-258 a value fills one whenever it can carry the call's words (expansions.fill_from): a substitution whose text
+        # shell/positional set them in (`filled_texts`), an arithmetic expression that names one, or another variable they
+        # fill.  `line_filled`, the body variables a value naming one of the line's own variables fills (SPD-253: the
+        # harness's `_cc_bin="${CLAUDE_CODE_EXECPATH:-}"` after `CLAUDE_CODE_EXECPATH=<file>` on the line), which the prune
+        # keeps as it keeps the line's variables themselves; `shell_line_vars`, those variables while the outermost
+        # reading of the shell's text is under way.
         self.member_vars = set()
+        self.filled_texts, self.line_filled, self.shell_line_vars = set(), set(), frozenset()
         # SPD-246: a function body the shell already holds (a snapshot's) runs in the line's shell, so a name it assigns is
         # still set after the call and a later text reads it -- unless the body declared it local, which is gone when it
         # returns.  `line_assigned`, every name assigned where the assignment reaches the line's shell: everything the

@@ -16,6 +16,11 @@ _ARITH_OPEN = syntax._ARITH_SENTINELS["("]
 PROCSUB_FILE = hookio.SUBST + syntax.PROCSUB_MARK
 
 
+def _lifted(word):
+    """How many lifted bodies a word's placeholders pair with, in order (ShellWalk.consume): a `<( )`'s file name none."""
+    return word.count(hookio.SUBST) - word.count(PROCSUB_FILE)
+
+
 def _value_may_start_with_dash(word):
     """Whether a masked word, as the shell expands it, may start with `-`: spelled so, an expansion or an operand
     the line does not spell at its start, or a glob or brace list that may expand to such a word."""
@@ -465,9 +470,21 @@ class ShellWalk:
         # where the body reads them -- one of the member's own words, fills the loop variable with what the member wrote,
         # so a finding on it is the member's own inside a function body (SPD-205, analyse_shell_text's prune).  Only the
         # word just read is tested, so a long list stays linear: each word reaches this once as `t`.
-        word = prepare.deglob(t)
-        if syntax.POSITIONAL_RE.search(word) is not None or word in self.a.shell_words:
-            self.a.fill_members(names)
+        self.fill_loop(names, [t], self.words[:-1])
+
+    def fill_loop(self, names, listed, before):
+        """A for, select or foreach list's words `listed`, after the header's words `before`, fill the loop's `names` with
+        what the member supplies wherever a value would (expansions.fill_from, SPD-258): a positional, one of the call's
+        own words, a substitution shell/positional set them in -- its body the next one lifted, which consume has not
+        paired yet -- a variable they fill, and the line's own variables (SPD-253)."""
+        k = sum(_lifted(w) for w in before)
+        for w in listed:
+            n = _lifted(w)
+            bodies = tuple(self.inner[k : k + n])
+            k += n
+            if prepare.deglob(w) in self.a.shell_words:
+                self.a.fill_members(names)
+            expansions.fill_from(self.a, names, w, bodies + (None,) * (n - len(bodies)))
 
     def end_header(self):
         """The loop's header, or an if/while/until condition ending in `]]`, is complete.  Its body may follow with no `do`
@@ -534,7 +551,7 @@ class ShellWalk:
         self.substitutions = {}  # each word -> the bodies its substitutions lifted, which shell/loop_bindings reads (SPD-146)
         for w in words:
             lifted = []
-            for _ in range(w.count(hookio.SUBST) - w.count(PROCSUB_FILE)):  # a `<( )`'s file name lifted no body
+            for _ in range(_lifted(w)):  # a `<( )`'s file name lifted no body
                 if self.inner:
                     lifted.append(self.inner.pop(0))
                     analyse.analyse_isolated(self.a, lifted[-1], self.depth + 1, *self.substitution_input())
@@ -900,6 +917,9 @@ class ShellWalk:
                     j += 1
                 if unread.process_sub_in(toks[i : j + 1]):  # SPD-198: a `<( )`, `>( )` or `=( )` in a for/foreach list, unread
                     unread.record_unread(self.a, "procsub-list", unread.unread_shown("".join(toks[i : j + 1])))
+                if self.header in _NAMED_LOOPS and self.words and self.loop_names(self.words):
+                    # zsh's `for f ( word ... )`: its words fill the names as an `in` list's do (SPD-258)
+                    self.fill_loop([n for n in self.words if syntax.IDENTIFIER_RE.match(n)], toks[i + 1 : j], self.words)
                 self.words.append("".join(toks[i : j + 1]))
                 i = j
                 # `for (( ... ))`, `repeat (( ... ))`, or a `for`, `select` or `foreach` list after its names closed: its

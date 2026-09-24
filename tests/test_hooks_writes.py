@@ -761,6 +761,38 @@ class XargsInputTest(TreeWriteCase):
                 self.assertNotIn(INPUT_WORDING, r.reason or "")
         self.assertRefused("xargs -J % cp % docs/ < list", "Law 1", agent_id=None)
 
+    def test_248_what_xargs_hands_sed_tar_or_tee_may_be_their_options_and_files(self):
+        """SPD-248 (2) (proposal by SPUD-134/Billie): the words xargs appends may be sed's -i with its script and files,
+        tar's mode with -P or -f, or the files tee writes, and the hook read them as none of these: `echo '-i s/a/b/ f' |
+        xargs sed` and `echo '-xPf a.tar' | xargs tar` recorded no write, where `echo f | xargs sed -i s/a/b/` did.  Read now
+        as SPD-230 read git's: where the input may stand for sed's options every operand may be a file it edits in place,
+        where it may stand for tar's mode the archive may land anywhere, and each word it hands tee is a file tee writes.
+        Probed 2026-09-24 through tests/probes/shell_probe.py (zsh 5.9 -f -o nobareglobqual and -f, bash 3.2.57, this Mac's
+        BSD sed, bsdtar and xargs): `echo "-i '' s/a/b/ f" | xargs sed` edited f, `echo '-i.bak s/a/b/ g' | xargs sed`
+        edited g and left g.bak, `echo '-xf a.tar -C out' | xargs tar` extracted into out, and `echo teefile | xargs tee`
+        made teefile."""
+        m = self.module
+        self.assertEqual(self.writes("echo '-i s/a/b/ f' | xargs sed"), [(m.INPUT_OPERAND, None)] * 2)
+        self.assertEqual(self.writes("echo '-xPf a.tar' | xargs tar"), [(m.ANY_PATH, "tree")])
+        for command in ("echo '-i s/a/b/ f' | xargs sed", "xargs sed < list", "xargs sed -n < list", "xargs sed -e s/a/b/ < list",
+                        "xargs -J % sed % out/x < list", "xargs tee < list", "xargs tee -a < list", "xargs -I% tee out/% < list"):
+            with self.subTest(command):
+                self.assertRefused(command, INPUT_WORDING, agent_id=AGENT_G)
+        for command in ("echo '-xPf a.tar' | xargs tar", "xargs tar < list", "xargs bsdtar < list", "xargs -J % tar % < list",
+                        "xargs tar -C out < list", "X=$(echo -xPf); tar $X a.tar", "X=$(echo xPf); tar $X a.tar"):
+            with self.subTest(command):
+                self.assertRefused(command, ANYWHERE_WORDING, agent_id=AGENT_G)
+        # a script the line spells first, or options that leave the input no place to be one, read as before
+        for command in ("xargs sed s/a/b/ < list", "xargs sed -n 1p < list", "xargs tar -tf < list", "xargs tar -tvf a.tar < list",
+                        "tar -tf a.tar", "tar $TAPE_OPTS -tf a.tar", "sed -n p list"):
+            with self.subTest(command):
+                self.assertSilent(command, agent_id=AGENT_G)
+        for command in ("xargs sed < list", "xargs tar < list", "xargs tee < list"):
+            with self.subTest(command):
+                r = self.bash(command, None)
+                self.assertNotIn(INPUT_WORDING, r.reason or "")
+                self.assertNotIn(ANYWHERE_WORDING, r.reason or "")
+
 
 class RecursiveWriteTest(TreeWriteCase):
     """SPD-126: what a recursive removal, copy or move carries under the directory it names.  Main (08c344e) read `rm -rf
