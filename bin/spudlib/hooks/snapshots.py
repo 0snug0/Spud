@@ -90,6 +90,58 @@ UNALIAS_RE = re.compile(r"^unalias(?P<options>(?: +-[A-Za-z]+)*) +(?P<rest>\S.*)
 # and the closing brace of an indented one is at column 0 there, so the closer is read stripped.
 FUNCTION_RE = re.compile(r"^\s*(?:function\s+)?(?P<name>[^\s(){}=#|&;<>'\"]+)\s*(?:\(\s*\))?\s*\{$")
 
+# Claude Code's own shadows (SPD-247): the body of each function the harness writes after the profile, as Table.body
+# returns it, byte for byte as every snapshot on this Mac held it on 2026-09-24, with CLAUDE_BIN where it writes the claude
+# binary it installed (this Mac's /Users/<user>/.local/bin/claude).  find, grep and rg run that binary as bfs, ugrep and rg
+# through `"$_cc_bin"`, which ${CLAUDE_CODE_EXECPATH:-} may name instead, and fall back to `command <name>`; pkill refuses a
+# pattern matching the CLI's own process, then runs `command pkill`.  shell/held_text.read_shadow reads a call of one as what
+# the full reading of its body records; any other text -- another harness version, a profile's own function of the name, one
+# byte changed -- is read in full (tests/test_hooks_snapshots.py HarnessShadowReadingTest).
+CLAUDE_BIN = "\x00"
+_CLAUDE_BIN_RE = re.compile(r"/(?:[A-Za-z0-9_.+-]+/)*claude\Z")  # an absolute path, no quoting, to a file named claude
+_RUNS_CLAUDE = ('  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"\n  [[ -x $_cc_bin ]] || _cc_bin=' + CLAUDE_BIN + '\n'
+                '  if [[ ! -x $_cc_bin ]]; then command %(name)s ${1+"$@"}; return; fi\n'
+                '  if [[ -n ${ZSH_VERSION:-} ]]; then\n    ARGV0=%(runs)s "$_cc_bin" %(options)s${1+"$@"}\n'
+                '  elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then\n'
+                '    ARGV0=%(runs)s "$_cc_bin" %(options)s${1+"$@"}\n'
+                '  else\n    (exec -a %(runs)s "$_cc_bin" %(options)s${1+"$@"})\n  fi\n')
+HARNESS_SHADOWS = {
+    "find": _RUNS_CLAUDE % {"name": "find", "runs": "bfs", "options": "-S dfs -regextype findutils-default "},
+    "grep": ('  local _cc_a\n  for _cc_a in ${1+"$@"}; do\n'
+             '    case "$_cc_a" in -*-filter*|-*-pager*|-*-view*|-*-format-open*|-*-config*|---*|-@*|-*-save-config*|'
+             '-[Zz]*|-[!-]*[Zz]*|--null|--null-data) command grep ${1+"$@"}; return ;; esac\n'
+             '  done\n' + _RUNS_CLAUDE % {"name": "grep", "runs": "ugrep", "options": "-G --ignore-files --hidden -I "
+                                          "--exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr "
+                                          "--exclude-dir=.jj --exclude-dir=.sl "}),
+    "rg": _RUNS_CLAUDE % {"name": "rg", "runs": "rg", "options": ""},
+    "pkill": ('  if [ -n "${CLAUDE_PID:-}" ] && [ -r "/proc/${CLAUDE_PID}/comm" ]; then\n    local _cc_skip="" _cc_a\n'
+              '    local -a _cc_probe=()\n    for _cc_a in ${1+"$@"}; do\n      if [ -n "$_cc_skip" ]; then _cc_skip=""; continue; fi\n'
+              '      case "$_cc_a" in\n        --signal) _cc_skip=1 ;;\n        --signal=*|-e|--echo) ;;\n        -[0-9]*) ;;\n'
+              '        -[PUGOF]?*) _cc_probe+=("$_cc_a") ;;\n        -[ABCDEFGHIJKLMNOPQRSTUVWXYZ][ABCDEFGHIJKLMNOPQRSTUVWXYZ0-9]*) ;;\n'
+              '        *) _cc_probe+=("$_cc_a") ;;\n      esac\n    done\n'
+              '    if command pgrep ${_cc_probe[@]+"${_cc_probe[@]}"} 2>/dev/null | command grep -qx "${CLAUDE_PID}"; then\n'
+              "      printf 'pkill: refusing to run — this pattern matches the Claude CLI process (PID %s). Narrow the "
+              "pattern, or target your own children with `pkill -P $$ ...`.\\n' \"${CLAUDE_PID}\" >&2\n      return 1\n"
+              "    fi\n  fi\n  command pkill ${1+\"$@\"}\n"),
+}
+_SHADOW_ENDS = {name: text.partition(CLAUDE_BIN)[::2] for name, text in HARNESS_SHADOWS.items()}  # (before, after) the hole
+
+
+def harness_shadow(name, body):
+    """The claude binary the body of the function `name` runs when the body is byte for byte the harness's own shadow
+    (HARNESS_SHADOWS) -- "" for pkill's, which names none -- or None for any other text.  The binary is the one word of the
+    text that differs between machines, taken only as the harness spells it: an absolute path to a file named claude."""
+    ends = _SHADOW_ENDS.get(name)
+    if ends is None or body is None:
+        return None
+    before, after = ends
+    if CLAUDE_BIN not in HARNESS_SHADOWS[name]:
+        return "" if body == before else None
+    if len(body) <= len(before) + len(after) or not body.startswith(before) or not body.endswith(after):
+        return None
+    claude = body[len(before) : len(body) - len(after)]
+    return claude if _CLAUDE_BIN_RE.match(claude) else None
+
 
 class Table:
     """What the shell the Bash tool starts already defines: `aliases`, each name's body as the shell stores it (None for a

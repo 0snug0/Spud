@@ -1,6 +1,8 @@
 """PreToolUse(Bash): Claude Code's shell snapshot (the aliases and functions the shell already defines), and the reader
 failing closed on text it cannot read."""
 
+import contextlib
+import importlib
 import json
 import os
 import shutil
@@ -446,6 +448,28 @@ class RealShellSnapshotTest(BashHookCase):
         effects = [(line, m.option_effect(kind, name, on)) for kind, name, on, line, _ in self.table.options]
         self.assertTrue(effects)
         self.assertEqual([e for e in effects if e[1] is not None], [])
+
+    def test_247_this_macs_shadows_are_the_harness_s_text(self):
+        """SPD-247: every shadow the harness wrote into this Mac's snapshots is the text hooks/snapshots.HARNESS_SHADOWS
+        recognizes, so its calls take the fast reading, which records what the full reading does (HarnessShadowReadingTest).
+        A harness that writes other text fails here first, naming the shadow, and its calls are read in full meanwhile."""
+        m, home = load_spud_module(), str(self.home.path)
+        found = [name for name in ("find", "grep", "rg", "pkill") if name in self.table.functions]
+        if not found:
+            self.skipTest("this profile's snapshots hold none of the harness's shadows")
+        self.assertEqual([n for n in found if m.harness_shadow(n, self.table.body(n)) is None], [])
+
+        def reading(line):
+            marks = {}
+            with mock.patch.dict(os.environ, self.env, clear=True):
+                a = m.analyse_command(line, m.ShellAnalysis(cwd=home, home=home))
+            return {name: canonical(value, marks) for name, value in vars(a).items()}
+        for line in ("grep -rn x .", "find . -name '*.py' | grep -v y", "rg -n foo src", "pkill -f 'node server'",
+                     "CLAUDE_CODE_EXECPATH=/tmp/x.sh grep a f", "x=status; grep -rn x .; git $x"):
+            with self.subTest(line=line):
+                with mock.patch("spudlib.hooks.snapshots.harness_shadow", return_value=None):
+                    full = reading(line)
+                self.assertEqual(reading(line), full)
 
 
 SETTLED_SNAPSHOT = """\
@@ -2694,6 +2718,380 @@ class SnapshotOptionsTest(ShellSnapshotCase):
         cache.write_text(json.dumps(old), encoding="utf-8")
         self.assertEqual(self.written_in("cd dest; echo x > f", "f"), [None])
         self.assertIn("options", json.loads(cache.read_text(encoding="utf-8")))
+
+
+# Claude Code's own shadows byte for byte as every snapshot on this Mac held them on 2026-09-24
+# (snapshot-zsh-1790263809802-78wrv5.sh, the four before it alike), the harness's comment lines and rg's `if` included, with
+# the Mac's claude path spelled as a scratch one: the text hooks/snapshots.HARNESS_SHADOWS recognizes.  HARNESS_SHADOWS above
+# spells pkill's dash `--` where the harness writes `—`, so its pkill is other text, read in full; its find, grep and rg
+# are the harness's, which every test using it now reads through held_text.read_shadow.
+SCRATCH_CLAUDE = "/Users/Someone/.local/bin/claude"
+THIS_MACS_SHADOWS = """\
+# Check for rg availability
+if ! (unalias rg 2>/dev/null; command -v rg) >/dev/null 2>&1; then
+  function rg {
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  [[ -x $_cc_bin ]] || _cc_bin=/Users/Someone/.local/bin/claude
+  if [[ ! -x $_cc_bin ]]; then command rg ${1+"$@"}; return; fi
+  if [[ -n ${ZSH_VERSION:-} ]]; then
+    ARGV0=rg "$_cc_bin" ${1+"$@"}
+  elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
+    ARGV0=rg "$_cc_bin" ${1+"$@"}
+  else
+    (exec -a rg "$_cc_bin" ${1+"$@"})
+  fi
+}
+fi
+# Shadow find/grep with embedded bfs/ugrep
+unalias find 2>/dev/null || true
+unalias grep 2>/dev/null || true
+function find {
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  [[ -x $_cc_bin ]] || _cc_bin=/Users/Someone/.local/bin/claude
+  if [[ ! -x $_cc_bin ]]; then command find ${1+"$@"}; return; fi
+  if [[ -n ${ZSH_VERSION:-} ]]; then
+    ARGV0=bfs "$_cc_bin" -S dfs -regextype findutils-default ${1+"$@"}
+  elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
+    ARGV0=bfs "$_cc_bin" -S dfs -regextype findutils-default ${1+"$@"}
+  else
+    (exec -a bfs "$_cc_bin" -S dfs -regextype findutils-default ${1+"$@"})
+  fi
+}
+function grep {
+  local _cc_a
+  for _cc_a in ${1+"$@"}; do
+    case "$_cc_a" in -*-filter*|-*-pager*|-*-view*|-*-format-open*|-*-config*|---*|-@*|-*-save-config*|-[Zz]*|-[!-]*[Zz]*|--null|--null-data) command grep ${1+"$@"}; return ;; esac
+  done
+  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"
+  [[ -x $_cc_bin ]] || _cc_bin=/Users/Someone/.local/bin/claude
+  if [[ ! -x $_cc_bin ]]; then command grep ${1+"$@"}; return; fi
+  if [[ -n ${ZSH_VERSION:-} ]]; then
+    ARGV0=ugrep "$_cc_bin" -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl ${1+"$@"}
+  elif [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "cygwin" ]] || [[ "$OSTYPE" == "win32" ]]; then
+    ARGV0=ugrep "$_cc_bin" -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl ${1+"$@"}
+  else
+    (exec -a ugrep "$_cc_bin" -G --ignore-files --hidden -I --exclude-dir=.git --exclude-dir=.svn --exclude-dir=.hg --exclude-dir=.bzr --exclude-dir=.jj --exclude-dir=.sl ${1+"$@"})
+  fi
+}
+# Shadow pkill to refuse patterns matching the CLI process
+unalias pkill 2>/dev/null || true
+function pkill {
+  if [ -n "${CLAUDE_PID:-}" ] && [ -r "/proc/${CLAUDE_PID}/comm" ]; then
+    local _cc_skip="" _cc_a
+    local -a _cc_probe=()
+    for _cc_a in ${1+"$@"}; do
+      if [ -n "$_cc_skip" ]; then _cc_skip=""; continue; fi
+      case "$_cc_a" in
+        --signal) _cc_skip=1 ;;
+        --signal=*|-e|--echo) ;;
+        -[0-9]*) ;;
+        -[PUGOF]?*) _cc_probe+=("$_cc_a") ;;
+        -[ABCDEFGHIJKLMNOPQRSTUVWXYZ][ABCDEFGHIJKLMNOPQRSTUVWXYZ0-9]*) ;;
+        *) _cc_probe+=("$_cc_a") ;;
+      esac
+    done
+    if command pgrep ${_cc_probe[@]+"${_cc_probe[@]}"} 2>/dev/null | command grep -qx "${CLAUDE_PID}"; then
+      printf 'pkill: refusing to run — this pattern matches the Claude CLI process (PID %s). Narrow the pattern, or target your own children with `pkill -P $$ ...`.\\n' "${CLAUDE_PID}" >&2
+      return 1
+    fi
+  fi
+  command pkill ${1+"$@"}
+}
+"""
+SHADOWS = ("find", "grep", "rg", "pkill")
+# The words a call hands a shadow, one of each kind the reading tells apart (held_text.read_shadow): literal ones, quoted
+# ones whose sentinels it takes off, a dash that keeps grep's loop from being dashless, names the words spell and the
+# bodies' own, the primaries find acts on, and what expands -- read in full, and compared all the same
+SHADOW_WORDS = ("x", "-rn", "-v", "--color=auto", "--", "-", "-Z", "-9", "-KILL", "--signal", ".", "/tmp", "src/a.py", "~/x",
+                "'def foo'", "'*.py'", "*.py", "'a|b'", "'$HOME'", "'^$'", "'$1'", "$X", "$$", "$(echo x)", "{a,b}", "''",
+                "-delete", "-exec echo {} ;", "-fprint out", "-name", "_cc_bin", "_cc_a", "ARGV0", "IFS", "in", "a=b")
+# ... and the lines a call stands in: pipes, lists, what a line assigns or defines before it, the wrappers and readings it
+# is read behind, and every way SPD-253 and SPD-258 set CLAUDE_CODE_EXECPATH for it
+SHADOW_CONTEXTS = ("{}", "cd /tmp && {}", "cat f | {}", "{} | head", "x=1; {}", "x=status; {}; git $x", "find . -name y | {}",
+                   "grep a f | {}", "{}; {}", "pkill -f z; {}", "for i in a b; do {}; done", "while true; do {}; done",
+                   "for ((i = 0; i < 2; i++)); do {}; done", "echo $({})", "{} > out",
+                   "echo 'git push' | {}", "noglob {}", "exec {}", "command {}", "xargs {}", "eval '{}'", "sh -c '{}'",
+                   "f(){{ :; }}; {}", "alias g=grep; {}", "ARGV0=z; {}", "typeset -i ARGV0; {}", "_cc_bin=/tmp/x; {}",
+                   "OSTYPE=msys; {}", "PATH=/x:$PATH; {}", "IFS=:; {}", "setopt x; {}", "source f; {}",
+                   "hash grep=/tmp/g; {}", "cd $Q; {}", "n=$(basename a/b); {}; echo $n",
+                   "CLAUDE_CODE_EXECPATH=/tmp/x.sh {}", "CLAUDE_CODE_EXECPATH=$(echo /tmp/x.sh) {}",
+                   "export CLAUDE_CODE_EXECPATH=/tmp/x.sh; {}", "X=/tmp/x.sh; CLAUDE_CODE_EXECPATH=$X {}",
+                   "{} | CLAUDE_CODE_EXECPATH=/tmp/x.sh {}", ": ${{OSTYPE:=x}}; {}", "find . -exec {} {{}} \\;",
+                   "echo $(echo $(echo $(echo $(echo $({})))))", "echo $(echo $(echo $(echo $(echo $(echo $({}))))))",
+                   "hash command=/tmp/c; {}", "hash exec=/tmp/e; {}", "(IFS=:); {}", "(OSTYPE=msys); {}",
+                   "command() {{ :; }}; {}", "alias command=x; eval '{}'", "trap 'cd /' EXIT; {}")
+SHADOW_CALLS = ("grep -rn x .", "grep -v y", "grep -c 'a b' f", "find . -name x", "find src -type f", "rg foo",
+                "rg -n 'a|b' src", "pkill -f node", "pkill x", "grep", "find", "rg", "pkill")
+# The lines the fast reading takes (analyse_shell_text reads nothing), each shadow call on them once
+FAST_LINES = (("grep -rn x .", 1), ("find . -name x", 1), ("rg x", 1), ("pkill x", 1), ("grep a f | grep -v b", 2),
+              ("find . -name '*.py' | grep y", 2), ("grep -rn 'def foo' .", 1), ("cat f | grep x", 1),
+              ("cd /tmp && rg -n 'a|b' src", 1), ("pkill -f 'node server'", 1), ("grep -c a f; grep -c b f", 2),
+              ("git log --oneline | grep fix | head -3", 1), ("rg x; find . -type f; grep -v y f; pkill z", 4))
+# ... and lines one of whose calls reads its body in full, one for each of read_shadow's conditions
+FULL_LINES = ("eval 'grep a f'", "while true; do grep x f; done", "for f in a b; do grep x f; done", "f() { grep x f; }; f",
+              "source f; grep a f", "f(){ :; }; grep a f", "hash command=/tmp/c; grep a f", "alias g=grep; grep a f",
+              "setopt x; grep a f", "echo $(echo $(echo $(echo $(echo $(echo $(grep a f))))))", "PATH=/x:$PATH; grep a f",
+              "grep -rn $X .", "grep x *.py", "find . -exec grep x {} \\;", "grep '$1' f", "grep '$HOME' f", "grep _cc_bin f",
+              "find . -name x -delete", "CLAUDE_CODE_EXECPATH=/tmp/x.sh grep a f", "IFS=:; grep a f", "OSTYPE=msys; grep a f",
+              "(IFS=:); grep a f", "typeset -i ARGV0; grep a f", ": ${OSTYPE:=x}; grep a f")
+
+
+def canonical(value, marks):
+    """A value of the analysis with every bare object() in it -- a reading's mark, made anew for each reading -- named by
+    the order it first appears in, so two readings of one line compare equal wherever they differ only in the marks."""
+    if type(value) is object:
+        return marks.setdefault(id(value), "mark %d" % len(marks))
+    if isinstance(value, dict):
+        return {canonical(k, marks): canonical(v, marks) for k, v in value.items()}
+    if isinstance(value, (set, frozenset)):
+        return frozenset(canonical(v, marks) for v in value)
+    if isinstance(value, (list, tuple)):
+        return type(value)(canonical(v, marks) for v in value)
+    return value
+
+
+class HarnessShadowReadingTest(ShellSnapshotCase):
+    """SPD-247 (proposal 349 by SPUD-134/Billie): Claude Code writes its own grep, find, rg and pkill into every shell
+    snapshot, in a fixed shape (THIS_MACS_SHADOWS), and each hands the call's words on through `${1+"$@"}`, so SPD-134's judge
+    of inert bodies could never pass them over: each call's body was read in full, at 0.8 to 1.5 ms of the Bash hook a call.
+    held_text.read_shadow now records for a body that is byte for byte the harness's (hooks/snapshots.harness_shadow) what
+    the full reading of it records, without reading it, and reads any other text, or a call whose line the fixed record
+    does not fit, in full.
+
+    The proof is here: every field of the analysis and the hook's answer, for member and Spud, are the full reading's --
+    forced by making harness_shadow recognize nothing -- on each shape and every kind of word and line the reading tells
+    apart, the CLAUDE_CODE_EXECPATH lines of SPD-253 and SPD-258 among them; a changed byte is read in full; and proposal
+    348's leak (a shadow's locals counted as the line's), fixed by SPD-246, stays fixed on both readings.  The fixed record
+    was measured on the reader as it stands: a change to it that moves what a harness body records fails here, and
+    held_text._SHADOW_READINGS is measured again.  AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        path = self.write_snapshot("snapshot-zsh-1700000000247-247247.sh", THIS_MACS_SHADOWS)
+        newest = path.stat().st_mtime + 60  # newer than SHELL_SNAPSHOT, whose one-line grep it replaces
+        os.utime(path, (newest, newest))
+        self.m = load_spud_module()
+        self.held_text = importlib.import_module("spudlib.shell.held_text")
+
+    def full(self):
+        """The full reading, forced: no body is the harness's text."""
+        return mock.patch("spudlib.hooks.snapshots.harness_shadow", return_value=None)
+
+    def counted(self):
+        """analyse_shell_text, counted: once for each body read in full."""
+        return mock.patch("spudlib.shell.held_text.analyse_shell_text", wraps=self.held_text.analyse_shell_text)
+
+    def spied(self):
+        """read_shadow, spied: `self.fast` holds its answer for each call it was asked about, True where it recorded the
+        body without reading it."""
+        real, self.fast = self.held_text.read_shadow, []
+
+        def spy(*args):
+            self.fast.append(real(*args))
+            return self.fast[-1]
+        return mock.patch("spudlib.shell.held_text.read_shadow", side_effect=spy)
+
+    def analysis(self, command):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def reading(self, command):
+        marks = {}
+        return {name: canonical(value, marks) for name, value in vars(self.analysis(command)).items()}
+
+    def bodies(self):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            table = self.m.shell_table(str(self.home.path))
+            return {name: table.body(name) for name in SHADOWS}
+
+    def corpus(self):
+        lines = [name for name in SHADOWS] + ["%s %s" % (name, w) for name in SHADOWS for w in SHADOW_WORDS]
+        lines += [context.format(call, call.replace("x", "y")) for context in SHADOW_CONTEXTS for call in SHADOW_CALLS[:10]]
+        lines += [one + sep + two for one in SHADOW_CALLS[::2] for two in SHADOW_CALLS[1::2] for sep in (" | ", "; ")]
+        return lines + ["; ".join("grep %d f" % i for i in range(10)), "grep a f; grep a f"]
+
+    def test_the_harness_s_text_is_recognized_shape_by_shape(self):
+        bodies = self.bodies()
+        for name in SHADOWS:
+            with self.subTest(name=name):
+                self.assertEqual(self.m.harness_shadow(name, bodies[name]), "" if name == "pkill" else SCRATCH_CLAUDE)
+                self.assertIsNone(self.m.harness_shadow("egrep", bodies[name]))  # the text of one shadow is no other's
+        # SHELL_SNAPSHOT's one-line grep, and HARNESS_SHADOWS's pkill with `--` for the harness's dash, are other text
+        self.assertIsNone(self.m.harness_shadow("grep", '  local _cc_bin="${CLAUDE_CODE_EXECPATH:-}"\n'
+                                                        '  ARGV0=ugrep "$_cc_bin" ${1+"$@"}\n'))
+        self.assertIsNone(self.m.harness_shadow("pkill", bodies["pkill"].replace("—", "--")))
+
+    def test_a_changed_byte_is_read_in_full(self):
+        """One byte changed anywhere outside the claude path -- or in it, where the path is then no absolute path to a file
+        named claude -- and the body is no harness shadow: it is read in full, which the fast reading then equals."""
+        bodies = self.bodies()
+        for name, body in bodies.items():
+            path = body.find(SCRATCH_CLAUDE)
+            for at in sorted({0, 1, len(body) // 3, len(body) // 2, body.find('${1+"$@"}') + 2, len(body) - 3, len(body) - 1}):
+                if 0 <= path <= at < path + len(SCRATCH_CLAUDE):
+                    continue
+                changed = body[:at] + ("X" if body[at] != "X" else "Y") + body[at + 1 :]
+                with self.subTest(name=name, at=at):
+                    self.assertIsNone(self.m.harness_shadow(name, changed))
+        for spelled in ("/Users/Someone/.local/bin/claudex", "Users/Someone/.local/bin/claude", "/Users/Some one/claude",
+                        "$HOME/.local/bin/claude", "/Users/Someone/.local/bin/claude;x", "~/.local/bin/claude"):
+            with self.subTest(spelled=spelled):
+                self.assertIsNone(self.m.harness_shadow("rg", bodies["rg"].replace(SCRATCH_CLAUDE, spelled)))
+        # ... and a line calling one read in full: a snapshot newer than the fixture's, one byte changed in each shadow
+        for name, old, new in (("find", "-S dfs", "-S bfs"), ("grep", " -G ", " -E "), ("rg", "ARGV0=rg", "ARGV0=rG"),
+                               ("pkill", "_cc_skip=1", "_cc_skip=2")):
+            with self.subTest(name=name):
+                text = THIS_MACS_SHADOWS.replace(old, new, 1)
+                self.assertEqual(len(text), len(THIS_MACS_SHADOWS))
+                path = self.write_snapshot("snapshot-zsh-1700000000248-%s.sh" % name, text)
+                newest = time.time() + 120 + SHADOWS.index(name)
+                os.utime(path, (newest, newest))
+                forget_process_caches()
+                self.assertIsNone(self.m.harness_shadow(name, self.bodies()[name]))
+                line = "%s -rn x ." % name
+                with self.full():
+                    full = self.reading(line)
+                with self.counted() as read, self.spied():
+                    self.assertEqual(self.reading(line), full)
+                self.assertEqual((read.call_count, self.fast), (1, []))
+
+    def test_the_fast_reading_records_what_the_full_reading_records(self):
+        """Every field of the analysis, on every line of the corpus: each shape with each kind of word, in each kind of line,
+        and the shapes in pairs.  The text a call's words are set in is among them (bodies_read), so shadow_text is
+        positional.substitution's wherever the reading ran."""
+        fast = 0
+        for line in self.corpus():
+            with self.subTest(line=line):
+                with self.full():
+                    full = self.reading(line)
+                with self.spied():
+                    self.assertEqual(self.reading(line), full)
+                fast += True in self.fast
+        self.assertGreater(fast, 200)  # the fast reading ran on these lines, not only the fallback
+
+    def test_the_fast_reading_runs_where_the_record_fits(self):
+        for line, calls in FAST_LINES:
+            with self.subTest(line=line):
+                with self.counted() as read, self.spied():
+                    self.analysis(line)
+                self.assertEqual((read.call_count, self.fast), (0, [True] * calls))
+                with self.full(), self.counted() as read:
+                    self.analysis(line)
+                self.assertEqual(read.call_count, calls)
+        for line in FULL_LINES:
+            with self.subTest(line=line), self.spied():
+                self.analysis(line)
+                self.assertIn(False, self.fast)
+                self.assertNotIn(True, self.fast)
+
+    def assertReadInFull(self, line, in_full=True):
+        """The line records what the full reading forced on it records, and no shadow's body is recorded without being
+        read (`in_full`), or one is."""
+        with self.full():
+            full = self.reading(line)
+        with self.spied():
+            self.assertEqual(self.reading(line), full)
+        self.assertEqual(True not in self.fast, in_full, self.fast)
+
+    def with_profile(self, text, number):
+        """A snapshot of the profile's own, older than the harness's shadows, so its names are the table's where the
+        shadows' snapshot names none of them; the one before it removed."""
+        for old in self.snapshots.glob("snapshot-zsh-1600000000000-*.sh"):
+            old.unlink()
+        path = self.write_snapshot("snapshot-zsh-1600000000000-%06d.sh" % number, text)
+        os.utime(path, (1600000000, 1600000000))
+        forget_process_caches()
+
+    def test_a_shadow_inside_the_text_the_shell_holds_is_read_in_full(self):
+        """A profile function or alias that runs grep: the call is read inside that text, whose prune is not the one the
+        fixed record was measured under (analyse_shell_text's outermost reading)."""
+        self.with_profile("# Functions\nlsgrep () {\n\tls | grep \"$1\"\n}\n# Aliases\nalias -- gr='grep -n'\n", 1)
+        for line in ("lsgrep x", "gr x f", "gr -v y f | lsgrep z", "ls | gr x"):
+            with self.subTest(line=line):
+                self.assertReadInFull(line)
+
+    def test_a_profile_that_holds_a_word_the_bodies_look_up_is_read_in_full(self):
+        """Any of the words a shadow's body looks up (held_text._SHADOW_LOOKUPS, and the claude binary where the body runs
+        it), defined by the profile, is read as the profile defines it, so the body is read in full."""
+        for number, word in enumerate(("local", "[[", "[", "command", "return", "exec", "printf", "continue", SCRATCH_CLAUDE)):
+            self.with_profile("# Functions\n%s () {\n\t:\n}\n" % word, number)
+            for line in ("grep -rn x .", "pkill x", "find . -name x", "rg x"):
+                with self.subTest(word=word, line=line):
+                    self.assertReadInFull(line, in_full=(word, line) != (SCRATCH_CLAUDE, "pkill x"))
+
+    def test_a_claude_that_is_a_spud_launcher_is_read_in_full(self):
+        """The binary is run by its path, so a link named claude to bin/spud is a spud call, which the fixed record is not."""
+        link = self.home.path / "linked" / "claude"
+        link.parent.mkdir()
+        link.symlink_to(self.home.launcher)
+        path = self.write_snapshot("snapshot-zsh-1700000000249-249249.sh", THIS_MACS_SHADOWS.replace(SCRATCH_CLAUDE, str(link)))
+        newest = time.time() + 300
+        os.utime(path, (newest, newest))
+        forget_process_caches()
+        self.assertEqual(self.m.harness_shadow("grep", self.bodies()["grep"]), str(link))
+        for line in ("grep -rn x .", "find . -name x", "rg x"):
+            with self.subTest(line=line):
+                self.assertReadInFull(line)
+
+    def test_the_words_are_set_as_positional_sets_them(self):
+        bodies, positional = self.bodies(), importlib.import_module("spudlib.shell.positional")
+        for line in ["%s %s" % (name, w) for name in SHADOWS for w in SHADOW_WORDS] + ["grep 'a b' '' c", "rg"]:
+            for name, readings in self.analysis(line).bodies_read.items():
+                for text, words, _ in readings:
+                    with self.subTest(line=line):
+                        self.assertEqual(positional.substitution(bodies[name], list(words)), (text, True, ()))
+                        self.assertEqual(self.m.shadow_text(bodies[name], list(words)), text)
+
+    def test_the_hook_answers_as_the_full_reading_does(self):
+        """Member and Spud, allowed or refused, and the reason word for word."""
+        lines = ("grep -rn x .", "find . -name x", "rg x", "pkill x", "grep -rn 'def foo' . | head", "find . -name '*.py' | grep y",
+                 "grep -c a f; grep -c b f", "cat f | grep x > out.txt", "grep -rn x . > ledger/Home.md", "find . -type f -name x",
+                 "rg -n --color=never foo src", "pkill -f 'node server'", "x=status; grep -rn x .; git $x",
+                 "grep x f; git push", "find . -exec git push \\;", "grep -rn x .; spud board",
+                 "CLAUDE_CODE_EXECPATH=/tmp/x.sh grep a f", "CLAUDE_CODE_EXECPATH=$(echo /tmp/x.sh) grep a f",
+                 "export CLAUDE_CODE_EXECPATH=/tmp/x.sh; grep a f", "X=/tmp/x.sh; CLAUDE_CODE_EXECPATH=$X grep a f",
+                 "CLAUDE_CODE_EXECPATH=/tmp/x.sh find . -name x", "CLAUDE_CODE_EXECPATH=/tmp/x.sh rg x",
+                 "grep a f | CLAUDE_CODE_EXECPATH=/tmp/x.sh grep b", "CLAUDE_CODE_EXECPATH=/tmp/x.sh pkill x")
+        for line in lines:
+            for caller in (AGENT_A, None):
+                with self.subTest(line=line, caller=caller):
+                    with self.full():
+                        full = self.bash(line, caller)
+                    fast = self.bash(line, caller)
+                    self.assertEqual((fast.code, fast.stdout, fast.stderr), (full.code, full.stdout, full.stderr))
+
+    def test_the_execpath_lines_stay_refused(self):
+        """SPD-253 and SPD-258: a line that sets CLAUDE_CODE_EXECPATH before a shadow runs the member's own file where
+        claude would run; the line holds the name the body reads, so the body is read in full, which refuses it."""
+        for line in ("CLAUDE_CODE_EXECPATH=/tmp/x.sh grep a f", "CLAUDE_CODE_EXECPATH=$(echo /tmp/x.sh) grep a f",
+                     "export CLAUDE_CODE_EXECPATH=/tmp/x.sh; grep a f", "X=/tmp/x.sh; CLAUDE_CODE_EXECPATH=$X grep a f",
+                     "CLAUDE_CODE_EXECPATH=/tmp/x.sh find . -name x", "CLAUDE_CODE_EXECPATH=/tmp/x.sh rg x",
+                     "grep a f | CLAUDE_CODE_EXECPATH=/tmp/x.sh grep b"):
+            with self.subTest(line=line):
+                with self.spied():
+                    self.analysis(line)
+                self.assertEqual(self.fast[-1], False)  # the call CLAUDE_CODE_EXECPATH is set for
+                self.refused_for_members(line, "$_cc_bin")
+                self.assertSilent(line, agent_id=None)
+
+    def test_proposal_348_a_shadow_s_locals_are_not_the_line_s(self):
+        """SPD-246 fixed it: the first shadow's own `_cc_bin` counted as the line's variable, and the second one's
+        `"$_cc_bin"` was kept as the member's, refusing every member these lines.  On both readings no shadow leaves its
+        locals among the line's variables, and the lines pass."""
+        for reading in ("fast", "full"):
+            with self.full() if reading == "full" else contextlib.nullcontext():
+                for line in ("find . -name x | grep y", "grep a f | grep -v b", "grep -c a f; grep -c b f", "rg x | grep y",
+                             "grep a f; rg b; find . -name c", "pkill -f x; grep a f"):
+                    with self.subTest(reading=reading, line=line):
+                        a = self.analysis(line)
+                        self.assertNotIn(("var-doubt", "$_cc_bin"), a.findings)
+                        self.assertTrue({"_cc_bin", "_cc_a"}.isdisjoint(a.line_assigned), a.line_assigned)
+                        self.assertNotIn("_cc_bin", a.vars)
+                        self.silent_for_everyone(line)
 
 
 if __name__ == "__main__":
