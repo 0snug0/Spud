@@ -4,12 +4,16 @@ It began in shell/git_config, for a member's git call, and lives here, below the
 caller but a plain session's), the SessionStart context and `spud board --brief` (one line naming a checkout with a
 finding), and `spud doctor` (every finding).  It stays one module past the size rule's look-again point because it is one
 reading of one repository -- where git finds it, the config it sets for itself and the hooks it runs, and whether it is a
-known checkout's own -- and every reader asks all of it in the same order."""
+known checkout's own -- and every reader asks all of it in the same order.  The findings cache (SPD-131) keeps that
+reading per checkout under the stat of every file it came from, so it lives beside the reading it must stay exact to:
+apart, a change to what the reading opens would not show in what the cache stamps."""
 
 import contextlib
 import json
 import os
 import re
+import stat
+import time
 
 from . import hookio, worktrees
 from ..core import homeconf, lazy
@@ -188,15 +192,17 @@ def git_scope_config_files(gitdir, commondir):
 
 def git_config_fingerprint(files):
     """What changes when the config a repository sets for itself changes, read without running git: the stat of each file
-    git reads at its local and worktree scopes; a file that is not there is recorded as absent, so one that appears later
-    is a change too."""
+    git reads at its local and worktree scopes (and, for the findings cache, of a commondir file and a hooks directory); a
+    file that is not there is recorded as absent, so one that appears later is a change too.  The ctime is in it because a
+    program can put an mtime back (os.utime) after writing the same number of bytes in place, and nothing but the kernel
+    sets a ctime: utime itself moves it (SPD-131)."""
     out = []
     for path in files:
         try:
             st = os.stat(path)
-            out.append([path, st.st_mtime_ns, st.st_size, st.st_ino])
+            out.append([path, st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns])
         except OSError:
-            out.append([path, None, None, None])
+            out.append([path, None, None, None, None])
     return out
 
 
@@ -224,10 +230,11 @@ _SCOPES_READ = {}  # the cache file -> (its stat, what it held when read), so on
 
 
 def git_scopes_cache(cache):
-    """What <home>/.spud/git-config-scopes.json holds, {} when it is missing or unreadable.  Parsed once per process while
-    its stat stays the same: SessionStart and doctor read every checkout's entry in one run, and a repository with
-    many branches keeps hundreds of keys there.  A write replaces the file, which changes its inode, so it is read again.
-    The dict is shared: git_own_config_keys builds a new one before it changes anything."""
+    """What a cache file of this module's in the state directory holds (git-config-scopes.json, git-checkout-findings.json),
+    {} when it is missing, unreadable or not a JSON object.  Parsed once per process while its stat stays the same:
+    SessionStart and doctor read every checkout's entry in one run, and a repository with many branches keeps hundreds of
+    keys there.  A write replaces the file, which changes its inode, so it is read again.  The dict is shared: a writer
+    builds a new one before it changes anything, and a reader checks every entry's shape before it trusts it."""
     try:
         st = os.stat(cache)
     except OSError:
@@ -271,18 +278,26 @@ def git_own_config_keys(home, where, gitdir, commondir):
         return None
     keys = [[scope, key] for scope, key in listed if scope in GIT_OWN_SCOPES]
     if cache and os.path.isdir(state):
-        stored = {k: v for k, v in stored.items() if k != gitdir}
-        for extra in sorted(stored)[:max(0, len(stored) - GIT_CONFIG_SCOPES_KEPT + 1)]:
-            del stored[extra]
-        stored[gitdir] = {"fingerprint": fingerprint, "keys": keys}
-        tmp = "%s.%d.tmp" % (cache, os.getpid())
-        with contextlib.suppress(OSError):
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(stored, f)
-            os.replace(tmp, cache)
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
+        git_cache_write(cache, stored, {gitdir: {"fingerprint": fingerprint, "keys": keys}})
     return keys
+
+
+def git_cache_write(cache, stored, entries):
+    """Replace the cache file with `stored` (what git_scopes_cache read, left unchanged) and `entries` over it, keeping
+    GIT_CONFIG_SCOPES_KEPT entries.  Written beside it and renamed over it, so a concurrent reader sees one whole file or the
+    other; two writers racing lose one's entries, which the next run reads as a miss.  A file that cannot be written is left
+    as it was."""
+    kept = {k: v for k, v in stored.items() if k not in entries}
+    for extra in sorted(kept)[:max(0, len(kept) + len(entries) - GIT_CONFIG_SCOPES_KEPT)]:
+        del kept[extra]
+    kept.update(entries)
+    tmp = "%s.%d.tmp" % (cache, os.getpid())
+    with contextlib.suppress(OSError):
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(kept, f)
+        os.replace(tmp, cache)
+    with contextlib.suppress(OSError):
+        os.unlink(tmp)
 
 
 # -- a known checkout's own repository ---------------------------------------------------------------------------------
@@ -386,6 +401,13 @@ def repository_findings(home, known, where, gitdir, commondir, hooks=None):
     if not git_checkout_repository(known, where, gitdir, commondir):
         named = "" if gitdir == where else " (its git directory %s)" % gitdir
         return [{"kind": "foreign", "what": where, "file": gitdir, "text": FINDING_FOREIGN % (where, named)}]
+    return own_findings(home, where, gitdir, commondir, hooks)[0]
+
+
+def own_findings(home, where, gitdir, commondir, hooks):
+    """([finding], whether it may be kept) for a known checkout's own repository: its program keys, then its hooks.  An
+    answer holding a config git could not list or a hooks directory the hook could not list is not kept: it is the
+    reading's failure, not the repository's state, and the next run asks again."""
     out = []
     keys = git_own_config_keys(home, where, gitdir, commondir)
     if keys is None:
@@ -403,22 +425,136 @@ def repository_findings(home, known, where, gitdir, commondir, hooks=None):
         entries, listed = hooks[commondir]
     for path in entries:
         out.append({"kind": "hook", "what": path, "file": path, "text": (FINDING_HOOK if listed else FINDING_HOOKS_UNLISTED) % path})
-    return out
+    return out, keys is not None and listed
 
 
-def checkout_findings(ctx, con):
+# -- the findings cache (SPD-131) ----------------------------------------------------------------------------------------
+#
+# SessionStart and `spud board --brief` read every known checkout: which repository it is (its .git, and for a linked
+# worktree the gitfile and the commondir it names, two files opened), then its config files opened and searched for
+# includes, the scopes cache consulted and its hooks directory listed -- linear in the checkouts, and at five to seven of
+# them the largest cost SessionStart carried.  So those two keep, per checkout, in <home>/.spud/git-checkout-findings.json,
+# which repository it is and its own findings (its program keys and its hooks), under the stat of everything that answer
+# was read from: <root>/.git, <gitdir>/commondir, each config file git_scope_config_files names (the includes it followed
+# were found in those files, so none can change without one of them changing) and the common directory's hooks/.  A hit is
+# a few stats per checkout; whether that repository is a known checkout's own is still asked anew (checkout_identities,
+# read from every registered root's .git on each run).
+#
+# What that relies on, so that no stale entry reads a checkout clean:
+# - A directory's mtime and ctime move whenever an entry is added, removed or renamed in or over it (POSIX: link, unlink,
+#   rename, mkdir, symlink all update the parent), so a hook added, removed, or replaced by a rename changes the stamp.
+#   A hook's own content is no finding (any entry that is not a plain *.sample file is one, whatever it holds).
+# - A directory replaced, or retargeted through a symlink, changes its inode (os.stat follows the link).  That is all a
+#   .git directory is stamped by: git rewrites its entries on every status, and which git directory it is does not depend
+#   on them (its commondir file is stamped on its own).
+# - A file edited in place changes its mtime, and its size or not; one replaced (git writes config.lock and renames it)
+#   changes its inode; one that appears was recorded absent.
+# - The ctime is in the stamp because a program can put an mtime back with os.utime, and utime itself moves the ctime,
+#   which nothing but the kernel sets.
+# - Each stamp is read before the file it covers, so a change after the read moves it; the commondir file, read inside
+#   git_repository_dirs, is read again after its stamp and the entry kept only when both readings agree.
+# - An entry is written only when every mtime it is kept under is SETTLED_NS old: a change made in the same clock tick as
+#   the stamp read would leave the stamp unchanged (APFS stamps are nanoseconds, but HFS+ keeps seconds and FAT two).
+# - An entry is trusted only whole: read for this checkout, its stamps covering at least .git, the commondir file, the four
+#   base config files and hooks/, every finding a key or a hook.  Anything else, and a cache that is missing, unreadable
+#   or not JSON, is a miss, which reads the repository.  A foreign repository, or a reading that failed, is never kept.
+#   The state directory is refused to every tool, so nothing a member writes can plant an entry.
+GIT_FINDINGS_CACHE = "git-checkout-findings.json"
+SETTLED_NS = 2 * 10**9
+_CACHED_KINDS = ("key", "hook")
+
+
+def dot_stamp(root):
+    """The stamp of <root>/.git a checkout's entry is kept under: a directory by its identity alone, a gitfile by its full
+    stat; None when it is neither (git_repository_dirs walks on up from there, and nothing is kept)."""
+    try:
+        st = os.stat(os.path.join(root, ".git"))
+    except OSError:
+        return None
+    if stat.S_ISDIR(st.st_mode):
+        return ["dir", st.st_dev, st.st_ino]
+    if stat.S_ISREG(st.st_mode):
+        return ["file", st.st_mtime_ns, st.st_size, st.st_ino, st.st_ctime_ns]
+    return None
+
+
+def stamped_paths(gitdir, commondir):
+    """The paths a checkout's entry must be stamped by, at the least: its commondir file, the four config files git reads
+    at the local and worktree scopes whatever they include, and the common directory's hooks/."""
+    return ({os.path.join(gitdir, "commondir"), os.path.join(commondir, "hooks")}
+            | {os.path.normpath(p) for p in (os.path.join(commondir, "config"), os.path.join(gitdir, "config"),
+                                             os.path.join(gitdir, "config.worktree"), os.path.join(commondir, "config.worktree"))})
+
+
+def checkout_held(entry, root):
+    """(where, gitdir, commondir, findings) a cache entry holds for the checkout `root` when it is whole, was read for
+    that checkout and every stamp is the file's now; None otherwise."""
+    if not isinstance(entry, dict):
+        return None
+    where, gitdir, commondir, dot = entry.get("where"), entry.get("gitdir"), entry.get("commondir"), entry.get("dot")
+    if where != os.path.abspath(root) or not isinstance(gitdir, str) or not isinstance(commondir, str) or not isinstance(dot, list):
+        return None
+    if dot[:1] == ["dir"] and gitdir != os.path.join(where, ".git"):
+        return None
+    stamps, found = entry.get("fingerprint"), entry.get("findings")
+    if not isinstance(stamps, list) or not isinstance(found, list):
+        return None
+    paths = [s[0] for s in stamps if isinstance(s, list) and s and isinstance(s[0], str)]
+    if len(paths) != len(stamps) or not stamped_paths(gitdir, commondir).issubset(paths):
+        return None
+    for f in found:
+        if not (isinstance(f, dict) and f.get("kind") in _CACHED_KINDS
+                and all(isinstance(f.get(k), str) for k in ("what", "file", "text"))):
+            return None
+    if dot != dot_stamp(root) or git_config_fingerprint(paths) != stamps:
+        return None
+    return where, gitdir, commondir, found
+
+
+def checkout_kept(home, known, root, dot, where, gitdir, commondir, fresh):
+    """repository_findings for a checkout the cache missed, and its entry added to `fresh` when it may be kept: its own
+    repository (a foreign one is its finding, asked anew each run), found at its root, read whole, re-read the same, and
+    every stamp settled.  `dot` is dot_stamp's, read before git_repository_dirs read .git."""
+    if not git_checkout_repository(known, where, gitdir, commondir):
+        return repository_findings(home, known, where, gitdir, commondir)
+    # The stamps before the reading they are kept with, and hooks/ listed anew after them, never the listing another
+    # checkout of this common directory took earlier in the run: a hook added between that listing and these stamps
+    # would be kept as absent under stamps that already show it.
+    stamps = git_config_fingerprint([os.path.join(gitdir, "commondir")] + git_scope_config_files(gitdir, commondir)
+                                    + [os.path.join(commondir, "hooks")])
+    found, keep = own_findings(home, where, gitdir, commondir, None)
+    now = time.time_ns()
+    if (keep and dot is not None and where == os.path.abspath(root) and git_repo_common_dir(gitdir) == commondir
+            and (dot[0] == "dir" or now - dot[1] >= SETTLED_NS)
+            and all(s[1] is None or now - s[1] >= SETTLED_NS for s in stamps)):
+        fresh[root] = {"where": where, "gitdir": gitdir, "commondir": commondir, "dot": dot, "fingerprint": stamps,
+                       "findings": found}
+    return found
+
+
+def checkout_findings(ctx, con, cached=False):
     """(the checkouts read, [(project row, checkout, finding)]) for every checkout the ledger knows (project_checkouts: the
     home, each active project's root and its listed worktrees), each repository read once: what doctor lists and the
     board's line names.  A checkout whose directory is gone, or whose repository lies outside every known checkout (the home,
-    which is no repository, inside one that is), is not read.  Raises HookError when a worktree list git cannot give."""
+    which is no repository, inside one that is), is not read.  Raises HookError when a worktree list git cannot give.
+
+    `cached`: read each checkout through the findings cache (the board's line, on every SessionStart; see above); doctor
+    reads every repository itself.  Whether a checkout's repository is its own is asked anew either way."""
     checkouts = worktrees.project_checkouts(ctx, con)
     known = checkout_identities(checkouts)
-    read, found, seen, hooks = [], [], set(), {}
+    read, found, seen, hooks, fresh = [], [], set(), {}, {}
+    cache = os.path.join(str(ctx.home), hookio.STATE_DIR, GIT_FINDINGS_CACHE)
+    stored = git_scopes_cache(cache) if cached else {}
     for project, paths in checkouts:
         for root in paths:
             if not os.path.isdir(root):
                 continue
-            where, gitdir, commondir = git_repository_dirs(root)
+            held = checkout_held(stored.get(root), root) if cached else None
+            if held is not None:
+                where, gitdir, commondir, kept = held
+            else:
+                dot = dot_stamp(root) if cached else None  # before git_repository_dirs reads what it stamps
+                where, gitdir, commondir = git_repository_dirs(root)
             if gitdir is None:
                 continue
             mine = worktrees.file_identity(where) or os.path.normpath(where)
@@ -428,7 +564,16 @@ def checkout_findings(ctx, con):
             if not in_known_checkout(ctx.home, known, where):
                 continue
             read.append(root)
-            found.extend((project, root, f) for f in repository_findings(ctx.home, known, where, gitdir, commondir, hooks))
+            if held is not None:
+                own = kept if git_checkout_repository(known, where, gitdir, commondir) else \
+                    repository_findings(ctx.home, known, where, gitdir, commondir)
+            elif cached:
+                own = checkout_kept(ctx.home, known, root, dot, where, gitdir, commondir, fresh)
+            else:
+                own = repository_findings(ctx.home, known, where, gitdir, commondir, hooks)
+            found.extend((project, root, f) for f in own)
+    if fresh and os.path.isdir(os.path.dirname(cache)):
+        git_cache_write(cache, stored, fresh)
     return read, found
 
 
@@ -443,7 +588,7 @@ def planted_lines(ctx, con):
     means git runs nothing planted in any of them.  The harness runs git no hook sees (its session-start `git status`,
     EnterWorktree's `git worktree add`), and so does Eric, so the next session learns of it here."""
     try:
-        _read, found = checkout_findings(ctx, con)
+        _read, found = checkout_findings(ctx, con, cached=True)
     except hookio.HookError as e:
         return (PLANTED_UNREAD_LINE % e,)
     names = []
