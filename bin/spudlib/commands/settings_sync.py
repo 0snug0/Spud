@@ -188,8 +188,11 @@ def merge_deny_rules(ctx, settings, agent=True, keep=()):
     return kept
 
 
-def merge_additional_dirs(settings, dirs):
-    """permissions.additionalDirectories gains each of `dirs` it lacks, every other entry kept; returns those it added."""
+def merge_additional_dirs(settings, dirs, drop=()):
+    """permissions.additionalDirectories gains each of `dirs` it lacks, every other entry kept, except an entry `drop`
+    names: a directory an earlier install wrote for another home (SPD-245), whose place the first of `dirs` missing takes,
+    so a reinstall for a moved home replaces its entry where it stands rather than adding one beside it.  Returns the
+    directories of `dirs` it added."""
     permissions = settings.get("permissions")
     if not isinstance(permissions, dict):
         permissions = {}
@@ -197,15 +200,24 @@ def merge_additional_dirs(settings, dirs):
     current = permissions.get("additionalDirectories")
     current = [d for d in current if isinstance(d, str)] if isinstance(current, list) else []
     added = [d for d in dirs if d not in current]
-    permissions["additionalDirectories"] = current + added
+    missing = list(added)
+    out = []
+    for d in current:
+        if d in drop and d not in dirs:
+            if missing:
+                out.append(missing.pop(0))
+            continue
+        out.append(d)
+    permissions["additionalDirectories"] = out + missing
     return added
 
 
-def merge_settings(ctx, settings, *, env, agent_deny, keep_deny=(), additional_dirs=(), project_key=None):
+def merge_settings(ctx, settings, *, env, agent_deny, keep_deny=(), additional_dirs=(), drop_dirs=(), project_key=None):
     """One merge for both writers:`settings sync` for the home (env=True, agent_deny=True) and `project install` for
-    another repository's local settings (env=False, agent_deny=False, the home as an additional directory, the project's
-    key on every hook line).  Both write the state directory's deny rules (SPD-033).  Keeps every key and entry that is
-    not the ledger's; returns what it set."""
+    another repository's local settings (env=False, agent_deny=False, the home as an additional directory in place of
+    the one `drop_dirs` names when an earlier install wrote that for another home, the project's key on every hook line).
+    Both write the state directory's deny rules (SPD-033).  Keeps every key and entry that is not the ledger's; returns
+    what it set."""
     out = {}
     if env:
         limits = ctx.limits
@@ -219,7 +231,7 @@ def merge_settings(ctx, settings, *, env, agent_deny, keep_deny=(), additional_d
     out["allow"] = merge_allow_rules(ctx, settings)
     out["deny"] = merge_deny_rules(ctx, settings, agent=agent_deny, keep=keep_deny)
     if additional_dirs:
-        out["additional_dirs_added"] = merge_additional_dirs(settings, list(additional_dirs))
+        out["additional_dirs_added"] = merge_additional_dirs(settings, list(additional_dirs), drop=tuple(drop_dirs))
     out["hooks"] = merge_hooks(ctx, settings, project_key)
     return out
 
