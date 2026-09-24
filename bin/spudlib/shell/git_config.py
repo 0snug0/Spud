@@ -135,7 +135,7 @@ def git_spud_repository_reason(ctx, con, targets, cwds):
             continue
         if known is None:
             known = gitrepos.checkout_identities(worktrees.project_checkouts(ctx, con))
-        if not gitrepos.in_known_checkout(ctx.home, known, where):
+        if not gitrepos.in_known_checkout(known, where):
             continue  # a scratch clone, a repository Eric keeps elsewhere: Spud's own business
         findings = gitrepos.repository_findings(ctx.home, known, where, gitdir, commondir)
         if findings:

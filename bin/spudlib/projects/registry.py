@@ -20,8 +20,7 @@ from ..state import actors, ledgerdb, lookup
 # once presumed to be, and not a row that must exist: a
 # home may hold no project, and then it holds no ticket either.  The first project registered gets id 1.
 # A session launched in another project is Spud only after `/spud` claims it (projects.sessions = 'claim', the default
-# for `project add`, Eric 2026-09-14), or when its project is 'always', as project spud is until `home move`; a session
-# launched in the home is always Spud's.
+# for `project add`, Eric 2026-09-14), or when its project is 'always'; a session launched in the home is always Spud's.
 
 PROJECT_KEY_RE = re.compile(r"[a-z][a-z0-9-]{0,31}")
 PREFIX_RE = re.compile(r"[A-Z][A-Z0-9]*")

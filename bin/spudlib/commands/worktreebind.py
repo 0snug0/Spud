@@ -14,8 +14,8 @@ from ..state import ledgerdb, lookup, ops
 # the caller's checkout, which must be a linked worktree of the project (the same git common directory as its root, and
 # not the main checkout); after that every plan must come from that worktree while git still lists it.  A binding whose
 # worktree is gone is stale: Spud's next plan from a worktree rebinds it, with the old path in the event, and a member's
-# never does (decision 1).  A project whose root holds no `.git` has no linked worktree to bind -- the suite's scratch
-# homes, where project spud's root is the home -- and its tickets bind nothing.
+# never does (decision 1).  A project whose root holds no `.git` has no linked worktree to bind -- `project add` registers
+# only a repository, so this is one whose .git went away after -- and its tickets bind nothing.
 #
 # Every git call runs before the transaction opens: Binder.prepare makes the whole decision once against the ticket as it
 # reads then, writing nothing and keeping every refusal to itself, and decide, inside member new's BEGIN IMMEDIATE, reads
