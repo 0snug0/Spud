@@ -401,6 +401,7 @@ class ShippedConfigTest(unittest.TestCase):
                                                "ticket_prefix": "ZZZ", "team_prefix": "ZZZS"}))
         self.assertEqual(spud.config_problems(config), [])
         self.assertIn(config["identity"]["model"], config["pricing"]["models"])  # or cost renders as NO_TABLE
+        self.assertIn("claude-opus-5-5", config["pricing"]["models"])  # SPD-218: opus tier resolves to claude-opus-5-5
         self.assertEqual((config["identity"]["name"], config["tickets"]["prefix"]), ("Tuber", "ZZZ"))
         # SPD-157: the person the home works for, beside the identity of the one working.
         self.assertEqual((config["owner"]["name"], config["owner"]["pronouns"]["possessive"]), ("Robin", "her"))
