@@ -253,6 +253,21 @@ class RespawnTreeTest(TeamCardCase):
         line = tree_lines(section)[1]
         self.assertEqual(importlib.import_module("spudlib.imports.bulkimport").TEAM_LINE.match(line).group("text"), "Built the rest of it.")
 
+    def test_the_chain_reads_in_the_cards_text_tree(self):
+        t = self.new_ticket("Respawned card")
+        first = self.new_member(t["key"], name="Russet")
+        self.returned(first)
+        second = self.home.json("member", "respawn", first["ref"], actor="spud")["member"]
+        self.returned(second)
+        third = self.home.json("member", "respawn", second["ref"], actor="spud")["member"]
+        tree = [line for line in self.home.run("card", t["key"]).stdout.splitlines() if line.startswith("- ")]
+        a, b, c = first["name"], second["name"], third["name"]
+        self.assertEqual([line.split(")", 1)[0] for line in tree], [
+            "- %s (01, scout, haiku; re-spawned as %s" % (a, b),
+            "- %s (02, scout, haiku; re-spawns %s, re-spawned as %s" % (b, a, c),
+            "- %s (03, scout, haiku; re-spawns %s" % (c, b),
+        ])
+
     def test_a_childs_chain_reads_in_its_parents_subagents(self):
         t = self.new_ticket("Child respawned")
         lead = self.new_member(t["key"], name="Pompadour", persona="engineer", model="opus")
