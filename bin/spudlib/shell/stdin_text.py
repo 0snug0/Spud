@@ -70,7 +70,7 @@ names.
 import os
 import re
 
-from . import arg_writes, directories, expansions, globbing, heredocs, line_functions, prepare, syntax
+from . import arg_writes, directories, expansions, globbing, heredocs, line_aliases, line_functions, prepare, syntax
 from ..hooks import snapshots
 
 # The operands that name the standard input the line gave the shell rather than a script file of its own (probed:
@@ -512,7 +512,7 @@ def _shadowed(name, a, called=None):
     """Whether the shell runs something other than its own `name` or the program on PATH for it (SPD-272): a function the
     line defines under that name, or one it cannot name (ShellAnalysis.functions: a definition, zsh's `functions` table),
     a program it hashed there (cat and tee alone, which the shell looks up), an alias of the line's where `eval` reads it
-    again (expansions.alias_substitution), or an alias or a function the shell's snapshot defines (hooks/snapshots), an
+    again (line_aliases.alias_substitution), or an alias or a function the shell's snapshot defines (hooks/snapshots), an
     alias not while its own expansion is read.  The shell runs that body in place of the command, whose text this reading
     does not follow: unread, as input the line does not spell (probed through tests/probes/shell_probe.py in zsh 5.9 -f
     and -f -o nobareglobqual and bash 3.2.57, 2026-09-24, tests/test_hooks_input.py PrinterShadowTest: `echo() { printf
@@ -525,7 +525,7 @@ def _shadowed(name, a, called=None):
     if name in a.functions and name != called or syntax.UNKNOWN_NAME in a.functions or _hashed(name, a):
         return True
     if a.alias_scope:
-        body, doubtful = expansions.alias_substitution(name, a)
+        body, doubtful = line_aliases.alias_substitution(name, a)
         if body is not None or doubtful:
             return True
     table = snapshots.shell_table(a.home)

@@ -11,7 +11,7 @@ keeps by are one rule, and read_shell_name and read_body are its only way in.  A
 is read at each call through the same per-state reading (read_once, read_function, SPD-277), since a call runs it where
 the shell stands then exactly as it runs a snapshot's."""
 
-from . import analyse, directories, expansions, globbing, held_shadows, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
+from . import analyse, directories, expansions, globbing, held_shadows, line_aliases, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
 from ..hooks import hookio, snapshots
 
 
@@ -87,7 +87,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     cmd = prepare.deglob(words[0])
     before = a.cwds
     if aliased:
-        text, own_words, expanded, unreadable = expansions.shell_aliased(words, a)
+        text, own_words, expanded, unreadable = line_aliases.shell_aliased(words, a)
         a.shell_expanded.extend(expanded)
         if unreadable is not None:  # the chain reached a body whose quoting the hook cannot take off: it runs the line, unread
             a.kinds.append("other")
@@ -105,7 +105,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
         return False
     # a body the line itself defines under the name (SPD-277)
     line_moved = line_functions.read_call(a, cmd, depth, stdin, fed)
-    body = expansions.shell_function(cmd, a)
+    body = line_aliases.shell_function(cmd, a)
     if body is None and line_moved is not line_functions.NO_BODY:
         a.cwds = directories.settle(effect, before, line_moved)
     elif body is not None:

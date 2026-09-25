@@ -331,7 +331,7 @@ _REQUOTE = str.maketrans({**{c: "\\" + c for c in " \t\r'\"\\`#"}, "\n": "'\n'"}
 def requoted(word):
     """Shell text the reading turns back into exactly this masked word, for text the hook reads again with words it has
     already tokenized set into it: the body of an alias followed by the words the line spelled after the alias's name,
-    whether the Bash tool's shell holds the alias (expansions.shell_aliased) or the line defined it for eval
+    whether the Bash tool's shell holds the alias (line_aliases.shell_aliased) or the line defined it for eval
     (analyse.dispatch_words) -- SPD-201.  The shell expands an alias textually, before it parses the words after it, so
     they keep their quotes: `gc -m "don't"` runs `git commit --verbose -m "don't"`, and a quoted word holding blanks, `;`,
     `>`, a newline, `$( )` or backticks stays one word (probed through tests/probes/shell_probe.py, AliasWordsTest).

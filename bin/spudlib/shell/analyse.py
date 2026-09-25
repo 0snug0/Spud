@@ -6,7 +6,7 @@ and the options it holds, which a line starts from, shell/held_options (SPD-267)
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, git_writes, globbing, held_options, held_text, heredocs, inline_programs, interpreter_words, line_functions, loop_bindings, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, git_writes, globbing, held_options, held_text, heredocs, inline_programs, interpreter_words, line_aliases, line_functions, loop_bindings, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
 from ..hooks import hookio
 
 
@@ -58,7 +58,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
     if a.alias_scope and a.aliases:
         # text the shell parses again where the line's aliases stand (eval's, an alias body, a substitution in them): a
         # global alias is expanded in every word zsh reads unquoted, not only the command word (SPD-109)
-        text = expansions.global_aliased(text, a)
+        text = line_aliases.global_aliased(text, a)
     text, apart = prepare.ansi_c_quotes(text)
     if apart is not None and a.unparseable is None:
         # an ANSI-C string that never closes, or a quote zsh and bash end apart (SPD-202): the words the reading finds are
@@ -419,16 +419,16 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # eval's text spells them, quotes and all: the shell parses them after the body (SPD-201, prepare.requoted).
         # A suffix alias the line defined runs its body before a command word ending in its suffix, that word kept after
         # the body (`a.txt x` runs `<body> a.txt x`), where no plain alias of the word's name does (SPD-109).
-        body, doubtful = expansions.alias_substitution(cmd, a)
+        body, doubtful = line_aliases.alias_substitution(cmd, a)
         kept = 1
         if body is None and not doubtful:
-            (body, doubtful), kept = expansions.suffix_substitution(prepare.deglob(cmd), a), 0
+            (body, doubtful), kept = line_aliases.suffix_substitution(prepare.deglob(cmd), a), 0
             if body is None and doubtful:  # a body the hook cannot read: refused a member, the word read on as spelled
                 unread.record_unread(a, "alias-word", prepare.deglob(cmd))
                 doubtful = False
         if body is not None or doubtful:
             if body is not None:
-                rest = " ".join(expansions.alias_requoted(w, a) for w in words[kept:])
+                rest = " ".join(line_aliases.alias_requoted(w, a) for w in words[kept:])
                 before = a.cwds
                 analyse_command(body + (" " + rest if rest else ""), a, depth + 1, stdin, fed)
                 a.cwds = directories.settle(effect, before, a.cwds)  # its cd, where the command runs (SPD-252)
@@ -580,7 +580,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         before = a.cwds
         a.alias_scope += 1  # an alias the line defined is expanded where eval parses its words again
         eval_text = prepare.deglob(" ".join(words[1:]))
-        if expansions.word_aliases(a) and any(expansions.expansion_word(w) for w in words[1:]):
+        if line_aliases.word_aliases(a) and any(expansions.expansion_word(w) for w in words[1:]):
             # a word the shell expands before eval reads it again may become a global or suffix alias's name, which
             # eval then expands (`X=gp; eval echo $X`): text the hook does not read (SPD-109, SPD-217)
             unread.record_unread(a, "alias-word", unread.unread_shown(" ".join(words[1:])))
@@ -697,9 +697,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # position -- which on one line means `eval`.  Never a spud call, so an aliasing line is not allowed on its own.
         a.kinds.append("other")
         if cmd == "alias":
-            expansions.record_alias_line(words, a)
+            line_aliases.record_alias_line(words, a)
         else:
-            expansions.clear_alias_line(words, a)
+            line_aliases.clear_alias_line(words, a)
     elif cmd == "functions" and directories.builtin_runs_here(effect):
         # zsh's `functions -c OLD NEW` binds NEW to OLD's body, as a definition of NEW would (SPD-279)
         a.kinds.append("other")
@@ -763,11 +763,11 @@ def record_assignment(a, found):
     if special is not None:
         table, pairs = special
         if table == "alias":
-            kinds = expansions.ALIAS_TABLE_KINDS[name]  # aliases, galiases or saliases (SPD-109)
+            kinds = line_aliases.ALIAS_TABLE_KINDS[name]  # aliases, galiases or saliases (SPD-109)
             if pairs is None:
-                expansions.record_alias_unknown(a, kinds)
+                line_aliases.record_alias_unknown(a, kinds)
             for key, body in pairs or ():
-                expansions.record_alias_definition(a, key, body, kinds)
+                line_aliases.record_alias_definition(a, key, body, kinds)
         else:
             names = a.functions if table == "function" else a.hashed
             names.update([syntax.UNKNOWN_NAME] if pairs is None else [prepare.deglob(key) for key, _ in pairs])
