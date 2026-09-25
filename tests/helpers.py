@@ -689,7 +689,8 @@ class HookResult:
 # and every test that calls a function of load_spud_module() directly).  A `spud hook` process starts with each empty.
 # (the module, the name) of every per-process cache on the hook path: each is empty when a `spud hook` process starts.
 HOOK_CACHES = (("spudlib.hooks.snapshots", "_TABLES"), ("spudlib.hooks.worktrees", "_WORKTREES"), ("spudlib.hooks.worktrees", "_CASE_CACHE"),
-               ("spudlib.hooks.gitrepos", "_SCOPES_READ"), ("spudlib.hooks.gitrepos", "_PROGRAM_KEYS"))
+               ("spudlib.hooks.gitrepos", "_SCOPES_READ"), ("spudlib.hooks.gitrepos", "_PROGRAM_KEYS"),
+               ("spudlib.shell.held_options", "_EXPANDS_ALIASES"))
 # ... and the two that are not a container: git's own command set (None until read) and the glob sampler's lru_cache.
 HOOK_MEMOS = (("spudlib.shell.git_verbs", "_GIT_OWN_COMMANDS"), ("spudlib.shell.globbing", "glob_sample_matches"))
 # The module-level tables a run fills that hold nothing a later run could read differently: a pure function of the text

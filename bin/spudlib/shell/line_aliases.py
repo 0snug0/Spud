@@ -46,7 +46,7 @@ Where each alias stands, as the reading now has it (the comments below hold the 
 
 import re
 
-from . import expansions, prepare, syntax, unread
+from . import expansions, held_options, prepare, syntax, unread
 from ..hooks import snapshots
 
 
@@ -131,7 +131,8 @@ class AliasView:
     off where it is not interactive (held_text.expands_no_alias), set where analyse.analyse_new_shell reads its text and
     inherited, as `held` is, by every text parsed inside it: there a command word a plain or suffix alias of the view
     stands in is read both ways, the alias and the word as written, and a word a global alias stands in, which bash has
-    none of, is refused a member unread (spelled_too).
+    none of, is refused a member unread (spelled_too).  The Bash tool's own texts (`shell` TOOL_SHELL) are marked False
+    here and asked in spelled_too instead, where a bash snapshot may leave expand_aliases off (SPD-327).
 
     SPD-323: `shell`, the name of the shell that parses the text -- TOOL_SHELL for the Bash tool's own, a new shell's
     base name where analyse.analyse_new_shell reads its text, "" for one the hook cannot name -- inherited, as `held` is,
@@ -238,11 +239,19 @@ def parsed_doubted(a, key):
 # txt=...` the same of -s, each status 2, defining nothing: a later `eval X` found no command X), so a word a global
 # alias stands in runs as written, which the hook, reading the alias's words in its place, refuses a member unread
 # (global_aliased, walk.ShellWalk.expand_globals).
+#
+# SPD-327: the Bash tool's own shell is such a bash where a snapshot it may source is bash's and leaves expand_aliases off
+# (held_options.tool_expands_no_alias): there `alias git=echo; eval git push` on the member's own line pushed with no
+# finding, the whole reading held_text.tool_lines gives the line standing for no alias in the line's own words alone.
 def spelled_too(a):
     """Whether a command word of the text being read runs as it is written as well as the alias the text was parsed with
-    (SPD-322, above): the text is parsed as the line runs by a shell that may expand no alias at all (AliasView.bare)."""
+    (SPD-322, above): the text is parsed as the line runs by a shell that may expand no alias at all -- a bash's text
+    (AliasView.bare), or the Bash tool's own where its snapshot may leave expand_aliases off (SPD-327), asked only here,
+    where an alias stands in a word, so no other line reads a snapshot for it."""
     view = parsed_view(a)
-    return view is not None and view.bare
+    if view is None:
+        return False
+    return view.bare or view.shell == TOOL_SHELL and held_options.tool_expands_no_alias(a)
 
 
 def alias_arguments(words):

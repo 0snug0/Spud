@@ -11,6 +11,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import helpers
 from helpers import load_spud_module, wall_clock
 from helpers import git as scratch_git
 from hookcase import AGENT_A, AGENT_B, AGENT_C, GIT_NESTED_WORDING, SCRIPT_WORDING, SPUD_PLANTED_WORDING, BashHookCase
@@ -2767,6 +2768,111 @@ class BashToolLineAliasTest(BashHookCase):
         self.snapshot("zsh")
         self.snapshot("bash")
         self.assertRefused(self.LINE, "Law 7", AGENT_A)
+
+
+class BashSnapshotBareAliasTest(BashHookCase):
+    """SPD-327: where a snapshot the Bash tool's shell may source is bash's and leaves expand_aliases off, that shell
+    expands no alias at all, in eval's words and a substitution's body as in its own line -- which held_text.tool_lines's
+    whole reading stands for in the line's own words only, reading eval's and a substitution's with the line's alias:
+    `alias git=echo; eval git push` on the member's own line pushed with no finding (Law 7).  Such a word is now read both
+    ways, the alias and as written (line_aliases.spelled_too, held_options.tool_expands_no_alias), as SPD-322 reads a
+    bash's `-c` text.  A bash snapshot that turns expand_aliases on -- Claude Code 2.1.282 appends `shopt -s
+    expand_aliases` to every one it writes, after the `shopt -p` lines of the shell that made it -- reads as before, and so
+    does a zsh snapshot, and no snapshot at all.
+
+    Probed through tests/probes/shell_probe.py (2026-09-25, SPD-322's ticket): `/bin/bash -c 'alias ls="echo ALIASED";
+    eval ls -d /'` printed `/`, with `shopt -s expand_aliases` first `ALIASED -d /`; BashUnexpandedAliasTest has the rest.
+
+    AGENT_A and AGENT_B plan tests/** and bin/spud."""
+
+    SHAPES = ("alias git=echo; eval git push", "alias git=echo; echo $(git push)", "alias git=echo; echo `git push`",
+              "alias git=echo; cat <(git push)", "alias git=echo; eval \"eval git push\"",
+              "alias git=echo; f() { eval git push; }; f", "alias git=echo\neval git push",
+              "alias git=echo; (eval git push)", "alias git=echo; echo \"$(echo $(git push))\"")
+
+    def setUp(self):
+        super().setUp()
+        self.snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        self.snapshots.mkdir(parents=True, exist_ok=True)
+
+    def snapshot(self, shell, options="", stamp="1700000000327"):
+        text = "unalias -a 2>/dev/null || true\n%salias -- ll='ls -l'\n" % options
+        (self.snapshots / ("snapshot-%s-%s-327327.sh" % (shell, stamp))).write_text(text, encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7"):
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_A, AGENT_B, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def findings(self, command):
+        """The line's findings, read in this process against this home's snapshots."""
+        m = load_spud_module()
+        env = {"SPUD_USER_CLAUDE_DIR": self.home.env["SPUD_USER_CLAUDE_DIR"]}
+        with mock.patch.dict(os.environ, env):
+            helpers.forget_process_caches()
+            try:
+                return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=self.home.path)).findings
+            finally:
+                helpers.forget_process_caches()
+
+    def test_a_bash_snapshot_without_expand_aliases_reads_both_ways(self):
+        self.snapshot("bash")
+        for command in self.SHAPES:
+            with self.subTest(command):
+                self.refused_for_members(command)
+        self.assertIn(("git", ("push", "push")), self.findings("alias git=echo; eval git push"))
+        # a trap's action, whose alias the hook doubts (the reason it names), holds the push as written too
+        trap = "alias git=echo; trap 'git push' EXIT"
+        self.refused_for_members(trap, "the command word `git` runs an alias")
+        self.assertIn(("git", ("push", "push")), self.findings(trap))
+
+    def test_a_global_alias_bash_has_none_of_is_refused_unread(self):
+        self.snapshot("bash")
+        for command in ("alias -g push=status; eval git push", "alias -g push=status; echo $(git push)"):
+            with self.subTest(command):
+                self.refused_for_members(command, "bash has no global alias")
+
+    def test_the_last_shopt_line_decides_each_snapshot(self):
+        """Each bash snapshot is read on its own, its last `shopt` line naming the option deciding it; one that leaves
+        it off, among others that turn it on, is enough."""
+        self.snapshot("bash", "shopt -s expand_aliases\n", "1700000000001")
+        self.silent_for_everyone("alias git=echo; eval git push")
+        self.snapshot("bash", "shopt -s histappend expand_aliases\n", "1700000000002")
+        self.silent_for_everyone("alias git=echo; eval git push")
+        self.snapshot("bash", "", "1700000000003")
+        self.refused_for_members("alias git=echo; eval git push")
+
+    def test_expand_aliases_on_reads_as_before(self):
+        self.snapshot("bash", "shopt -s expand_aliases\n")
+        for command in self.SHAPES:
+            with self.subTest(command):
+                self.silent_for_everyone(command)
+        self.assertEqual(self.findings("alias git=echo; eval git push"), [])
+
+    def test_zsh_and_no_snapshot_read_as_before(self):
+        for command in self.SHAPES:
+            with self.subTest(command, snapshot=None):
+                self.silent_for_everyone(command)
+        self.snapshot("zsh")
+        for command in self.SHAPES:
+            with self.subTest(command, snapshot="zsh"):
+                self.silent_for_everyone(command)
+
+    def test_a_control_stays_allowed(self):
+        """Both ways reads the alias and the word as written, so an alias whose word runs nothing refused stays allowed,
+        and a line with no alias in eval's words reads no snapshot for it."""
+        self.snapshot("bash")
+        for ok in ("alias ll='ls -l'; eval ll", "alias ll='ls -l'; echo $(ll)", "alias git=echo; eval git log",
+                   "eval git status", "echo $(git log -1)", "ll"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
 
 
 if __name__ == "__main__":

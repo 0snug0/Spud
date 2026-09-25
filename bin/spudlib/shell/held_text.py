@@ -437,8 +437,12 @@ def tool_lines(a):
     `zq: command not found`; zsh -f's eval of the two lines `command not found: zq`).  The snapshot's name says its shell
     (`snapshot-<shell>-<stamp>-<id>.sh`, hooks/snapshots), and any of them may be the one a session sources: False where
     none is bash's, the line read whole as it always was; else syntax.LINES_BOTH, zsh's reading whole and the other a
-    line at a time -- a zsh snapshot may be the one sourced, and a bash one that leaves expand_aliases off (a line only
-    `shopt -s` in the snapshot turns on) expands no alias at all, which the whole reading stands for too."""
+    line at a time -- a zsh snapshot may be the one sourced.  A bash one that leaves expand_aliases off (a line only
+    `shopt -s` in the snapshot turns on, which Claude Code writes into every bash snapshot it makes) expands no alias at
+    all: the whole reading stands for that in the line's own words, but not in eval's words, a substitution's body or a
+    trap's action, which it reads with the line's aliases (SPD-322's probe) -- those are read both ways, the alias and the
+    word as written, where such a snapshot may be the one sourced (line_aliases.spelled_too,
+    held_options.tool_expands_no_alias, SPD-327)."""
     for path in snapshots.shell_table(a.home).files:
         name = os.path.basename(path)
         if name.startswith(snapshots.SNAPSHOT_PREFIX + "bash-"):
