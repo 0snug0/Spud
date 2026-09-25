@@ -797,6 +797,8 @@ class InProcessParityTest(BashHookCase):
             ("echo $(echo $(echo $(echo $(echo $(echo $(echo $(git push)))))))", AGENT_A, None, "deny", "cannot read part of what this line runs"),
             ("X=ls; trap 'X=git' DEBUG; $X push", AGENT_A, None, "deny", "may not hold the value"),
             ("alias g=$Y; eval 'g push'", AGENT_A, None, "deny", "`eval` runs the command word"),
+            # SPD-286: eval parses its text whole, so the alias it defines stands in none of its own commands
+            ("eval 'alias git=echo; git push'", AGENT_A, None, "deny", "Law 7: spudagents never run `git push`"),
             ("broken", AGENT_A, None, "deny", "is an alias your shell already defines"),
             ("gp", AGENT_A, None, "deny", "(The shell this command runs in already defines `gp`"),
             ("[gp][iu][st]* x", AGENT_A, None, "deny", "is a glob the shell expands"),

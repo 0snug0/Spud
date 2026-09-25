@@ -149,21 +149,29 @@ def analyse_isolated(a, command, depth, stdin=None, fed=False):
     printed the X held before; an (e) flag's value when it is expanded), so the aliases the line's table holds stand
     there as they do in eval's words: it is read a level into ShellAnalysis.alias_scope while the table holds any
     (line_aliases).  A new shell's body, whose table analyse_new_shell empties, holds none, and a line with none is read
-    as it always was.  The table is part of the state a body is read once per, beside ShellAnalysis.reading_state: `echo
-    $(gp); alias gp='git push'; echo $(gp)` pushes in the second substitution, which a reading cached from the first had
-    skipped, and so did the same pair of eval's."""
-    key = (command, depth, stdin_text.reading_key(stdin, fed), a.reading_state(), frozenset(a.aliases.items()),
-           a.alias_unknown)
+    as it always was.  The table is part of the state a body is read once per (ShellAnalysis.reading_state): `echo $(gp);
+    alias gp='git push'; echo $(gp)` pushes in the second substitution, which a reading cached from the first had skipped,
+    and so did the same pair of eval's.
+
+    The shell parses the body whole, so it is read with the table as it stands here, and an alias it defines or clears
+    stands in no word of its own (line_aliases.AliasView, SPD-286: `alias x=y; echo $(alias git=echo; git push)` pushes).
+    A function body the line defines (a line_functions.LineBody a trap or a hook array runs) was parsed where the line
+    defined it, and keeps the view in force."""
+    key = (command, depth, stdin_text.reading_key(stdin, fed), a.reading_state())
     if key in a.isolated_done:
         return
     a.isolated_done.add(key)
     bodies, a.function_bodies = a.function_bodies, walk.bodies_copy(a.function_bodies)
     parsed = 1 if a.aliases or a.alias_unknown else 0
+    view = a.alias_view
+    if isinstance(command, str):
+        a.alias_view = line_aliases.AliasView(a, "\n" in command)
     a.alias_scope += parsed
     try:
         isolated(a, lambda: analyse_command(command, a, depth, stdin, fed))
     finally:
         a.alias_scope -= parsed
+        a.alias_view = view
     a.function_bodies = bodies  # a function the body defines stays in its process, and no call after it runs it (SPD-212)
 
 
@@ -172,12 +180,12 @@ def analyse_new_shell(a, command, depth, stdin=None, fed=False):
     hand on.  An alias the line defined does not reach it (probed: `alias gp='git push'; eval 'sh -c gp'` ran
     nothing, while `eval 'echo $(gp)'` ran it, the substitution being parsed by the shell that holds the alias).  It runs
     on the standard input `stdin` its command hands it, and `fed` says whether anything stands there (SPD-210)."""
-    state = (a.alias_scope, a.aliases, a.alias_unknown)
-    a.alias_scope, a.aliases, a.alias_unknown = 0, {}, False
+    state = (a.alias_scope, a.aliases, a.alias_unknown, a.alias_view)
+    a.alias_scope, a.aliases, a.alias_unknown, a.alias_view = 0, {}, False, None
     try:
         analyse_isolated(a, command, depth, stdin, fed)
     finally:
-        a.alias_scope, a.aliases, a.alias_unknown = state
+        a.alias_scope, a.aliases, a.alias_unknown, a.alias_view = state
 
 
 def stdin_file_word(tokens, bodies, piped_fed):
@@ -438,9 +446,26 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # shell parses them after the body (SPD-201, prepare.requoted).  A suffix alias runs its body before a command
         # word ending in its suffix, that word kept after the body (`a.txt x` runs `<body> a.txt x`), where no plain alias
         # of the word's name does (SPD-109): there, one of the line's table; in the line's own text, parsed before any of
-        # it runs, one the shell's snapshot holds, as it holds it, for a word no expansion gave (SPD-283).
+        # it runs, one the shell's snapshot holds, as it holds it, for a word no expansion gave (SPD-283).  The line's table
+        # is read as it stood where the shell parsed the text, never with what the text itself did to it (SPD-286).
         word = prepare.deglob(cmd)
-        body, doubtful = line_aliases.alias_substitution(cmd, a) if a.alias_scope else (None, False)
+        body, doubtful = line_aliases.parsed_alias(cmd, a) if a.alias_scope else (None, False)
+        # ... save in a text of several lines, which bash and sh read a line at a time, so that an alias a line before this
+        # one defined, changed or cleared may stand for them where zsh holds the view's (line_aliases.line_reading): theirs
+        # is read first, and the view's from where either may leave the shell; where they run the word as it is, it is
+        # read as that too, after the view's alias
+        apart = line_aliases.line_reading(cmd, a) if a.alias_scope else None
+        as_spelled = False
+        if apart is not None:
+            other, other_doubtful = apart
+            if other is not None and other != body:
+                rest = " ".join(line_aliases.alias_requoted(w, a) for w in words[1:])
+                before = a.cwds
+                analyse_command(other + (" " + rest if rest else ""), a, depth + 1, stdin, fed)
+                a.cwds = directories.union_dirs(before, directories.settle(effect, before, a.cwds))
+            if other_doubtful:
+                a.findings.append(("alias", word))
+            as_spelled = other is None and not other_doubtful
         kept, doubt = 1, None
         if body is None and not doubtful:
             (body, doubt), kept = line_aliases.suffix_substitution(word, a, fresh), 0
@@ -455,13 +480,16 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 before = a.cwds
                 analyse_command(body + (" " + rest if rest else ""), a, depth + 1, stdin, fed)
                 a.cwds = directories.settle(effect, before, a.cwds)  # its cd, where the command runs (SPD-252)
+                if as_spelled:
+                    a.cwds = directories.union_dirs(before, a.cwds)
             else:
                 a.kinds.append("other")
             if doubtful:  # after the body, so a refusal the body itself earns keeps its own reason
                 a.findings.append(("alias", word))
             elif doubt is not None:
                 line_aliases.note_alias_doubt(a, doubt)
-            return
+            if not as_spelled:
+                return
     if seeks_function is True:
         looked_up.append(cmd)
     if (command_position or seeks_function is True) and held_text.read_shell_name(
@@ -609,11 +637,16 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             unread.record_unread(a, "alias-word", unread.unread_shown(" ".join(words[1:])))
         if unread.escaped_substitution(eval_text):
             unread.record_unread(a, "escaped-subst", unread.escaped_shown(eval_text))  # SPD-196
+        # eval parses its text whole before any of it runs, with the aliases as they stand here, so one the text itself
+        # defines or clears stands in none of its own words, only in text parsed after it (SPD-286: `eval 'alias git=echo;
+        # git push'` pushes, and `eval 'alias gp="git push"'; eval gp` too)
+        view, a.alias_view = a.alias_view, line_aliases.AliasView(a, "\n" in eval_text)
         try:
             # eval reads its words again, their quotes gone, and runs them on its own standard input (SPD-210)
             analyse_command(eval_text, a, depth + 1, stdin, fed)
         finally:
             a.alias_scope -= 1
+            a.alias_view = view
         a.cwds = directories.settle(effect, before, a.cwds)
     elif cmd in ("source", ".") and directories.builtin_runs_here(effect):
         a.kinds.append("other")
