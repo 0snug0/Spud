@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import json
 import os
+import shlex
 import shutil
 import sys
 import time
@@ -2734,6 +2735,202 @@ class SnapshotOptionsTest(ShellSnapshotCase):
         self.assertIn("options", json.loads(cache.read_text(encoding="utf-8")))
 
 
+# SPD-329: Claude Code 2.1.282's bash snapshot, from both branches of its snapshot script (Skinner's spike, SpudHome
+# docs/spikes/spd-329/).  With no startup file to source -- this Mac's bash, which has ~/.bash_profile and no ~/.bashrc --
+# it writes BASH_SNAPSHOT_HEADER, `shopt -s expand_aliases`, the harness's shadows and `export PATH=...`: the live
+# snapshot-bash-1790355092479-tavcwg.sh, whose shadows are THIS_MACS_SHADOWS byte for byte once its claude path is spelled
+# SCRATCH_CLAUDE.  With one it writes `shopt -p`, then `set -o NAME` for each line of `set -o` that `grep "on"` matches,
+# then `shopt -s expand_aliases`: the option block BASH_32_OPTIONS spells, which is /bin/bash 3.2.57 --norc --noprofile's
+# as the spike captured it without -i (full-noninteractive.txt) and with it (full-interactive.txt), byte for byte.  The two
+# differ only in expand_aliases's `shopt -p` line and in -i's `set -o emacs`, `histexpand` and `history`; `grep "on"` also
+# matches `monitor off` and `onecmd off`, so Claude Code sets both.  The spike had no live snapshot of that branch, so
+# where the header and shadows sit around its option block is the no-config file's frame, not a capture.
+BASH_SNAPSHOT_HEADER = "# Snapshot file\n# Unset all aliases to avoid conflicts with functions\nunalias -a 2>/dev/null || true\n"
+BASH_32_SHOPT_P = (
+    "-u cdable_vars", "-u cdspell", "-u checkhash", "-u checkwinsize", "-s cmdhist", "-u compat31", "-u dotglob",
+    "-u execfail", "%s expand_aliases", "-u extdebug", "-u extglob", "-s extquote", "-u failglob", "-s force_fignore",
+    "-u gnu_errfmt", "-u histappend", "-u histreedit", "-u histverify", "-s hostcomplete", "-u huponexit",
+    "-s interactive_comments", "-u lithist", "-u login_shell", "-u mailwarn", "-u no_empty_cmd_completion", "-u nocaseglob",
+    "-u nocasematch", "-u nullglob", "-s progcomp", "-s promptvars", "-u restricted_shell", "-u shift_verbose",
+    "-s sourcepath", "-u xpg_echo")
+
+
+def bash_32_options(interactive):
+    """The option block Claude Code writes into a bash snapshot where the user has a startup file (above)."""
+    sets = (("braceexpand", "emacs", "hashall", "histexpand", "history", "interactive-comments", "monitor", "onecmd")
+            if interactive else ("braceexpand", "hashall", "interactive-comments", "monitor", "onecmd"))
+    shopts = "".join("shopt %s\n" % (line % ("-s" if interactive else "-u") if "%" in line else line)
+                     for line in BASH_32_SHOPT_P)
+    return "# Shopt\n%s# Shell Options\n%sshopt -s expand_aliases\n" % (shopts, "".join("set -o %s\n" % s for s in sets))
+
+
+def live_bash_snapshot(options="shopt -s expand_aliases\n"):
+    """A bash snapshot in Claude Code 2.1.282's frame, holding these option lines: by default the live no-config one."""
+    return BASH_SNAPSHOT_HEADER + options + THIS_MACS_SHADOWS + "export PATH='/usr/bin:/bin'\n"
+
+
+class BashSnapshotOptionsTest(ShellSnapshotCase):
+    """SPD-329 (proposal by SPUD-327/Riker): Claude Code's bash snapshot, where the user has a startup file, holds `shopt
+    -p`'s lines, a `set -o NAME` for each option `set -o` lists on, and `shopt -s expand_aliases` (bash_32_options).  The
+    reader took each option line on its own and every `set -o` name as zsh's, so bash's own default-on braceexpand and
+    hashall, the hyphenated interactive-comments it could not take apart, the onecmd and monitor Claude Code sets
+    through its `grep "on"`, and the `shopt -u expand_aliases` a shell that is not interactive prints before the
+    harness's own line turns it on were each an "unread" option: every line a member typed was refused before its own
+    words were read.  A bash snapshot's `set -o` lines are now read against bash's own names (held_options.BASH_SET_ON and
+    kin), a hyphenated name is a name, and within one bash snapshot the last line naming an option decides it.  A zsh
+    snapshot reads as it did.
+
+    Probed 2026-09-25 through tests/probes/shell_probe.py, GNU bash 3.2.57(1)-release: `bash --norc --noprofile -c 'set
+    -o'` listed 27 names, on: braceexpand, hashall, interactive-comments; in the Bash tool's own shape, `bash -c 'source
+    ./snap.sh 2>/dev/null || true && eval ...'` with the snapshot turning history, histexpand, onecmd and monitor on and
+    interactive-comments off, eval's `echo "two!!" # comment` printed `two!!` and the line after it ran; with braceexpand
+    off, `echo {a,b}` printed `{a,b}`; and `set -o` refused `interactive_comments`, `INTERACTIVE-COMMENTS` and an unknown
+    name (`invalid option name`, status 1).
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.m = load_spud_module()
+        self.held = sys.modules["spudlib.shell.held_options"]
+        self.order = 0
+
+    def snapshot(self, text, shell="bash"):
+        """Write a snapshot newer than every one before it."""
+        self.order += 1
+        path = self.write_snapshot("snapshot-%s-17000000%05d-329329.sh" % (shell, self.order), text)
+        newest = path.stat().st_mtime + 60 * self.order
+        os.utime(path, (newest, newest))
+        return path
+
+    def fresh(self):
+        shutil.rmtree(self.snapshots)
+        self.snapshots.mkdir()
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", SHELL_SNAPSHOT)
+
+    def analysis(self, command="ls"):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            forget_process_caches()
+            try:
+                return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+            finally:
+                forget_process_caches()
+
+    def unread(self, command="ls"):
+        return [f[1][1] for f in self.analysis(command).findings if f[0] == "unread"]
+
+    def expands_no_alias(self):
+        env = {"SPUD_USER_CLAUDE_DIR": self.home.env["SPUD_USER_CLAUDE_DIR"]}
+        with mock.patch.dict(os.environ, env):
+            forget_process_caches()
+            try:
+                return self.held.tool_expands_no_alias(self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+            finally:
+                forget_process_caches()
+
+    def test_the_live_no_config_snapshot_reads_a_members_line(self):
+        self.snapshot(live_bash_snapshot())
+        self.assertEqual(self.unread(), [])
+        self.assertFalse(self.expands_no_alias())
+        for agent_id in (AGENT_A, AGENT_B, None):
+            with self.subTest(agent_id=agent_id):
+                self.assertSilent("ls", agent_id)
+
+    def test_the_startup_file_snapshot_reads_a_members_line(self):
+        """Both of the spike's captures, the shell that made the snapshot interactive or not: `ls` is read and allowed, and
+        a line a member is refused is refused for its own words, not for an option line."""
+        for interactive in (False, True):
+            with self.subTest(interactive=interactive):
+                self.fresh()
+                self.snapshot(live_bash_snapshot(bash_32_options(interactive)))
+                self.assertEqual(self.unread(), [])
+                self.assertEqual(self.unread("git push"), [])
+                self.assertFalse(self.expands_no_alias())
+                for agent_id in (AGENT_A, AGENT_B, None):
+                    with self.subTest(agent_id=agent_id):
+                        self.assertSilent("ls", agent_id)
+                self.refused_for_members("git push")
+
+    def test_the_option_lines_as_the_reader_takes_them_apart(self):
+        """In a bash snapshot the last line naming an option decides it, so `shopt -p`'s `-u expand_aliases` gives way to
+        the harness's `-s`; a hyphenated `set -o` name is a name; and every line reads as changing nothing."""
+        options = self.m.read_snapshot(live_bash_snapshot(bash_32_options(False)).encode(), 0, bash=True)[3]
+        read = [o[:3] for o in options]
+        self.assertEqual(len(read), 34 + 5)
+        self.assertEqual([o for o in read if o[1] == "expand_aliases"], [("shopt", "expand_aliases", True)])
+        self.assertEqual(read[-1], ("shopt", "expand_aliases", True))
+        self.assertIn(("set", "interactive-comments", True), read)
+        self.assertEqual([self.m.option_effect(*o, bash=True) for o in read], [None] * len(read))
+
+    def test_an_option_the_hook_must_not_ignore_is_still_read(self):
+        """A bash option that changes how the line's words are read, off or on against its default, stays an "unread"
+        finding naming its line, and so does a name bash does not take (probed above); within a snapshot a later line
+        that leaves it so is the one named, and an earlier one a later line undoes is none."""
+        for lines, named in (("set -o noglob", "set -o noglob"), ("set -o posix", "set -o posix"),
+                             ("set -o allexport", "set -o allexport"), ("set -o keyword", "set -o keyword"),
+                             ("set -o nounset", "set -o nounset"), ("set +o braceexpand", "set +o braceexpand"),
+                             ("set -o nosuch", "set -o nosuch"), ("set -o INTERACTIVE-COMMENTS", "set -o INTERACTIVE-COMMENTS"),
+                             ("set -o shwordsplit", "set -o shwordsplit"), ("shopt -s extglob", "shopt -s extglob"),
+                             ("shopt -s expand_aliases\nshopt -u expand_aliases", "shopt -u expand_aliases"),
+                             ("shopt -u extglob\nshopt -s extglob", "shopt -s extglob"),
+                             ("set +o noglob\nset -o noglob", "set -o noglob"), ("set -o 'noglob'", "set -o 'noglob'")):
+            with self.subTest(lines=lines):
+                self.fresh()
+                path = self.snapshot(live_bash_snapshot(lines + "\n"))
+                self.assertEqual(self.unread(), ["`%s` (%s)" % (named, path.name)])
+                self.refused_for_members("ls", named)
+                self.assertSilent("ls", agent_id=None)
+        for lines in ("shopt -s extglob\nshopt -u extglob", "set -o noglob\nset +o noglob", "set +o posix",
+                      "set -o braceexpand", "set -o errexit", "set -o pipefail", "set -o xtrace", "set -o vi",
+                      "set -o noclobber", "set +o hashall", "set +o interactive-comments", "set -o nolog"):
+            with self.subTest(lines=lines):
+                self.fresh()
+                self.snapshot(live_bash_snapshot(lines + "\n"))
+                self.assertEqual(self.unread(), [])
+                self.assertSilent("ls", AGENT_A)
+
+    def test_physical_is_chase_links(self):
+        self.snapshot(live_bash_snapshot("set -o physical\n"))
+        self.assertTrue(self.analysis().chase)
+        self.fresh()
+        self.snapshot(live_bash_snapshot("set +o physical\n"))
+        self.assertFalse(self.analysis().chase)
+
+    def test_a_zsh_snapshot_reads_as_before(self):
+        """zsh has no shopt and its own `set -o` names, so the same block in a zsh snapshot is read line by line against
+        zsh's names, as it was: bash's names are unread there, and so is each shopt line off its bash default."""
+        path = self.snapshot(bash_32_options(False), shell="zsh")
+        self.assertEqual(self.unread(), ["`%s` (%s)" % (line, path.name) for line in (
+            "shopt -u expand_aliases", "set -o braceexpand", "set -o hashall", "set -o interactive-comments",
+            "set -o onecmd")])
+        self.fresh()
+        path = self.snapshot("setopt shwordsplit\nsetopt noshwordsplit\n", shell="zsh")
+        self.assertEqual(self.unread(), ["`setopt shwordsplit` (%s)" % path.name])
+
+    def test_a_zsh_line_is_not_taken_for_a_bash_ones(self):
+        """The same line in a zsh and a bash snapshot is two options, each read as its own shell reads it, whichever is
+        newer: zsh has no braceexpand, so its line stays unread."""
+        older = self.snapshot("set -o braceexpand\n", shell="zsh")
+        self.snapshot(live_bash_snapshot("set -o braceexpand\n"))
+        self.assertEqual(self.unread(), ["`set -o braceexpand` (%s)" % older.name])
+
+    def test_a_cache_of_the_old_reading_is_rebuilt(self):
+        """A table cached before bash's option lines were read so held their unread entries; one of another format is built
+        again, never read."""
+        self.snapshot(live_bash_snapshot(bash_32_options(False)))
+        self.assertEqual(self.unread(), [])
+        cache = self.home.path / ".spud" / "shell-snapshot.json"
+        stored = json.loads(cache.read_text(encoding="utf-8"))
+        stored["format"] = 3
+        stored["options"].append(["set", None, True, "set -o interactive-comments", 0])
+        cache.write_text(json.dumps(stored), encoding="utf-8")
+        self.assertEqual(self.unread(), [])
+        self.assertEqual(json.loads(cache.read_text(encoding="utf-8"))["format"],
+                         sys.modules["spudlib.hooks.snapshots"].CACHE_FORMAT)
+
+
 # Claude Code's own shadows byte for byte as every snapshot on this Mac held them on 2026-09-24
 # (snapshot-zsh-1790263809802-78wrv5.sh, the four before it alike), the harness's comment lines and rg's `if` included, with
 # the Mac's claude path spelled as a scratch one: the text hooks/snapshots.HARNESS_SHADOWS recognizes.  HARNESS_SHADOWS above
@@ -4152,6 +4349,96 @@ class NewShellStartupTest(ShellSnapshotCase):
             with self.subTest(line):
                 self.refused_for_members(line, "never run `git push`")  # the string's push, not a script operand
         self.silent_for_everyone("sh -c 'echo hi' -x")
+
+
+DQ_BRACE = "bash reads quotes inside a double-quoted `${ }` differently from this hook"  # SPD-204's reason, a member's
+SPUD_TOUCH = "Law 1: a write by argument (`touch` x)"  # Spud's answer to `touch x` in home/tests, before SPD-204 and after
+
+
+class DoubleQuotedBraceQuoteTest(ShellSnapshotCase):
+    """SPD-204, filed by SPUD-202/Frederica: the hook reads every quote inside double quotes as text, so in
+    `"${u:-'"'}"` it ends the double quotes at the inner `"` and opens a single-quoted span after it, while bash 3.2 reads
+    that `"` as a quote nested in the expansion and the apostrophes as text.  Two such words balance for both readings,
+    and the commands between them are hidden from the hook in text bash runs.  The ticket's evidence, through
+    tests/probes/shell_probe.py (2026-09-23; zsh 5.9 -f and -f -o nobareglobqual, GNU bash 3.2.57): eval of `echo
+    "${u:-'"'}" ; echo RAN > l/dqsq ; echo "${u:-'"'}"` wrote l/dqsq in bash and failed in zsh (`unmatched double quote`),
+    so the Bash tool's own zsh line runs nothing and the gap is bash's.
+
+    The rule now, fail-closed and nothing more (Eric's call, 2026-09-25): in text bash or sh reads -- a `bash -c` or
+    `sh -c` string, a here-document fed to one, a shell the hook cannot name, and the Bash tool's own line where a bash
+    snapshot may be the one it sources -- any `'`, `"` or backtick inside a double-quoted `${ }` is an "unread" finding,
+    refused a member; Spud reads on, and zsh's top-level line reads as it did.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; every line runs in home/tests, where `touch x` is theirs."""
+
+    INNER = "echo \"${u:-'a'}\"; touch x"
+    PLAIN = "echo \"${u:-a}\"; touch x"
+    EVIDENCE = "echo \"${u:-'\"'}\" ; touch x ; echo \"${u:-'\"'}\""
+
+    def setUp(self):
+        super().setUp()
+        self.tests_dir = str(self.home.path / "tests")
+
+    @staticmethod
+    def bash_texts(inner):
+        """The inner text as bash or sh reads it: a `bash -c` and an `sh -c` string, and a here-document fed to bash."""
+        return ("bash -c " + shlex.quote(inner), "sh -c " + shlex.quote(inner), "bash <<'EOF'\n%s\nEOF" % inner)
+
+    def spud_reads_on(self, line, misread=False):
+        """Spud's answer as before SPD-204: the hook reads the words, and `touch x` in home/tests is Law 1's (Spud never
+        produces a deliverable), with nothing of SPD-204's reason -- except where the line holds the ticket's evidence
+        (`misread`), which the hook reads as one echo of one word, so Spud is left silent there as he was: the laws bind
+        him where the hook cannot see."""
+        with self.subTest(line=line, agent_id="spud"):
+            if misread:
+                self.assertSilent(line, None, self.tests_dir)
+                return
+            r = self.assertRefused(line, SPUD_TOUCH, None, self.tests_dir)
+            self.assertNotIn(DQ_BRACE, r.reason)
+
+    def refused_to_members_alone(self, line, misread=False):
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, DQ_BRACE, agent_id, self.tests_dir)
+        self.spud_reads_on(line, misread)
+
+    def read_as_before(self, line, misread=False):
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertSilent(line, agent_id, self.tests_dir)
+        self.spud_reads_on(line, misread)
+
+    def test_a_quote_inside_a_double_quoted_brace_is_refused_a_member_in_text_bash_reads(self):
+        for inner in (self.INNER, self.EVIDENCE, "echo \"${u:-\"a\"}\"; touch x", "echo \"${u:-`echo a`}\"; touch x",
+                      "echo \"x${u:-${v:-'a'}}y\"; touch x", "echo \"${u:+'a'}\" \"${v:-'b'}\"; touch x"):
+            for line in self.bash_texts(inner):
+                self.refused_to_members_alone(line, inner == self.EVIDENCE)
+
+    def test_the_reason_names_the_expansion_and_how_to_respell_it(self):
+        r = self.assertRefused(self.bash_texts(self.INNER)[0], DQ_BRACE, AGENT_A, self.tests_dir)
+        self.assertIn("${u:-'a'}", r.reason)
+        self.assertIn("variable", r.reason)
+
+    def test_the_same_text_with_no_quote_inside_is_allowed(self):
+        for inner in (self.PLAIN, "echo ${u:-'a'}; touch x", "echo \"a\" ${u:-'b'}; touch x", "echo \"${u:-\\'}\"; touch x",
+                      "echo \"\\${u:-'a'}\"; touch x", "echo \"${u:-a}\" 'b'; touch x"):
+            for line in self.bash_texts(inner):
+                self.read_as_before(line)
+
+    def test_zshs_top_level_line_and_a_zsh_string_read_as_before(self):
+        """The Bash tool's own line with only a zsh snapshot, and a `zsh -c` string: read as before SPD-204, allowed."""
+        for line in (self.INNER, self.PLAIN, "zsh -c " + shlex.quote(self.INNER), "zsh -f <<'EOF'\n%s\nEOF" % self.INNER):
+            self.read_as_before(line)
+        for line in (self.EVIDENCE, "zsh -c " + shlex.quote(self.EVIDENCE)):
+            self.read_as_before(line, misread=True)
+
+    def test_a_bash_snapshot_makes_the_tools_own_line_text_bash_reads(self):
+        """Where a bash snapshot may be the one the Bash tool sources, its line is text bash reads; a `zsh -c` string is not."""
+        self.write_snapshot("snapshot-bash-1700000000001-bbbbbb.sh", live_bash_snapshot())
+        self.refused_to_members_alone(self.INNER)
+        self.refused_to_members_alone(self.EVIDENCE, misread=True)
+        for line in (self.PLAIN, "zsh -c " + shlex.quote(self.INNER)):
+            self.read_as_before(line)
 
 
 if __name__ == "__main__":

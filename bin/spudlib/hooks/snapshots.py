@@ -69,19 +69,22 @@ def ansi_c_value(body):
 # Nothing here writes into ~/.claude: the snapshots are the user's files, read and never touched.
 SNAPSHOTS = "shell-snapshots"
 SNAPSHOT_PREFIX = "snapshot-"
+BASH_SNAPSHOT_PREFIX = SNAPSHOT_PREFIX + "bash-"  # `snapshot-<shell>-<stamp>-<id>.sh`: a bash's, read as bash reads it
 CACHE_NAME = "shell-snapshot.json"  # the parsed table, under the home's .spud/, keyed by every snapshot's size and mtime
 # What a cache holds, which changes whenever the table does: one of another format, or of none (written before SPD-263
 # added the options), is built again, never read, since a table read from it would lack what this one reads -- format 2's
-# held a global alias among the plain ones and no suffix alias at all (SPD-283).
-CACHE_FORMAT = 3
+# held a global alias among the plain ones and no suffix alias at all (SPD-283), format 3 a bash snapshot's `shopt` line a
+# later one overrides and its hyphenated `set -o` name as an option line it could not take apart (SPD-329).
+CACHE_FORMAT = 4
 # A snapshot's option lines, which the shell runs before every Bash call (SPD-263): zsh's `setopt <name>` (and unsetopt),
 # bash's `shopt -s|-u <name>`, and `set -o|+o <name>`, each at the start of a line of its own (a function's body, which
 # runs only when called, is skipped as a whole).  Read as (kind, the option as spelled, on or off), with the line itself
 # for a reason to show; shell/held_options.line_options reads what each means for the line.  A line of any other shape --
 # an option builtin with a flag of its own, a redirection, an operator, quoting -- is kept with no option (None), which
-# the reader takes as one it cannot model.
+# the reader takes as one it cannot model.  A name may hold a hyphen after its first character, as bash's
+# interactive-comments does (SPD-329: Claude Code writes `set -o interactive-comments` into a bash snapshot).
 OPTION_RE = re.compile(r"^(?P<builtin>setopt|unsetopt|shopt|set)(?P<rest>(?:\s.*)?)$", re.S)
-OPTION_WORD_RE = re.compile(r"[A-Za-z0-9_]+\Z")
+OPTION_WORD_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]*\Z")
 BODY_CAP = 64 * 1024  # the most of one function body the hook reads; nothing a profile defines comes near it
 # A snapshot's `alias` line: `alias -- name=body`, any options before the `--`.  Claude Code writes the alias block from
 # zsh's plain `alias` listing, one `alias -- ` line per entry, and that listing prints a global alias with no flag and a
@@ -258,7 +261,8 @@ def build_table(files):
                 data = f.read()
         except OSError as e:
             return Table(gap="cannot read %s: %s" % (path, e))
-        file_aliases, file_functions, named, file_options = read_snapshot(data, index)
+        bash = is_bash(path)
+        file_aliases, file_functions, named, file_options = read_snapshot(data, index, bash)
         for name in named:
             if name in decided:
                 continue
@@ -273,17 +277,25 @@ def build_table(files):
             elif name in file_functions:
                 functions[name] = file_functions[name]
         for option in file_options:  # every snapshot's, since any may be the one a session sourced (SPD-263)
-            options.setdefault(option[:3] if option[1] is not None else option[3], option)
+            # a bash's line and a zsh's alike are two options, each read as its own shell reads it (SPD-329)
+            options.setdefault((option[:3] if option[1] is not None else option[3], bash), option)
     return Table(aliases["plain"], functions, files, options=options.values(), galiases=aliases["global"],
                  saliases=aliases["suffix"])
 
 
-def read_snapshot(data, index):
+def is_bash(path):
+    """Whether the snapshot at `path` is a bash's, by its name (BASH_SNAPSHOT_PREFIX)."""
+    return os.path.basename(path).startswith(BASH_SNAPSHOT_PREFIX)
+
+
+def read_snapshot(data, index, bash=False):
     """(the aliases this snapshot leaves defined, a table per kind -- ALIAS_KINDS -- of each name's body, its functions as
     (index, the body's first byte, its length), every name any of its lines names -- a suffix alias's as ("suffix", its
     suffix) -- its option lines as Table.options holds them).  The lines are read in order, so a later `unalias` clears an
     alias and a later definition replaces an earlier one, as the shell reading the same file does: a plain and a global
-    alias share zsh's one table and a function the name, a suffix alias has a table of its own (ALIAS_RE)."""
+    alias share zsh's one table and a function the name, a suffix alias has a table of its own (ALIAS_RE).  In a bash's
+    snapshot (`bash`) an option's last `shopt` or `set` line decides it (last_option_lines); a zsh's keeps every option
+    line, each read on its own."""
     aliases, functions, named, options = {kind: {} for kind in ALIAS_KINDS}, {}, [], []
     lines = data.split(b"\n")
     offsets, at = [], 0
@@ -336,7 +348,20 @@ def read_snapshot(data, index):
         aliases["global"].pop(name, None)
         named.append(name)
         i += 1
-    return aliases, functions, named, options
+    return aliases, functions, named, last_option_lines(options) if bash else options
+
+
+def last_option_lines(options):
+    """A bash snapshot's option lines with each option's last line alone, in line order (SPD-329): Claude Code writes the
+    `shopt -p` of the shell that made the snapshot and then its own `shopt -s expand_aliases`, and a shell that is not
+    interactive prints `shopt -u expand_aliases` among the first, which the harness's line overrides as bash reading the
+    file does.  An option is its builtin and its name as spelled -- bash takes a `set -o` name in no other case or
+    spelling (probed, SPD-329's BashSnapshotOptionsTest) -- and a line the reader could not take apart (no name) is kept."""
+    last = {}
+    for at, option in enumerate(options):
+        if option[1] is not None:
+            last[option[0], option[1]] = at
+    return [option for at, option in enumerate(options) if option[1] is None or last[option[0], option[1]] == at]
 
 
 def option_line(line, index):

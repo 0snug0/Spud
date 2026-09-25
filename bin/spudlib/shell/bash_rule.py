@@ -285,6 +285,13 @@ UNREAD_MESSAGES = {
                    " words in its place, as zsh would; but bash has no global alias -- its `alias -g` is an invalid"
                    " option -- so it runs the words as written, which the hook did not read",
                    "define no global alias in text a bash runs, and spell out in its place the words you mean it to run"),
+    # SPD-204: text bash reads (held_text.bash_reads) with a quote inside a double-quoted `${ }` (unread.dq_brace_quote)
+    "dq-brace": ("bash reads quotes inside a double-quoted `${ }` differently from this hook (`%s`, in text bash or sh"
+                 " runs): bash 3.2 reads a `\"` there as a quote nested in the expansion and a `'` as text, where the hook"
+                 " ends the double quotes at the `\"` and opens a single-quoted span at the `'`, so the commands between two"
+                 " such words may be ones the hook never read",
+                 "put the default in a variable first and expand that (`d=a; echo \"${u:-$d}\"`), or quote it another way"
+                 " -- no `'`, `\"` or backtick inside the double-quoted `${ }`"),
 }
 
 

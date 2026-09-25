@@ -479,6 +479,22 @@ def parsed_lines(a, substitution=False):
     return shell not in _WHOLE_PARSED and syntax.LINES_BOTH
 
 
+# SPD-204: the shells alias_views.AliasView.shell names whose text bash may read -- bash, sh (bash in POSIX mode on macOS)
+# and one the hook cannot name ("")
+_BASH_READ = frozenset({"bash", "sh", ""})
+
+
+def bash_reads(a):
+    """Whether the text being read may be read by a bash (SPD-204): a bash's, an sh's or an unnamed shell's, as
+    alias_views.AliasView.shell names it for every text parsed inside it, or the Bash tool's own where a snapshot any
+    session may source is bash's (held_options.tool_may_be_bash).  zsh's, dash's, ksh's and the others' are not."""
+    view = a.alias_view
+    shell = alias_views.TOOL_SHELL if view is None else view.shell
+    if shell == alias_views.TOOL_SHELL:
+        return held_options.tool_may_be_bash(a)
+    return shell in _BASH_READ
+
+
 # SPD-326: dash and ash parse a `$( )` or backtick body with the text around it (above), so the body's words expand the
 # aliases that text was parsed with, not the ones its own line defined, changed or cleared before the body.  Probed
 # through tests/probes/shell_probe.py (2026-09-25), zsh 5.9 -f -o nobareglobqual, -f and bash 3.2.57 each driving
