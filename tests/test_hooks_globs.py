@@ -493,7 +493,7 @@ class SnapshotBodyLateParsedTest(BashHookCase):
     """SPD-300: a function body the snapshot defines was parsed before the snapshot's aliases (SPD-290), but a `<( )` or
     `>( )` body in it and an `e` or `+` glob qualifier's code are parsed when they run, once the snapshot is sourced, so
     the snapshot's aliases stand there.  ShellWalk.open_process_substitution (SPD-287) and read_qualifier_code (SPD-292)
-    put a new line_aliases.AliasView in force only while the line's table held an alias, so inside such a body, with the
+    put a new alias_views.AliasView in force only while the line's table held an alias, so inside such a body, with the
     line's table empty, they read with the body's early view and expanded none: `procgp`, whose body is `cat <(gp)`
     under `alias gp='git push'`, reached the hook with no finding.  And stdin_text's printer-shadow check took every
     snapshot alias of a printer's name as standing, a body's `cat` too.

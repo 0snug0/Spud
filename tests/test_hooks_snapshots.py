@@ -3476,7 +3476,7 @@ class HeldPlainAliasScopeTest(ShellSnapshotCase):
     parsed with none -- nor in a new shell's text, which never sources the snapshot.  Reading an alias's body in place of a
     command that runs is a reading of other text, not more: under a profile's `alias git=hub`, a snapshot function's `git
     push` and `sh -c 'git push'` were read as `hub push` and let through.  SPD-283 made the snapshot's global and suffix
-    aliases stand only where zsh expands them; the plain ones now do too (line_aliases.held_standing): the line's own
+    aliases stand only where zsh expands them; the plain ones now do too (alias_views.held_standing): the line's own
     command words, an alias body read in them, and text the Bash tool's shell parses as it runs -- eval's, a substitution's,
     in the line or in a snapshot body -- and a function body the line defines, parsed with the line.
 
@@ -3741,7 +3741,7 @@ class HashTableAliasClearTest(ShellSnapshotCase):
     `unhash -s` / `disable -s` a suffix alias, but analyse read unhash and disable for their `-f` alone (SPD-281), so
     under a profile's `alias git=hub`, `unhash -a git; eval 'git push'` was still read as `hub push` and the push missed
     (SPD-299's case, another spelling).  They now clear the line's and the snapshot's aliases as unalias does
-    (line_aliases.clear_alias_line), each builtin's flags read for the table they name; `enable -a NAME` may bring a
+    (alias_definitions.clear_alias_line), each builtin's flags read for the table they name; `enable -a NAME` may bring a
     disabled alias back, so it doubts a name the line cleared.
 
     Probed through tests/probes/shell_probe.py in zsh 5.9 -f and -f -o nobareglobqual, a fresh `zsh -f -c` sourcing a
@@ -3844,7 +3844,7 @@ alias -- broken='git push
 class MixedAliasChainTest(ShellSnapshotCase):
     """SPD-313: zsh holds one alias table, the snapshot's aliases and the line's in it, and looks the word after any alias
     whose body ends in a blank up there, and the first word of each body it expands, chained or not.  The hook chained the
-    line's aliases into the line's (SPD-310, line_aliases.alias_texts) and the snapshot's into the snapshot's
+    line's aliases into the line's (SPD-310, alias_chains.alias_texts) and the snapshot's into the snapshot's
     (shell_aliased's loop), never one into the other, and the snapshot's loop joined a chained body without looking its
     first word up -- so behind the snapshot's `s='sudo '` a line's `gp` in eval, behind a line's `sn='sudo '` the snapshot's
     `gp`, and behind `s` the snapshot's `u=gp` were each read as a program sudo runs, and a member's push went through.

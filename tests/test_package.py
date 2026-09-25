@@ -55,13 +55,16 @@ DISPATCH = "hooks.dispatch"
 # tarfile and zipfile only through core.lazy (HookPathTest.test_a_hook_lists_an_archive_only_on_a_line_that_extracts_one),
 # shell.line_functions for a function body the line defines and its reading at each call, taken out of shell.walk
 # (SPD-280), shell.line_aliases for the aliases a line defines for eval and the ones the shell already holds, taken out
-# of shell.expansions (SPD-284).
+# of shell.expansions (SPD-284), and out of it in turn shell.alias_definitions for what a line does to the alias table,
+# shell.alias_views for the table the text being read was parsed with, shell.alias_spellings for how that text writes
+# each word, and shell.alias_chains for the text an alias body and the words after it stand for (SPD-314).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
     "render.prices", "projects.sessions",
     "hooks.dispatch", "hooks.gitrepos", "hooks.hookio", "hooks.pathrule", "hooks.pretool", "hooks.recording", "hooks.sessionhooks",
     "hooks.snapshots", "hooks.stophook", "hooks.subagent_stop", "hooks.worktrees",
+    "shell.alias_chains", "shell.alias_definitions", "shell.alias_spellings", "shell.alias_views",
     "shell.analyse", "shell.archive_names", "shell.arg_writes", "shell.arithmetic_assignments", "shell.assigning_builtins", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
     "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.git_writes", "shell.globbing", "shell.held_options", "shell.held_shadows", "shell.held_text", "shell.heredocs", "shell.inline_programs",
     "shell.interpreter_words", "shell.line_aliases", "shell.line_functions","shell.loop_bindings", "shell.positional", "shell.prepare", "shell.program_writes", "shell.redirect_globs", "shell.reevaluation", "shell.runner_files", "shell.runtime_shells", "shell.spud_calls",

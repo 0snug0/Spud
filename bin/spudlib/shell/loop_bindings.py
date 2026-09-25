@@ -357,7 +357,7 @@ def basename_runs(a):
     the program, so under a profile's `basename () { ...; }` `sh -c 'echo hi > "tests/$(basename a/x.txt)"'` writes
     tests/x.txt, and a snapshot it never sources, or could not read, hides nothing there (tests/test_hooks_groups.py
     NewShellSnapshotLookupTest).  Its aliases too, which a snapshot body's substitution, parsed as the body runs, does
-    expand, so line_aliases.held_standing, whose `early` mark such a body carries, is not the test here.
+    expand, so alias_views.held_standing, whose `early` mark such a body carries, is not the test here.
 
     SPD-307: the snapshot's function only where line_functions.held_function still finds it standing there, so a line's
     own `unset -f basename` (sure or maybe -- a removal that may not have run keeps today's cautious reading) takes the

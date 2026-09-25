@@ -1,10 +1,11 @@
 """shell/expansions: Parameter expansions and a command's read points.
 
-Its alias reading, the aliases a line defines for eval and the ones the shell already holds, is shell/line_aliases (SPD-284)."""
+Its alias reading, the aliases a line defines for eval and the ones the shell already holds, is shell/line_aliases (SPD-284)
+and the four modules SPD-314 took out of it: alias_definitions, alias_views, alias_spellings and alias_chains."""
 
 import functools
 
-from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_programs, git_writes, globbing, line_functions, loop_bindings, prepare, spud_calls, syntax, unread
+from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_programs, git_writes, globbing, held_text, line_functions, loop_bindings, prepare, spud_calls, syntax, unread
 from ..core import lazy
 from ..hooks import hookio
 
@@ -517,8 +518,10 @@ def read_action(a, action, depth, in_line):
     a.cwds = None
     calls, moves = len(a.git_calls), a.dir_moves
     a.deferring.append(in_line)
+    # SPD-323: a trap's text of several lines, which sh and bash parse a line at a time, as they parse eval's
+    lines = held_text.parsed_lines(a) if isinstance(action, str) and "\n" in action else False
     try:
-        analyse.analyse_isolated(a, action, depth + 1)
+        analyse.analyse_isolated(a, action, depth + 1, lines=lines)
     finally:
         a.deferring.pop()
     if a.dir_moves != moves:

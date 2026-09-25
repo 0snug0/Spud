@@ -13,8 +13,8 @@ ShellAnalysis.function_bodies holds, and a copy, a removal or a registration is 
 
 import functools
 
-from . import (analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, directories, expansions,
-               held_text, line_aliases, prepare, script_files, stdin_text, syntax, unread, walk)
+from . import (alias_views, analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, directories,
+               expansions, held_text, prepare, script_files, stdin_text, syntax, unread, walk)
 from ..hooks import hookio, snapshots
 
 
@@ -36,7 +36,7 @@ class LineBody:
     SPD-308) -- or None where that walk had none; kept on the body, since a call may read it after that walk is over (a
     body an eval's text defined) or from a walk of the body's own tokens (a body defined inside another's reading).
     `parsed` (SPD-312): (ShellAnalysis.alias_scope, ShellAnalysis.alias_view) where zsh parsed the definition -- whether
-    the line's own aliases stand in that text, and the line_aliases.AliasView they stand with -- which every reading of
+    the line's own aliases stand in that text, and the alias_views.AliasView they stand with -- which every reading of
     the body reads it with (read_line_body), wherever the call stands: zsh expands a body's aliases once, as it parses the
     definition, and never again at a call (walk.ShellWalk.bind; assign_function for a `functions` body).
 
@@ -159,7 +159,7 @@ def read_line_body(a, body, depth, stdin, fed):
     whose readings (zsh's and bash's) this does not follow.
 
     SPD-311: the tokens are read by the text the definition was read from (LineBody.written), the one zsh parsed them
-    with: the quotes line_aliases.spellings finds there (a.quoted_text, which analyse_command puts back when this
+    with: the quotes alias_spellings.spellings finds there (a.quoted_text, which analyse_command puts back when this
     returns) and the plain words ShellWalk.expand_globals takes for a global alias's name in a `<( )` body -- so a body
     an eval's text defined, called after that eval, and one defined inside another body's reading, are read as they run,
     not every aliased word both ways (probed in zsh 5.9: under `alias ls='echo ALIASED'`, `eval 'f() { ls -d /; }'; f`
@@ -211,7 +211,7 @@ def assign_function(a, found):
     scope = 1 if a.aliases or a.alias_unknown else 0  # as analyse.analyse_isolated opens a body's
     for name, text in pairs:
         body = shell_walk.bind([name])
-        body.text, body.parsed = text, (scope, line_aliases.AliasView(a, "\n" in text))
+        body.text, body.parsed = text, (scope, alias_views.AliasView(a, "\n" in text))
         shell_walk.queue(body)
 
 
