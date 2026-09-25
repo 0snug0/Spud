@@ -13,8 +13,8 @@
   "suite runs when the file is not in `files` (a new file), or when its reach meets `fixture`.  Otherwise every test",
   "module whose entry meets the reach runs, and every test module the table does not name."
  ],
- "tree": "2164f5929ddbf91f",
- "code": "d9a6ea6da144f906",
+ "tree": "cf789f8dc4e335cf",
+ "code": "ecae73904b1800cb",
  "files": [
   "bin/spud",
   "bin/spud_ledger.py",
