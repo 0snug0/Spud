@@ -5,8 +5,30 @@ from ..core import lazy
 from ..state import lookup
 
 
-def team_line(team_key, m):
-    return "- [[%s/%s|%s]] (%s, %s, %s)" % (team_key, m["name"], m["name"], m["lineage"], lookup.persona_label(m), m["model"])
+def team_line(team_key, m, respawn=""):
+    """A member's line in the Team tree and in a parent's ## Subagents.  `respawn` is respawn_words' entry for it, inside
+    the parentheses, so the ` — worked on` suffix after them still reads back as the summary (bulkimport.TEAM_LINE)."""
+    return "- [[%s/%s|%s]] (%s, %s, %s%s)" % (team_key, m["name"], m["name"], m["lineage"], lookup.persona_label(m), m["model"], respawn)
+
+
+def respawn_words(con, ticket):
+    """{member id: `; re-spawns [[…]], re-spawned as [[…]]`} for each member of `ticket` in a re-spawn chain (SPD-321):
+    what the member re-spawns, then what re-spawned it, each linked, so the chain reads in the tree whichever run the
+    reader is on.  Empty, and nothing more read, on a ticket with no re-spawn."""
+    links = lookup.respawn_links(con, ticket["id"])
+    if not links:
+        return {}
+    names = {r["id"]: r["name"] for r in con.execute("SELECT id, name FROM members WHERE ticket_id = ?", (ticket["id"],))}
+
+    def link(member_id):
+        return "[[%s/%s|%s]]" % (ticket["team_key"], names[member_id], names[member_id])
+
+    words = {}
+    for new, old in links.items():
+        if new in names and old in names:
+            words.setdefault(new, []).insert(0, "re-spawns " + link(old))
+            words.setdefault(old, []).append("re-spawned as " + link(new))
+    return {member_id: "; " + ", ".join(parts) for member_id, parts in words.items()}
 
 
 def prose_for(con, entity, entity_id, section):

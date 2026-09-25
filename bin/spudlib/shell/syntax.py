@@ -137,6 +137,23 @@ _QUOTED_SUBST = chr(0xE027)
 # pattern and a spelled `;` ends the word.  mark_zsh_patterns replaces every one, with `;` or with the group's newline, so
 # shlex and the walk never see it and deglob has nothing to restore.
 LINE_BREAK = chr(0xE026)
+
+
+class LineEnd(str):
+    """SPD-291: the `;` token a newline became (LINE_BREAK), in text a shell reads a line at a time, which the walk reads
+    as every other `;` and, where it stands between two of the text's commands, as the end of one line and the start of
+    the next (walk.ShellWalk.new_line).  Equal to `;` and hashed as it is, so every reading that compares a token to
+    `;`, or looks one up in LIST_TERMINATORS, reads it as it always read a newline; line_ends sets it among the tokens."""
+
+    __slots__ = ()
+
+
+LINE_END = LineEnd(";")
+# How a new shell reads its text, where the walk reads each reading of it (analyse.walk_readings, held_text.text_lines):
+# True, a line at a time; LINES_BOTH, the shell may read it a line at a time with aliases on or expand no alias at all
+# (bash, whose expand_aliases is off in a shell that is not interactive), so zsh's reading reads it whole and the other
+# a line at a time.
+LINES_BOTH = "both"
 # The characters of an arithmetic command `(( ... ))` and of an arithmetic expansion `$(( ... ))`.  Both shells
 # evaluate what stands between the parentheses as arithmetic -- the `>` of `(( n > 2 ))` is a comparison and opens no file,
 # `|` is a bitwise or and not a pipeline, `;` separates a `for` header's three expressions and no commands -- so
@@ -148,6 +165,7 @@ LINE_BREAK = chr(0xE026)
 _ARITH_CHARS = "()<>|&;\n \t"
 _ARITH_SENTINELS = {c: chr(0xE030 + i) for i, c in enumerate(_ARITH_CHARS)}
 _ARITH_UNSENTINEL = {v: k for k, v in _ARITH_SENTINELS.items()}
+_ARITH_NEWLINE = _ARITH_SENTINELS["\n"]  # a newline inside arithmetic, a word of its own between blanks (line_ends)
 # A shell operator character that is quoted or escaped (`\;`, `';'`, `\(`, `"|"`) is an ordinary character of the
 # word it stands in, and neutralize_quoted_globs replaces it with one of these so shlex keeps it there.  Before these, shlex
 # took the quotes away and handed the walk a bare `;` or `(`, which it read as the operator: `find . -exec rm {} \; -delete`
@@ -696,7 +714,8 @@ class ShellAnalysis:
         # reading is inside, the only places on one line where a name the line aliased is expanded (zsh expands an alias
         # when it parses the text, and parses the line's own text before any of it runs): each eval's words raise it, and
         # so does a body read in its own process -- a substitution, a trap's action, an (e) flag's value -- while the
-        # line's table holds an alias (analyse.analyse_isolated, SPD-283); a function body the shell's snapshot holds,
+        # line's table holds an alias (analyse.analyse_isolated, SPD-283), and each line after one that left an alias in
+        # text a shell reads a line at a time (walk.ShellWalk.new_line, SPD-291); a function body the shell's snapshot holds,
         # parsed before any alias of the line's, is read at 0 (held_text.read_body), and an eval or a substitution inside
         # it raises it again, which is why the table is part of reading_state (SPD-288);
         # `alias_unknown`, the line defined an alias whose name the hook cannot read.  Each name's doubt lives in `doubt`
@@ -899,6 +918,47 @@ def shell_tokens(text):
         return None
 
 
+def line_ends(tokens, doubled):
+    """`tokens` with the `;` each newline of the text became set as LINE_END (SPD-291), found by `doubled`, the tokens of
+    the same text with every LINE_BREAK written twice: a run of `;` there longer than the one `tokens` holds in its
+    place is a newline's, and the run's first `;` is marked.  Only the runs are compared, not the words, so a newline zsh
+    reads inside a word -- a glob group's, a `${ }`'s -- ends no line, as it ends none in the shell; nor does one inside
+    an arithmetic command, whose sentinel mark_zsh_patterns writes between blanks, a word of its own, left out of the
+    comparison.  None where the two do not line up, a word of one standing where the other has a `;`."""
+    if doubled is None:
+        return None
+    doubled = [t for t in doubled if not _arith_newline(t)]
+    out, i, j, n, m = [], 0, 0, len(tokens), len(doubled)
+    while i < n:
+        t = tokens[i]
+        if _arith_newline(t):  # an arithmetic command's newline: kept, compared with nothing
+            out.append(t)
+            i += 1
+            continue
+        if t != ";":
+            if j >= m or doubled[j] == ";":
+                return None
+            out.append(t)
+            i, j = i + 1, j + 1
+            continue
+        run, twice = i, j
+        while run < n and tokens[run] == ";":
+            run += 1
+        while twice < m and doubled[twice] == ";":
+            twice += 1
+        if twice - j < run - i:
+            return None
+        out.append(LINE_END if twice - j > run - i else tokens[i])
+        out.extend(tokens[i + 1 : run])
+        i, j = run, twice
+    return out if j == m else None
+
+
+def _arith_newline(token):
+    """Whether a token is a newline inside an arithmetic command alone, as mark_zsh_patterns writes it (line_ends)."""
+    return bool(token) and not token.strip(_ARITH_NEWLINE)
+
+
 _NOT_BRACED_PAREN = "$<>="  # what a `(` in a `${ }` follows when a shell reads it as more than a character of the word
 # What _braced_words writes for a blank or an operator character both shells keep in a `${ }`'s word: the quoted operator's
 # sentinel, and for a blank the inert one an arithmetic expansion's blanks get (zsh._ARITH_WORD); deglob restores each.
@@ -1020,7 +1080,8 @@ def untokenized(text):
 
 
 def operator_parts(token):
-    """A run of shell punctuation split into the operators it holds (`)>` is `)` then `>`; `;;&` stays one)."""
+    """A run of shell punctuation split into the operators it holds (`)>` is `)` then `>`; `;;&` stays one).  A token
+    that is one operator is handed back itself, so a LINE_END stays one (SPD-291)."""
     if not token or any(c not in SHELL_PUNCTUATION for c in token):
         return [token]
     parts, i = [], 0
@@ -1028,7 +1089,7 @@ def operator_parts(token):
         op = next(o for o in SHELL_OPERATORS if token.startswith(o, i))
         parts.append(op)
         i += len(op)
-    return parts
+    return parts if len(parts) > 1 else [token]
 
 
 _CURRENT = object()  # analyse_segment: redirections open in the directories in force

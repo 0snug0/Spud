@@ -5,6 +5,7 @@ the importer reading summaries and usage back.  Expected values are the spec's o
 mocks, or derived by hand from its rules.  Every case runs in a scratch SPUD_HOME; rows the CLI
 cannot produce directly are set with a direct UPDATE or INSERT there, as section 9 allows."""
 
+import importlib
 import json
 import re
 import unittest
@@ -219,6 +220,48 @@ class TeamSectionTest(TeamCardCase):
         self.assertEqual(order(), (["02", "02.01", "01", "01.01"], ["02", "02.01", "01", "01.01"]))
         self.set("tickets", t["id"], lead_id=None)
         self.assertEqual(order(), (["01", "01.01", "02", "02.01"], ["01", "01.01", "02", "02.01"]))
+
+
+class RespawnTreeTest(TeamCardCase):
+    """SPD-321: a re-spawn chain (`member respawn`, SPD-318) reads on the Team tree and a parent's ## Subagents, linked both
+    ways inside each line's parentheses, so the ` — worked on` suffix still reads back as the summary on import.  Not in
+    process, as test_members.RespawnTest is not: the leak guard samples every command an in-process class calls, and
+    `member respawn` is Spud's to run between spawns, not a hook's."""
+
+    in_process = False
+
+    def returned(self, m):
+        self.home.json("member", "finish", m["ref"], "--status", "failed", "--outcome", "x", actor="spud")
+
+    def test_the_chain_is_linked_both_ways_on_the_tree(self):
+        t = self.new_ticket("Respawned")
+        first = self.new_member(t["key"], name="Russet")
+        self.returned(first)
+        second = self.home.json("member", "respawn", first["ref"], actor="spud")["member"]
+        self.set("members", second["id"], summary="Built the rest of it.")
+        self.returned(second)
+        third = self.home.json("member", "respawn", second["ref"], actor="spud")["member"]
+        section = self.team()
+        a, b, c = first["name"], second["name"], third["name"]
+        self.assertEqual(tree_lines(section), [
+            "- [[SPUD-001/%s|%s]] (01, scout, haiku; re-spawned as [[SPUD-001/%s|%s]])" % (a, a, b, b),
+            "- [[SPUD-001/%s|%s]] (02, scout, haiku; re-spawns [[SPUD-001/%s|%s]], re-spawned as [[SPUD-001/%s|%s]]) — Built the rest of it."
+            % (b, b, a, a, c, c),
+            "- [[SPUD-001/%s|%s]] (03, scout, haiku; re-spawns [[SPUD-001/%s|%s]])" % (c, c, b, b),
+        ])
+        self.assertEqual([cells(r)[0] for r in table_rows(section)], ["[[SPUD-001/%s\\|%s]]" % (n, n) for n in (a, b, c)])  # the table as before
+        line = tree_lines(section)[1]
+        self.assertEqual(importlib.import_module("spudlib.imports.bulkimport").TEAM_LINE.match(line).group("text"), "Built the rest of it.")
+
+    def test_a_childs_chain_reads_in_its_parents_subagents(self):
+        t = self.new_ticket("Child respawned")
+        lead = self.new_member(t["key"], name="Pompadour", persona="engineer", model="opus")
+        child = self.new_member(t["key"], actor=lead["ref"], name="Yukon")
+        self.returned(child)
+        again = self.home.json("member", "respawn", child["ref"], actor=lead["ref"])["member"]
+        note = self.member_note("Pompadour")
+        self.assertIn("- [[SPUD-001/Yukon|Yukon]] (01.01, scout, haiku; re-spawned as [[SPUD-001/%s|%s]])\n" % (again["name"], again["name"]), note)
+        self.assertIn("- [[SPUD-001/%s|%s]] (01.02, scout, haiku; re-spawns [[SPUD-001/Yukon|Yukon]])" % (again["name"], again["name"]), note)
 
 
 def deeper_config():

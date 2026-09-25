@@ -9,8 +9,10 @@ shell/held_options (SPD-263), both taken out of this module on SPD-267.  It join
 read of analyse inside a function body.  Past 250 lines as one reading: analyse_shell_text's prune and the helpers it
 keeps by are one rule, and read_shell_name and read_body are its only way in.  A function body the line itself defines
 is read at each call through the same per-state reading (read_once, read_function, SPD-277), since a call runs it where
-the shell stands then exactly as it runs a snapshot's."""
+the shell stands then exactly as it runs a snapshot's.  Whether a new shell's text holds the snapshot at all -- which
+startup files a shell sources, read from its options -- is shell_start's (SPD-301), since only a zsh sourcing them does."""
 
+import os
 import re
 
 from . import analyse, directories, expansions, globbing, held_shadows, line_aliases, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
@@ -83,7 +85,8 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     the word stands where the shell expands an alias (the command position); `function`: where it looks a function up,
     which zsh's noglob, exec and `-` keep and the command position does not (SPD-262, analyse.dispatch_words).  Neither
     stands in a new shell's text, which never sources the snapshot (line_aliases.held_standing, SPD-290; snapshot_sourced,
-    SPD-298): there the word is the program or builtin it names.
+    SPD-298): there the word is the program or builtin it names -- except a zsh that sources the user's startup files,
+    which holds them, and one that sources part of them, where the word is read both ways (shell_start, SPD-301).
 
     Either runs in the line's shell, so the directory it leaves is the line's after it (SPD-252), settled by `effect`,
     where the command runs (directories.prefix_effect): `coproc takedir x` moves a forked shell and leaves the line where
@@ -125,6 +128,8 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     # SPD-305: none where the line surely removed it (`unset -f cd; cd /tmp` runs the builtin), and one a removal that may
     # not have run leaves read beside the command of that name (line_functions.held_function)
     held = line_functions.held_function(a, cmd)
+    if held == "sure" and line_aliases.held_partly(a):
+        held = "maybe"  # SPD-301: a new zsh's startup files may not define it -- the body and the command both (shell_start)
     body = line_aliases.shell_function(cmd, a) if held else None
     if body is None and line_moved is not line_functions.NO_BODY:
         a.cwds = directories.settle(effect, before, line_moved)
@@ -275,10 +280,158 @@ def snapshot_sourced(a):
     This is the `held` mark of line_aliases.AliasView, which analyse_new_shell clears and every text parsed inside it
     inherits (SPD-290), and not line_aliases.held_standing, which a snapshot body's `early` mark also clears: the
     snapshot defines its functions before its aliases, so a body's own words expand none of its aliases, but every one of
-    its functions stands when a body runs.  `zsh -i -c` and `zsh -l -c`, which read the user's startup files, are read
-    here as any new shell is (SPD-301)."""
+    its functions stands when a body runs.
+
+    SPD-301: a new zsh that sources the user's startup files, where the profile's functions live, holds them too
+    (shell_start): every one where it sources all the files the snapshot came from, and where it sources part of them
+    (line_aliases.held_partly), each read as a function that may or may not stand there (read_shell_name)."""
     view = a.alias_view
-    return view is None or view.held
+    return view is None or bool(view.held)
+
+
+# SPD-301: which of the user's startup files a new shell sources, read from its options.  Claude Code writes its snapshot
+# from `$SHELL -c -l` sourcing ~/.zshrc (read in its 2.1.282 bundle), so the snapshot holds what zsh's login files
+# (.zshenv, .zprofile, .zlogin) and ~/.zshrc define.  Probed through tests/probes/shell_probe.py in zsh 5.9 and bash
+# 3.2.57, HOME the probe's directory, each startup file defining an alias and a function of its own (NewShellStartupTest
+# has the whole record): a plain `zsh -c` ran .zshenv's alone; `-i`, `-o interactive`, `--interactive`, `-ointeractive`,
+# `-io interactive` and `-c -i` added .zshrc's; `-l`, `--login` and `-o login` added .zprofile's and .zlogin's but not
+# .zshrc's; `-il` and `-o interactive -o login` ran all four; `-f`, `-o norcs`, `+o rcs` and `--no-rcs` ran none wherever
+# they stood before the string, the last of `-f`/`-o rcs` winning; `-i +o interactive` and `+i` ran .zshenv's alone;
+# `zsh -c gb -i` ran gb non-interactive, -i being its $0; `-ib -c` read `-c` as a script, -b ending the options.  So a zsh
+# both interactive and login reads the files the snapshot came from, and its text is read as the Bash tool's line is
+# (held True); one that is either alone, or plain where a .zshenv exists, reads part of them, which part the hook cannot
+# tell, and is read both ways (line_aliases.PARTLY); one with rcs off reads none but /etc/zshenv (absent on macOS).
+#
+# bash -i ran ~/.bashrc's alias and function, bash -l ~/.bash_profile's function (no alias: a non-interactive bash expands
+# none), sh -i the file $ENV names, and `--norc -i` and `--noprofile -l` ran neither.  On this Mac ~/.bashrc is absent and
+# ~/.bash_profile evaluates conda's generated hook (conda's functions, PATH), none of which the zsh snapshot read.  So a
+# bash, sh, dash, ksh or ash started interactive or login sources files the snapshot may share with it or not -- a
+# profile both shells source is common -- and its text reads the snapshot's names both ways as well (PARTLY), more than
+# runs; a name only the bash files define stays unread, as tests/test_hooks_programs.py ScriptFileTest pins it (`bash -lc
+# 'git status'` reads no file a member could have written; ~/.bash_profile is the user's).  Every one of those shells and
+# zsh read an option after `-c` as an option (`sh -c -x 'echo A1'` traced `echo A1`), the string being the first word
+# after the options -- where the hook had read the option (`sh -c -x 'git push'` was read as `-x`); csh, tcsh and fish
+# take the word after -c.
+_ZSH_OPTIONS = {"interactive", "login", "rcs"}
+_POSIX_SHELLS = frozenset({"sh", "bash", "dash", "ksh", "ash"})
+_NEXT_WORD_STRING = frozenset({"csh", "tcsh", "fish"})
+
+
+def shell_start(base, words):
+    """(the index of a shell command's first operand -- its `-c` string where it has one -- or len(words); whether it
+    has `-c`; line_aliases.AliasView's `held` for its text, True, False or PARTLY) for the shell `base` and its words as
+    the line spells them (SPD-301, above).  zsh's single letters `-i`, `-l`, `-f` and `+` of each, `-o NAME` (glued or
+    not) and `--NAME`, a name read as zsh reads it (case, `-` and `_` ignored, `no` before it turning it off); bash's
+    `--login`, `--norc`, `--noprofile`, and the value `--rcfile`, `--init-file`, `-o` and `-O` take."""
+    is_zsh, n = base == "zsh", len(words)
+    on = {"interactive": False, "login": False, "rcs": True, "norc": False, "noprofile": False}
+    i, dash_c = 1, False
+    while i < n:
+        w = prepare.deglob(words[i])
+        if w in ("--", "-"):
+            i += 1
+            break
+        if len(w) < 2 or w[0] not in "-+" or dash_c and base in _NEXT_WORD_STRING:
+            break
+        i += 1
+        if w.startswith("--"):
+            name = w[2:].lower()
+            if name in ("rcfile", "init-file") and not is_zsh:  # bash's, whose file stdin_text.startup_files reads
+                i += 1
+            elif name in ("login", "norc", "noprofile") and not is_zsh:
+                on[name] = True
+            elif is_zsh:
+                _zsh_option(on, name, True)
+            continue
+        ends = False
+        for k, letter in enumerate(w[1:]):
+            if letter == "c":
+                dash_c = True
+            elif letter in "oO":
+                value = w[k + 2 :]
+                if not value and i < n:
+                    value, i = prepare.deglob(words[i]), i + 1
+                if is_zsh and letter == "o":
+                    _zsh_option(on, value, w[0] == "-")
+                break
+            elif letter in "il":
+                on["interactive" if letter == "i" else "login"] = w[0] == "-"
+            elif letter == "f" and is_zsh:
+                on["rcs"] = w[0] == "+"
+            elif letter == "b" and is_zsh:
+                ends = True
+        if ends:
+            break
+    if is_zsh:
+        return i, dash_c, _zsh_held(on)
+    sources = base in _POSIX_SHELLS and (on["interactive"] and not (base == "bash" and on["norc"])
+                                         or on["login"] and not (base == "bash" and on["noprofile"]))
+    return i, dash_c, line_aliases.PARTLY if sources else False
+
+
+def _zsh_option(on, name, value):
+    """Set one of zsh's options shell_start reads, `name` as zsh reads an option's name, `value` for `-o`, not for `+o`."""
+    name = name.lower().replace("_", "").replace("-", "")  # `--no-rcs` ran none (probed)
+    if name not in _ZSH_OPTIONS and name.startswith("no") and name[2:] in _ZSH_OPTIONS:
+        name, value = name[2:], not value
+    if name in _ZSH_OPTIONS:
+        on[name] = value
+
+
+def _zsh_held(on):
+    """AliasView.held for the text of a zsh started with the options shell_start read (above): True where it sources every
+    startup file the snapshot came from, PARTLY where it sources part of them, False where it sources none."""
+    if on["rcs"] and on["interactive"] and on["login"]:
+        return True
+    if on["rcs"] and (on["interactive"] or on["login"]):
+        return line_aliases.PARTLY
+    home = os.environ.get("ZDOTDIR") or os.environ.get("HOME") or os.path.expanduser("~")
+    files = ["/etc/zshenv"] + ([os.path.join(home, ".zshenv")] if on["rcs"] else [])
+    return line_aliases.PARTLY if any(os.path.exists(f) for f in files) else False
+
+
+# SPD-291: which shells read their text a line at a time, parsing each line once the lines before it ran, so an alias one
+# line defines stands in the next line's words (never in its own line's: the shell parses a whole line, and every line a
+# compound command spans, before it runs any of it).  Probed through tests/probes/shell_probe.py (2026-09-24), each of
+# zsh 5.9 -f -o nobareglobqual, zsh 5.9 -f and bash 3.2.57 driving the shells below, with `alias ls="echo ALIASED"`:
+# `/bin/sh -c`, `/bin/dash -c` and `/bin/ksh -c` with the alias and `ls -d /` on two lines printed `ALIASED -d /`, on one
+# line `/`; `/bin/zsh -c` printed `/` either way (it parses the string whole, SPD-286), and so did `/bin/bash -c`, whose
+# expand_aliases is off in a shell that is not interactive, until `shopt -s expand_aliases` on a line before or `-O
+# expand_aliases` turned it on (`ALIASED -d /`); fed a script by a pipe, with and without `-s`, sh, zsh, dash and ksh
+# printed `/` for `alias ...; ls -d /` and `ALIASED -d /` for the `ls -d /` on the next line, and bash `/` twice, or `/`
+# then ALIASED after a `shopt -s expand_aliases` line (tests/test_hooks_input.py LineAtATimeAliasTest has the rest).  On
+# macOS /bin/sh runs the shell /private/var/select/sh names -- /bin/bash here, in POSIX mode, `/bin/sh --version` printing
+# GNU bash 3.2.57 -- which may be set to /bin/zsh or /bin/dash, and zsh run as sh parsed the two-line `-c` string whole
+# (`zsh --emulate sh -f -c` printed `/`); a script on its standard input each of them reads a line at a time.
+_LINE_SHELLS = frozenset({"dash", "ksh", "ash"})
+
+
+def text_lines(base, fed):
+    """How the shell `base` reads a text of its own -- its `-c` string, or, `fed`, a script it reads on standard input
+    (above): True a line at a time (dash, ksh and ash, and sh and zsh fed one); syntax.LINES_BOTH for bash, a line at a
+    time where expand_aliases is on and with no alias at all where it is off, as it is unless something turns it on, and
+    for sh's `-c` string, which the shell /bin/sh stands for may read either way; False whole (zsh's `-c` string; csh,
+    tcsh and fish, whose `alias` the reader does not read)."""
+    if base == "bash" or base == "sh" and not fed:
+        return syntax.LINES_BOTH
+    return base in _LINE_SHELLS or fed and base in ("sh", "zsh")
+
+
+def tool_lines(a):
+    """How the Bash tool's own shell reads the member's line (SPD-291): Claude Code sources its snapshot and runs the line
+    through eval, which zsh parses whole (line_aliases, SPD-286) and bash 3.2 with `shopt -s expand_aliases`, which a bash
+    snapshot's option lines run, a line at a time (probed through tests/probes/shell_probe.py: `bash -c 'shopt -s
+    expand_aliases; eval "$(printf ...)"'` with the alias and `zq hi` on two lines printed `ALIASED hi`, on one line
+    `zq: command not found`; zsh -f's eval of the two lines `command not found: zq`).  The snapshot's name says its shell
+    (`snapshot-<shell>-<stamp>-<id>.sh`, hooks/snapshots), and any of them may be the one a session sources: False where
+    none is bash's, the line read whole as it always was; else syntax.LINES_BOTH, zsh's reading whole and the other a
+    line at a time -- a zsh snapshot may be the one sourced, and a bash one that leaves expand_aliases off (a line only
+    `shopt -s` in the snapshot turns on) expands no alias at all, which the whole reading stands for too."""
+    for path in snapshots.shell_table(a.home).files:
+        name = os.path.basename(path)
+        if name.startswith(snapshots.SNAPSHOT_PREFIX + "bash-"):
+            return syntax.LINES_BOTH
+    return False
 
 
 # ShellAnalysis.body_dirs' marks for a function body whose reading is under way, and for one a call inside that reading

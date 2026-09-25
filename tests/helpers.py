@@ -76,6 +76,18 @@ os.environ["SPUD_TOOL_DIR"] = GUARD_HOME
 # ~/.claude/shell-snapshots/.  This Mac's snapshots must not decide a test in this process either, so the guard path
 # stands in for ~/.claude here as it does for the home; every Home sets its own SPUD_USER_CLAUDE_DIR below.
 os.environ["SPUD_USER_CLAUDE_DIR"] = os.path.join(GUARD_HOME, "user-claude")
+# SPD-319: and this Mac's shell startup files must not decide one.  zsh sources $ZDOTDIR/.zshenv, else $HOME/.zshenv, for
+# every shell with rcs on, a plain `zsh -c` included, so held_text._zsh_held reads a plain zsh's text both ways where that
+# file exists (SPD-301), stat'd as the hook runs: a test asserting `zsh -c <snapshot alias>` silent passed only on a Mac
+# with no ~/.zshenv.  So HOME is a directory that does not exist and cannot be made, outside every project and every temp
+# root (the hook lets any caller write a temp root, and the tests of `~` writes expect the refusal a real HOME gets), and
+# ZDOTDIR is gone, here and in every Home's env; a test about startup files writes its own under a HOME it names
+# (NewShellStartupTest).  REAL_USER_HOME is kept for the one opt-in test that reads this Mac's own ~/.claude on purpose
+# (test_hooks_snapshots.RealShellSnapshotTest).
+REAL_USER_HOME = os.path.expanduser("~")
+USER_HOME = os.path.join("/nonexistent-spud", "test-home")  # joined: test_package's guard reads Path.home() in shipped text
+os.environ["HOME"] = USER_HOME
+os.environ.pop("ZDOTDIR", None)
 # SPW-011: `schedule show|install|uninstall`, `init`'s step 8 and `home move` run $SPUD_LAUNCHCTL
 # (commands/schedule.launchctl, default /bin/launchctl) against gui/<uid> and the labels local.spud.backup and
 # local.spud.render -- this Mac's own user domain and its own two jobs.  SPUD_LAUNCH_AGENTS_DIR moves the plist a test
@@ -322,6 +334,9 @@ class Home:
         self.env = dict(os.environ)
         self.env.pop("SPUD_SUITE_PYCACHE", None)  # the runner's word to this module, not to the CLI
         self.env["SPUD_HOME"] = str(self.path)
+        # SPD-319: the process's scratch HOME and no ZDOTDIR (above), even for a home built while a test patched them
+        self.env["HOME"] = USER_HOME
+        self.env.pop("ZDOTDIR", None)
         # `member new` records the session its Bash runs in (SPD-018): a suite run from a Claude Code session must
         # not stamp that live session on scratch rows, so a test that wants a session names it.
         self.env.pop("CLAUDE_CODE_SESSION_ID", None)

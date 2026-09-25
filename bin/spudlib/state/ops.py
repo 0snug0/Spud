@@ -206,11 +206,44 @@ def escalation_target(con, ref, ticket, parent_id, model):
     again = con.execute("SELECT id FROM members WHERE escalates_id = ?", (target["id"],)).fetchone()
     if again is not None:
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s was escalated once already, by %s; a %s failure is not retried" % (handle, lookup.member_ref(con, again["id"]), high))
+    # SPD-321: the once is the work's, not the row's.  A re-spawn (`member respawn`) is the same work run again as a new
+    # row, so a chain escalates at its latest run alone, and once: escalating an earlier run would fork the work in two,
+    # and escalating a second run of a chain already escalated would be the second fable attempt the rule forbids.
+    chain = lookup.respawn_chain(con, target)
+    if chain[-1] != target["id"]:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s was re-spawned as %s; a re-spawn chain is escalated at its latest run, %s"
+                               % (handle, lookup.member_ref(con, chain[chain.index(target["id"]) + 1]), lookup.member_ref(con, chain[-1])))
+    before = con.execute("SELECT id, escalates_id FROM members WHERE escalates_id IN (%s) ORDER BY id" % ", ".join("?" * len(chain)), chain).fetchone()
+    if before is not None:
+        raise kernel.SpudError(kernel.EXIT_ERROR, "%s's re-spawn chain includes %s, which %s escalated once already; a re-spawn chain is escalated"
+                               " once, and a %s failure is not retried" % (handle, lookup.member_ref(con, before["escalates_id"]),
+                                                                          lookup.member_ref(con, before["id"]), high))
     return target
 
 
+def respawn_target(con, ref, ticket, parent_id):
+    """The member `member respawn <ref>` re-plans (SPD-318, SPD-321), checked inside the plan's transaction: on the same
+    ticket under the same parent, re-spawned by no other member yet, and escalated by none.  Once, so a chain is a line:
+    re-spawning a run twice would put two rows on one piece of work, and the next re-spawn is of the latest run.  Not
+    after an escalation, whose fable row carries the work on: it is that row that runs again."""
+    old = lookup.get_member(con, ref)
+    handle = lookup.member_ref(con, old["id"])
+    if old["ticket_id"] != ticket["id"] or old["parent_id"] != parent_id:
+        raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "%s is not a child of this plan's parent on %s; a member is re-spawned by the parent"
+                               " that planned it" % (handle, ticket["key"]))
+    after = next((new for new, was in lookup.respawn_links(con, ticket["id"]).items() if was == old["id"]), None)
+    if after is not None:
+        raise kernel.SpudError(kernel.EXIT_TRANSITION, "%s was re-spawned once already, as %s; re-spawn the latest run of the chain, %s"
+                               % (handle, lookup.member_ref(con, after), lookup.member_ref(con, lookup.respawn_chain(con, old)[-1])))
+    escalated = con.execute("SELECT id FROM members WHERE escalates_id = ?", (old["id"],)).fetchone()
+    if escalated is not None:
+        raise kernel.SpudError(kernel.EXIT_TRANSITION, "%s was escalated by %s, which carries its work on; re-spawn %s, not %s"
+                               % (handle, lookup.member_ref(con, escalated["id"]), lookup.member_ref(con, escalated["id"]), handle))
+    return old
+
+
 def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_reason=None, agent_type=None, brief="", deliverables=None, session_id=None,
-                binder=None, escalates=None, effort=None):
+                binder=None, escalates=None, effort=None, respawns=None):
     """member new: the four limit checks, the lineage and the name draw, all inside
     one BEGIN IMMEDIATE, reading the ticket and the parent inside it too.  session_id is
     the Claude Code session planning it, None outside one.  `binder` is the
@@ -218,8 +251,10 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
     last, inside the transaction, so a plan refused for its worktree writes nothing and a
     binding is written only with the member it binds for.  `escalates` names the failed
     opus member this plan re-runs on fable (escalation_target), and fills the tier reason
-    when none is given.  `effort` is --effort, settled by planned_effort.  Returns (the
-    row, planned_effort's note or None)."""
+    when none is given.  `effort` is --effort, settled by planned_effort.  `respawns` names
+    the returned member `member respawn` plans again (respawn_target), and the link is
+    written on the member.planned event (lookup.respawn_links).  Returns (the row,
+    planned_effort's note or None)."""
     limits = ctx.limits
     deliverables = normalize_deliverables(deliverables)
     if persona not in ctx.personas():
@@ -277,6 +312,7 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
         lineage = ((parent["lineage"] + ".") if parent else "") + str(ever + 1).zfill(pad)
         chosen = draw_name(con, ticket["id"], name)
         target = escalation_target(con, escalates, ticket, parent_id, model) if escalates else None
+        rerun = respawn_target(con, respawns, ticket, parent_id) if respawns else None
         if target is not None and not tier_reason:
             tier_reason = "escalation after %s %s" % (lookup.member_ref(con, target["id"]), target["status"])
         floor = (lookup.member_ref(con, target["id"]), target["effort"]) if target is not None else None
@@ -297,10 +333,14 @@ def plan_member(ctx, con, actor, ticket_key, persona, model, name=None, tier_rea
             data["effort"] = effort
         if target is not None:
             data["escalates"] = lookup.member_ref(con, target["id"])
+        body = "planned %s (%s, %s, %s)" % (chosen, lineage, persona, model)
+        if rerun is not None:  # SPD-321: the re-spawn link, as data (lookup.respawn_links reads it)
+            data["respawns"] = lookup.member_ref(con, rerun["id"])
+            data["respawns_id"] = rerun["id"]
+            body += ", re-spawning %s" % data["respawns"]
         if session_id:
             data["session_id"] = session_id
-        ledgerdb.write_event(con, at, actor.label, "member.planned", "planned %s (%s, %s, %s)" % (chosen, lineage, persona, model),
-                    ticket_id=ticket["id"], member_id=member_id, data=data)
+        ledgerdb.write_event(con, at, actor.label, "member.planned", body, ticket_id=ticket["id"], member_id=member_id, data=data)
     return lookup.get_member_by_id(con, member_id), note
 
 

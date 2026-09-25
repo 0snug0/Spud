@@ -207,6 +207,175 @@ class ResumeTest(SpudTestCase):
             self.assertEqual(proc.returncode, EXIT_TRANSITION, terminal)
 
 
+class RespawnTest(hookcase.HookCase):
+    """member respawn (SPD-318): a spudagent is never resumed with SendMessage (tests/test_hooks_sendmessage.py), so a
+    returned one runs again as a new row planned from the old: the same persona, model, effort and deliverables under
+    the same parent, the old row's Blocked, Result and Log under Read first in its brief, and the exact Agent call printed,
+    which PreToolUse(Agent) then allows.  Not in process: the leak guard samples every command an in-process class calls,
+    and this one is Spud's to run between spawns, not a hook's."""
+
+    def returned_blocked(self, actor="spud", caller=None, agent_id=hookcase.AGENT_A, **kw):
+        kw.setdefault("persona", "engineer")
+        kw.setdefault("model", "opus")
+        m = self.spawn(self.plan(actor=actor, **kw), agent_id, caller=caller)
+        self.home.json("member", "log", "Tried pnpm install; the hook refused it.\n## Brief", actor=agent_id)
+        self.home.json("member", "result", "Half built: the schema is in.", actor=agent_id)
+        self.home.json("member", "block", "Install the dependencies first, or drop the lockfile?", actor=agent_id)
+        self.home.json("member", "finish", m["ref"], "--status", "blocked", "--outcome", "asked Eric", actor=actor)
+        return self.home.json("member", "show", m["ref"])["member"]
+
+    def test_respawn_plans_a_new_row_with_the_record_and_prints_the_agent_call(self):
+        old = self.returned_blocked(effort="xhigh")
+        out = self.home.json("member", "respawn", old["ref"], "--answer", "Spud ran the install; carry on.", actor="spud")
+        new = out["member"]
+        self.assertEqual(out["respawns"], old["ref"])
+        self.assertNotEqual(new["name"], old["name"])
+        self.assertEqual((new["status"], new["lineage"], new["parent"]), ("planned", "02", None))
+        for key in ("persona", "model", "effort", "agent_type", "deliverables", "ticket"):
+            self.assertEqual(new[key], old[key], key)
+        self.assertEqual(out["subagent_type"], "spudagent-xhigh")
+        self.assertEqual(out["agent_call"], {"subagent_type": "spudagent-xhigh", "model": "opus", "run_in_background": True,
+                                             "description": "%s (02, engineer)" % new["ref"]})
+        brief = new["brief"]
+        self.assertTrue(brief.startswith(old["brief"]), brief)
+        self.assertIn("re-spawns %s (01, engineer), which returned blocked" % old["ref"], brief)
+        self.assertIn("> Spud ran the install; carry on.", brief)
+        self.assertIn("> Install the dependencies first, or drop the lockfile?", brief)
+        self.assertIn("> Half built: the schema is in.", brief)
+        self.assertIn("Tried pnpm install; the hook refused it.", brief)
+        self.assertNotIn("\n## ", brief)  # the log's `## Brief` line is quoted, so the note's sections stay its own
+        self.assertLess(brief.index("carry on"), brief.index("Install the dependencies"))  # the answer first
+        self.assertEqual(self.home.json("member", "show", old["ref"])["member"]["status"], "blocked")  # the old row stays as recorded
+        # The call it printed is the one the spawn check allows.
+        call = out["agent_call"]
+        r = self.home.hook("PreToolUse", self.pre_agent(call["description"], model=call["model"], subagent_type=call["subagent_type"],
+                                                         tool_use_id="toolu_respawn", run_in_background=True))
+        self.assertEqual((r.code, r.decision), (0, "allow"), r)
+
+    def test_the_text_output_spells_out_the_agent_call(self):
+        old = self.returned_blocked()
+        text = self.home.run("member", "respawn", old["ref"], actor="spud").stdout
+        new = self.home.json("member", "show", "%s/02" % self.team)["member"]
+        self.assertIn("planned %s (02, engineer, opus) on %s at high effort: spawn it as subagent_type spudagent-high" % (new["ref"], self.t["key"]), text)
+        self.assertIn("re-spawns %s (blocked)" % old["ref"], text)
+        for line in ("Agent call:", "  subagent_type: spudagent-high", "  model: opus", "  description: %s (02, engineer)" % new["ref"],
+                     "  run_in_background: true"):
+            self.assertIn(line + "\n", text + "\n")
+
+    def test_brief_replaces_the_old_brief_and_the_record_still_follows(self):
+        old = self.returned_blocked()
+        new = self.home.json("member", "respawn", old["ref"], "--brief", "Build the rest of it.", actor="spud")["member"]
+        self.assertTrue(new["brief"].startswith("Build the rest of it.\n\nRead first, the prior run"), new["brief"])
+        self.assertIn("> Half built: the schema is in.", new["brief"])
+
+    def test_a_child_is_respawned_by_its_parent_alone(self):
+        lead = self.spawn(self.plan(persona="engineer", model="opus"), hookcase.AGENT_C)
+        child = self.returned_blocked(actor=lead["ref"], caller=hookcase.AGENT_C, persona="scout", model="haiku")
+        proc = self.home.run("member", "respawn", child["ref"], actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_OWNERSHIP, proc.stderr)
+        self.assertIn("re-spawned by the parent that planned it", proc.stderr)
+        new = self.home.json("member", "respawn", child["ref"], actor=hookcase.AGENT_C)["member"]
+        self.assertEqual((new["parent"], new["lineage"], new["effort"]), (lead["ref"], "01.02", None))
+
+    def test_a_planned_or_unrecorded_member_is_refused(self):
+        planned = self.plan()
+        proc = self.home.run("member", "respawn", planned["ref"], actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_TRANSITION)
+        self.assertIn("never spawned", proc.stderr)
+        running = self.spawn(self.plan(), hookcase.AGENT_B)
+        proc = self.home.run("member", "respawn", running["ref"], actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_TRANSITION)
+        self.assertIn("member finish %s" % running["ref"], proc.stderr)
+
+    def test_member_start_refuses_a_spawned_blocked_member_and_names_respawn(self):
+        old = self.returned_blocked()
+        proc = self.home.run("member", "start", old["ref"], actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_TRANSITION)
+        self.assertIn("spud --as spud member respawn %s" % old["ref"], proc.stderr)
+        self.assertEqual(self.home.json("member", "show", old["ref"])["member"]["status"], "blocked")
+
+    def returned(self, m, agent_id, status="blocked"):
+        """Spawn planned member `m` and record its return."""
+        self.spawn(m, agent_id)
+        self.home.json("member", "finish", m["ref"], "--status", status, "--outcome", "x", actor="spud")
+        return self.home.json("member", "show", m["ref"])["member"]
+
+    def test_the_link_is_data_on_the_planned_event_and_shows_both_ways(self):
+        # SPD-321: the link was only in the brief's text and the command's output; it is now the member.planned event's
+        # data, which member show, card --json and the Team card read.
+        old = self.returned_blocked()
+        new = self.home.json("member", "respawn", old["ref"], actor="spud")["member"]
+        planned = [e for e in self.home.json("events", "--member", new["ref"])["events"] if e["kind"] == "member.planned"]
+        self.assertEqual(len(planned), 1)
+        self.assertEqual((planned[0]["data"]["respawns"], planned[0]["data"]["respawns_id"]), (old["ref"], old["id"]))
+        self.assertTrue(planned[0]["body"].endswith(", re-spawning %s" % old["ref"]), planned[0]["body"])
+        self.assertEqual((new["respawns"], new["respawned_as"]), (old["ref"], None))
+        shown = self.home.json("member", "show", old["ref"])["member"]
+        self.assertEqual((shown["respawns"], shown["respawned_as"]), (None, new["ref"]))
+        self.assertIn("re-spawned as: " + new["ref"], self.home.run("member", "show", old["ref"]).stdout.splitlines())
+        self.assertIn("re-spawns: " + old["ref"], self.home.run("member", "show", new["ref"]).stdout.splitlines())
+        team = {n["ref"]: n for n in self.home.json("card", self.t["key"])["team"]}
+        self.assertEqual((team[old["ref"]]["respawned_as"], team[new["ref"]]["respawns"]), (new["ref"], old["ref"]))
+        # a member planned with member new carries no link
+        plain = self.home.json("member", "show", self.plan()["ref"])["member"]
+        self.assertEqual((plain["respawns"], plain["respawned_as"]), (None, None))
+
+    def test_a_member_is_respawned_once_and_the_chain_goes_on_from_its_latest_run(self):
+        first = self.returned_blocked()
+        second = self.home.json("member", "respawn", first["ref"], actor="spud")["member"]
+        proc = self.home.run("member", "respawn", first["ref"], actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_TRANSITION, proc.stderr)
+        self.assertIn("%s was re-spawned once already, as %s; re-spawn the latest run of the chain, %s" % (first["ref"], second["ref"], second["ref"]),
+                      proc.stderr)
+        self.returned(second, hookcase.AGENT_B)
+        third = self.home.json("member", "respawn", second["ref"], actor="spud")["member"]
+        self.assertEqual((third["respawns"], third["lineage"]), (second["ref"], "03"))
+        proc = self.home.run("member", "respawn", first["ref"], actor="spud", check=False)
+        self.assertIn("re-spawn the latest run of the chain, %s" % third["ref"], proc.stderr)
+        middle = self.home.json("member", "show", second["ref"])["member"]
+        self.assertEqual((middle["respawns"], middle["respawned_as"]), (first["ref"], third["ref"]))
+        self.assertEqual(self.home.scalar("SELECT count(*) FROM members"), 3)
+
+    def test_a_chain_is_escalated_once_at_its_latest_run(self):
+        # SPD-321's decision: the once-only escalation is the work's, and a re-spawn is the same work as a new row.  An
+        # earlier run of a chain is not escalated (it would fork the work); the latest run is, once; and an escalated
+        # run is not re-spawned, since its fable row carries the work on.
+        first = self.returned_blocked()
+        second = self.home.json("member", "respawn", first["ref"], actor="spud")["member"]
+        proc = self.home.run("member", "new", "--ticket", self.t["key"], "--persona", "engineer", "--model", "fable", "--brief", "x",
+                             "--escalates", first["ref"], actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stderr)
+        self.assertIn("%s was re-spawned as %s; a re-spawn chain is escalated at its latest run, %s" % (first["ref"], second["ref"], second["ref"]),
+                      proc.stderr)
+        self.returned(second, hookcase.AGENT_B, status="failed")
+        fable = self.new_member(self.t["key"], persona="engineer", model="fable", escalates=second["ref"])
+        self.assertEqual(fable["escalates"], second["ref"])
+        proc = self.home.run("member", "respawn", second["ref"], actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_TRANSITION, proc.stderr)
+        self.assertIn("%s was escalated by %s, which carries its work on; re-spawn %s" % (second["ref"], fable["ref"], fable["ref"]), proc.stderr)
+        self.returned(fable, hookcase.AGENT_C)
+        again = self.home.json("member", "respawn", fable["ref"], actor="spud")["member"]  # the fable row re-spawns on fable
+        self.assertEqual((again["model"], again["respawns"], again["escalates"]), ("fable", fable["ref"], None))
+
+    def test_a_chain_escalated_at_an_earlier_run_is_not_escalated_again(self):
+        # The chain rule over rows the CLI no longer makes (an earlier run escalated, then linked as re-spawned): a link
+        # written straight onto the log, which is append-only and takes an insert.
+        first = self.returned_blocked()
+        self.new_member(self.t["key"], persona="engineer", model="fable", escalates=first["ref"], name="Kestrel")
+        later = self.returned(self.plan(persona="engineer", model="opus"), hookcase.AGENT_B, status="failed")
+        con = self.home.connect()
+        try:
+            with con:
+                con.execute("INSERT INTO events (at, actor, ticket_id, member_id, kind, body, data) VALUES (?, 'spud', ?, ?, 'member.planned', 'link', ?)",
+                            ("2026-09-25T00:00:00-07:00", self.t["id"], later["id"], json.dumps({"respawns": first["ref"], "respawns_id": first["id"]})))
+        finally:
+            con.close()
+        proc = self.home.run("member", "new", "--ticket", self.t["key"], "--persona", "engineer", "--model", "fable", "--brief", "x",
+                             "--escalates", later["ref"], actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR, proc.stderr)
+        self.assertIn("%s's re-spawn chain includes %s, which %s/Kestrel escalated once already" % (later["ref"], first["ref"], self.team), proc.stderr)
+
+
 class LeadRaceTest(SpudTestCase):
     def test_concurrent_root_plans_always_make_lineage_01_the_lead(self):
         import subprocess

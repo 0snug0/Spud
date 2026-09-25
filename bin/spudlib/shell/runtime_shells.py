@@ -110,6 +110,11 @@ PNPM_RUNNER = Runner(
 YARN_RUNNER = Runner(value=("--cwd",), flags=("-h", "--help"), stop=1)
 RUNNERS = {"npm": NPM_RUNNER, "npx": NPX_RUNNER, "bun": BUN_RUNNER, "deno": DENO_RUNNER, "pnpm": PNPM_RUNNER,
            "yarn": YARN_RUNNER}
+# SPD-291: the shell each tool hands its text to, where that is a shell of the system's own: npm's and npx's script shell
+# (@npmcli/run-script's default, `sh -c`) and pnpm's shell mode ("Uses /bin/sh on UNIX", pnpm.io/cli/exec), which read a
+# `-c` string a line at a time (held_text.text_lines).  bun's, deno task's and yarn's shells are their own, with no
+# `alias` builtin, and are read as a text parsed whole.
+RUNNER_SHELLS = {"npm": "sh", "npx": "sh", "pnpm": "sh"}
 
 # pnpm's builtin commands (pnpm.io/cli), which the implicit `pnpm <command>` never names.  One missing here is read as
 # the command it names, which only fails closed.

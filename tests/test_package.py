@@ -20,9 +20,8 @@ import sys
 import tarfile
 import textwrap
 import unittest
-from pathlib import Path
 
-from helpers import REPO, SPUD, SpudTestCase, load_spud_module
+from helpers import REAL_USER_HOME, REPO, SPUD, SpudTestCase, load_spud_module
 
 PACKAGE = REPO / "bin" / "spudlib"
 ENTRY = REPO / "bin" / "spud_ledger.py"
@@ -679,7 +678,7 @@ class ShippedPathsTest(unittest.TestCase):
 
     def test_no_shipped_file_names_a_machines_home_directory(self):
         # This machine's home, whichever machine runs the suite, and the one path SPW-002 took out of six shipped files.
-        needles = sorted({str(Path.home()), "/Users/" + "ericlug" + "o"})
+        needles = sorted({REAL_USER_HOME, "/Users/" + "ericlug" + "o"})
         shipped = self.shipped()
         self.assertGreater(len(shipped), 50, "the shipped files were not found; this guard would pass vacuously")
         self.assertEqual([(rel, needle) for rel, data in shipped for needle in needles if needle.encode("utf-8") in data], [])

@@ -24,11 +24,15 @@ Where each alias stands, as the reading now has it (the comments below hold the 
   aliases in every unquoted word (ShellWalk.expand_globals, SPD-293), which the line's own text leaves to it
   (alias_words); a glob qualifier's `e` or `+` code (ShellWalk.read_qualifier_code, SPD-292); and each further pass of a
   loop whose body changed the table (ShellWalk.read_loop_again, SPD-294).  Never in the line's own text, parsed before
-  any of it runs, nor in a word of the same text that defined it, nor in a new shell's text (analyse.analyse_new_shell);
+  any of it runs, nor in a word of the same text that defined it, nor in a new shell's text (analyse.analyse_new_shell)
+  -- but for a later line of text a shell reads a line at a time, each parsed once the lines before it ran: a script fed
+  to a shell, sh's, dash's and ksh's `-c` string, bash's both ways, and the Bash tool's own line where its shell may be
+  bash (ShellWalk.new_line, held_text.text_lines and tool_lines, SPD-291);
 - the snapshot's global and suffix aliases in the line's own text as the snapshot holds them, and in text parsed as the
   line runs as the line left them (held_aliases, held_names, SPD-283); its plain aliases on a command word
   (shell_aliased); none of them in a function body the snapshot defines, parsed before its aliases, except in the text
-  that body parses as it runs, nor anywhere in a new shell's text (held_standing, SPD-290, SPD-300);
+  that body parses as it runs, nor anywhere in a new shell's text (held_standing, SPD-290, SPD-300) but a zsh's that
+  sources the user's startup files: all of them read as the line's own text, part of them both ways (SPD-301);
 - a quoted or escaped word: a global alias never expands it (alias_words; a `<( )` body's token, only where the text
   writes it unquoted: plain_words), nor a plain alias, the line's or the snapshot's, nor a suffix alias where the text
   after its last dot is quoted, each read by how the text being read writes the word (spellings, SPD-295), and one it
@@ -77,7 +81,8 @@ from ..hooks import snapshots
 # $$`, 2026-09-24), where `alias zzq='echo ALIASED-TOP'` and `zzq hi` on the next line printed "(eval):2: command not
 # found: zzq".  bash 3.2 (with `shopt -s expand_aliases`) and sh read such text a line at a time instead: `eval $'alias
 # ls=...\nls -d /'`, `sh -c` on two lines, a `$( )` body and a trap's action on two lines each ran the alias there, and on
-# one line none did -- which AliasView.lines keeps for line_reading.
+# one line none did -- which AliasView.lines keeps for line_reading, and, for a new shell's text and a bash Bash tool's
+# line, whose lines the walk tells apart, walk.ShellWalk.new_line (SPD-291).
 def record_alias(a, name, body, doubtful=False):
     """Record `alias NAME=body`, or an `unalias` (whose body is None), where the shell reads it.  The name goes into
     `assigned` under a key no variable can have, so every rule that doubts a variable the line assigned -- a branch that may
@@ -109,7 +114,12 @@ class AliasView:
     SPD-290: two more marks say whether the aliases the shell's snapshot defines stand in the text (held_standing).
     `held`: the shell that parses it sourced the snapshot -- False in a new shell's text (analyse.analyse_new_shell) and
     in every text parsed inside it, which inherits it (`outer`); `early`: the text is a function body the snapshot defines,
-    parsed before the snapshot's aliases (held_text.read_body), which no text the body parses as it runs inherits."""
+    parsed before the snapshot's aliases (held_text.read_body), which no text the body parses as it runs inherits.
+
+    SPD-301: `held` is PARTLY in a new zsh that sources part of the startup files the snapshot came from -- started
+    interactive or login but not both, or plain where a .zshenv exists (held_text.shell_start) -- where the hook cannot
+    tell which of the snapshot's names those files define: its plain aliases and functions are read both ways, the body
+    and the command as spelled (held_partly), and its global and suffix aliases doubted (held_aliases, held_names)."""
 
     __slots__ = ("table", "doubted", "unknown", "lines", "held", "early", "key")
 
@@ -139,16 +149,28 @@ class AliasView:
         return hash(self.key)
 
 
+# SPD-301: AliasView.held for a new zsh that sources part of the files Claude Code's snapshot came from (AliasView)
+PARTLY = "partly"
+
+
+def held_partly(a):
+    """Whether the text being read runs in a new zsh that sources part of the snapshot's startup files (AliasView.held
+    PARTLY, SPD-301), where a snapshot name may stand or not: read both ways, or doubted where it cannot be."""
+    view = a.alias_view
+    return view is not None and view.held == PARTLY
+
+
 def held_standing(a):
     """Whether the aliases the shell's snapshot defines stand in the text being read (SPD-290; SPD-283 for the global and
     suffix ones, held_names): in the line's own text, an alias body read in it, and text the Bash tool's shell parses as
     the line runs -- eval's, a substitution's, on the line or inside a snapshot function's body, which run with the
     aliases defined -- and a function body the line defines, parsed with the line; never in a function body the snapshot
     defines, which it writes before its aliases (so zsh parsed it with none), nor anywhere in a new shell's text, which
-    never sources the snapshot (AliasView's `held` and `early`).  The harness's shadows, which the snapshot defines after
-    its aliases, are read as the line's own text (held_text.read_body)."""
+    never sources the snapshot (AliasView's `held` and `early`) -- unless it is a zsh that sources the user's startup
+    files, where they stand, in part of them only as held_partly reads them (SPD-301, held_text.shell_start).  The
+    harness's shadows, which the snapshot defines after its aliases, are read as the line's own text (held_text.read_body)."""
     view = a.alias_view
-    return view is None or view.held and not view.early
+    return view is None or bool(view.held) and not view.early
 
 
 def parsed_view(a):
@@ -412,14 +434,16 @@ def held_aliases(a):
     line does to one where it runs -- `alias -g`, `alias -s`, a plain `alias` of the name, `unalias` -- changes it for the
     text the shell parses after that, and every rule that reads, doubts, copies or joins the table reads them.  A body the
     hook cannot read is recorded doubtful, never as cleared.  A global alias's name a word cannot spell unquoted
-    (alias_word_name) is never expanded, and is left out.  Called once, where analyse.analyse_command reads the line."""
-    held = snapshots.shell_table(a.home)
+    (alias_word_name) is never expanded, and is left out.  Called once, where analyse.analyse_command reads the line, and
+    where analyse.analyse_new_shell reads the text of a new zsh that sources the user's startup files (SPD-301): one that
+    sources part of them (held_partly) holds each doubtful, since the hook cannot tell whether those files define it."""
+    held, partly = snapshots.shell_table(a.home), held_partly(a)
     entries = [(GLOBAL_ALIAS + name, body) for name, body in held.galiases.items() if alias_word_name(name)]
     entries += [(name, body) for name, body in held.galiases.items() if syntax.IDENTIFIER_RE.match(name)]
     entries += [(SUFFIX_ALIAS + suffix, body) for suffix, body in held.saliases.items()]
     for key, body in entries:
         a.aliases[key] = body
-        if body is None:
+        if body is None or partly:
             a.doubt.add(syntax.ALIAS_KEY + key)
 
 
@@ -431,12 +455,14 @@ def held_names(a, prefix):
     the snapshot defines before its aliases, and a new shell's text, whose table analyse.analyse_new_shell empties besides,
     so held_aliases never put the name there.  Text the shell parses as the line runs reads the line's table instead
     (ShellAnalysis.alias_scope), as it stood where that text was parsed (AliasView, SPD-286) -- inside a snapshot body too,
-    where a substitution read at scope 0, since the line's table holds none, now reads them as its shell parses it then."""
+    where a substitution read at scope 0, since the line's table holds none, now reads them as its shell parses it then.
+    In a new zsh that sources part of the snapshot's startup files (held_partly, SPD-301) each is one the hook cannot
+    read, None: it may stand there or not, and a word spelling its name is refused a member (alias_doubt)."""
     if not held_standing(a):
         return {}
-    held = snapshots.shell_table(a.home)
+    held, partly = snapshots.shell_table(a.home), held_partly(a)
     table = held.galiases if prefix == GLOBAL_ALIAS else held.saliases
-    return {name: body for name, body in table.items() if prefix + name in a.aliases}
+    return {name: None if partly else body for name, body in table.items() if prefix + name in a.aliases}
 
 
 def alias_doubt(a, prefix, name, shown):
@@ -1108,7 +1134,8 @@ def shell_aliased(words, a):
         if name in view.doubted:
             note_alias_doubt(a, ("alias", name))
         return [], [], None, False
-    as_spelled, body = written != UNQUOTED, found.aliases[name]  # SPD-308: it may be a quoted word, read on as spelled
+    # SPD-308: it may be a quoted word, read on as spelled; SPD-301: or run in a new zsh whose startup files may not define it
+    as_spelled, body = written != UNQUOTED or held_partly(a), found.aliases[name]
     if body is None:
         return [], [], name, as_spelled
     # SPD-313: the body's own first word and, where the body so read ends in a blank, the words after it, down the chain in

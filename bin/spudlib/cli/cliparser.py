@@ -314,9 +314,18 @@ def build_parser():
     q.add_argument("--deliverable", action="append", help="a path glob the member may write (repeatable): bare for the ticket's project, in the worktree the ticket"
                                                           " is bound to; home:<glob> for the home; <key>:<glob> naming another project is refused")
     q.set_defaults(func=membercmds.cmd_member_new)
-    q = ps.add_parser("start", help="planned -> active (stamping spawned) or blocked -> active after a re-brief; the parent's")
+    q = ps.add_parser("start", help="planned -> active (stamping spawned), or blocked -> active for a row never spawned; the parent's."
+                                     " A spawned member that returned blocked is re-spawned with `member respawn`")
     q.add_argument("ref")
     q.set_defaults(func=membercmds.cmd_member_start)
+    respawn_help = ("plan a returned member again as a new row (the parent's): a spudagent is never resumed with SendMessage (SPD-318)."
+                    " Same persona, model, effort and deliverables; its Blocked, Result and Log go under Read first in the new brief,"
+                    " and the Agent call to issue is printed")
+    q = ps.add_parser("respawn", help=respawn_help, description=respawn_help)
+    q.add_argument("ref", help="the returned member, recorded done, blocked or failed")
+    q.add_argument("--answer", type=text_arg, help="the answer to its Blocked question, put first in its record; @file or @- accepted")
+    q.add_argument("--brief", type=text_arg, help="the brief its record follows, in place of the old member's; @file or @- accepted")
+    q.set_defaults(func=membercmds.cmd_member_respawn)
     q = ps.add_parser("log", help="append a Log line (the member's own)")
     q.add_argument("text", type=text_arg)
     q.set_defaults(func=lambda ctx, a: membercmds.cmd_member_own(ctx, a, "log"))

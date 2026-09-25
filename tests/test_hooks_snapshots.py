@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest import mock
 
+import helpers
 from helpers import forget_process_caches, load_spud_module, wall_clock
 from hookcase import AGENT_A, AGENT_B, AGENT_C, INLINE_WORDING, SCRIPT_WORDING, VARIABLE_WORDING, BashHookCase
 
@@ -362,7 +363,7 @@ class RealShellSnapshotTest(BashHookCase):
     only test of a rule."""
 
     def setUp(self):
-        directory = Path(os.path.expanduser("~/.claude")) / "shell-snapshots"
+        directory = Path(helpers.REAL_USER_HOME) / ".claude" / "shell-snapshots"  # SPD-319: HOME is the suite's scratch
         if os.environ.get(REAL_SNAPSHOTS) != "1":
             self.skipTest("reads this machine's own %s: set %s=1 to run it" % (directory, REAL_SNAPSHOTS))
         if not directory.is_dir() or not list(directory.glob("snapshot-*.sh")):
@@ -372,6 +373,7 @@ class RealShellSnapshotTest(BashHookCase):
         self.table = m.build_table(sorted((str(p) for p in directory.glob("snapshot-*.sh")), reverse=True))
         self.env = dict(self.home.env)
         self.env.pop("SPUD_USER_CLAUDE_DIR")  # this run reads the real ~/.claude
+        self.env["HOME"] = helpers.REAL_USER_HOME
 
     def real_bash(self, command, agent_id=AGENT_A):
         env, self.home.env = self.home.env, self.env
@@ -3532,6 +3534,43 @@ class HeldPlainAliasScopeTest(ShellSnapshotCase):
         self.silent_for_everyone("alias -s txt='git push'; eval a.txt")  # the snapshot's plain a.txt runs ls there
 
 
+class MachineStartupFilesTest(ShellSnapshotCase):
+    """SPD-319: SPD-301 reads a plain `zsh -c` both ways where $ZDOTDIR/.zshenv or $HOME/.zshenv exists, since zsh
+    sources that file for every shell with rcs on (held_text._zsh_held, which stats it when the hook runs).  Every home's
+    env copied the suite's os.environ, HOME and ZDOTDIR included, so the tests asserting `zsh -c <snapshot alias>` silent
+    (HeldPlainAliasScopeTest, NewShellFunctionTest, test_hooks_groups.NewShellSnapshotLookupTest) passed only on a Mac
+    with no ~/.zshenv.  helpers now points HOME at a directory that does not exist and drops ZDOTDIR, in
+    os.environ and in every Home's env, so a machine's startup files reach no test; a test about them writes its own
+    (NewShellStartupTest)."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", PLAIN_BEFORE_ALIASES)
+        self.machine = Path(self.home.path) / ".machine-home"  # this Mac's HOME, as a person with a ~/.zshenv has it
+        self.machine.mkdir(exist_ok=True)
+        (self.machine / ".zshenv").write_text("alias -- zz=true\n", encoding="utf-8")
+
+    def test_the_suites_environment_names_no_startup_file(self):
+        for env in (os.environ, self.home.env):
+            with self.subTest(env=env is os.environ):
+                self.assertEqual(env.get("HOME"), getattr(helpers, "USER_HOME", None))
+                self.assertNotIn("ZDOTDIR", env)
+        self.assertFalse(os.path.exists(helpers.USER_HOME))
+
+    def test_a_machines_zshenv_reaches_no_home(self):
+        """A home built while the process's HOME or ZDOTDIR names a directory holding a .zshenv reads `zsh -c gp` as the
+        suite's own does: gp stands for nothing there (HeldPlainAliasScopeTest), so the line runs no git push."""
+        for leaked in ({"HOME": str(self.machine)}, {"ZDOTDIR": str(self.machine)}):
+            with self.subTest(leaked=leaked):
+                with mock.patch.dict(os.environ, leaked):
+                    fresh = helpers.Home()
+                self.addCleanup(fresh.cleanup)
+                with mock.patch.dict(self.home.env):
+                    self.home.env.pop("ZDOTDIR", None)
+                    self.home.env.update({k: fresh.env[k] for k in ("HOME", "ZDOTDIR") if k in fresh.env})
+                    self.silent_for_everyone("zsh -c gp")
+
+
 # SPD-298: functions a profile defines -- one named for a program the hook reads, ones no program is named for, one
 # that moves the directory and one that sets a variable -- which a new shell sources none of.
 NEW_SHELL_FUNCTIONS = """\
@@ -3805,7 +3844,7 @@ alias -- broken='git push
 class MixedAliasChainTest(ShellSnapshotCase):
     """SPD-313: zsh holds one alias table, the snapshot's aliases and the line's in it, and looks the word after any alias
     whose body ends in a blank up there, and the first word of each body it expands, chained or not.  The hook chained the
-    line's aliases into the line's (SPD-310, line_aliases.chained_texts) and the snapshot's into the snapshot's
+    line's aliases into the line's (SPD-310, line_aliases.alias_texts) and the snapshot's into the snapshot's
     (shell_aliased's loop), never one into the other, and the snapshot's loop joined a chained body without looking its
     first word up -- so behind the snapshot's `s='sudo '` a line's `gp` in eval, behind a line's `sn='sudo '` the snapshot's
     `gp`, and behind `s` the snapshot's `u=gp` were each read as a program sudo runs, and a member's push went through.
@@ -3969,6 +4008,150 @@ class AliasFlightScopeTest(ShellSnapshotCase):
     def test_the_reason_names_each_snapshot_alias_the_chain_expanded(self):
         self.assertEqual(self.expansion("x x gp"), ["x", "s", "x", "s", "gp"])
         self.assertEqual(self.expansion("x2 x2 gp"), ["x2", "x2", "gp"])
+
+
+# SPD-301: a profile's alias and functions, one that pushes and one that moves the directory, and a global alias.
+STARTUP_SNAPSHOT = """\
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+# Functions
+pushit () {
+\tgit push
+}
+intests () {
+\tcd tests
+}
+# Shell Options
+setopt autocd
+# Aliases
+alias -- gp='git push'
+alias -- ls='ls -G'
+alias -g -- GP='; git push'
+"""
+
+
+class NewShellStartupTest(ShellSnapshotCase):
+    """SPD-301: SPD-290 and SPD-298 read no snapshot alias or function in a new shell's text, true of `sh -c` and a plain
+    `zsh -c`; but a zsh started interactive or login sources the user's startup files, where the profile's aliases and
+    functions live, so `zsh -i -c gp` pushed while the hook read gp as an unknown command.  Claude Code writes its snapshot
+    from `$SHELL -c -l` sourcing ~/.zshrc, so a zsh both interactive and login reads exactly the files the snapshot came
+    from, and its text is read as the Bash tool's own line is; one started only interactive, or only login, or a plain
+    one where a ~/.zshenv exists, reads part of them, which part the hook cannot tell, so a snapshot alias or function
+    there is read both ways (the body and the command as spelled) and a global or suffix alias is doubted.  A bash or sh
+    started interactive or login sources files that may share the profile or not, and is read both ways too.
+
+    Probed through tests/probes/shell_probe.py (zsh 5.9, bash 3.2.57), HOME the probe's directory holding a .zshenv,
+    .zshrc, .zprofile and .zlogin that each define an alias and a function: `zsh -c` ran .zshenv's alone; `-i`, `-o
+    interactive`, `--interactive`, `-ointeractive`, `-io interactive` and `-c -i` added .zshrc's; `-l`, `--login` and `-o
+    login` added .zprofile's and .zlogin's, not .zshrc's; `-il` and `-o interactive -o login` ran all four; `-f`, `-o
+    norcs`, `+o rcs` and `--no-rcs`, before or after `-i`, ran none, and `-f -o rcs -i` ran .zshenv's and .zshrc's again;
+    `-i +o interactive` and `+i` ran .zshenv's alone; `zsh -c gb -i` ran gb non-interactive, -i being $0; `echo gb | zsh
+    -i` ran .zshrc's alias.  bash -i ran .bashrc's alias and function; bash -l .bash_profile's function (no alias expanded,
+    non-interactive); `--norc -i` and `--noprofile -l` ran neither; sh -i ran $ENV's.  Every shell read an option after
+    `-c` as an option (`sh -c -x 'echo A1'` traced echo A1), the string being the first word after them.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; the home is the cwd."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", STARTUP_SNAPSHOT)
+        self.user_home = Path(self.home.path) / ".user-home"  # a HOME with no startup file, unless a test writes one
+        self.user_home.mkdir(exist_ok=True)
+        patcher = mock.patch.dict(self.home.env, {"HOME": str(self.user_home)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.home.env.pop("ZDOTDIR", None)
+
+    def test_the_tickets_evidence(self):
+        for line in ("zsh -i -c gp", "zsh -l -c gp", "zsh -il -c gp", "zsh -ic gp", "zsh -lc gp", "zsh -ilc gp",
+                     "zsh -li -c gp", "zsh --login -c gp", "zsh -o interactive -c gp", "zsh -o login -c gp",
+                     "zsh --interactive -c gp", "zsh -ointeractive -c gp", "zsh -io interactive -c gp",
+                     "zsh -o INTERACTIVE -c gp", "zsh -o inter_active -c gp", "zsh -c -i gp", "zsh -c -l gp",
+                     "zsh -i -c pushit", "zsh -l -c pushit", "zsh -il -c pushit", "echo gp | zsh -i", "zsh -l <<< gp",
+                     "zsh -i -c 'eval gp'", "zsh -i -c 'echo $(gp)'", "zsh -il -c 'f() { gp; }; f'",
+                     "/bin/zsh -i -c gp", "env zsh -i -c gp", "sh -c 'zsh -i -c gp'", "eval 'zsh -l -c gp'"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+
+    def test_a_shell_that_reads_every_file_the_snapshot_came_from_reads_it_as_the_line_does(self):
+        """`zsh -il` reads the profile the snapshot holds, so intests moves it into tests/, as the line's own call does."""
+        text = "intests; echo hi > kept.txt"
+        for line in (text, "zsh -il -c '%s'" % text, "zsh -o interactive -o login -c '%s'" % text,
+                     "zsh -l -i -c '%s'" % text, "zsh --login -i -c '%s'" % text):
+            for agent_id in (AGENT_A, AGENT_B):
+                with self.subTest(line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+
+    def test_a_shell_that_reads_part_of_them_reads_both_ways(self):
+        """Only interactive or only login, the hook cannot tell which file defined a name: the function and the command
+        it names both, so ./kept.txt is read beside tests/kept.txt; under a profile's `alias git=hub`, git's push beside
+        hub's."""
+        text = "intests; echo hi > kept.txt"
+        for line in ("zsh -i -c '%s'" % text, "zsh -l -c '%s'" % text, "echo '%s' | zsh -i" % text):
+            with self.subTest(line):
+                self.refused_for_members(line, "Law 5")
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", STARTUP_SNAPSHOT + PROGRAM_ALIAS)
+        for line in ("zsh -i -c 'git push'", "zsh -l -c 'git push'", "zsh -o login -c 'git push'"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+        for line in ("git push", "zsh -il -c 'git push'"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+    def test_a_global_alias_there_is_doubted(self):
+        for line in ("zsh -i -c 'echo GP'", "zsh -l -c 'echo GP'"):
+            with self.subTest(line):
+                self.refused_for_members(line, "global or suffix alias")
+        self.refused_for_members("zsh -il -c 'echo GP'")  # read as the line reads it: `echo ; git push`
+        self.silent_for_everyone("zsh -f -il -c 'echo GP'")
+
+    def test_a_shell_that_reads_no_startup_file_reads_none(self):
+        for line in ("zsh -c gp", "zsh -f -i -c gp", "zsh -i -f -c gp", "zsh -fi -c gp", "zsh -lfi -c gp",
+                     "zsh -o norcs -i -c gp", "zsh +o rcs -il -c gp", "zsh --no-rcs -i -c gp", "zsh -o no_rcs -l -c gp",
+                     "zsh -i +o interactive -c gp", "zsh +i -c gp", "zsh -c gp -i", "zsh -o rcs -f -i -c gp",
+                     "zsh -c pushit", "echo gp | zsh", "sh -c gp"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+        for line in ("zsh -f -o rcs -i -c gp", "zsh -f +f -i -c gp"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+
+    def test_a_plain_zsh_reads_a_zshenv_where_there_is_one(self):
+        (self.user_home / ".zshenv").write_text("export X=1\n", encoding="utf-8")
+        for line in ("zsh -c gp", "zsh -c pushit", "echo gp | zsh"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+        for line in ("zsh -f -c gp", "sh -c gp", "bash -c gp"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+        (self.user_home / ".zshenv").unlink()
+        zdotdir = self.user_home / "zdot"
+        zdotdir.mkdir()
+        (zdotdir / ".zshenv").write_text("export X=1\n", encoding="utf-8")
+        self.silent_for_everyone("zsh -c gp")
+        with mock.patch.dict(self.home.env, {"ZDOTDIR": str(zdotdir)}):
+            self.refused_for_members("zsh -c gp")
+
+    def test_a_bash_or_sh_started_interactive_or_login_reads_them_both_ways(self):
+        """Its startup files may source the profile the snapshot read, or not: both ways, as a zsh reading part of them."""
+        for line in ("bash -i -c gp", "bash -l -c pushit", "bash --login -c gp", "bash -ic gp", "bash -c -i gp",
+                     "sh -i -c gp", "sh -l -c pushit", "echo gp | bash -i", "bash -il -c gp", "dash -i -c gp"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+        self.refused_for_members("bash -l -c 'intests; echo hi > kept.txt'", "Law 5")
+        for line in ("bash -c gp", "bash --norc -i -c gp", "bash --noprofile -l -c pushit",
+                     "bash --norc --noprofile -il -c gp", "sh -c pushit", "bash -lc 'git status'", "bash -i -c 'ls -la'"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+    def test_an_option_after_the_c_flag_is_an_option_and_the_string_follows(self):
+        for line in ("sh -c -x 'git push'", "zsh -c -x 'git push'", "bash -c -- 'git push'", "zsh -c -o errexit 'git push'",
+                     "bash -c +x 'git push'", "sh -c -e -u 'git push'", "zsh -co errexit 'git push'",
+                     "sh +x -c 'git push'"):
+            with self.subTest(line):
+                self.refused_for_members(line, "never run `git push`")  # the string's push, not a script operand
+        self.silent_for_everyone("sh -c 'echo hi' -x")
 
 
 if __name__ == "__main__":

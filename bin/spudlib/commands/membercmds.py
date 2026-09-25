@@ -1,4 +1,7 @@
-"""commands/membercmds: member new, start, finish, edit, log, result, block, show."""
+"""commands/membercmds: member new, respawn, start, finish, edit, log, result, block, show.
+
+Past 250 lines since SPD-318 added respawn, and kept whole: it is the one family of member commands, each a thin shell
+over state/ops, and respawn shares plan_line and spawn_data with new and edit."""
 
 import contextlib
 import json
@@ -6,6 +9,7 @@ import os
 
 from . import reportentry, worktreebind
 from ..core import kernel, markdown
+from ..render import sectiontext
 from ..state import actors, ledgerdb, lookup, ops
 
 
@@ -44,6 +48,77 @@ def plan_line(d, note):
     return line + ("\nnote: " + note if note else "")
 
 
+def agent_call(d):
+    """The Agent call that spawns planned member `d`, as the PreToolUse(Agent) check holds it (SPD-318): the prompt is the
+    brief template, which `member show` fills with the brief."""
+    return {"subagent_type": kernel.spawn_type(d["agent_type"], d["effort"]), "model": d["model"],
+            "description": "%s (%s, %s)" % (d["ref"], d["lineage"], d["persona"]), "run_in_background": True}
+
+
+def agent_call_lines(d):
+    call = agent_call(d)
+    return (["Agent call:"] + ["  %s: %s" % (k, "true" if v is True else v) for k, v in call.items()]
+            + ["  prompt: the brief template, naming %s (`spud member show %s` prints its brief)" % (d["ref"], d["ref"])])
+
+
+def quoted(text):
+    """`text` as a markdown block quote, so no line of it reads as one of a member note's own headings."""
+    return "\n".join("> " + line if line else ">" for line in text.split("\n"))
+
+
+def respawn_brief(con, old, ref, brief, answer):
+    """The re-spawned member's brief (SPD-318): `brief`, or the old member's, then its record under Read first -- the
+    answer to its Blocked question when there is one, and its Blocked, Result and Log, each quoted -- so the new run starts
+    from what the old one found and left in the tree rather than from nothing."""
+    parts = [(brief if brief is not None else old["brief"] or "").rstrip(),
+             "Read first, the prior run: this member re-spawns %s (%s, %s), which returned %s. A spudagent is never resumed"
+             " (SPD-318), so its record is here: continue from its work in the tree rather than starting over."
+             % (ref, old["lineage"], old["persona"], old["status"])]
+    if answer:
+        parts.append("The answer to its Blocked question:\n" + quoted(answer))
+    for label, text in (("Its Blocked question", old["blocked"]), ("Its Result", old["result"]),
+                        ("Its Log", sectiontext.render_log_rows(con, old))):
+        if text and text.strip():
+            parts.append("%s:\n%s" % (label, quoted(text.strip())))
+    return "\n\n".join(p for p in parts if p)
+
+
+def cmd_member_respawn(ctx, args):
+    """member respawn: plan a returned member again as a new row, since a spudagent is never resumed with SendMessage
+    (SPD-318): the same persona, model, effort, agent type and deliverables under the same parent, its brief carrying the
+    old row's record (respawn_brief), and the exact Agent call printed."""
+    con = ledgerdb.connect(ctx)
+    try:
+        actor = actors.resolve_actor(con, args.actor)
+        old = lookup.get_member(con, args.ref)
+        ref = lookup.member_ref(con, old["id"])
+        caller_id = actor.member["id"] if actor.kind == "member" else None
+        if old["parent_id"] != caller_id:
+            raise kernel.SpudError(kernel.EXIT_OWNERSHIP, "%s's parent is %s; a member is re-spawned by the parent that planned it, not by %s"
+                                   % (ref, lookup.member_ref(con, old["parent_id"]) or "Spud", actor.ref(con)))
+        if old["status"] == "planned":
+            raise kernel.SpudError(kernel.EXIT_TRANSITION, "%s is planned and was never spawned: spawn it with Agent as planned (`spud member show %s`"
+                                   " prints its subagent_type)" % (ref, ref))
+        if old["status"] == "active":
+            raise kernel.SpudError(kernel.EXIT_TRANSITION, "%s is active: record its return first (`member finish %s --status blocked|failed|done"
+                                   " --outcome '…'`), then re-spawn it" % (ref, ref))
+        brief = respawn_brief(con, old, ref, args.brief, args.answer)
+        ops.check_prose_headings(brief, markdown.IMPORT_MEMBER_SECTIONS, "the re-spawned member's brief")
+        ticket = lookup.get_ticket_by_id(con, old["ticket_id"])
+        deliverables = json.loads(old["deliverables"])
+        binder = worktreebind.Binder(ctx, worktreebind.working_directory())
+        binder.prepare(con, actor, worktreebind.planned_ticket(con, actor, ticket["key"]), deliverables)
+        m, note = ops.plan_member(ctx, con, actor, ticket["key"], old["persona"], old["model"], tier_reason=old["tier_reason"] or (
+                                      None if old["model"] == ctx.persona_tier(old["persona"]) else "re-spawn of %s" % ref),
+                                  agent_type=old["agent_type"], brief=brief, deliverables=deliverables,
+                                  session_id=actors.planning_session(os.environ), binder=binder, effort=old["effort"], respawns=ref)
+        d = lookup.member_dict(con, m)
+    finally:
+        con.close()
+    lines = [plan_line(d, note), "re-spawns %s (%s); its record is under Read first in the new brief" % (ref, old["status"])] + agent_call_lines(d)
+    return kernel.Result(dict({"member": d, "respawns": ref, "agent_call": agent_call(d)}, **spawn_data(d, note)), "\n".join(lines))
+
+
 def cmd_member_start(ctx, args):
     con = ledgerdb.connect(ctx)
     try:
@@ -52,6 +127,13 @@ def cmd_member_start(ctx, args):
         with ledgerdb.write_txn(con):
             m = lookup.get_member(con, args.ref)
             actors.require_ancestor(con, actor, m, "starting a member (its status)")
+            if m["status"] == "blocked" and m["agent_id"]:
+                # A spawned member that returned blocked has no way to run again as this row: SendMessage is refused
+                # (SPD-318) and Agent spawns only a planned one.  Its re-spawn is a new row.
+                ref = lookup.member_ref(con, m["id"])
+                raise kernel.SpudError(kernel.EXIT_TRANSITION, "%s returned blocked and a spudagent is never resumed (SPD-318): re-spawn it with"
+                                       " `spud --as %s member respawn %s [--answer '…'] [--brief @-]` and issue the Agent call it prints"
+                                       % (ref, args.actor, ref))
             ops.member_status_change(con, at, actor.label, m, "active")
             m = lookup.get_member_by_id(con, m["id"])
         d = lookup.member_dict(con, m)
@@ -199,6 +281,10 @@ def format_member(d):
         lines.append("tier reason: " + d["tier_reason"])
     if d["escalates"]:
         lines.append("escalates: " + d["escalates"])
+    if d["respawns"]:  # SPD-321: the re-spawn chain, both ways
+        lines.append("re-spawns: " + d["respawns"])
+    if d["respawned_as"]:
+        lines.append("re-spawned as: " + d["respawned_as"])
     if d["deliverables"]:
         lines.append("deliverables: " + ", ".join(d["deliverables"]))
     for name, key in (("Brief", "brief"), ("Result", "result"), ("Blocked", "blocked"), ("Outcome", "outcome"), ("Summary", "summary")):

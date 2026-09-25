@@ -179,6 +179,64 @@ def hook_edit(ctx, con, at, payload, tool_input, caller_agent_id, caller_member,
     return hookio.SILENT
 
 
+# SPD-318: a spudagent is never resumed with SendMessage.  Eric's evidence (2026-09-24, CHI-014 and CHI-002): a member
+# returned blocked, Spud ran `member start` and sent it a message to its agentId; the resumed run lasted more than thirty
+# minutes while the desktop app's tasks pane showed only the SendMessage result, with no live progress and no task row,
+# and it never met the member check above (a resume gives the hooks one signal, a second SubagentStart:
+# hooks/recording.RESUME_KIND).  So a SendMessage whose `to` names a member the ledger knows is refused, whatever its
+# status: the way back is a new row, `member respawn`, spawned with Agent.  `to` names an agent by its id or
+# by its name, and a listing may append ` [ref]` to either (the tool's own description); the ledger's names are the pool
+# name, `SPUD-nnn/<Name>` and the handles lookup.HANDLE_RE reads.  Any other target -- `main`, a teammate, another
+# session -- passes silently.  The raw agentId is how the harness addresses an Agent-tool subagent, so it is matched in
+# every session; the name forms only for a caller that can own a spudagent: a session whose mode is not `plain` (Spud's,
+# or `outside`, which is held as Spud's) or a caller with an agent_id (a parent spudagent).  A plain session's teammate or
+# local session may bear a pool name some past member bore (Sam, Tom), so it sends to names freely (Ralph's review).
+def message_target(con, to, names=True):
+    """The members row a SendMessage `to` names, or None; with names=False, by agent id alone."""
+    word = to.strip()
+    if word.endswith("]") and "[" in word:  # `name [ref]`: the ref is the harness's, the name is what the ledger knows
+        word = word[:word.rindex("[")].rstrip()
+    if not word:
+        return None
+    row = con.execute("SELECT * FROM members WHERE agent_id = ?", (word,)).fetchone()
+    if row is not None or not names:
+        return row
+    handle = lookup.HANDLE_RE.match(word)
+    if handle:
+        team, name = handle.group("team"), handle.group("name")
+    elif "/" in word:
+        team, _, name = word.partition("/")
+    else:
+        team, name = None, word
+    if team is not None:
+        return con.execute("SELECT m.* FROM members m JOIN tickets t ON t.id = m.ticket_id WHERE t.team_key = ? AND m.name = ? COLLATE NOCASE",
+                           (team, name)).fetchone()
+    # A bare name repeats across teams; the most recent member bearing it is the one a harness listing would show.
+    return con.execute("SELECT * FROM members WHERE name = ? COLLATE NOCASE ORDER BY id DESC LIMIT 1", (name,)).fetchone()
+
+
+def hook_send_message(ctx, con, at, payload, tool_input, caller_agent_id, caller_member):
+    to = tool_input.get("to")
+    if not isinstance(to, str):
+        return deny_and_record(con, at, payload, "malformed PreToolUse(SendMessage) payload: tool_input.to is missing", caller_agent_id, caller_member)
+    target = message_target(con, to, names=False)
+    if target is None and (caller_agent_id or sessions.session_mode(ctx, con, payload)[0] != "plain"):
+        target = message_target(con, to)
+    if target is None:
+        return hookio.SILENT
+    ref = lookup.member_ref(con, target["id"])
+    actor = caller_agent_id or "spud"
+    reason = ("Law 2: %s is a spudagent (%s%s), and a spudagent is never resumed with SendMessage: the resumed run passes no"
+              " PreToolUse(Agent) member check and shows no progress (SPD-318). Re-spawn it as a new member: record its return"
+              " (`spud --as %s member finish %s --status blocked|failed|done --outcome '…'`) if it is unrecorded, then"
+              " `spud --as %s member respawn %s [--answer '…'] [--brief @-]`, run from the ticket's bound worktree when its"
+              " deliverables are bare globs (it binds as member new does, exit 5 elsewhere); it plans the new row with the old one's"
+              " Result, Blocked and Log under Read first and prints the Agent call: its subagent_type, model and description,"
+              " run_in_background: true"
+              % (ref, target["status"], ", agent_id %s" % target["agent_id"] if target["agent_id"] else "", actor, ref, actor, ref))
+    return deny_and_record(con, at, payload, reason, caller_agent_id, caller_member, ticket_id=target["ticket_id"], extra={"to": to[:300], "member": ref})
+
+
 def request_from_meta(con, meta_path, agent_id):
     """The allowed, still unbound spawn_requests row named by agent-<id>.meta.json's toolUseId
     (the harness writes the file about a second after the spawn; it is an internal file, so
@@ -249,6 +307,8 @@ def hook_pre_tool_use(ctx, payload):
                 caller_member = late_bind(con, at, payload, caller_agent_id)
             if not isinstance(tool_input, dict):
                 return deny_and_record(con, at, payload, "malformed PreToolUse(%s) payload: tool_input is not an object" % tool, caller_agent_id, caller_member)
+            if tool == "SendMessage":  # refused in every session, whatever its mode (SPD-318)
+                return hook_send_message(ctx, con, at, payload, tool_input, caller_agent_id, caller_member)
             mode = sessions.session_mode(ctx, con, payload)[0]
             if tool == "Agent":
                 if mode == "plain" and caller_member is None and not sessions.spudagent_shaped(tool_input):
