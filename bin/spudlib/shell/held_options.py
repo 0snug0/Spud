@@ -4,7 +4,8 @@ A module of its own since SPD-267: line_options and option_effect taken out of s
 read out of shell/syntax, which nothing else reads.  analyse.analyse_command calls line_options once, at a line's first
 reading.  A leaf the shell reading's import cycle reaches: it imports hooks/snapshots and nothing of the cycle.
 tool_expands_no_alias (SPD-327) reads whether a bash snapshot turns expand_aliases on, for alias_views.spelled_too;
-tool_may_be_bash (SPD-328) whether any snapshot is bash's, for held_text.tool_lines and alias_views.global_spelled."""
+tool_may_be_bash (SPD-328) whether any snapshot is bash's, for held_text.tool_lines and alias_views.global_spelled.  A
+bash snapshot's `set -o` lines are read against bash's own names (BASH_SET_ON, SPD-329), a zsh's against zsh's."""
 
 import os
 
@@ -16,10 +17,12 @@ def line_options(a):
     line, so CDABLE_VARS there is ShellAnalysis.cdable from the line's first word, CHASE_LINKS or CHASE_DOTS
     ShellAnalysis.chase, an option that changes arithmetic ShellAnalysis.arith_opaque; and an option the reader does not
     model, which may change how the shell reads the line's words (the option tables below), is an "unread" finding that
-    names the profile's line, refused a member.  Every snapshot's options count, any of them may be the one sourced."""
+    names the profile's line, refused a member.  Every snapshot's options count, any of them may be the one sourced, and a
+    `set -o` line in a bash's is read against bash's names (SPD-329)."""
     table = snapshots.shell_table(a.home)
     for kind, name, on, line, index in table.options:
-        effect = option_effect(kind, name, on)
+        bash = kind == "set" and 0 <= index < len(table.files) and snapshots.is_bash(table.files[index])
+        effect = option_effect(kind, name, on, bash)
         if effect == "cdable":
             a.cdable = True
         elif effect == "chase":
@@ -39,8 +42,8 @@ def line_options(a):
 # snapshot without it -- another writer's, an older one's -- leaves the line's eval and substitution words to run as they
 # are written as well.  Which snapshot a session sources is not in the hook's input, so each bash snapshot is read on its
 # own, in line order, the last `shopt` line naming the option deciding it (a snapshot's `shopt -p` may print it off before
-# the harness's line turns it on).  Read only where a word an alias stands in asks, once per process: each path's answer.
-_BASH_SNAPSHOT = snapshots.SNAPSHOT_PREFIX + "bash-"
+# the harness's line turns it on; hooks/snapshots.last_option_lines, SPD-329).  Read only where a word an alias stands in
+# asks, once per process: each path's answer.
 _EXPANDS_ALIASES = {}
 
 
@@ -49,7 +52,7 @@ def tool_may_be_bash(a):
     (`snapshot-<shell>-<stamp>-<id>.sh`, hooks/snapshots) -- held_text.tool_lines's question (SPD-291), and
     alias_views.global_spelled's, bash having no global alias whatever its options (SPD-328)."""
     for path in snapshots.shell_table(a.home).files:
-        if os.path.basename(path).startswith(_BASH_SNAPSHOT):
+        if snapshots.is_bash(path):
             return True
     return False
 
@@ -59,7 +62,7 @@ def tool_expands_no_alias(a):
     backtick or `<( )` body, a trap's action (SPD-327, above): a bash snapshot any session may source leaves
     expand_aliases off, or cannot be read.  zsh expands one there whatever its options; with no bash snapshot, False."""
     for path in snapshots.shell_table(a.home).files:
-        if os.path.basename(path).startswith(_BASH_SNAPSHOT) and not snapshot_expands_aliases(path):
+        if snapshots.is_bash(path) and not snapshot_expands_aliases(path):
             return True
     return False
 
@@ -74,18 +77,18 @@ def snapshot_expands_aliases(path):
                 data = f.read()
         except OSError:
             data = b""
-        for kind, name, state, _, _ in snapshots.read_snapshot(data, 0)[3]:
+        for kind, name, state, _, _ in snapshots.read_snapshot(data, 0, bash=True)[3]:
             if kind == "shopt" and name is not None and name.lower() == "expand_aliases":
                 on = state
         _EXPANDS_ALIASES[path] = on
     return _EXPANDS_ALIASES[path]
 
 
-def option_effect(kind, name, on):
+def option_effect(kind, name, on, bash=False):
     """What one option line of the snapshot does to the line the shell reads next: None, "cdable", "chase", "arith" or
     "unread", as the option tables below say (-- the options a shell snapshot sets --).  `kind` is the builtin that set it,
-    "setopt" (zsh, `unsetopt` turning it off), "shopt" (bash) or "set" (`set -o`, zsh's names); a name None is a line the
-    snapshot reader could not take apart."""
+    "setopt" (zsh, `unsetopt` turning it off), "shopt" (bash) or "set" (`set -o`, zsh's names, or bash's where `bash`: the
+    line is a bash snapshot's, SPD-329); a name None is a line the snapshot reader could not take apart."""
     if name is None:
         return "unread"
     if kind == "shopt":
@@ -93,6 +96,12 @@ def option_effect(kind, name, on):
         if name == "cdable_vars":
             return "cdable" if on else None
         if name in BASH_SHOPT_INERT or on == (name in BASH_SHOPT_ON):
+            return None
+        return "unread"
+    if kind == "set" and bash:  # bash's names, spelled only as bash spells them (BASH_SET_ON)
+        if name == "physical":
+            return "chase" if on else None
+        if name in BASH_SET_INERT or on == (name in BASH_SET_ON):
             return None
         return "unread"
     name = name.lower().replace("_", "")
@@ -208,3 +217,24 @@ BASH_SHOPT_INERT = frozenset({
     "inherit_errexit", "interactive_comments", "lithist", "login_shell", "mailwarn", "no_empty_cmd_completion",
     "noexpand_translation", "progcomp", "progcomp_alias", "promptvars", "restricted_shell", "shift_verbose", "sourcepath",
     "varredir_close"})
+# bash's `set -o` names (SPD-329), which Claude Code writes into a bash snapshot as `set -o NAME` for each line of `set -o`
+# its `grep "on"` matches -- onecmd and monitor too, whose `off` holds "on" -- and which a bash snapshot's `set` lines are
+# read against, never zsh's.  /bin/bash 3.2.57 listed these 27 in `bash --norc --noprofile -c 'set -o'`
+# (tests/probes/shell_probe.py, 2026-09-25): allexport, braceexpand, emacs, errexit, errtrace, functrace, hashall,
+# histexpand, history, ignoreeof, interactive-comments, keyword, monitor, noclobber, noexec, noglob, nolog, notify, nounset,
+# onecmd, physical, pipefail, posix, privileged, verbose, vi, xtrace; on: braceexpand, hashall and interactive-comments.
+# A name a later bash adds is read as one the table does not know, below.  bash takes a name only as spelled -- `set -o` refused
+# `interactive_comments` and `INTERACTIVE-COMMENTS` as invalid option names -- so a name is matched as it is written.
+# physical is "chase", as zsh's CHASE_LINKS.  The inert ones change nothing the hook reads in the Bash tool's shell, which
+# runs its line through `eval` in `bash -c` (probed in that shape: with history, histexpand, onecmd and monitor on and
+# interactive-comments off, eval's `echo "two!!" # comment` printed `two!!` and the line after it ran): line editing,
+# history, job control, hashing and comments, which act in an interactive shell; errexit, errtrace, functrace, noexec,
+# onecmd, pipefail, ignoreeof, under which a line runs no more of itself; noclobber, which writes no more than it reads;
+# xtrace, verbose and nolog, which only report; privileged, which reads no startup file once the shell runs.  The rest
+# change how the line's words are read or what its commands are handed -- braceexpand off left `{a,b}` as written, and
+# allexport, keyword, noglob, nounset and posix on are read as zsh's kin are -- so they are "unread" off their default,
+# and so is a name bash does not know set on (bash refuses it, but the hook does not guess why a profile wrote it).
+BASH_SET_ON = frozenset({"braceexpand", "hashall", "interactive-comments"})
+BASH_SET_INERT = frozenset({
+    "emacs", "vi", "history", "histexpand", "monitor", "notify", "hashall", "interactive-comments", "errexit", "errtrace",
+    "functrace", "noexec", "onecmd", "pipefail", "ignoreeof", "noclobber", "xtrace", "verbose", "nolog", "privileged"})
