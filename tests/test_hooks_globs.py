@@ -445,6 +445,114 @@ class QualifierCodeAliasTest(BashHookCase):
         self.assertEqual((after.alias_scope, after.alias_view), (0, None))  # the scope closes with the code's reading
 
 
+# SPD-300: functions written before the aliases, as Claude Code writes its snapshot (SPD-290), whose bodies run a plain
+# alias's name in text zsh parses as the body runs -- a process substitution, a glob qualifier's code -- or where the
+# body itself was parsed; `cat` is a plain alias of a printer's name.
+LATE_PARSED_BODIES = """\
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+# Functions
+procgp () {
+\tcat <(gp)
+}
+outgp () {
+\techo x > >(gp)
+}
+qualgp () {
+\tls tests/*(e:gp:)
+}
+plusgp () {
+\tls tests/*(+gp)
+}
+loopgp () {
+\tfor i in 1 2; do cat <(gp); done
+}
+substgp () {
+\techo $(gp)
+}
+plaingp () {
+\tgp
+}
+newshellgp () {
+\tcat <(sh -c gp)
+}
+echoqual () {
+\tls tests/*(e:'echo gp':)
+}
+catpipe () {
+\tprintf 'ls\\n' | cat | sh
+}
+# Aliases
+alias -- gp='git push'
+alias -- cat='cat -v'
+"""
+
+
+class SnapshotBodyLateParsedTest(BashHookCase):
+    """SPD-300: a function body the snapshot defines was parsed before the snapshot's aliases (SPD-290), but a `<( )` or
+    `>( )` body in it and an `e` or `+` glob qualifier's code are parsed when they run, once the snapshot is sourced, so
+    the snapshot's aliases stand there.  ShellWalk.open_process_substitution (SPD-287) and read_qualifier_code (SPD-292)
+    put a new line_aliases.AliasView in force only while the line's table held an alias, so inside such a body, with the
+    line's table empty, they read with the body's early view and expanded none: `procgp`, whose body is `cat <(gp)`
+    under `alias gp='git push'`, reached the hook with no finding.  And stdin_text's printer-shadow check took every
+    snapshot alias of a printer's name as standing, a body's `cat` too.
+
+    Probed in zsh 5.9 -f through tests/probes/shell_probe.py, a `zsh -f -c` sourcing a file that holds `unalias -a`,
+    functions, then `alias gp='echo GP-RAN'` and `alias cat='echo CAT-ALIAS'`, and evaluating the call: a body's `cat
+    <(gp)`, `echo x > >(gp)`, `echo *(e:gp:)` and `echo *(+gp)` (three files: GP-RAN three times) and `for i in 1 2; do
+    cat <(gp); done` each ran GP-RAN; a body's `gp` and `cat <(sh -c gp)` found no command gp; a body's `printf 'echo
+    PIPED\\n' | cat | sh` printed PIPED, the real cat, where the same line outside a body ran CAT-ALIAS.
+
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True)
+        (snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh").write_text(LATE_PARSED_BODIES, encoding="utf-8")
+        for rel in ("tests/keep.py", "tests/other.py"):
+            p = self.home.path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7"):
+        """The refusal's reason, "" where a subtest failed."""
+        reason = ""
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                reason = self.assertRefused(command, needle, agent_id).reason
+        return reason
+
+    def silent_for_members(self, command):
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def test_the_tickets_evidence(self):
+        for line in ("procgp", "outgp", "qualgp", "plusgp"):
+            with self.subTest(line):
+                self.assertIn("git push", self.refused_for_members(line))
+
+    def test_every_late_parse_inside_a_body_expands_them(self):
+        for line in ("loopgp", "substgp", "eval procgp", "echo $(qualgp)", "x=1; procgp; plusgp", "procgp | cat"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+
+    def test_what_the_body_itself_parsed_and_a_new_shell_expand_none(self):
+        for line in ("plaingp", "newshellgp", "echoqual", "plaingp; newshellgp"):
+            with self.subTest(line):
+                self.silent_for_members(line)
+
+    def test_a_printer_the_snapshot_aliases_is_its_own_inside_a_body(self):
+        """The body's `cat` runs the program, so the text `sh` reads is the one the line spells; outside the body the
+        alias runs in its place, and the text is unread (SPD-272)."""
+        self.silent_for_members("catpipe")
+        reason = self.refused_for_members("printf 'ls\\n' | cat | sh", SCRIPT_WORDING)
+        self.assertIn("standard input that the line does not spell", reason)
+
+
 class ArithmeticCommandTest(BashHookCase):
     """SPD-088: `(( ... ))` is an arithmetic command and `$(( ... ))` an arithmetic expansion, and both shells evaluate what
     stands between the parentheses -- the `>` of `(( n > 2 ))` is a comparison, the `|` of `(( a | b ))` a bitwise or, the `;`

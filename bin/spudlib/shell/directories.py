@@ -3,7 +3,7 @@
 import os
 import re
 
-from . import arg_writes, globbing, prepare, syntax
+from . import arg_writes, globbing, line_functions, prepare, syntax
 from ..hooks import hookio
 
 
@@ -332,8 +332,27 @@ def cd_destinations(name, args, a):
     return None
 
 
-def directory_change(words, a, effect):
-    """Apply cd, chdir, pushd or popd, spelled exactly (the shell's builtins), to the directories the shell may be in."""
+def directory_change(words, a, effect, looked_up=False):
+    """Apply cd, chdir, pushd or popd, spelled exactly (the shell's builtins), to the directories the shell may be in.
+
+    `looked_up`: the shell looked the word up as a function first (analyse.dispatch_words' seeks_function), as it does for
+    a bare `cd` and not behind `builtin` or `command`.  SPD-304: zsh and bash run a function before a builtin of the same
+    name, so where the line or the shell's snapshot defines one under this name, the call runs its body, which
+    held_text.read_shell_name has already read from where the call started, and the builtin's own move is not made --
+    probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f and bash 3.2.57: after
+    `cd() { builtin cd t; }`, `cd /tmp` left the shell in ./t, after `cd() { true; }` where it stood, and the same for
+    pushd, popd and chdir functions, `\\cd` and `'cd'`, while `builtin cd /tmp` went to /tmp and `unset -f cd` gave the
+    builtin back.  Where the function may or may not be the one that runs -- a definition that may not have run, a body
+    the hook cannot read, a function whose name it cannot read -- the directory is doubted, as an unfollowable cd leaves
+    it (line_functions.in_builtins_place)."""
+    if looked_up:
+        runs = line_functions.in_builtins_place(a, words[0])
+        if runs == "function":
+            return
+        if runs == "either":
+            a.cwds = None
+            a.dir_moves += 1
+            return
     if words[0] == "chdir":
         effect = max(effect, "either", key=EFFECT_ORDER.get)  # zsh's synonym for cd; bash has no chdir
     new = cd_destinations(words[0], words[1:], a)

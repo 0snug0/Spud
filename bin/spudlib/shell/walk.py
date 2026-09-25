@@ -52,6 +52,37 @@ def _value_may_start_with_dash(word):
     return globbing.active_glob_word(word) and (globbing.may_start_with_dash(word) or word.startswith("{"))
 
 
+# The tokens after which a `case` opens a case command, not a word of one (_procsub_words)
+_COMMAND_START = frozenset((";", "&&", "||", "|", "|&", "&", "(", "<(", ">(", "{", "!", "then", "else", "elif", "do", ";;",
+                            ";&", ";|"))
+
+
+def _procsub_words(toks, start):
+    """The indices of the tokens a `<( )` or `>( )` body starting at toks[start] holds as its own, up to the `)` that
+    closes it (ShellWalk.expand_globals, SPD-293): not those of a `<( )` or `>( )` nested in it, which the walk expands
+    where that one opens.  A case command's patterns end in a `)` that closes nothing (`cat <(case a in a) echo X;;
+    esac)`), so a `)` read while the innermost thing open is a case, between its `case` in command position and its
+    `esac`, is a pattern's; a `case` the walk reads as an argument opens one here too, and the body is then read to the
+    line's end, words the body does not hold among them: more than zsh runs, never less."""
+    own, open_, prev = [], [], None
+    for j in range(start, len(toks)):
+        t = toks[j]
+        if t in ("(", "<(", ">("):
+            open_.append(t)
+        elif t == ")" and not (open_ and open_[-1] == "case"):
+            if not open_:
+                break
+            open_.pop()
+        elif t == "case" and (prev is None or prev in _COMMAND_START):
+            open_.append(t)
+        elif t == "esac" and open_ and open_[-1] == "case":
+            open_.pop()
+        if "<(" not in open_ and ">(" not in open_:
+            own.append(j)
+        prev = t
+    return own
+
+
 def _function_names(words):
     """The names a function definition binds, deglobbed: the name words that reached a `name ()` or
     `function name {` header -- `name`, both of zsh's several names in `a b () { ... }`, `function name` and the
@@ -119,7 +150,9 @@ class ShellFrame:
         # (SPD-145: `bash <(curl ...)` runs that file's text as a script; SPD-190).
         self.procsub = False
         # a process substitution's body read a level into the line's alias scope (ShellWalk.open_process_substitution,
-        # SPD-287): the AliasView in force where it opened, in a 1-tuple, put back when it closes; None for every other frame
+        # SPD-287): the AliasView in force where it opened, put back when it closes, and how many levels of alias scope it
+        # opened (1, or 0 where it only put the snapshot's aliases back in force inside a snapshot function's body, SPD-300);
+        # None for every other frame
         self.alias_view = None
         # which compound command of the walk this is, counting from 0 in the order they open -- the same in every walk of
         # one line's tokens, which is how walk_line hands the second walk each compound's input (SPD-210) -- and whether
@@ -207,7 +240,8 @@ class ShellWalk:
       this walk is a call's reading of a compound body, whose input stands as a pipe into it
       (line_functions.read_line_body)."""
 
-    def __init__(self, a, inner, bodies, expanded, depth, glued=True, stdin=None, fed=False, inputs=None, line=None, into=False):
+    def __init__(self, a, inner, bodies, expanded, depth, glued=True, stdin=None, fed=False, inputs=None, line=None, into=False,
+                 text=None):
         self.a, self.inner, self.bodies, self.depth = a, list(inner), list(bodies), depth
         self.expanded = list(expanded)  # whether the shell expands each body (heredocs.strip_heredocs)
         # ... and all three as they came, for the stretch a definition's body lifts (end_body)
@@ -250,6 +284,11 @@ class ShellWalk:
         # read_loop_again's walk of a loop once more (SPD-294): `once`, it ends where the loop it opens first closes, and
         # `header_state`, (the table the loop's header ran with, the one its body is read with) until the header is over
         self.once, self.header_state = False, None
+        # SPD-293: the text the tokens were read from (analyse_command's; None for a body line_functions reads), whose
+        # unquoted words inside a `<( )` body are the ones expand_globals may take for a global alias's name, found when it
+        # first asks (`plain`); and, once it has set an alias's expansion in a word's place, `origin`: each token's index
+        # among the tokens as the line spelled them, which `source` then holds (pristine)
+        self.text, self.plain, self.origin = text, None, None
         self.start_list()
         self.pipe_feeds = into  # a call's input, a pipe into the compound body (SPD-212)
 
@@ -338,8 +377,8 @@ class ShellWalk:
         self.end_list()  # ... which joins the last element's text to the rest of what this compound command printed
         frame = self.stack.pop()
         if frame.alias_view is not None:  # its body is read: the scope open_process_substitution opened closes (SPD-287)
-            self.a.alias_scope -= 1
-            self.a.alias_view = frame.alias_view[0]
+            self.a.alias_view, opened = frame.alias_view
+            self.a.alias_scope -= opened
         # the compound command's own output stands where it opened, in the element that holds it
         self.printed = stdin_text.joined(frame.printed, self.frame_printed) if frame.prints else frame.printed
         self.frame_printed, (self.element_mark, self.list_defined) = frame.earlier, frame.element_mark
@@ -411,12 +450,82 @@ class ShellWalk:
         expand_aliases` reads the body a line at a time (`cat <(alias g4=...<newline>g4)` ran it), and the walk's tokens
         no longer tell a newline from a `;`, so the view is one of several lines (line_aliases.line_reading): a body's
         own alias is read for its later words on one line too, a reading of more than runs, never less.  A line with no
-        alias reads its process substitutions as it always did.  pop closes the scope with the frame."""
-        if not (self.a.aliases or self.a.alias_unknown):
+        alias reads its process substitutions as it always did.  pop closes the scope with the frame.  The global aliases
+        that stand there are expanded in the body's words as the scope opens (expand_globals, SPD-293).
+
+        SPD-300: inside a function body the snapshot defines, read with an AliasView marked `early` (SPD-290: parsed
+        before the snapshot's aliases), the body is still parsed when it runs, once the snapshot is sourced, so the
+        snapshot's aliases stand in it (line_aliases.held_standing; probed in zsh 5.9 -f through
+        tests/probes/shell_probe.py, a file of functions then `alias gp='echo GP-RAN'` sourced: a body's `cat <(gp)`,
+        `echo x > >(gp)` and a loop's `cat <(gp)` ran GP-RAN, where the body's own `gp` and `cat <(sh -c gp)` found no
+        command gp).  Where the line's table holds none the view above is not made, so the frame still puts the body's
+        view back in force as a text parsed late (AliasView.parsed_late), opening no alias scope: the line's table,
+        empty, stands there as it does."""
+        view = self.a.alias_view
+        if self.a.aliases or self.a.alias_unknown:
+            frame.alias_view = (view, 1)
+            self.a.alias_view = line_aliases.AliasView(self.a, True)
+            self.a.alias_scope += 1
+            self.expand_globals()
+        elif view is not None and view.early:
+            frame.alias_view = (view, 0)
+            self.a.alias_view = view.parsed_late()
+
+    def expand_globals(self):
+        """The global aliases that stand in the `<( )` or `>( )` body just opened at self.at, expanded in its words
+        (SPD-293).  zsh parses the body when it runs it, so every unquoted word there that spells a global alias of the
+        table as it stands here -- the line's own, and the snapshot's as the line left them -- is that alias's body, as in
+        a `$( )` body (analyse.analyse_isolated) and eval's words (line_aliases.global_aliased), and the line's own text
+        leaves them be (line_aliases.alias_words).  Probed in zsh 5.9 -f and -f -o nobareglobqual through
+        tests/probes/shell_probe.py, each line run by eval as the Bash tool's shell runs it: after `alias -g Y="; echo
+        PUSHED"`, `cat <(echo p2 Y)` printed p2 then PUSHED, and `echo x > >(cat; echo in-out Y2)` the same; with `alias -g
+        X=snapshot` held, `alias -g X=line; cat <(echo p1 X)` printed `p1 line`; `'Q'`, `"Q"` and `\\Q` were left as
+        written; a body holding another global alias expanded it, one holding `$( )` ran it, a case in the body read its
+        words; `cat <(alias -g Z=own; echo p5 Z)` printed `p5 zz`, the body parsed whole; and `alias -g U=uu; f() { cat
+        <(echo p8 U); }; alias -g U=later; f` printed `p8 later`.
+
+        The walk has the body as tokens, which no longer show a word's quotes, so a word is taken for a name only where
+        the text writes it unquoted (line_aliases.plain_words; any word, for a function body line_functions reads, which
+        hands the walk no text: more than zsh runs, never less).  Each such word's expansion is
+        tokenized as analyse_command would (analyse.spliced_tokens) and set in its place among the walk's tokens, which
+        the walk then reads as the body's own: its commands, what it prints, the directories it moves through.  A word of
+        a `<( )` nested in this body is left to that one, which opens with the table as it stands there.  A word that may
+        be a global alias the hook cannot resolve, and every plain word where the line defined one whose name it cannot
+        read, is refused a member unread, as global_aliased refuses one.  The tokens as the line spelled them stay in
+        `source`, and `origin` maps each token back to them (pristine), so a function body a call reads and a loop
+        read_loop_again reads once more are read from the words the line wrote, with the table where they run."""
+        a = self.a
+        names = line_aliases.global_names(a)
+        if not names:
             return
-        frame.alias_view = (self.a.alias_view,)
-        self.a.alias_view = line_aliases.AliasView(self.a, True)
-        self.a.alias_scope += 1
+        if self.plain is None and self.text is not None:
+            self.plain = line_aliases.plain_words(self.text)
+        unknown, budget, spliced = line_aliases.unknown_global(a, names), [line_aliases.GLOBAL_EXPANSIONS], []
+        for j in _procsub_words(self.toks, self.at + 1):
+            word = self.toks[j]
+            if self.plain is not None and word not in self.plain or all(c in syntax.SHELL_PUNCTUATION for c in word):
+                continue
+            if unknown:  # once for the body, as global_aliased records it once for its text
+                unread.record_unread(a, "alias-word", unread.unread_shown(word))
+                unknown = False
+            text = line_aliases.global_word(word, names, a, budget)
+            tokens = None if text is None else analyse.spliced_tokens(text, a, self.glued)
+            if tokens is not None:
+                spliced.append((j, tokens))
+        if spliced and self.origin is None:
+            if self.source is None:
+                self.source = list(self.toks)
+            self.origin = list(range(len(self.toks)))
+        for j, tokens in reversed(spliced):  # from the last, so each index still names its word
+            self.toks[j : j + 1] = tokens
+            self.origin[j : j + 1] = [self.origin[j]] * len(tokens)
+
+    def pristine(self, i):
+        """The index among the tokens as the line spelled them (`source`) of the walk's token i, which expand_globals may
+        have moved; a token of an alias's expansion is its word's.  Past the last token, the end of the line."""
+        if self.origin is None:
+            return i
+        return self.origin[i] if i < len(self.origin) else len(self.source)
 
     def read_arithmetic_command(self, frame, text):
         """What an arithmetic command `(( ... ))` assigns, recorded as the line's where the command stands (SPD-225):
@@ -539,14 +648,14 @@ class ShellWalk:
         left = _alias_state(a)
         if left == previous:
             return
-        tokens = [keyword] + (self.source or self.toks)[at + 1 :]
+        tokens = [keyword] + (self.source or self.toks)[self.pristine(at) + 1 :]
         piped_text, _frame_stdin, piped_fed, _frame_fed, pipe_feeds = frame.stdin
         passes = 0
         while left != previous:
             if passes == _ALIAS_PASSES:
                 a.alias_unknown = True
             again = ShellWalk(a, self.lifted[lifted:], self.docs[docs:], self.expands[docs:], self.depth, self.glued,
-                              piped_text, piped_fed, self.inputs, self.line)
+                              piped_text, piped_fed, self.inputs, self.line, text=self.text)
             again.opened, again.once, again.pipe_feeds = frame.serial, True, pipe_feeds
             if keyword not in ("while", "until"):
                 again.header_state = (opened, _alias_state(a))
@@ -773,14 +882,22 @@ class ShellWalk:
         the next match, not its own (`echo *(e:'alias ls="echo INNER"; ls -d /':)` ran ALIASED, then INNER; an alias
         defined after a command ran that command for the second file), so where the reading changed the table the code
         is read once more with the table it left: the parse every later match makes.  A line with no alias reads the
-        code as it always did."""
+        code as it always did.
+
+        SPD-300: inside a function body the snapshot defines (an AliasView marked `early`, SPD-290) the code is parsed as
+        the glob expands, once the snapshot is sourced, so the snapshot's aliases stand there (probed in zsh 5.9 -f
+        through tests/probes/shell_probe.py, a file of functions then `alias gp='echo GP-RAN'` sourced: a body's `echo
+        *(e:gp:)` and `echo *(+gp)` ran GP-RAN once per file, where the body's own `gp` found no command gp); where the
+        line's table holds none, the code is read with the body's view as a text parsed late (AliasView.parsed_late),
+        opening no alias scope."""
         view, read_with = self.a.alias_view, None
+        late = None if view is None else view.parsed_late()
         for again in (False, True):
             parsed = 1 if self.a.aliases or self.a.alias_unknown else 0
             current = line_aliases.AliasView(self.a, False) if parsed else None
             if again and current == read_with:
                 return
-            self.a.alias_view = current if parsed else view
+            self.a.alias_view = current if parsed else late
             self.a.alias_scope += parsed
             try:
                 analyse.analyse_command(code, self.a, self.depth + 1)
@@ -983,7 +1100,7 @@ class ShellWalk:
         if body not in self.capturing:
             return
         self.capturing.remove(body)
-        body.tokens = tuple((self.source or self.toks)[body.start : self.at])
+        body.tokens = tuple((self.source or self.toks)[self.pristine(body.start) : self.pristine(self.at)])
         (lifted, docs), (lifted_now, docs_now) = body.consumed, (len(self.lifted) - len(self.inner), len(self.docs) - len(self.bodies))
         body.inner, body.docs, body.expanded = self.lifted[lifted:lifted_now], self.docs[docs:docs_now], self.expands[docs:docs_now]
         body.glued, body.into = self.glued, into
@@ -1402,7 +1519,7 @@ class ShellWalk:
             analyse.analyse_isolated(self.a, self.inner.pop(0), self.depth + 1, *self.substitution_input())
 
 
-def walk_line(a, tokens, inner, bodies, expanded, depth, start, glued=True, stdin=None, fed=False, into=False):
+def walk_line(a, tokens, inner, bodies, expanded, depth, start, glued=True, stdin=None, fed=False, into=False, text=None):
     """Walk a line's tokens (ShellWalk), and walk them again where a compound command on it has input redirections of its
     own (SPD-210): the shells perform those before the compound runs, so every command in it reads that input, but the
     walk reads them after its closer, when those commands are read already.  The second walk hands each such compound its
@@ -1417,11 +1534,11 @@ def walk_line(a, tokens, inner, bodies, expanded, depth, start, glued=True, stdi
     line = object()  # this reading of the line, which its definitions are bound to (ShellWalk.define)
     a.walking.add(line)
     try:
-        shell_walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, line=line, into=into)
+        shell_walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, line=line, into=into, text=text)
         shell_walk.walk(tokens)
         if shell_walk.found:
             restore_reading(a, start)
-            shell_walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, shell_walk.found, line, into)
+            shell_walk = ShellWalk(a, inner, bodies, expanded, depth, glued, stdin, fed, shell_walk.found, line, into, text)
             shell_walk.walk(tokens)
         shell_walk.settle_definitions()
         return shell_walk

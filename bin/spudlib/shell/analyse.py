@@ -32,8 +32,12 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         return a
     if isinstance(command, line_functions.LineBody):
         # a function body the line defines, read where a call or a trap runs it (SPD-277, SPD-276): its tokens, as the
-        # walk that read the definition had them
-        return line_functions.read_line_body(a, command, depth, stdin, fed)
+        # walk that read the definition had them -- with no text, so no name stands quoted there (SPD-295, below)
+        held_quoted, (a.quoted_text, a.quoted_sets) = (a.quoted_text, a.quoted_sets), (None, None)
+        try:
+            return line_functions.read_line_body(a, command, depth, stdin, fed)
+        finally:
+            a.quoted_text, a.quoted_sets = held_quoted
     if depth == 0:
         held_options.line_options(a)  # the options the shell's snapshot set before the line (SPD-263)
         line_aliases.held_aliases(a)  # ... and its global and suffix aliases, in the line's own table (SPD-283)
@@ -88,8 +92,22 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         for sub in inner:
             analyse_isolated(a, sub, depth + 1, stdin, fed)
         return a
+    # SPD-295: zsh expands no plain alias of a word quoted in any way, nor a suffix alias of one quoted after its last dot,
+    # but the tokens have their quotes taken; the text they were read from is kept while they are walked, for
+    # line_aliases.quoted_only to find the names it spells only quoted, and put back after, as a text read inside this one
+    # (an eval's, a substitution's, an alias body) keeps its own
+    held_quoted, (a.quoted_text, a.quoted_sets) = (a.quoted_text, a.quoted_sets), (outer, None)
+    try:
+        return walk_readings(a, tokens, marked, other, inner, bodies, expanded, depth, stdin, fed, outer)
+    finally:
+        a.quoted_text, a.quoted_sets = held_quoted
+
+
+def walk_readings(a, tokens, marked, other, inner, bodies, expanded, depth, stdin, fed, outer):
+    """analyse_command's walk of a text's tokens: zsh's reading, and where the other shell reads the text apart, its reading
+    too, the two joined."""
     start = walk.reading_start(a)
-    zsh_walk = walk.walk_line(a, tokens, inner, bodies, expanded, depth, start, True, stdin, fed)
+    zsh_walk = walk.walk_line(a, tokens, inner, bodies, expanded, depth, start, True, stdin, fed, text=outer)
     if other == marked and not zsh_walk.split_brace:
         # one reading: the line holds no zsh pattern, or only markings both shells make (arithmetic), and no brace
         # glued to a word that zsh splits off
@@ -104,7 +122,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
     zsh_locals = None if a.body_locals is None else a.body_locals[-1]
     walk.restore_reading(a, start)
     walk.walk_line(a, tokens if other == marked else syntax.shell_tokens(other) or [], inner, bodies, expanded, depth, start,
-                   False, stdin, fed)
+                   False, stdin, fed, text=outer)
     if zsh_locals is not None:  # a name is surely local only where both readings declared it so (SPD-246)
         a.body_locals[-1] = {name: before for name, before in a.body_locals[-1].items() if name in zsh_locals}
     line_functions.merge_readings(a, zsh_bodies)  # a function body either reading defines (SPD-212), or removes (SPD-281)
@@ -184,7 +202,12 @@ def analyse_new_shell(a, command, depth, stdin=None, fed=False):
     Nor does an alias the shell's snapshot defines, which only the Bash tool's own shell sources (SPD-290, probed in zsh
     5.9 -f: after sourcing `alias gp='echo GP-RAN'`, `zsh -f -c gp`, `zsh -f -c "eval gp"` and `sh -c gp` found no
     command gp): the text is read with a line_aliases.AliasView whose `held` is False, which every text parsed inside it
-    inherits, and which the reading's cache keys hold, so `sh -c gp; echo $(gp)` reads the substitution afresh."""
+    inherits, and which the reading's cache keys hold, so `sh -c gp; echo $(gp)` reads the substitution afresh.
+
+    Nor does a function the snapshot defines, the harness's shadows among them (SPD-298, held_text.snapshot_sourced, which
+    reads that same `held`): the new shell runs the program of that name, or finds no command, so a profile's `intests()
+    { cd tests; }` no longer moves `sh -c 'intests; echo hi > kept.txt'` into tests/, and `sh -c 'git push'` under a
+    profile's `git() { hub "$@"; }` is git's push alone."""
     state = (a.alias_scope, a.aliases, a.alias_unknown, a.alias_view)
     a.alias_scope, a.aliases, a.alias_unknown = 0, {}, False
     a.alias_view = line_aliases.AliasView(a, False, held=False)
@@ -192,6 +215,27 @@ def analyse_new_shell(a, command, depth, stdin=None, fed=False):
         analyse_isolated(a, command, depth, stdin, fed)
     finally:
         a.alias_scope, a.aliases, a.alias_unknown, a.alias_view = state
+
+
+def spliced_tokens(text, a, glued):
+    """The walk's tokens for `text`, the expansion of a global alias a `<( )` or `>( )` body's word spells, which the walk
+    reads in that word's place (ShellWalk.expand_globals, SPD-293), as analyse_command would tokenize it -- zsh's reading
+    (`glued`) or the other shell's -- or None where it cannot stand among the tokens of the line: it lifts a `$( )` or
+    backtick body, or holds a here-document operator, whose bodies the walk pairs with the line's own in order; its quotes
+    never close; or an ANSI-C string there is one the hook cannot read.  That is refused a member unread, as a global
+    alias the hook cannot resolve is (SPD-217): zsh runs the text (probed: `alias -g W='$(echo SUBST)'` printed SUBST in a
+    `<( )` body)."""
+    text, apart = prepare.ansi_c_quotes(text)
+    outer, inner = prepare.split_substitutions(prepare.newlines_as_separators(text))
+    tokens = None
+    if apart is None and not inner:
+        marked, other = zsh.mark_zsh_patterns(prepare.neutralize_quoted_globs(outer))
+        tokens = syntax.shell_tokens(marked if glued else other)
+    parts = None if tokens is None else [p for t in tokens for p in syntax.operator_parts(t)]
+    if parts is None or "<<" in parts or "<<-" in parts:
+        unread.record_unread(a, "alias-word", unread.unread_shown(text))
+        return None
+    return parts
 
 
 def stdin_file_word(tokens, bodies, piped_fed):
@@ -777,7 +821,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         a.hashed.update(hashed_names(words))
     elif cmd in syntax.DIRECTORY_COMMANDS and directories.builtin_runs_here(effect):
         a.kinds.append("cd")
-        directories.directory_change(words, a, effect)
+        # A line function named cd/pushd/popd/chdir runs before the builtin's move in zsh and bash (SPD-304); tell
+        # directory_change to check where a name in DIRECTORY_COMMANDS actually runs instead of assuming the builtin.
+        directories.directory_change(words, a, effect, looked_up=seeks_function is True)
     elif cmd in syntax.SHELL_DECLARATIONS:
         a.kinds.append("other")
         if a.body_locals is not None and effect == "shell" and not a.unsure:

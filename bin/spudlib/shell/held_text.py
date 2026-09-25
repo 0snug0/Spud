@@ -79,7 +79,9 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     command now -- or a function, whose body is read as an `eval` string is while the call's own words go on to be
     dispatched for what they name.  An alias shadows a function of the same name, as the shell resolves them.  `aliased`:
     the word stands where the shell expands an alias (the command position); `function`: where it looks a function up,
-    which zsh's noglob, exec and `-` keep and the command position does not (SPD-262, analyse.dispatch_words).
+    which zsh's noglob, exec and `-` keep and the command position does not (SPD-262, analyse.dispatch_words).  Neither
+    stands in a new shell's text, which never sources the snapshot (line_aliases.held_standing, SPD-290; snapshot_sourced,
+    SPD-298): there the word is the program or builtin it names.
 
     Either runs in the line's shell, so the directory it leaves is the line's after it (SPD-252), settled by `effect`,
     where the command runs (directories.prefix_effect): `coproc takedir x` moves a forked shell and leaves the line where
@@ -130,7 +132,10 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
         return False
     # a body the line itself defines under the name (SPD-277)
     line_moved = line_functions.read_call(a, cmd, depth, stdin, fed)
-    body = line_aliases.shell_function(cmd, a)
+    # SPD-305: none where the line surely removed it (`unset -f cd; cd /tmp` runs the builtin), and one a removal that may
+    # not have run leaves read beside the command of that name (line_functions.held_function)
+    held = line_functions.held_function(a, cmd)
+    body = line_aliases.shell_function(cmd, a) if held else None
     if body is None and line_moved is not line_functions.NO_BODY:
         a.cwds = directories.settle(effect, before, line_moved)
     elif body is not None:
@@ -162,8 +167,32 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
         after = read_once(a, cmd, read, before, run)
         if line_moved is not line_functions.NO_BODY:
             after = directories.union_dirs(after, line_moved)  # either function may be the one that runs
+        if held == "maybe":
+            after = directories.union_dirs(after, before)  # ... or neither: the command, whose own move is dispatched after
         a.cwds = directories.settle(effect, before, after)
     return False
+
+
+def snapshot_sourced(a):
+    """Whether the shell that runs the text being read sourced Claude Code's snapshot, so a function it defines -- the
+    profile's, or one of the harness's shadows -- stands there (SPD-298): the Bash tool's own shell, and every text it
+    parses as the line runs, a snapshot function's body included; never a new shell's text (`sh -c`, `zsh -c`, `bash -c`,
+    a shell fed its text on standard input, analyse.analyse_new_shell), nor any text parsed inside it, which never sources
+    the snapshot and so runs the program of that name, or finds no command.  Probed through tests/probes/shell_probe.py in
+    zsh 5.9 -f -o nobareglobqual and -f and bash 3.2.57, after sourcing a file defining pushit (`echo PUSHIT-RAN`),
+    intests (`cd tests`) and grep (`echo GREP-FN`): the sourcing shell's own `eval` ran all three, while `sh -c pushit`,
+    `zsh -f -c pushit`, `zsh -c pushit`, `bash -c pushit`, `echo pushit | sh`, `zsh -f -c 'eval pushit; echo $(pushit)'`
+    and `sh -c 'intests; pwd'` found no command and left the directory where it was, and `sh -c 'grep -c x /dev/null'`
+    ran the program.  Reading the body there read other text: `sh -c 'intests; echo hi > kept.txt'`, which writes
+    ./kept.txt, was read as a write to tests/kept.txt.
+
+    This is the `held` mark of line_aliases.AliasView, which analyse_new_shell clears and every text parsed inside it
+    inherits (SPD-290), and not line_aliases.held_standing, which a snapshot body's `early` mark also clears: the
+    snapshot defines its functions before its aliases, so a body's own words expand none of its aliases, but every one of
+    its functions stands when a body runs.  `zsh -i -c` and `zsh -l -c`, which read the user's startup files, are read
+    here as any new shell is (SPD-301)."""
+    view = a.alias_view
+    return view is None or view.held
 
 
 # ShellAnalysis.body_dirs' marks for a function body whose reading is under way, and for one a call inside that reading

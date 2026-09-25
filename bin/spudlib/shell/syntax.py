@@ -705,6 +705,12 @@ class ShellAnalysis:
         # parsed with -- the table as it stood where its reading began, which its own words read while `aliases` takes what
         # it defines for text parsed after it -- or None where no such text is being read.
         self.aliases, self.alias_scope, self.alias_unknown, self.alias_view = {}, 0, False, None
+        # SPD-295: `quoted_text`, the text being read as analyse_command tokenizes it (None where the reading has no text:
+        # a function body's tokens), set for each text it reads and put back after it; `quoted_sets`, what
+        # line_aliases.quoted_only finds in it, the names it spells only in a quoted word and the suffixes it writes after
+        # a word's last dot only quoted, for which zsh expands no plain or suffix alias there -- found at the first lookup
+        # that asks, so a text no alias could reach never pays for the scan
+        self.quoted_text = self.quoted_sets = None
         # The shell the Bash tool starts sources Claude Code's snapshot of the user's interactive shell, so a
         # command word may already be one of that profile's aliases or functions before anything on the line runs.
         # `shell_expanded`, (the name, what the shell runs for it) per expansion on this line, in order, so a reason can
@@ -821,13 +827,36 @@ class ShellAnalysis:
         their doubt, the aliases -- their scope, the table as it stands and the one the text being read was parsed with
         (SPD-283, SPD-286: `f() { eval gp; }; f; alias gp='git push'; f` pushes in the second call; SPD-288: so does a
         snapshot function's `eval "$@"` or `$(gp)`, called before and after the line's alias, probed in zsh 5.9) -- what
-        shell/loop_bindings settled (SPD-146, SPD-221), and whether an option builtin ran (arith_opaque, cdable, chase).
+        shell/loop_bindings settled (SPD-146, SPD-221), whether an option builtin ran (arith_opaque, cdable, chase), and
+        the functions the line defines, copies, removes or registers for arithmetic (function_state, SPD-296: `echo $(f);
+        f() { git push; }; echo $(f)` pushes in the second substitution).
         analyse.analyse_isolated reads a body in its own process once per such state, and held_text.read_shell_name a
         function's body once per call from one (SPD-252); a field that changes what a reading finds belongs here."""
         return (self.cwds, self.loop_depth, tuple(sorted(self.vars.items())), frozenset(self.doubt), frozenset(self.sticky),
                 self.all_doubt, self.alias_scope, frozenset(self.aliases.items()), self.alias_unknown, self.alias_view,
                 tuple(sorted(self.loop_words.items())), tuple(sorted(self.derived.items())), self.func_depth,
-                tuple(sorted(self.loop_derived.items())), self.arith_opaque, self.cdable, self.chase)
+                tuple(sorted(self.loop_derived.items())), self.arith_opaque, self.cdable, self.chase, self.function_state())
+
+    def function_state(self):
+        """The line's function table as reading_state holds it (SPD-296): the names that shadow a command (`functions`)
+        and, per name and per `functions -M` registration, what each body bound to it runs, in the order the line bound
+        them (line_functions.LineBody.state), which decides which of them stands (line_functions._settled).  zsh looks a
+        function up when it runs the call, so a `$( )` that calls one runs whatever the table holds at that point (probed
+        2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f: `echo $(f); f() { echo
+        F-RAN $PWD; }; echo $(f)` failed the first, `command not found: f`, and ran f in the second; so did a `$(f)` after
+        `functions -c g f`, which ran g's body, and a `$(echo $(( m() )))` after `functions -M m`, where before it zsh said
+        `unknown function: m`; after `unset -f f` a `$(f)` found no f again).  A reading cached from before a definition, a
+        copy, a removal or a registration read none of it (tests/test_hooks_input.py FunctionTableReadingTest).  None where
+        the line holds no function, which costs a line that defines none nothing."""
+        if not self.function_bodies and not self.functions:
+            return None
+        return frozenset(self.functions), frozenset(
+            (key, tuple(body.state() for body in sorted(bodies, key=_body_serial))) for key, bodies in self.function_bodies.items())
+
+
+def _body_serial(body):
+    """The order the line bound a line_functions.LineBody in (function_state)."""
+    return body.serial
 
 
 def loop_name(word, first=False):
@@ -857,8 +886,8 @@ def shown_operands(text):
 
 
 def shell_tokens(text):
-    if "${" in text and "(" in text:
-        text = _braced_parentheses(text)
+    if "${" in text:
+        text = _braced_words(text)
     lx = shlex.shlex(text, posix=True, punctuation_chars=True)
     lx.whitespace_split = True
     lx.commenters = ""  # newlines_as_separators has read the comments; shlex would eat the rest of the line
@@ -869,23 +898,44 @@ def shell_tokens(text):
 
 
 _NOT_BRACED_PAREN = "$<>="  # what a `(` in a `${ }` follows when a shell reads it as more than a character of the word
+# What _braced_words writes for a blank or an operator character both shells keep in a `${ }`'s word: the quoted operator's
+# sentinel, and for a blank the inert one an arithmetic expansion's blanks get (zsh._ARITH_WORD); deglob restores each.
+_BRACED_MARKS = dict(_PUNCT_SENTINELS, **{c: _ARITH_SENTINELS[c] for c in " \t\n"})
+_BRACED_LITERAL = frozenset(";&|<> \t\n")
 
 
-def _braced_parentheses(text):
-    """The text with each unquoted `(` inside a `${ }` that closes, and the `)` that closes it there, written as the
-    quoted operator's sentinel (_PUNCT_SENTINELS), so shlex keeps both in the word, as mark_zsh_patterns keeps a `${(e)x}`
-    flag group's (SPD-297).  Both shells read a `${` to the `}` that closes it, counting the braces it holds and skipping
-    quoted and escaped ones, so `${arr[mf()+1]}` is one word whose subscript calls a `functions -M` function (probed in
-    zsh 5.9 -f -o nobareglobqual and -f: `${arr[mf()+1]}` and `${arr[mf() + 1]}` called mf, and `${x:-a()b}`,
-    `${x:-a(b)c}`, `${x:-a{b}c()d}`, `${x:-a\\}()b}` and `${x:-'}'()b}` each expanded as one word; bash 3.2 read each as
-    one word too, failing the subscript's expression), where shlex split it at the `()` as if it opened a function
-    definition.  Left as they are: a `(` a `$`, `<`, `>` or `=` opens (a substitution, an arithmetic expansion
-    mark_zsh_patterns leaves there, and the process substitutions bash ran in `${x:-<(cmd)}` and `${x:->(cmd)}` and zsh in
-    `${x:-=(cmd)}`) with its `)` and every parenthesis between them, a list a shell runs, a `(` whose `)` is not in the same
-    `${ }`, every parenthesis of a `${` that never closes, and every one outside a `${ }`, a function definition's `()`
-    among them.  An unquoted `$arr[mf()+1]` and an `arr[mf()]=1` are not braced and are left alone too: zsh called no
-    function there (`invalid subscript`, `bad pattern: arr[mf`) and bash rejected the line."""
+def _braced_words(text):
+    """The text with the characters of each `${ }` that shlex would split at written as sentinels (_BRACED_MARKS), so
+    shlex keeps the expansion one word, as the shells do.
+
+    Parentheses (SPD-297): each unquoted `(` inside a `${ }` that closes, and the `)` that closes it there, is the quoted
+    operator's sentinel, as mark_zsh_patterns writes a `${(e)x}` flag group's.  zsh reads a `${` to the `}` that closes it,
+    counting the braces it holds and skipping quoted and escaped ones, so `${arr[mf()+1]}` is one word whose subscript
+    calls a `functions -M` function (probed in zsh 5.9 -f -o nobareglobqual and -f: `${arr[mf()+1]}` and `${arr[mf() +
+    1]}` called mf, and `${x:-a()b}`, `${x:-a(b)c}`, `${x:-a{b}c()d}`, `${x:-a\\}()b}` and `${x:-'}'()b}` each expanded as
+    one word; bash 3.2 read each as one word too, failing the subscript's expression), where shlex split it at the `()` as
+    if it opened a function definition.  Left as they are: a `(` a `$`, `<`, `>` or `=` opens (a substitution, an
+    arithmetic expansion mark_zsh_patterns leaves there, and the process substitutions bash ran in `${x:-<(cmd)}` and
+    `${x:->(cmd)}` and zsh in `${x:-=(cmd)}`) with its `)` and every parenthesis between them, a list a shell runs, a `(`
+    whose `)` is not in the same `${ }`, every parenthesis of a `${` that never closes, and every one outside a `${ }`, a
+    function definition's `()` among them.  An unquoted `$arr[mf()+1]` and an `arr[mf()]=1` are not braced and are left
+    alone too: zsh called no function there (`invalid subscript`, `bad pattern: arr[mf`) and bash rejected the line.
+
+    Blanks and `;`, `&`, `|`, `<`, `>` (SPD-302): each unquoted one inside a `${ }` is a character of the word in both
+    shells, where shlex split the word there and the walk read `echo ${x:-a;git status}` as a git call, `git status}`,
+    and `${x:-a>f}` as a write (probed 2026-09-24 in zsh 5.9 -f -o nobareglobqual and -f, and bash 3.2.57: `${x:-a;b}`,
+    `${x:-a|b}`, `${x:-a&b}`, `${x:-a&&b}`, `${x:-a<b}` and `${x:-a>f}` each expanded as one word and wrote no file, and so
+    did a nested `${x:-${y:-a;b} c;d}`; `${x:-a b}`, a tab and a newline there were one word in zsh and two in bash, which
+    splits the value, not the text).  The shells end the word apart, though: bash ends a `${` at the first unquoted `}`
+    that closes no nested `${`, a bare `{` uncounted (`${x:-{a;b} c;d}` was one word in zsh, and in bash the word
+    `${x:-{a;b}`, then `c`, then the command `d}`, which ran).  So these are marked only up to where bash ends the
+    expansion, inside both words, and past it the text is read as it always was, operators and all, which reads every
+    command bash runs there and at worst one zsh does not.  Left as they are too: the characters of a list a shell runs
+    there (a held parenthesis's, above; a `$( )` body, which prepare lifts before this reads the line anyway, and a
+    backtick body), the `<` or `>` that opens a process substitution, and every one of a `${` bash never closes (both
+    shells failed `${x:-a;b`)."""
     marked, depth, parens, found, held = [], 0, [], [], 0  # held: the parentheses left as they are, still open
+    literal, dollars = [], 0  # the blanks and operators bash's `${ }` holds so far, and the `${`s it has open
     i, n, quote = 0, len(text), None
     while i < n:
         c = text[i]
@@ -897,13 +947,19 @@ def _braced_parentheses(text):
             quote = None if c == '"' else quote
         elif c in "'\"":
             quote = c
+        elif c == "$" and text.startswith("${", i):
+            depth, dollars, i = depth + 1, dollars + 1, i + 1
         elif not depth:
-            if text.startswith("${", i):
-                depth, i = 1, i + 1
+            pass
         elif c == "{":
             depth += 1
         elif c == "}":
             depth -= 1
+            if dollars:
+                dollars -= 1
+                if not dollars:
+                    marked.extend(literal)
+                    literal = []
             if not depth:
                 marked.extend(found)
                 parens, found, held = [], [], 0
@@ -917,12 +973,17 @@ def _braced_parentheses(text):
                 found.extend((opened, i))
             else:
                 held -= 1
+        elif c == "`":
+            end = text.find("`", i + 1)
+            i = n if end == -1 else end
+        elif dollars and not held and c in _BRACED_LITERAL and not (c in "<>" and text.startswith("(", i + 1)):
+            literal.append(i)
         i += 1
     if not marked:
         return text
     chars = list(text)
     for k in marked:
-        chars[k] = _PUNCT_SENTINELS[chars[k]]
+        chars[k] = _BRACED_MARKS[chars[k]]
     return "".join(chars)
 
 

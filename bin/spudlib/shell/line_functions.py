@@ -6,7 +6,7 @@ settle_definitions, which share the walk's frames, position and lifted text and 
 parameter and its hook arrays bind and queue one (assign_function, hook_functions).  The text a call's reading prints
 (SPD-272) is left here too, in ShellAnalysis.read_printed and call_printed.  zsh's `functions -c` binds a copy of one
 (copy_function, SPD-279), and `unset -f` and its kin remove the bodies bound to a name (remove_functions, SPD-281), which
-line_bodies, the bodies a call runs, reads.  zsh's `functions -M` registers a function arithmetic calls (math_function,
+line_bodies, the bodies a call runs, reads, and the function the shell's snapshot defines under it (held_function, SPD-305).  zsh's `functions -M` registers a function arithmetic calls (math_function,
 SPD-282), a binding in the same table, and each arithmetic call of one reads that function's body where it stands
 (read_math_calls).  Past 250 lines as one table: every function here binds, reads or settles the LineBody objects
 ShellAnalysis.function_bodies holds, and a copy, a removal or a registration is a binding read by the same _settled."""
@@ -71,6 +71,14 @@ class LineBody:
 
     def __hash__(self):
         return hash((self.serial, self.names))
+
+    def state(self):
+        """What a call of this body runs, as ShellAnalysis.reading_state holds it (SPD-296): its text, whether it is
+        complete, whether it surely runs, whether it is a removal's mark -- values, so a key holding them does not change
+        when the body does.  Not its serial nor the reading of the line that bound it: zsh's reading of a line and the other
+        shell's bind bodies of their own, which are alike where both read the text alike, and a substitution after them is
+        read once for both, as it was before the table was part of the state."""
+        return self.tokens, self.text, self.inner, self.docs, self.expanded, self.into, self.certain, self.removes
 
     def __str__(self):
         return self.text if self.text is not None else " ".join(prepare.deglob(t) for t in self.tokens or ())
@@ -205,6 +213,47 @@ def line_bodies(a, name):
     return [body for body in kept if not body.removes and body.complete()], sure
 
 
+def in_builtins_place(a, name):
+    """SPD-304: whether a function runs where a call of the builtin `name` (cd, chdir, pushd, popd) looked up as a function
+    stands (directories.directory_change): "function" where one surely does -- a body the line defines that surely runs, or
+    one the shell's snapshot holds where the text being read sourced it and no removal took it (held_function, SPD-305),
+    each read at the call by held_text.read_shell_name -- "either" where one may: a definition that may not have run,
+    beside the builtin's reading, whose start the call no longer holds, a snapshot's function a removal that may not have
+    run left, a name the line binds with a body the hook does not have, or a function whose name it cannot read
+    (UNKNOWN_NAME); None where none does: `unset -f cd; cd /tmp` under a snapshot cd is the builtin's move."""
+    name = prepare.deglob(name)
+    bodies, sure = line_bodies(a, name)
+    held = held_function(a, name)
+    if bodies and sure or held == "sure":
+        return "function"
+    if bodies or held or name in a.functions or syntax.UNKNOWN_NAME in a.functions:
+        return "either"
+    return None
+
+
+def held_function(a, name):
+    """SPD-305: whether the function the shell's snapshot defines under `name` stands where the text being read runs --
+    "sure", "maybe", or None where the snapshot defines none, the text's shell never sourced it (held_text.snapshot_sourced),
+    or a removal the line made surely took it (remove_functions).  A removal that may not have run leaves it "maybe": the
+    function read beside the command of that name.  The line's own bodies do not bring it back, and its removals' order
+    among them does not matter: once gone from the shell it is gone for the rest of the line, a definition after it being
+    the line's own (line_bodies).  Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual
+    and -f and bash 3.2.57, a file defining `cd () { builtin cd u }` sourced first: `unset -f cd; cd /tmp` left /tmp, and so
+    did an `eval 'cd /tmp'`, a `$(cd /tmp; pwd)` and a `{ unset -f cd; }` before it, while a removal in `( ... )`, in `$(
+    )` or before `&` left the function running (./u); zsh's `unfunction cd` removed it and bash's plain `unset cd` did,
+    each in its own shell alone (tests/test_hooks_groups.py SnapshotFunctionRemovalTest)."""
+    if not held_text.snapshot_sourced(a) or name not in snapshots.shell_table(a.home).functions:
+        return None
+    found = "sure"
+    for key in (name, syntax.UNKNOWN_NAME):  # a removal of a name the hook cannot read may have removed this one
+        for body in a.function_bodies.get(key, ()):
+            if body.removes and body.certain:
+                return None
+            if body.removes:
+                found = "maybe"
+    return found
+
+
 def merge_readings(a, zsh_bodies):
     """analyse_command's two readings of one line, zsh's `zsh_bodies` and the other shell's in ShellAnalysis.function_bodies:
     each name keeps the bodies either reading defines, each reading's removals settled in it first (_settled), so one
@@ -219,6 +268,13 @@ def merge_readings(a, zsh_bodies):
             doubt = LineBody((name,), None, a)
             doubt.removes = True
             bodies.add(doubt)
+        # SPD-305: a removal that surely ran, which _settled drops with what it took, still took the snapshot's function
+        # (held_function): kept before every body, surely where both readings made one and maybe where one did
+        gone = [any(body.removes and body.certain for body in each.get(name, ())) for each in (zsh_bodies, a.function_bodies)]
+        if any(gone):
+            mark = LineBody((name,), None, a)
+            mark.serial, mark.removes, mark.certain = 0, True, all(gone)
+            bodies.add(mark)
         merged[name] = bodies
     a.function_bodies.clear()
     a.function_bodies.update(merged)
@@ -243,7 +299,8 @@ def copy_function(words, a):
         return
     old, new = found
     bodies, sure = line_bodies(a, old) if old is not None else ([], False)
-    profile = old is not None and not sure and old in snapshots.shell_table(a.home).functions
+    # a snapshot function the line removed is copied by no one (`no such function`, SPD-305: held_function)
+    profile = old is not None and not sure and held_function(a, old) is not None
     if old is None or new is None or profile:
         unread.record_unread(a, "function-copy", unread.unread_shown(" ".join(words)))
     if _in_place(a):
@@ -285,17 +342,26 @@ def remove_functions(words, a, effect):
     the command's reading, everywhere else, and for every name the line defines where the builtin may remove any.  Probed
     2026-09-24 as assigning_builtins.function_removals says, and: a removal before `&` or `|`, in `{ ...; } &` or in a
     subshell did not reach a call after it, while one in a called body or an eval did (tests/test_hooks_words.py
-    FunctionRemovalTest)."""
+    FunctionRemovalTest).
+
+    SPD-305: a function the shell's snapshot defines, where the text being read sourced it, is marked as the line's own
+    are, under its name, and every one of them under UNKNOWN_NAME where the builtin may remove any, so a call after the
+    removal reads no body of the snapshot's (held_function) and a `$( )` or an eval after it is read again (the mark is
+    part of ShellAnalysis.function_state, SPD-296)."""
     found = assigning_builtins.function_removals([words[0]] + [arg_writes.resolved(w, a) for w in words[1:]],
                                                  functools.partial(expansions.settled_text, a))
     if found is None or not a.walks or _in_place(a):
         return
     names, sure = found
     shell_walk = a.walks[-1]
+    # SPD-305: a function the shell's snapshot defines is removed as the line's own are, its mark bound under its name
+    # (held_function), and under UNKNOWN_NAME where the builtin may remove any
+    profile = snapshots.shell_table(a.home).functions if held_text.snapshot_sourced(a) else ()
     if names is None:
-        names, sure = list(a.function_bodies), False
+        names, sure = list(a.function_bodies) + ([syntax.UNKNOWN_NAME] if profile else []), False
     sure = sure and effect == "shell" and not a.unsure and shell_walk.certain_definition()
-    held = [name for name in dict.fromkeys(names) if name in a.function_bodies]
+    held = [name for name in dict.fromkeys(names) if name in a.function_bodies or name in profile
+            or name == syntax.UNKNOWN_NAME]
     if held:
         mark = shell_walk.bind(held)
         mark.removes, mark.certain = True, sure

@@ -1691,6 +1691,123 @@ class ProcessSubstitutionAliasTest(BashHookCase):
         self.assertIsNone(after.alias_view)
 
 
+class ProcessSubstitutionGlobalAliasTest(BashHookCase):
+    """SPD-293 (proposals 397, 399): zsh parses a `<( )` or `>( )` body when it runs it (SPD-287), so the line's global
+    aliases stand in every unquoted word there, as they do in a `$( )` body (SPD-283) -- but the hook expanded global
+    aliases over the line's text before its walk, where only the snapshot's stand, and the walk read the body's words as
+    they were, so `alias -g X='; git push'; cat <(echo X)` reached the hook with no finding (Law 7) where the same with `$(
+    )` was refused.  Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py, the lines run by
+    `eval` as the Bash tool's shell runs them: after `alias -g Y="; echo PUSHED"`, `cat <(echo p2 Y)` printed p2 then
+    PUSHED, and `echo x > >(cat; echo in-out Y2)` the same through `>( )`; with `alias -g X=snapshot` held before the
+    line, `alias -g X=line; cat <(echo p1 X); echo top X` printed `p1 line` then `top snapshot`; `'Q'`, `"Q"` and `\\Q`
+    were left as written; a body holding another global alias expanded it (`p4 RR more`), one holding `$( )` ran it (`p6
+    SUBST`), a case in the body read its words (`p7 matched vv`); the body's own `alias -g Z=own` stood in none of its own
+    words (`p5 zz`); and `alias -g U=uu; f() { cat <(echo p8 U); }; alias -g U=later; f` printed `p8 later`, the body
+    parsed when the call ran it.  bash 3.2 has no global alias.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_the_tickets_evidence_command(self):
+        self.refused_for_members("alias -g X='; git push'; cat <(echo X)")
+        self.assertEqual(self.analysis("alias -g X='; git push'; cat <(echo X)").findings, [("git", ("push", "push"))])
+        # ... as the same line with `$( )` always was
+        self.assertEqual(self.analysis("alias -g X='; git push'; cat $(echo X)").findings, [("git", ("push", "push"))])
+
+    def test_a_process_substitution_after_the_definition(self):
+        for cmd in ("alias -g X='; git push'; echo x > >(cat X)", "alias -g X='; git push'; tee >(echo X)",
+                    "galiases[X]='; git push'; cat <(echo X)", "alias +g X='; git push'; cat <(echo X)",
+                    "alias -g X='; git push'; diff <(echo a) <(echo X)", "alias -g X='; git push'; cat <(cat <(echo X))",
+                    "alias -g X='; git push'; cat <(echo a; (echo X))", "alias -g X='; git push'; cat <(echo a\necho X)",
+                    "alias -g X='; git push'; cat <(case a in a) echo X;; esac)",
+                    "alias -g X='; git push'; cat <(if true; then echo X; fi)",
+                    "alias -g X='git push'; cat <(X)", "alias -g X='git'; cat <(X push)",
+                    "alias -g Y='; git push'; alias -g X='a Y'; cat <(echo X)",
+                    "alias -g X='; git push'; eval 'cat <(echo X)'",
+                    "alias x=y; eval \"alias -g X='; git push'; cat <(echo X)\"",
+                    "alias -g X=a; eval \"alias -g X='; git push'; cat <(echo X)\"",
+                    "cat <(echo X); alias -g X='; git push'; cat <(echo X)",
+                    "alias -g X='; git push'; for i in 1 2; do cat <(echo X); done",
+                    "alias -g X='; git push'; f() { cat <(echo X); }; f",
+                    "alias -g X=a; f() { cat <(echo X); }; alias -g X='; git push'; f",
+                    "alias -g X='; git push'; cat <(echo X) $(echo hi)", "alias -g X='; git push'; echo $(cat <(echo X))",
+                    "alias -g X='; git push'; cat <(echo 'X' X)"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.assertEqual(self.analysis("cat <(echo X); alias -g X='; git push'; cat <(echo X)").findings,
+                         [("git", ("push", "push"))])
+
+    def test_where_the_lines_global_alias_does_not_reach(self):
+        for ok in ("cat <(echo X); alias -g X='; git push'", "alias -g X='; git push'; unalias X; cat <(echo X)",
+                   "alias -g X='; git push'; cat <(echo 'X')", "alias -g X='; git push'; cat <(echo \"X\")",
+                   "alias -g X='; git push'; cat <(echo \\X)", "alias -g X='; git push'; cat <(echo aX)",
+                   "alias -g X='; git push'; cat <(sh -c 'echo X')", "alias -g X='; git status'; cat <(echo X)",
+                   "cat <(alias -g X='; git push'; echo X)", "alias -g X='; git push'; cat <(echo Y) 'X'",
+                   "alias -g X='; git push'; echo X <(true)"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_a_definition_that_may_not_have_run(self):
+        # proposal 399's second form: a doubtful definition's word refuses a member unread, its known body read all the same
+        self.refused_for_members("if true; then alias -g gp='; git status'; fi; cat <(echo gp)", ALIAS_WORD_WORDING)
+        self.assertIn("Law 7", self.analysis_reason("if true; then alias -g gp='; git push'; fi; cat <(echo gp)"))
+        self.refused_for_members("alias -g $N=x; cat <(echo hi)", ALIAS_WORD_WORDING)
+
+    def analysis_reason(self, command):
+        return self.assertRefused(command, "", AGENT_A).reason
+
+    def test_a_body_the_walk_cannot_set_in_place(self):
+        # a body holding a substitution or a here-document: text the walk's tokens cannot take in, refused a member unread
+        for cmd in ("alias -g X='$(git status)'; cat <(echo X)", "alias -g X='`git status`'; cat <(echo X)",
+                    "alias -g X='; cat <<E'; cat <(echo X)"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, ALIAS_WORD_WORDING)
+
+    def test_the_snapshots_global_alias_as_the_line_left_it(self):
+        """The body is parsed as it runs, after the line's own `alias -g X=...` (probed: `p1 line`), where the line's own
+        text expanded the snapshot's X; the walk now reads the line's there, and the snapshot's where the line left it."""
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000293-293293.sh").write_text(
+            "unalias -a\nalias -g -- X=snapshot\nalias -g -- P='; git push'\n", encoding="utf-8")
+        self.refused_for_members("alias -g X='; git push'; cat <(echo X)")
+        self.refused_for_members("cat <(echo P)")
+        self.silent_for_everyone("alias -g P=fine; cat <(echo P)")
+        self.silent_for_everyone("alias -g X='; git push'; echo X")
+
+    def test_the_walks_token_positions_hold(self):
+        """A definition or a loop the walk reads again is taken from the tokens as the line spelled them, not as a body's
+        expansion left them: a call reads the function with the table where it runs (`p8 later`, above)."""
+        found = self.analysis("alias -g X=a; f() { cat <(echo X); echo in-f; }; alias -g X='; git push'; f")
+        self.assertEqual(found.findings, [("git", ("push", "push"))])
+        self.silent_for_everyone("alias -g X='; git push'; f() { cat <(echo 'X'); }")
+        self.silent_for_everyone("alias -g X=a; f() { cat <(echo X); }; alias -g X='; git push'; alias -g X=b; f")
+        # a loop whose body changes the table is read once more from its words as spelled (SPD-294), each pass's `<( )`
+        # parsed with the table that pass holds
+        for cmd in ("alias -g X=a; for i in 1 2; do cat <(echo X); alias -g X='; git push'; done",
+                    "alias -g X=a; while true; do cat <(echo X); alias -g X='; git push'; done",
+                    "alias -g X=a; f() { cat <(echo X) <(echo X); }; alias -g X='; git push'; f"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+
 class SameTextAliasTest(BashHookCase):
     """SPD-286 (SPUD-283/Stephanie's proposal 389): the shell parses a text it reads as the line runs -- eval's words, a
     `$( )` or backtick body, a trap's action, an (e) flag's value -- whole before any of it runs, so an alias that text

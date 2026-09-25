@@ -1837,34 +1837,9 @@ class SettledStandardInputTest(BashHookCase):
 MATH_WORDING = "zsh's `functions -M` names a function arithmetic calls"  # SPD-282's "function-math" unread reason
 
 
-class MathFunctionCallTest(BashHookCase):
-    """SPD-282 (Elmer's SPD-279 proposal): zsh's `functions -M NAME` lets arithmetic call the shell function NAME --
-    `$(( NAME() ))`, `(( NAME() ))`, `let`, a subscript -- which runs where the line stands at that call, but the reader
-    read NAME's body only in place, where it is defined, as `functions -c` was before SPD-279: `mf() { git status; };
-    functions -M mf; cd tests/fake; echo $(( mf() + 1 ))` ran git in a planted repository unchecked, and a relative write
-    in the body was held to the path rule in the definition's directory.  Each arithmetic call of a name `functions -M`
-    registered now reads the shell function's body where the call stands (line_functions.read_math_calls), the line's
-    and the shell snapshot's alike, and its cd reaches the rest of the line beside the directory bash leaves it in, bash
-    having no math functions; a registration or a call the hook cannot follow refuses a member (SPD-217).
-
-    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and
-    -f, which printed the same, each case in a subshell: the ticket's `mf() { echo MF-RAN $PWD >&2; (( 1 )); }; functions
-    -M mf; cd d; echo $(( mf() + 1 ))` printed 2 and MF-RAN .../d; `mc() { cd d; }; functions -M mc; echo $(( mc() ));
-    pwd` printed d; a function defined after the `-M` ran, and so did a body redefined after it, the name looked up at the
-    call (`-M nosuch` failed only there, `no such function`, and so did a call after `unfunction`); `(( mf() ))`, `let
-    'x = mf()'`, `[[ 'mf()' -eq 1 ]]`, `for (( i = 0; i < mf(); i++ ))`, `Y='mf()'; (( Y ))`, `integer T; T='mf()'`,
-    `$[ mf() ]`, `${arr[mf()+1]}` and `$(( $n() ))` with n=mf each called it (the call in a `${ }` subscript is read
-    since SPD-297, when syntax.shell_tokens stopped splitting that word at its `()`), and `$(( mf ))` and `$(( mf (1) ))`, a blank
-    before the parenthesis, did not; `functions -M mm 0 3 sf` ran sf for `mm(1, 2)` ($# 2, $0 mm), never mm's own
-    function, and `-M mm 0 -1 sf`, `-M mf 0`, `-M -- mf` and `builtin functions -M` registered; `-Ms st`, `-M -s` and
-    `-sM` passed `st(foo,bar rod)` whole as $1; a second `-M mx ... b1` replaced the first; `functions -M` and `+M` alone
-    and `-M -m 'm*'` listed and registered or removed nothing, while `+M mf`, `+M -m 'l*'` and `+Mm 'a*'` removed; `-M mf
-    x`, `-Mu`, `-Ms a1 2`, five operands and `-M a1 -s` registered nothing; `-M -c f g` copied f to g and registered no
-    math function; `command functions` was no builtin (read, as `command functions -c` is, as one bash's `command` may
-    run); a registration in a subshell or a `$( )` did not reach a call after it, nor one before a `|` (read as one that
-    may have, as a definition there is), while one in a called body or an eval did; a call in a `$( )`, in a prefix of an
-    external command or in its redirection target left the line where it was.  GNU bash 3.2.57 has no `functions` builtin
-    and failed every such call as a syntax error in the expression, running the rest of the line."""
+class PlantedCallCase(BashHookCase):
+    """A home that is a git repository holding a planted one at tests/fake, where a git call read where it runs is
+    refused, and how MathFunctionCallTest and FunctionTableReadingTest (SPD-296) read a line against it."""
 
     def setUp(self):
         super().setUp()
@@ -1904,6 +1879,36 @@ class MathFunctionCallTest(BashHookCase):
     def git_dirs(self, command, cwd=None):
         """The directories each git call of the line may run in, in order."""
         return [found for _targets, found in self.analysis(command, cwd).git_calls]
+
+
+class MathFunctionCallTest(PlantedCallCase):
+    """SPD-282 (Elmer's SPD-279 proposal): zsh's `functions -M NAME` lets arithmetic call the shell function NAME --
+    `$(( NAME() ))`, `(( NAME() ))`, `let`, a subscript -- which runs where the line stands at that call, but the reader
+    read NAME's body only in place, where it is defined, as `functions -c` was before SPD-279: `mf() { git status; };
+    functions -M mf; cd tests/fake; echo $(( mf() + 1 ))` ran git in a planted repository unchecked, and a relative write
+    in the body was held to the path rule in the definition's directory.  Each arithmetic call of a name `functions -M`
+    registered now reads the shell function's body where the call stands (line_functions.read_math_calls), the line's
+    and the shell snapshot's alike, and its cd reaches the rest of the line beside the directory bash leaves it in, bash
+    having no math functions; a registration or a call the hook cannot follow refuses a member (SPD-217).
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and
+    -f, which printed the same, each case in a subshell: the ticket's `mf() { echo MF-RAN $PWD >&2; (( 1 )); }; functions
+    -M mf; cd d; echo $(( mf() + 1 ))` printed 2 and MF-RAN .../d; `mc() { cd d; }; functions -M mc; echo $(( mc() ));
+    pwd` printed d; a function defined after the `-M` ran, and so did a body redefined after it, the name looked up at the
+    call (`-M nosuch` failed only there, `no such function`, and so did a call after `unfunction`); `(( mf() ))`, `let
+    'x = mf()'`, `[[ 'mf()' -eq 1 ]]`, `for (( i = 0; i < mf(); i++ ))`, `Y='mf()'; (( Y ))`, `integer T; T='mf()'`,
+    `$[ mf() ]`, `${arr[mf()+1]}` and `$(( $n() ))` with n=mf each called it (the call in a `${ }` subscript is read
+    since SPD-297, when syntax.shell_tokens stopped splitting that word at its `()`), and `$(( mf ))` and `$(( mf (1) ))`, a blank
+    before the parenthesis, did not; `functions -M mm 0 3 sf` ran sf for `mm(1, 2)` ($# 2, $0 mm), never mm's own
+    function, and `-M mm 0 -1 sf`, `-M mf 0`, `-M -- mf` and `builtin functions -M` registered; `-Ms st`, `-M -s` and
+    `-sM` passed `st(foo,bar rod)` whole as $1; a second `-M mx ... b1` replaced the first; `functions -M` and `+M` alone
+    and `-M -m 'm*'` listed and registered or removed nothing, while `+M mf`, `+M -m 'l*'` and `+Mm 'a*'` removed; `-M mf
+    x`, `-Mu`, `-Ms a1 2`, five operands and `-M a1 -s` registered nothing; `-M -c f g` copied f to g and registered no
+    math function; `command functions` was no builtin (read, as `command functions -c` is, as one bash's `command` may
+    run); a registration in a subshell or a `$( )` did not reach a call after it, nor one before a `|` (read as one that
+    may have, as a definition there is), while one in a called body or an eval did; a call in a `$( )`, in a prefix of an
+    external command or in its redirection target left the line where it was.  GNU bash 3.2.57 has no `functions` builtin
+    and failed every such call as a syntax error in the expression, running the rest of the line."""
 
     def test_the_tickets_line(self):
         """Silent on main for every caller: the body's git was read in place, in the home, and never at the call."""
@@ -2116,6 +2121,168 @@ class MathFunctionCallTest(BashHookCase):
                              ("arr[mf()]=1", ["arr[mf", "()", "]=1"])):
             with self.subTest(text=text):
                 self.assertEqual(syntax.shell_tokens(text), tokens)
+
+
+class BracedWordTest(PlantedCallCase):
+    """SPD-302: syntax.shell_tokens split an open `${ }` at its blanks and at `;`, `|`, `&`, `<` and `>`, so `echo
+    ${x:-a;git status}` was read as an echo and then a git call, `git status}`, which neither shell runs, and a `>` in a
+    default word was read as a write.  Both shells keep a `${ }` one word through the `}` that closes it, every blank and
+    operator character in it literal, while a `$( )`, backticks and the process substitution bash runs there are still
+    lists a shell runs, read where they run.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and -f
+    (with nonomatch, so `a|b` is not a failed pattern) and bash 3.2.57, printing each word in brackets: `${x:-a;b}`,
+    `${x:-a|b}`, `${x:-a&b}`, `${x:-a&&b}`, `${x:-a||b}`, `${x:-a<b}` and `${x:-a>f}` were each one word, `[a;b]` and so on,
+    and `a>f` wrote no file; `${x:-a b}`, a tab and a newline in the default were one word in zsh and two in bash, which
+    splits the value, not the text; `${x:-$(echo S1; echo S2)}` ran the substitution and `${x:-a}b;c` ran c after `[ab]`;
+    `${x:-'}';b}`, `${x:-\\};b}`, `${x:-"a}b";c}` and `${x:-$'a}b';c}` were one word, their quoted `}` no closer; a nested
+    `${x:-${y:-a;b} c;d}` was one word in both.  The shells part at a bare `{`: zsh counts it, bash does not, so
+    `${x:-{a;b} c;d}` was one word in zsh and in bash the word `${x:-{a;b}`, then `c`, then the command `d}`, which ran.
+    An unclosed `${x:-a;b` failed in both (`closing brace expected`, `unexpected EOF`)."""
+
+    def test_a_braced_word_keeps_its_blanks_and_operators(self):
+        load_spud_module()
+        syntax = importlib.import_module("spudlib.shell.syntax")
+        mark = dict(syntax._PUNCT_SENTINELS, **{c: syntax._ARITH_SENTINELS[c] for c in " \t\n"})
+
+        def word(text):
+            return "".join(mark.get(c, c) for c in text)
+
+        for text, tokens in (("echo ${x:-a;b}", ["echo", word("${x:-a;b}")]),
+                             ("echo ${x:-a b}", ["echo", word("${x:-a b}")]),
+                             ("echo ${x:-a\tb} c", ["echo", word("${x:-a\tb}"), "c"]),
+                             ("echo ${x:-a\nb}", ["echo", word("${x:-a\nb}")]),
+                             ("echo ${x:-a|b}", ["echo", word("${x:-a|b}")]),
+                             ("echo ${x:-a && b || c}", ["echo", word("${x:-a && b || c}")]),
+                             ("echo ${x:-a >f <g}", ["echo", word("${x:-a >f <g}")]),
+                             ("echo ${x:-a}b;c", ["echo", "${x:-a}b", ";", "c"]),
+                             ("echo ${x:-a;b", ["echo", "${x:-a", ";", "b"]),
+                             ("echo ${x:-'}';b}", ["echo", word("${x:-};b}")]),
+                             ("echo ${x:-a\\};b}", ["echo", word("${x:-a};b}")]),
+                             ("echo ${x:-${y:-a;b} c;d}", ["echo", word("${x:-${y:-a;b} c;d}")]),
+                             ("echo ${(s: :)x}", ["echo", word("${(s: :)x}")]),
+                             ("echo ${x:-a(b c)d}", ["echo", "${x:-a" + word("(b c)") + "d}"]),
+                             # bash ends the word at the first `}`, a bare `{` not counted, so past it the text is read as
+                             # before; a `${` opened there is a word of its own in bash
+                             ("echo ${x:-{a;b} c;d}", ["echo", word("${x:-{a;b}"), "c", ";", "d}"]),
+                             ("echo ${x:-{a} ${y:-b;c};d}", ["echo", "${x:-{a}", word("${y:-b;c}"), ";", "d}"]),
+                             # a list a shell runs keeps its operators, and so does the text around a backtick body
+                             ("echo ${x:-a <(b;c) d}", ["echo", word("${x:-a "), "<(", "b", ";", "c", ")", word(" d}")]),
+                             ("echo ${x:-a$(b;c)d}", ["echo", "${x:-a$", "(", "b", ";", "c", ")", "d}"]),
+                             ("echo ${x:-`b;c`}", ["echo", "${x:-`b", ";", "c`}"]),
+                             ("echo \\${x:-a;b}", ["echo", "${x:-a", ";", "b}"]),
+                             ("echo '${x:-a;b}'", ["echo", "${x:-a;b}"])):
+            with self.subTest(text=text):
+                self.assertEqual(syntax.shell_tokens(text), tokens)
+
+    def test_nothing_in_a_braced_word_runs(self):
+        """What a default word spells is no command, no redirection and no list: silent, where the git call the reader
+        found in it was refused."""
+        for spelled in ("echo ${x:-a;git status}", "echo ${x:-a|git status}", "echo ${x:-a&git status}",
+                        "echo ${x:-a && git status}", "echo ${x:-a\ngit status}", "echo ${x:-${y:-a;git status}}",
+                        "echo ${x:-a;git status}${y:-b|git status}"):
+            self.silent_for("cd tests/fake; " + spelled)
+        self.silent_for("echo ${x:-a>/etc/hosts}; echo ${x:-a >>tests/fake/.git/config}")
+        self.assertEqual(self.git_dirs("echo ${x:-a;cd tests/fake}; git status"), [frozenset([str(self.home.path)])])
+
+    def test_what_runs_around_and_inside_a_braced_word_is_still_read(self):
+        for spelled in ("echo ${x:-a;$(git status)}", "echo ${x:-a b $(git status) c}", "echo ${x:-a `git status` b}",
+                        "echo ${x:-a <(git status) b}", "echo ${x:-a}b;git status", "echo ${x:-a;b; git status",
+                        "echo ${x:-{a} ;git status .}", "echo ${x:-{a} ${y:-b} ;git status .}"):
+            command = "cd tests/fake; " + spelled
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+
+
+class FunctionTableReadingTest(PlantedCallCase):
+    """SPD-296: a `$( )` body is read once per (text, depth, input, ShellAnalysis.reading_state()) (analyse.analyse_isolated),
+    and so is a function body at each call (held_text), but reading_state held nothing of the functions the line defines,
+    so an identical substitution at the same directories after a definition, a `functions -c` copy, an `unset -f` removal
+    or a `functions -M` registration was served from the first reading and the call inside it never read where it runs:
+    `cd tests/fake; echo $(f); cd ../..; f() { git status; }; cd tests/fake; echo $(f)` ran git in a planted repository
+    unchecked, the body read only in place, in the home.  reading_state now holds the line's function table
+    (ShellAnalysis.functions and each name's bodies, line_functions.LineBody.state), so a reading after any change to it is
+    made afresh.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f: `echo $(f); f() { echo
+    F-RAN $PWD; }; echo $(f)` failed the first substitution (`command not found: f`) and ran f in the second; after
+    `functions -c g f` a `$(f)` ran g's body, after `unset -f f` it found no f again, and after `functions -M m` a
+    `$(echo $(( m() )))` ran m where before it zsh said `unknown function: m`.  bash 3.2.57 ran the definition's case alike
+    and has no `functions` builtin."""
+
+    def refused_everywhere(self, command):
+        self.members_refused(command, GIT_NESTED_WORDING)
+        self.spud_refused(command)
+
+    def test_the_tickets_line(self):
+        """The second `$(f)` stands where the first did, and runs the body the definition between them bound."""
+        self.refused_everywhere("cd tests/fake; echo $(f); cd ../..; f() { git status; }; cd tests/fake; echo $(f)")
+        self.refused_everywhere("cd tests/fake; : $(f); cd ../..; function f { git status; }; cd tests/fake; : $(f)")
+        # the ticket's own line: the body's findings stand at the call, not where it is defined
+        self.assertEqual(self.analysis("echo $(f); f() { git push; }; git log; echo $(f)").findings,
+                         [("git", ("log", None)), ("git", ("push", "push"))])
+        home, nested = str(self.home.path), str(self.nested)
+        self.assertEqual(self.git_dirs("cd tests/fake; echo $(f); cd ../..; f() { git status; }; cd tests/fake; echo $(f)"),
+                         [frozenset([nested])])
+
+    def test_a_copy_a_removal_and_a_registration(self):
+        # `functions -c g f`: f now runs g's body
+        self.refused_everywhere("cd tests/fake; echo $(f); cd ../..; g() { git status; }; functions -c g f; cd tests/fake;"
+                                " echo $(f)")
+        # `functions -M f`: arithmetic in the second substitution calls f
+        self.refused_everywhere("f() { git status; }; cd tests/fake; echo $(echo $(( f() ))); functions -M f;"
+                                " echo $(echo $(( f() )))")
+        # a redefinition that brings back a body the name held before: the table's order is part of it
+        self.refused_everywhere("f() { git status; }; unset -f f; f() { true; }; cd tests/fake; echo $(f); cd ../..;"
+                                " unset -f f; f() { git status; }; cd tests/fake; echo $(f)")
+
+    def test_each_change_to_the_table_reads_the_substitution_again(self):
+        """The substitution after each change is read afresh -- after a removal too, whose reading finds less: the hook reads
+        a command a function of its name shadows as well (refuse on doubt), so no finding shows it, and the count of
+        readings does."""
+        for command in ("f() { true; }; echo $(f); f() { git status; }; echo $(f)",
+                        "echo $(f); g() { true; }; functions -c g f; echo $(f)",
+                        "f() { true; }; echo $(f); unset -f f; echo $(f)", "f() { true; }; echo $(f); unfunction f; echo $(f)",
+                        "f() { true; }; echo $(f); unhash -f f; echo $(f)",
+                        "f() { true; }; echo $(f); functions -M f; echo $(f)",
+                        "f() { true; }; functions -M f; echo $(f); functions +M f; echo $(f)"):
+            with self.subTest(command=command):
+                self.assertEqual([key[0] for key in self.analysis(command).isolated_done], ["f", "f"])
+        # ... and a change that does not reach it, in a subshell or a substitution of its own, reads it once
+        for change in ("(unset -f f)", "(g() { true; }; functions -c g f)", ": $(f() { git status; })"):
+            command = "f() { true; }; echo $(f); " + change + "; echo $(f)"
+            with self.subTest(command=command):
+                self.assertEqual([key[0] for key in self.analysis(command).isolated_done].count("f"), 1)
+
+    def test_a_function_body_read_at_each_call(self):
+        """held_text keys a body's readings on the same state: a call's body holding `$(f)` reads it afresh too."""
+        self.refused_everywhere("g() { echo $(f); }; cd tests/fake; g; cd ../..; f() { git status; }; cd tests/fake; g")
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000296-296296.sh").write_text("sf () {\n\techo $(f)\n}\n", encoding="utf-8")
+        self.members_refused("cd tests/fake; sf; cd ../..; f() { git status; }; cd tests/fake; sf", GIT_NESTED_WORDING)
+
+    def test_the_controls_read_as_before(self):
+        """No change to the table between the readings, or one that does not reach them: read once, as before."""
+        for command in ("f() { git status; }; echo $(f); cd tests/fake; cd ../..; echo $(f)",
+                        "cd tests/fake; echo $(f); cd ../..; (f() { git status; }); cd tests/fake; echo $(f)",
+                        "cd tests/fake; echo $(f); cd ../..; : $(f() { git status; }); cd tests/fake; echo $(f)"):
+            self.silent_for(command)
+        # a line that defines no function keeps the state it had
+        m = load_spud_module()
+        a = m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))
+        before = a.reading_state()
+        m.analyse_command("echo $(git status); cd tests", a)
+        a.cwds = frozenset([str(self.home.path)])
+        self.assertEqual(a.reading_state(), before)
+
+    def test_both_readings_of_a_line_share_a_substitution_s_reading(self):
+        """zsh's reading and bash's bind bodies of their own; a body alike in both is one state, so a substitution after a
+        definition on a line read twice is read once, as before (a nested line must not double its work at every level)."""
+        m = load_spud_module()
+        a = m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path))
+        m.analyse_command("f() { true; }; echo $(git status) (a|b)", a)
+        self.assertEqual([key[0] for key in a.isolated_done], ["git status"])
 
 
 if __name__ == "__main__":

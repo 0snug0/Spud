@@ -1,16 +1,39 @@
-"""shell/line_aliases: the aliases a line defines for eval, and the ones the shell already holds (SPD-284).
+"""shell/line_aliases: the aliases a line defines, and the ones the shell already holds (SPD-284).
 
 The seam SPD-284 took out of shell/expansions, past its 1000-line band once SPD-109 added zsh's global and suffix aliases:
 `alias` and `unalias` lines and zsh's aliases, galiases and saliases parameters recorded into ShellAnalysis.aliases
 (record_alias_line, clear_alias_line, record_alias_definition, read by analyse), the table as it stood where the shell
-parsed the text being read (AliasView, SPD-286), the text eval's command word runs through it (alias_substitution,
+parsed the text being read (AliasView, SPD-286), the text a command word runs through it (alias_substitution,
 parsed_alias, line_reading and suffix_substitution, read by analyse.dispatch_words and stdin_text; alias_requoted,
-word_aliases), the global aliases expanded in text eval reads again (global_aliased, read by analyse), the global and
-suffix aliases the shell's snapshot holds, put in that table where a line starts (held_aliases, SPD-283) and read where
-the shell parsed the text with them (held_names), and a command word read against the plain aliases and the functions
-the snapshot holds (shell_aliased and shell_function, read by held_text), each kind only where the snapshot's aliases
-stand (held_standing, SPD-290).  Past 250 lines as one reading: every function here reads or writes the one alias
-table, or a word against the shell's own."""
+word_aliases), the global aliases expanded in the words of text the shell parses (global_aliased, read by analyse;
+global_names, global_word and plain_words, read by shell/walk for a `<( )` body, SPD-293), the global and suffix aliases
+the shell's snapshot holds, put in that table where a line starts (held_aliases, SPD-283) and read where the shell parsed
+the text with them (held_names), and a command word read against the plain aliases and the functions the snapshot holds
+(shell_aliased and shell_function, read by held_text), each kind only where the snapshot's aliases stand (held_standing,
+SPD-290).  Past 250 lines as one reading: every function here reads or writes the one alias table, or a word against the
+shell's own.
+
+Where each alias stands, as the reading now has it (the comments below hold the probes):
+
+- the line's own alias -- plain, global or suffix -- in text the shell parses as the line runs, a level into
+  ShellAnalysis.alias_scope with the table as it stood where that text was parsed (AliasView, SPD-286): eval's words
+  (analyse.dispatch_words); a `$( )` or backtick body, a trap's action and an (e) flag's value (analyse.analyse_isolated,
+  SPD-283); a `<( )` or `>( )` body, its command words (ShellWalk.open_process_substitution, SPD-287) and its global
+  aliases in every unquoted word (ShellWalk.expand_globals, SPD-293), which the line's own text leaves to it
+  (alias_words); a glob qualifier's `e` or `+` code (ShellWalk.read_qualifier_code, SPD-292); and each further pass of a
+  loop whose body changed the table (ShellWalk.read_loop_again, SPD-294).  Never in the line's own text, parsed before
+  any of it runs, nor in a word of the same text that defined it, nor in a new shell's text (analyse.analyse_new_shell);
+- the snapshot's global and suffix aliases in the line's own text as the snapshot holds them, and in text parsed as the
+  line runs as the line left them (held_aliases, held_names, SPD-283); its plain aliases on a command word
+  (shell_aliased); none of them in a function body the snapshot defines, parsed before its aliases, except in the text
+  that body parses as it runs, nor anywhere in a new shell's text (held_standing, SPD-290, SPD-300);
+- a quoted or escaped word: a global alias never expands it (alias_words; a `<( )` body's token, only where the text
+  writes it unquoted: plain_words), nor a plain alias, the line's or the snapshot's, nor a suffix alias where the text
+  after its last dot is quoted, each where the text being read spells the name only quoted (quoted_only, SPD-295; one it
+  also writes unquoted is read as the alias wherever it stands, more than runs);
+- `unalias` clears what the line and the snapshot -- its plain, global and suffix aliases -- hold for text parsed after
+  it (clear_alias_line; shell_aliased for the plain ones, SPD-299), and doubts every name where the hook cannot read what
+  it clears or it may not have run."""
 
 from . import expansions, prepare, syntax, unread
 from ..hooks import snapshots
@@ -22,8 +45,10 @@ from ..hooks import snapshots
 # inside eval or on the line itself, whose `$( )`, backtick and `<( )` bodies zsh parses when it runs them (probed in zsh
 # 5.9 -f and -f -o nobareglobqual, SPD-283: `alias gp="echo GP-RAN"; echo $(gp)` printed GP-RAN, and so did `echo
 # "$(gs)"`, `` echo `gq` `` and `cat <(gt)`, where `(gr)` ran nothing).  analyse.analyse_isolated reads a `$( )` or
-# backtick body as eval's words are (ShellAnalysis.alias_scope); the walk reads a `<( )` body with the line's own words,
-# where the line's alias does not stand -- a reading of less than zsh runs, left for shell/walk.  Probed in bash 3.2, zsh 5.9 -f,
+# backtick body as eval's words are (ShellAnalysis.alias_scope); the walk reads a `<( )` or `>( )` body a level into that
+# scope too, where it opens (ShellWalk.open_process_substitution, SPD-287), and expands the global aliases standing there
+# in the body's own words (ShellWalk.expand_globals, SPD-293: `alias -g X='; git push'; cat <(echo X)` pushes, as the
+# same line with `$( )` does).  Probed in bash 3.2, zsh 5.9 -f,
 # zsh -f -o nobareglobqual and sh with a fake git first on a scratch PATH: `alias gp='git push'; eval gp` pushed in zsh,
 # zsh-nbgq and sh (bash expands no alias non-interactively without `shopt -s expand_aliases`, so it pushed nothing -- noted,
 # never relied on), and so did `alias -g GP=...; eval GP`, two definitions on one `alias` line, `eval 'gp; gp'`, `eval 'X=1
@@ -251,12 +276,22 @@ def alias_word_name(name):
 def clear_alias_line(words, a):
     """`unalias NAME ...` and `unalias -a` clear what the line aliased; an argument the hook cannot read (an expansion, or a
     pattern for zsh's `-m`) clears nothing and doubts every name instead.  `-s` clears suffix aliases alone, and without
-    it no suffix alias is cleared (probed: `unalias -a` left `alias -s cfg=...` running)."""
+    it no suffix alias is cleared (probed: `unalias -a` left `alias -s cfg=...` running).
+
+    SPD-299: the pool holds the snapshot's plain aliases too, where the shell sourced the snapshot (AliasView's `held`,
+    held_text.snapshot_sourced: never in a new shell's text, and in a snapshot body, which runs once they are defined), so
+    `unalias -a`, `-m` and a name the hook cannot read clear or doubt them as they do the line's own; a name spelled out
+    is recorded whatever held it.  Each is recorded as cleared in the line's table, which text the shell parses after this
+    reads (AliasView) and shell_aliased then leaves unexpanded there (probed: under a sourced `alias gp='echo SNAP-GP'`,
+    `unalias gp`, `unalias -a`, `unalias -m "g*"` and `X=gp; unalias $X` each left `eval "gp x"` and `echo $(gp y)`
+    finding no command gp, while the line's own `gp top` still printed SNAP-GP)."""
     rest = alias_arguments(words)
     options = words[1 : len(words) - len(rest)]
     flags = "".join(prepare.deglob(w)[1:] for w in options)
     suffix = "s" in flags
     pool = [k for k in a.aliases if k.startswith(SUFFIX_ALIAS) == suffix]
+    if not suffix and (a.alias_view is None or a.alias_view.held):
+        pool +=[k for k in snapshots.shell_table(a.home).aliases if k not in a.aliases]
     if "a" in flags:
         names, doubtful = pool, False
     elif "m" in flags or any(expansions.active_read_word(w) for w in rest):
@@ -359,11 +394,16 @@ def alias_substitution(name, a):
 
 def parsed_alias(name, a):
     """(the body, whether it is doubtful) of the alias the table the text being read was parsed with (parsed_table, SPD-286)
-    holds for a command word: an alias the same text defines or clears changes neither."""
+    holds for a command word: an alias the same text defines or clears changes neither.  None stands for a name the text
+    spells only quoted, which zsh expands no alias of, whatever its name (quoted_name, SPD-295: `alias ls=...; eval
+    "'ls' -d /"` ran the real ls)."""
     table = parsed_table(a)
     if name not in table:
         view = parsed_view(a)
-        return None, a.alias_unknown if view is None else view.unknown
+        unknown = a.alias_unknown if view is None else view.unknown
+        return None, unknown and not quoted_name(a, name)
+    if quoted_name(a, name):
+        return None, False
     return table[name], parsed_doubted(a, name)
 
 
@@ -374,9 +414,9 @@ def line_reading(name, a):
     of one line, which every shell parses whole.  The table as it stands holds what this command's own line did too, which
     neither shell expands there: a reading of more than runs, never less."""
     view = parsed_view(a)
-    if view is None or not view.lines:
+    if view is None or not view.lines or quoted_name(a, name):  # bash and sh expand no alias of a quoted word either
         return None
-    now = (a.aliases[name], alias_doubted(a, name)) if name in a.aliases else (None, a.alias_unknown)
+    now =(a.aliases[name], alias_doubted(a, name)) if name in a.aliases else (None, a.alias_unknown)
     return None if now == parsed_alias(name, a) else now
 
 
@@ -398,27 +438,127 @@ def suffix_substitution(name, a, fresh=0):
     (probed: `alias a.txt=...` ran in place of `alias -s txt=...`), the shell's too, which shell_aliased then expands --
     where it stands (held_standing, SPD-290: `zsh -c 'alias -s txt=...; eval a.txt'` ran the suffix alias, the new shell
     holding no plain a.txt).
-    The word reaches this with its quotes taken, so a quoted suffix (`a.'txt'`, which zsh does not expand) is read as one:
-    that reads more than the shell runs, never less; so is a glob, whose text zsh looks the suffix up in before it globs
-    (probed: `a?.txt` and `*.txt` ran the suffix alias with the file they matched).  The line's table is read as the text
-    was parsed (parsed_table, SPD-286): `eval 'unalias -s txt; a.txt'` ran the suffix alias (probed)."""
+    A glob is read as one, whose text zsh looks the suffix up in before it globs (probed: `a?.txt` and `*.txt` ran the
+    suffix alias with the file they matched).  The line's table is read as the text was parsed (parsed_table, SPD-286):
+    `eval 'unalias -s txt; a.txt'` ran the suffix alias (probed).
+
+    SPD-295: zsh looks up only the text after the last dot as the word is written, so a quote or an escape there keeps
+    the suffix alias from running, and one before the dot does not (probed in zsh 5.9 -f and -f -o nobareglobqual:
+    `'a.cfg'`, `a.'cfg'`, `a.cf\\g` and `a.cfg''` ran nothing, `a\\.cfg`, `"a".cfg` and `'a'.cfg` ran `alias -s cfg`).
+    The word reaches this with its quotes taken, so a suffix the text writes only quoted stands for none (quoted_suffix);
+    and a plain alias of the whole word, which zsh expands in the suffix alias's place, does not stand where the text
+    spells the word only quoted (quoted_name), so `a\\.cfg` runs the suffix alias whatever plain `a.cfg` there is."""
     dot = name.rfind(".")
     if dot <= 0 or dot == len(name) - 1:
         return None, None
     suffix, held, table = name[dot + 1 :], snapshots.shell_table(a.home), parsed_table(a)
-    if name in held.aliases and held_standing(a) and (not a.alias_scope or name not in table):
+    if name in held.aliases and held_standing(a) and (not a.alias_scope or name not in table) and not quoted_name(a, name):
         return None, None
     if not a.alias_scope:
         names = {} if fresh else held_names(a, SUFFIX_ALIAS)
-        if suffix not in names:
+        if suffix not in names or quoted_suffix(a, suffix):
             return None, None
         return names[suffix], (alias_doubt(a, SUFFIX_ALIAS, suffix, name) if names[suffix] is None else None)
     key = SUFFIX_ALIAS + suffix
+    if key not in table and not (SUFFIX_ALIAS in table and parsed_doubted(a, SUFFIX_ALIAS)) or quoted_suffix(a, suffix):
+        return None, None
     if key in table:
         return table[key], (alias_doubt(a, SUFFIX_ALIAS, suffix, name) if parsed_doubted(a, key) else None)
-    if SUFFIX_ALIAS in table and parsed_doubted(a, SUFFIX_ALIAS):
-        return None, ("unread", ("alias-word", name))
-    return None, None
+    return None, ("unread", ("alias-word", name))
+
+
+# SPD-295: zsh expands no plain alias of a command word quoted in any way -- a quote or a backslash anywhere in it -- and
+# no suffix alias of one quoted or escaped anywhere after its last dot, the line's own aliases as the snapshot's (probed
+# in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py, the snapshot sourced and the line eval'd
+# as the Bash tool's shell runs it: `\ls`, `l''s`, `"ls"`, `'ls'`, `ls''` and `$'ls'` ran the real ls, in eval and a
+# `$( )` too, and `eval "'ls'"` did under the line's own `alias ls=...`; `'a.cfg'`, `a.'cfg'`, `a.cf\g` and `a.cfg''` ran
+# no `alias -s cfg`, `a\.cfg`, `"a".cfg`, `\a.cfg` and `'a'.cfg` ran it).  The tokens the walk reads have their quotes
+# taken (`'ls'`, `\ls` and `ls` are one token), so the mark is kept on the text instead: a name every word of the text
+# being read spells quoted is quoted wherever a token spells it, and stands for no alias there; one the text also writes
+# unquoted keeps the alias reading, which reads more than runs.  The text is the one analyse_command tokenizes
+# (ShellAnalysis.quoted_text), its comments' quote characters blanked, its newlines LINE_BREAK and its `$( )` and
+# backtick bodies lifted out, each read as a text of its own; a `<( )` body's words are the line's own tokens, and read
+# here with the rest.  A brace ends a word here, where zsh may split one off (`{ls}`), so a word glued to one counts
+# unquoted too.
+_SCAN_ENDS = _WORD_ENDS | {"{", "}", syntax.LINE_BREAK}
+_NO_QUOTED = (frozenset(), frozenset())
+
+
+def quoted_name(a, name):
+    """Whether the text being read spells the command word `name` only quoted (quoted_only), so no plain alias of it
+    stands there (SPD-295)."""
+    return prepare.deglob(name) in quoted_only(a)[0]
+
+
+def quoted_suffix(a, suffix):
+    """Whether the text being read writes `suffix` after a word's last dot only quoted (quoted_only), so no suffix alias of
+    it stands there (SPD-295)."""
+    return suffix in quoted_only(a)[1]
+
+
+def quoted_only(a):
+    """(the names the text being read spells only in words quoted or escaped, the suffixes it writes after a word's last
+    dot only quoted) -- SPD-295, above -- found once per text, at the first lookup that asks (ShellAnalysis.quoted_sets);
+    none where the reading has no text (a function body's tokens, analyse_command), or none of it is quoted.  None either
+    where a global alias may put words in a `<( )` or `>( )` body the walk splices in, which this text does not spell
+    (ShellWalk.expand_globals): where the text holds such a body and a global alias stands, the snapshot's or the line's,
+    or the text may define one."""
+    text = a.quoted_text
+    if text is None or not any(q in text for q in "'\"\\"):
+        return _NO_QUOTED
+    if ("<(" in text or ">(" in text) and ("alias" in text or snapshots.shell_table(a.home).galiases
+                                           or any(k.startswith(GLOBAL_ALIAS) for k in a.aliases)):
+        return _NO_QUOTED
+    if a.quoted_sets is None:
+        a.quoted_sets = _quoted_words(text)
+    return a.quoted_sets
+
+
+def _quoted_words(text):
+    """quoted_only's scan of `text`: each word as the shell splits it, taken apart into its value and whether any of it
+    was quoted, and for a word holding a dot whether the text after the last one was."""
+    names, suffixes = (set(), set()), (set(), set())  # each (unquoted, quoted)
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] in _SCAN_ENDS:
+            i += 1
+            continue
+        start, value, quoted = i, [], False
+        while i < n and text[i] not in _SCAN_ENDS:
+            c = text[i]
+            if c == "'":
+                end = text.find("'", i + 1)
+                end = n if end < 0 else end
+                value.append(text[i + 1 : end])
+                i, quoted = end + 1, True
+            elif c == '"':
+                i, quoted = _double_quoted(text, i + 1, value), True
+            elif c == "\\":
+                value.append(text[i + 1 : i + 2])
+                i, quoted = i + 2, True
+            else:
+                value.append(c)
+                i += 1
+        raw, word = text[start:i], "".join(value)
+        names[quoted].add(word)
+        dot = raw.rfind(".")
+        if dot >= 0:  # the same dot is the last of the word's value, a quote adding or taking none
+            suffixes[any(q in raw[dot + 1 :] for q in "'\"\\")].add(word[word.rfind(".") + 1 :])
+    return frozenset(names[1] - names[0]), frozenset(suffixes[1] - suffixes[0])
+
+
+def _double_quoted(text, i, value):
+    """The index past the `"` that closes a double-quoted string whose text starts at text[i], its value appended to
+    `value`: a backslash escapes only `"`, `\\`, `$` and a backtick there."""
+    n = len(text)
+    while i < n and text[i] != '"':
+        if text[i] == "\\" and text[i + 1 : i + 2] in ('"', "\\", "$", "`"):
+            value.append(text[i + 1])
+            i += 2
+        else:
+            value.append(text[i])
+            i += 1
+    return i + 1
 
 
 def word_aliases(a):
@@ -439,13 +579,19 @@ def alias_requoted(word, a):
     return "\\" + text if GLOBAL_ALIAS + prepare.deglob(word) in parsed_table(a) else text
 
 
-def alias_words(text):
+def alias_words(text, bodies=None):
     """[(start, end, plain)] for each word of `text` where zsh reads it unquoted, `plain` when it holds no quote, escape,
     expansion or substitution, which a global alias's name alone can be.  A comment is no word, and neither is arithmetic
     `(( ))` or the text of a `$( )`, backticks, `${ }` or `$'...'`, which a word holding it is not plain for; a substitution's
     body is read again on its own, where its words are expanded (probed: `echo $(echo gp)` and `` echo `echo gp` `` ran the
     alias, `(( gp == 5 ))` read the variable).  A case pattern is read as a word, which zsh does not expand there: a
-    refusal of more than runs, never less."""
+    refusal of more than runs, never less.
+
+    SPD-293: nor is the body of a `<( )` or `>( )`, which zsh parses when it runs it, with the table as it stands then
+    (probed: with `alias -g X=snapshot` held, `alias -g X=line; cat <(echo p1 X); echo top X` printed `p1 line`, then `top
+    snapshot`), so the walk expands its words where it opens it (shell/walk ShellWalk.open_process_substitution) and the
+    text around it leaves them be.  Its closing `)` is found as a `$( )`'s is (prepare.substitution_end).  `bodies`, a list:
+    the words inside such bodies are read and not skipped, and each body's (start, end) is appended to it (plain_words)."""
     spans, i, n, start, plain = [], 0, len(text), None, True
     while i < n:
         c = text[i]
@@ -453,7 +599,14 @@ def alias_words(text):
             if start is not None:
                 spans.append((start, i, plain))
                 start = None
-            if text.startswith("((", i):
+            if c in "<>" and text.startswith("(", i + 1):
+                end = prepare.substitution_end(text, i)
+                if bodies is None:
+                    i = end + 1
+                else:
+                    bodies.append((i + 2, end))
+                    i += 2
+            elif text.startswith("((", i):
                 end = text.find("))", i + 2)
                 i = n if end < 0 else end + 2
             else:
@@ -528,18 +681,49 @@ def global_aliased(text, a):
     `rc='rc more'` gave `rc more`), then a blank, as zsh adds one before a word the body is glued to.  A word that may be
     one the hook cannot resolve -- a doubtful definition or `unalias`, a body the line does not spell, a body of the shell's
     it cannot unquote (alias_doubt) -- or any word at all where the line defined a global alias whose name the hook cannot
-    read, is refused a member (SPD-217); a known body is read all the same, so a refusal it earns comes first."""
-    if a.alias_scope:
-        names = {k[len(GLOBAL_ALIAS) :]: body for k, body in parsed_table(a).items() if k.startswith(GLOBAL_ALIAS)}
-    else:
-        names = held_names(a, GLOBAL_ALIAS)
+    read, is refused a member (SPD-217); a known body is read all the same, so a refusal it earns comes first.  A `<( )` or
+    `>( )` body's words are left to the walk, which expands them as zsh parses them (alias_words, global_word, SPD-293)."""
+    names = global_names(a)
     if not names:
         return text
     budget = [GLOBAL_EXPANSIONS]
     out = _expand_global(text, names, a, frozenset(), budget)
-    if "" in names and parsed_doubted(a, GLOBAL_ALIAS) and any(plain for _, _, plain in alias_words(out)):
+    if unknown_global(a, names) and any(plain for _, _, plain in alias_words(out)):
         unread.record_unread(a, "alias-word", unread.unread_shown(text))
     return out
+
+
+def global_names(a):
+    """{name: body} for each global alias that stands in the text being read (global_aliased): in text parsed as the line
+    runs, the table it was parsed with (parsed_table); in the line's own text, the shell's own (held_names)."""
+    if a.alias_scope:
+        return {k[len(GLOBAL_ALIAS) :]: body for k, body in parsed_table(a).items() if k.startswith(GLOBAL_ALIAS)}
+    return held_names(a, GLOBAL_ALIAS)
+
+
+def unknown_global(a, names):
+    """Whether a global alias whose name the hook cannot read may stand among `names` (global_names): then any plain word
+    may be one, and is refused a member unread."""
+    return "" in names and parsed_doubted(a, GLOBAL_ALIAS)
+
+
+def global_word(word, names, a, budget):
+    """The text zsh parses in place of one word of a `<( )` or `>( )` body the walk reads (shell/walk, SPD-293) where
+    `names` (global_names, with the body's AliasView in force) makes it a global alias -- its body with the global aliases
+    it holds expanded, then a blank, as global_aliased writes it -- or None where it stays as it is: no such alias, or
+    one whose body the hook cannot read, whose finding _expand_global records.  `budget`, the one reading's count of
+    expansions left (GLOBAL_EXPANSIONS)."""
+    out = _expand_global(word, names, a, frozenset(), budget)
+    return None if out == word else out
+
+
+def plain_words(text):
+    """The words `text` writes unquoted (alias_words), those inside a `<( )` or `>( )` body among them: the ones the walk
+    may take for a global alias's name in such a body, since its tokens no longer show which word the line quoted (`'X'`
+    and `X` are one token).  Every such word of the text, not only a body's, since a case pattern's `)` in a body ends it
+    where a count of parentheses would place it (alias_words): a word written quoted in a body and unquoted elsewhere is
+    expanded in the body too, more than zsh runs, never less."""
+    return {text[s:e] for s, e, plain in alias_words(text, []) if plain}
 
 
 def _expand_global(text, names, a, in_use, budget):
@@ -587,24 +771,43 @@ def shell_aliased(words, a):
     and earns Law 7's own refusal -- each of those words quoted again as the line spelled it (prepare.requoted, SPD-201):
     `gc -m "don't"` is one message, not a quote that never closes.  When the body ends in a blank the next word is
     expanded too (zsh's chaining rule, `_='sudo '`), and a name is not expanded again while its own expansion is in
-    flight, which is what stops `alias ls='ls -G'`.  A word the line quoted or escaped (`\\gp`, `'gp'`) reaches this
-    with its quotes already taken and is expanded all the same: that is fail-closed -- the name it spells is no program --
-    and telling the two apart would need a mark inside the command word that every reading by name would then have to
-    strip (the expansion check makes the same choice for `'$X' push`).
+    flight, which is what stops `alias ls='ls -G'`.
+
+    SPD-295: zsh expands no alias of a word quoted or escaped in any way (`\\gp`, `'gp'`, `g''p`, `"gp"`, `gp''`,
+    `$'gp'`), which reaches this with its quotes already taken, so a name the text being read spells only quoted stands
+    for no alias here (quoted_name) and the word is the command it names: under `alias git=hub`, `'git' push` is git's
+    push.  The mark is on the text's names, not inside the word, which every reading by name would then have to strip.  A
+    name the text also spells unquoted is expanded wherever it stands: more than runs, never less, save where the alias
+    reads as a harmless command in place of one it quotes.
 
     SPD-290: only where the snapshot's aliases stand (held_standing), as SPD-283 made its global and suffix ones.  zsh
     expands none in a function body the snapshot defines, written before its aliases, nor in a new shell's text, which
     never sources it (probed in zsh 5.9 -f, a `zsh -f -c` sourcing `unalias -a`, functions, then `alias gp='echo
     GP-RAN'`: a body's `gp`, `runit gp` through a body's `"$@"`, `zsh -f -c gp` and `zsh -f -c "eval gp"` found no
     command gp, where a body's `eval gp` and `$(gp)` and a line function's `gp` ran the alias).  Reading the body there
-    reads other text, not more: under `alias git=hub`, a body's `git push` and `sh -c 'git push'` push."""
+    reads other text, not more: under `alias git=hub`, a body's `git push` and `sh -c 'git push'` push.
+
+    SPD-299: nor in text the shell parses as the line runs where the line had cleared it by then -- the table that text
+    was parsed with (parsed_view, AliasView) holds the name, which clear_alias_line records for the snapshot's aliases
+    too: zsh parses eval's words and a substitution's body with the aliases as they stand, so after `unalias git`,
+    `unalias -a` or `unalias -m 'g*'` the word runs the command it names (probed: under a sourced `alias gp='echo
+    SNAP-GP'`, `unalias gp; eval "gp x"`, `echo $(gp y)` and `cat <(gp ps)` found no command gp).  A name the line's
+    table holds with a body is the line's own alias, which analyse.dispatch_words expanded in its place; one it doubts --
+    an unalias that may not have run, or whose names the hook cannot read -- may stand or not, and is refused a member as
+    the line's doubtful alias is (the "alias" finding), where global_aliased doubts the snapshot's global ones.  The
+    line's own text, parsed before any of it runs, and a text that holds the unalias itself, still expand it."""
     found = snapshots.shell_table(a.home)
     if not found.aliases or not held_standing(a):  # no snapshot (every scratch home the suite builds), or none stands here
         return None, [], [], None
+    view = parsed_view(a)
     out, expanded, i, at_command = [], [], 0, True
     while i < len(words) and at_command:
         name = prepare.deglob(words[i])
-        if name in a.expanding or name not in found.aliases:
+        if name in a.expanding or name not in found.aliases or quoted_name(a, name):
+            break
+        if view is not None and name in view.table:  # the line cleared, redefined or doubted it before this was parsed
+            if name in view.doubted and ("alias", name) not in a.findings:
+                a.findings.append(("alias", name))
             break
         body = found.aliases[name]
         if body is None:

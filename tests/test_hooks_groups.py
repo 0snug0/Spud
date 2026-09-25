@@ -1,14 +1,17 @@
 """PreToolUse(Bash): case patterns and case substitutions, groups across newlines, coprocesses, prefixed groups,
 try-always, and braces glued to a word."""
 
+import importlib
+import os
 import shutil
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from helpers import load_spud_module, wall_clock
-from hookcase import AGENT_A, AGENT_B, AGENT_C, BashHookCase
+from hookcase import AGENT_A, AGENT_B, AGENT_C, BashHookCase, fresh_process
 
 
 # SPD-181: case patterns that hold a glob group, `%s` the arm's body.  With `( {echo <label>} )`, `{echo <label>}` and `{(
@@ -2175,6 +2178,271 @@ class GluedBraceTest(BashHookCase):
         started = time.monotonic()
         a = m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
         self.assertLess(time.monotonic() - started, 5.0)
+
+
+# SPD-303: a profile whose functions shadow a printer and basename, which only the Bash tool's own shell sources.
+NEW_SHELL_SHADOWS = """\
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+# Functions
+echo () {
+\tprintf '%s\\n' "$@"
+}
+basename () {
+\tcommand basename "$@"
+}
+gs () {
+\tgit status
+}
+# Shell Options
+setopt autocd
+# Aliases
+alias -- ls='ls -G'
+"""
+
+
+class NewShellSnapshotLookupTest(BashHookCase):
+    """SPD-303: SPD-298 made held_text.read_shell_name read no snapshot function in a new shell's text (`sh -c`, `zsh -c`,
+    `bash -c`, a shell fed its text on standard input, and every text parsed inside one), which never sources the
+    snapshot.  Two other lookups still asked the snapshot at every depth: stdin_text._shadowed, so a profile's `echo`
+    function made `sh -c 'echo git status | sh'` read the piped text as unread, though the new shell runs its builtin
+    echo; and loop_bindings.basename_runs, so a profile's `basename` left `sh -c 'echo hi > "tests/$(basename a/x.txt)"'`
+    unsettled, though the new shell runs the program.  A third lookup outside read_shell_name, line_functions.copy_function's
+    `profile` check, took the same shortcut: `functions -c` names a zsh builtin a new shell's `-c` text cannot run, but the
+    hook read gs as the profile's function all the same, no matter whose text spelled the copy.  All three now follow
+    held_text.snapshot_sourced.  In the Bash tool's own line, where the snapshot's functions stand, every one stays as it was.
+
+    held_shadows.read_shadow needs no guard: it runs only past read_shell_name's own snapshot_sourced gate, in a body
+    the sourcing shell runs, where the snapshot's functions do stand."""
+
+    def setUp(self):
+        super().setUp()
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True)
+        (snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh").write_text(NEW_SHELL_SHADOWS, encoding="utf-8")
+        (self.home.path / "tests").mkdir(exist_ok=True)
+
+    def test_a_new_shells_printer_is_its_own(self):
+        for line in ("sh -c 'echo git status | sh'", "zsh -c 'echo git status | sh'", "bash -c 'echo git status | sh'",
+                     "sh <<< 'echo git status | sh'", "sh -c 'eval \"echo git status | sh\"'"):
+            for agent_id in (AGENT_A, AGENT_B):
+                with self.subTest(line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+        for line in ("sh -c 'echo git push | sh'", "zsh -c 'echo git push | sh'"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+        # the Bash tool's own shell runs the profile's echo, whose text the hook does not follow
+        for line in ("echo git status | sh", "eval 'echo git status | sh'"):
+            with self.subTest(line):
+                self.assertRefused(line, "")
+
+    def test_a_new_shells_basename_is_the_program(self):
+        for line in ("sh -c 'echo hi > \"tests/$(basename a/x.txt)\"'",
+                     "zsh -c 'for f in a/x.txt b/y.txt; do echo hi > \"tests/$(basename $f)\"; done'",
+                     "bash -c 'n=$(basename a/x.txt); echo hi > \"tests/$n\"'"):
+            for agent_id in (AGENT_A, AGENT_B):
+                with self.subTest(line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+        self.assertRefused("sh -c 'echo hi > \"$(basename a/x.txt)\"'", "Law 5")  # the name lands outside tests/
+        # the Bash tool's own shell runs the profile's basename, whose output the hook does not settle
+        for line in ("echo hi > \"tests/$(basename a/x.txt)\"", "eval 'echo hi > \"tests/$(basename a/x.txt)\"'"):
+            with self.subTest(line):
+                self.assertRefused(line, "")
+
+    def test_a_new_shells_function_copy_reads_no_profile_body(self):
+        for line in ("sh -c 'functions -c gs g; cd tests; g'", "zsh -c 'functions -c gs g; cd tests; g'",
+                     "bash -c 'functions -c gs g; cd tests; g'", "sh <<< 'functions -c gs g; cd tests; g'"):
+            for agent_id in (AGENT_A, AGENT_B):
+                with self.subTest(line, agent_id=agent_id):
+                    self.assertSilent(line, agent_id)
+        # the Bash tool's own shell sources the profile: gs is still a copy the hook cannot follow
+        self.assertRefused("functions -c gs g; cd tests; g", "define the new name")
+
+
+class SnapshotFunctionRemovalTest(BashHookCase):
+    """SPD-305: SPD-281 marked a removal (`unset -f`, `unfunction`, `unhash -f`, `disable -f`, bash's plain `unset`) only
+    for bodies the line defines, so a function the shell's snapshot defines was read at every call after the line removed
+    it, where the shell runs the command of that name.  For most names that read a body that no longer runs (a refusal
+    at worst), but a snapshot cd, pushd, popd or chdir (SPD-304) was read as its body's move where the shell makes the
+    builtin's: under a snapshot `cd () { builtin cd u }`, `unset -f cd; cd /tmp; git status` was read as git in ./u, where
+    the shell runs it in /tmp.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f and bash 3.2.57: after
+    `cd() { builtin cd u; }; unset -f cd; cd /tmp`, `pwd` printed /tmp in all three; so did the same line with the
+    function sourced from a file, and the removal reached a later `eval 'cd /tmp'` and `$(cd /tmp; pwd)` alike, while one
+    in a subshell, `( unset -f cd ); cd /tmp`, left the body running (./u).  A removal that may not have run -- zsh's own
+    `unfunction`, one after `&&`, one of a name the hook cannot read -- leaves the function read beside the command, and a
+    cd there unknown (line_functions.held_function)."""
+
+    SNAPSHOT = "# Snapshot file\n# Functions\n%s# Aliases\n"
+
+    def setUp(self):
+        super().setUp()
+        for name in ("u", "tests", "bin"):
+            (self.home.path / name).mkdir(exist_ok=True)
+        functions = (("cd", "builtin cd u"), ("pushd", "builtin cd u"), ("gp", "git push"))
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        text = self.SNAPSHOT % "".join("%s () {\n\t%s\n}\n" % f for f in functions)
+        (snapshots / "snapshot-zsh-1700000000305-rmrmrm.sh").write_text(text, encoding="utf-8")
+
+    def git_dirs(self, command):
+        """The directories each git call of `command` may run in, as the hook's analysis reads them."""
+        fresh_process()
+        analyse = importlib.import_module("spudlib.shell.analyse")
+        syntax = importlib.import_module("spudlib.shell.syntax")
+        home = str(self.home.path)
+        with mock.patch.dict(os.environ, self.home.env, clear=True):
+            a = analyse.analyse_command(command, syntax.ShellAnalysis(cwd=home, home=home))
+        return [cwds for _, cwds in a.git_calls]
+
+    def test_the_tickets_evidence(self):
+        home = str(self.home.path)
+        self.assertEqual(self.git_dirs("cd /tmp; git status"), [frozenset([home + "/u"])])  # the function runs
+        self.assertEqual(self.git_dirs("unset -f cd; cd /tmp; git status"), [frozenset(["/tmp"])])
+
+    def test_a_removal_stands_for_every_later_call(self):
+        home, u = str(self.home.path), str(self.home.path / "u")
+        for command, expected in (
+                ("unset -f pushd; pushd /tmp; git status", [{"/tmp"}]),
+                ("unset -f -- cd; cd /tmp; git status", [{"/tmp"}]),
+                ("builtin unset -f cd; cd /tmp; git status", [{"/tmp"}]),
+                ("{ unset -f cd; }; cd /tmp; git status", [{"/tmp"}]),
+                ("unset -f cd; eval 'cd /tmp; git status'", [{"/tmp"}]),
+                ("unset -f cd; echo $(cd /tmp; git status)", [{"/tmp"}]),
+                ("unset -f cd; cd() { builtin cd u; }; cd /tmp; git status", [{u}]),  # a definition after it runs
+                # a substitution or an eval read before the removal is read again after it (SPD-296's reading state)
+                ("echo $(cd /tmp; git status); unset -f cd; echo $(cd /tmp; git status)", [{u}, {"/tmp"}]),
+                ("eval 'cd /tmp; git status'; unset -f cd; eval 'cd /tmp; git status'", [{u}, {"/tmp"}]),
+                # a removal in a process of its own leaves the function standing, as before
+                ("( unset -f cd ); cd /tmp; git status", [{u}]),
+                ("echo $(unset -f cd); cd /tmp; git status", [{u}]),
+                ("sh -c 'unset -f cd'; cd /tmp; git status", [{u}]),
+                # ... and so does a removal of another name, or of a variable
+                ("unset -f gp; cd /tmp; git status", [{u}]),
+                ("unset -v cd; cd /tmp; git status", [{u}])):
+            with self.subTest(command=command):
+                self.assertEqual(self.git_dirs(command), [frozenset(each) for each in expected])
+        self.assertEqual(self.git_dirs("cd /tmp; git status"), [frozenset([u])])
+        self.assertNotEqual(home, u)
+
+    def test_a_removal_that_may_not_have_run_leaves_the_directory_unknown(self):
+        for command in ("true && unset -f cd; cd /tmp; git status",
+                        "unfunction cd; cd /tmp; git status",  # zsh's alone
+                        "unhash -f cd; cd /tmp; git status",
+                        "unset cd; cd /tmp; git status",  # bash's alone, where no variable cd is set
+                        "unset -f \"$x\"; cd /tmp; git status",  # a name the hook cannot read
+                        "unfunction -m 'c*'; cd /tmp; git status",
+                        "if true; then unset -f cd; fi; cd /tmp; git status"):
+            with self.subTest(command=command):
+                self.assertEqual(self.git_dirs(command), [None])
+
+    def test_a_relative_write_after_the_call_is_held_where_it_lands(self):
+        self.write_cd_into_tests()
+        self.assertSilent("cd bin; echo x > out.txt")  # the function moves to tests/
+        self.assertRefused("unset -f cd; cd bin; echo x > out.txt", "deliverables")  # ... and after the removal cd does not
+
+    def write_cd_into_tests(self):
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        (snapshots / "snapshot-zsh-1700000000305-rmrmrm.sh").write_text(
+            self.SNAPSHOT % "cd () {\n\tbuiltin cd tests\n}\n", encoding="utf-8")
+
+    def test_a_removed_function_is_the_program_of_its_name(self):
+        self.assertRefused("gp", "Law 7")  # the snapshot's gp pushes
+        for line in ("unset -f gp; gp", "unset -f gp; eval gp", "unset -f gp; echo $(gp)", "unset -f cd gp; gp"):
+            with self.subTest(line):
+                self.assertSilent(line)
+        for line in ("true && unset -f gp; gp", "unfunction gp; gp", "( unset -f gp ); gp", "unset -f gp & gp",
+                     "gp; unset -f gp", "unset -f \"$x\"; gp"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+
+    def test_the_two_readings_merge_a_removal(self):
+        """line_functions.merge_readings, where _settled drops a removal that surely ran with the bodies it took: the
+        snapshot's function stays gone where both readings removed it, and may stand where one did."""
+        fresh_process()
+        line_functions = importlib.import_module("spudlib.shell.line_functions")
+        syntax = importlib.import_module("spudlib.shell.syntax")
+        home = str(self.home.path)
+
+        def removal(a, certain):
+            mark = line_functions.LineBody(("cd",), None, a)
+            mark.removes, mark.certain = True, certain
+            return {"cd": {mark}}
+
+        with mock.patch.dict(os.environ, self.home.env, clear=True):
+            for zsh_removes, other_removes, expected in ((True, True, None), (True, False, "maybe"),
+                                                         (False, True, "maybe"), (None, None, "sure")):
+                with self.subTest(zsh=zsh_removes, other=other_removes):
+                    a = syntax.ShellAnalysis(cwd=home, home=home)
+                    zsh_bodies = {} if zsh_removes is None else removal(a, zsh_removes)
+                    a.function_bodies = {} if other_removes is None else removal(a, other_removes)
+                    self.assertEqual(line_functions.held_function(a, "cd"), "sure" if other_removes is None else
+                                     None if other_removes else "maybe")
+                    line_functions.merge_readings(a, zsh_bodies)
+                    self.assertEqual(line_functions.held_function(a, "cd"), expected)
+
+    def test_a_copy_of_a_removed_function_copies_nothing(self):
+        # zsh's functions -c of a function it no longer holds copies nothing (`no such function`)
+        self.assertRefused("functions -c gp g; g", "define the new name")
+        self.assertSilent("unset -f gp; functions -c gp g; g")
+
+
+# SPD-307: a profile whose functions shadow the printers echo and cat, and basename.
+PRINTER_SHADOWS = """\
+# Snapshot file
+# Functions
+echo () {
+\tprintf '%s\\n' "$@"
+}
+cat () {
+\tcommand cat "$@"
+}
+basename () {
+\tcommand basename "$@"
+}
+# Aliases
+"""
+
+
+class SnapshotPrinterRemovalTest(BashHookCase):
+    """SPD-307: stdin_text._shadowed and loop_bindings.basename_runs asked the snapshot's tables directly (`name in
+    table.functions`) rather than line_functions.held_function, so a line's own `unset -f echo` (or `cat`, `basename`)
+    left the snapshot's function read as still standing -- an over-refusal, not a hole: the piped text a removed echo
+    or cat prints, and the write target a removed basename settles, both stayed unread after the line took the
+    function back.  Both now ask held_function, whose "sure" and "maybe" still leave the shadow standing (a removal
+    that may not have run keeps today's cautious reading) and whose None -- the removal surely ran -- lets the shell's
+    own printer or program through."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home.path / "tests").mkdir(exist_ok=True)
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000307-ppppp.sh").write_text(PRINTER_SHADOWS, encoding="utf-8")
+
+    def test_a_removed_echo_pipes_its_own_text(self):
+        # the control: echo's function shadows it, so the piped text is unread
+        self.assertRefused("echo git status | sh", "")
+        # a removal that surely ran leaves the builtin's own text read
+        self.assertSilent("unset -f echo; echo git status | sh")
+        self.assertRefused("unset -f echo; echo git push | sh", "Law 7")
+        # a removal that may not have run keeps today's cautious reading (unread)
+        self.assertRefused("true && unset -f echo; echo git status | sh", "")
+
+    def test_a_removed_cat_pipes_its_own_text(self):
+        self.assertRefused("printf 'git status' | cat | sh", "")
+        self.assertSilent("unset -f cat; printf 'git status' | cat | sh")
+        self.assertRefused("unset -f cat; printf 'git push' | cat | sh", "Law 7")
+
+    def test_a_removed_basename_settles_the_write_target(self):
+        # the control: basename's function shadows it, so the substitution stays unsettled
+        self.assertRefused('echo hi > "tests/$(basename a/x.txt)"', "hook cannot resolve")
+        # a removal that surely ran lets the program's own output settle the write
+        self.assertSilent('unset -f basename; echo hi > "tests/$(basename a/x.txt)"')
+        # a removal that may not have run keeps today's cautious reading (unsettled)
+        self.assertRefused('true && unset -f basename; echo hi > "tests/$(basename a/x.txt)"', "hook cannot resolve")
 
 
 if __name__ == "__main__":
