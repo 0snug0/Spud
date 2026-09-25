@@ -2,8 +2,9 @@
 
 A module of its own since SPD-267: line_options and option_effect taken out of shell/held_text, and the option tables they
 read out of shell/syntax, which nothing else reads.  analyse.analyse_command calls line_options once, at a line's first
-reading.  A leaf the shell reading's import cycle reaches: it imports hooks/snapshots and nothing of the cycle.  tool_expands_no_alias (SPD-327) reads whether a bash
-snapshot turns expand_aliases on, for line_aliases.spelled_too."""
+reading.  A leaf the shell reading's import cycle reaches: it imports hooks/snapshots and nothing of the cycle.
+tool_expands_no_alias (SPD-327) reads whether a bash snapshot turns expand_aliases on, for line_aliases.spelled_too;
+tool_may_be_bash (SPD-328) whether any snapshot is bash's, for held_text.tool_lines and line_aliases.global_spelled."""
 
 import os
 
@@ -41,6 +42,16 @@ def line_options(a):
 # the harness's line turns it on).  Read only where a word an alias stands in asks, once per process: each path's answer.
 _BASH_SNAPSHOT = snapshots.SNAPSHOT_PREFIX + "bash-"
 _EXPANDS_ALIASES = {}
+
+
+def tool_may_be_bash(a):
+    """Whether the Bash tool's own shell may be a bash: a snapshot any session may source is bash's, by its name
+    (`snapshot-<shell>-<stamp>-<id>.sh`, hooks/snapshots) -- held_text.tool_lines's question (SPD-291), and
+    line_aliases.global_spelled's, bash having no global alias whatever its options (SPD-328)."""
+    for path in snapshots.shell_table(a.home).files:
+        if os.path.basename(path).startswith(_BASH_SNAPSHOT):
+            return True
+    return False
 
 
 def tool_expands_no_alias(a):

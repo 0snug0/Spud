@@ -545,7 +545,7 @@ class ShellWalk:
             tokens = None if text is None else analyse.spliced_tokens(text, a, self.glued)
             if tokens is not None:
                 spliced.append((j, tokens))
-                if words is None and line_aliases.spelled_too(a):
+                if words is None and line_aliases.global_spelled(a):
                     # SPD-322: a bash, which has no global alias, runs the body's word as written, as global_aliased
                     # refuses it in a `$( )` body; a later line's word (`words`) is read as written by the reading that
                     # reads its text whole (analyse.walk_readings, held_text.text_lines)

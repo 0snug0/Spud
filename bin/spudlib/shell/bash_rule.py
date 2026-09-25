@@ -214,7 +214,7 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 # "bash-alias" a global alias the line's reading expanded in text a bash parses as it runs (eval's words, a `$( )`,
 #             backtick or `<( )` body, a trap's action: line_aliases.global_aliased, ShellWalk.expand_globals), where
 #             bash, which has no global alias, runs the words as written, which that reading did not read
-#             (line_aliases.spelled_too, SPD-322); shown is the text, or the word.
+#             (line_aliases.global_spelled, SPD-322, SPD-328); shown is the text, or the word.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"

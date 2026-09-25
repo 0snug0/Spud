@@ -30,7 +30,8 @@ Where each alias stands, as the reading now has it (the comments below hold the 
   bash (ShellWalk.new_line, held_text.text_lines and tool_lines, SPD-291), and eval's words, a trap's action and a `$(
   )`, backtick or `<( )` body where the shell running them parses them so, as sh and bash do (held_text.parsed_lines,
   AliasView.shell, ShellWalk.new_body_line, SPD-323); and in a bash's text, which may expand no
-  alias at all, both ways wherever it stands: the alias and the word as written (spelled_too, AliasView.bare, SPD-322);
+  alias at all, both ways wherever it stands: the alias and the word as written (spelled_too, AliasView.bare, SPD-322),
+  and a global alias, which bash has none of, refused where the shell may be a bash (global_spelled, SPD-328);
 - the snapshot's global and suffix aliases in the line's own text as the snapshot holds them, and in text parsed as the
   line runs as the line left them (held_aliases, held_names, SPD-283); its plain aliases on a command word
   (shell_aliased); none of them in a function body the snapshot defines, parsed before its aliases, except in the text
@@ -131,8 +132,9 @@ class AliasView:
     off where it is not interactive (held_text.expands_no_alias), set where analyse.analyse_new_shell reads its text and
     inherited, as `held` is, by every text parsed inside it: there a command word a plain or suffix alias of the view
     stands in is read both ways, the alias and the word as written, and a word a global alias stands in, which bash has
-    none of, is refused a member unread (spelled_too).  The Bash tool's own texts (`shell` TOOL_SHELL) are marked False
-    here and asked in spelled_too instead, where a bash snapshot may leave expand_aliases off (SPD-327).
+    none of, is refused a member unread (global_spelled).  The Bash tool's own texts (`shell` TOOL_SHELL) are marked
+    False here and asked in spelled_too instead, where a bash snapshot may leave expand_aliases off (SPD-327), and in
+    global_spelled wherever a snapshot may be bash's (SPD-328).
 
     SPD-323: `shell`, the name of the shell that parses the text -- TOOL_SHELL for the Bash tool's own, a new shell's
     base name where analyse.analyse_new_shell reads its text, "" for one the hook cannot name -- inherited, as `held` is,
@@ -252,6 +254,22 @@ def spelled_too(a):
     if view is None:
         return False
     return view.bare or view.shell == TOOL_SHELL and held_options.tool_expands_no_alias(a)
+
+
+# SPD-328: bash has no global alias whatever expand_aliases says (SPD-322's probe above), so where the Bash tool's shell
+# may be a bash -- a snapshot any session may source is bash's -- a word a global alias stands in runs as written there
+# even under Claude Code's own snapshot, which turns expand_aliases on: `alias -g git=echo; eval git push` on the member's
+# own line read as `echo push` and pushed with no finding.  spelled_too asks the snapshot's options, which decide only
+# the plain and suffix aliases.
+def global_spelled(a):
+    """Whether a word a global alias stands in, in the text being read, runs as it is written (SPD-322, SPD-328, above):
+    the text is parsed as the line runs by a shell that may be a bash, which has no global alias -- a bash's text
+    (AliasView.bare), or the Bash tool's own where a snapshot it may source is bash's (held_options.tool_may_be_bash),
+    asked only where a global alias stood in a word."""
+    view = parsed_view(a)
+    if view is None:
+        return False
+    return view.bare or view.shell == TOOL_SHELL and held_options.tool_may_be_bash(a)
 
 
 def alias_arguments(words):
@@ -1091,7 +1109,7 @@ def global_aliased(text, a):
     out = _expand_global(text, names, a, frozenset(), budget)
     if unknown_global(a, names) and any(plain for _, _, plain in alias_words(out)):
         unread.record_unread(a, "alias-word", unread.unread_shown(text))
-    if out != text and spelled_too(a):  # a bash runs the words as written, which this reading does not (SPD-322)
+    if out != text and global_spelled(a):  # a bash runs the words as written, which this reading does not (SPD-322)
         unread.record_unread(a, "bash-alias", unread.unread_shown(text))
     return out
 

@@ -15,7 +15,7 @@ startup files a shell sources, read from its options -- is shell_start's (SPD-30
 import os
 import re
 
-from . import analyse, directories, expansions, globbing, held_shadows, line_aliases, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
+from . import analyse, directories, expansions, globbing, held_options, held_shadows, line_aliases, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
 from ..hooks import hookio, snapshots
 
 
@@ -443,11 +443,7 @@ def tool_lines(a):
     trap's action, which it reads with the line's aliases (SPD-322's probe) -- those are read both ways, the alias and the
     word as written, where such a snapshot may be the one sourced (line_aliases.spelled_too,
     held_options.tool_expands_no_alias, SPD-327)."""
-    for path in snapshots.shell_table(a.home).files:
-        name = os.path.basename(path)
-        if name.startswith(snapshots.SNAPSHOT_PREFIX + "bash-"):
-            return syntax.LINES_BOTH
-    return False
+    return syntax.LINES_BOTH if held_options.tool_may_be_bash(a) else False
 
 
 # SPD-323: a shell parses eval's words, a trap's action and a `$( )` or backtick body as its text runs (line_aliases,

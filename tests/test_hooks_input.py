@@ -2875,5 +2875,64 @@ class BashSnapshotBareAliasTest(BashHookCase):
                 self.silent_for_everyone(ok)
 
 
+class BashSnapshotGlobalAliasTest(BashHookCase):
+    """SPD-328: bash has no global alias whatever expand_aliases says -- its `alias -g` is an invalid option (SPD-322's
+    probe: `bash -c 'alias -g X=...'` printed `alias: -g: invalid option`, status 2, defining nothing) -- so where a
+    snapshot the Bash tool's shell may source is bash's, eval's words and a substitution's body run as written, where the
+    hook reads the global alias's words in their place.  Under Claude Code's own bash snapshot, which turns expand_aliases
+    on, `alias -g push=status; eval git push` read as `git status` and `alias -g git=echo; eval git push` as `echo push`,
+    and both pushed with no finding (Law 7).  Such a word is now refused a member unread wherever a bash snapshot is
+    present (line_aliases.global_spelled, held_options.tool_may_be_bash); a zsh snapshot and no snapshot read as before.
+
+    AGENT_A and AGENT_B plan tests/** and bin/spud."""
+
+    GLOBAL_SHAPES = ("alias -g push=status; eval git push", "alias -g git=echo; eval git push",
+                     "alias -g push=status; echo $(git push)", "alias -g git=echo; echo `git push`",
+                     "alias -g push=status; cat <(git push)", "alias -g git=echo; (eval git push)")
+
+    def setUp(self):
+        super().setUp()
+        self.snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        self.snapshots.mkdir(parents=True, exist_ok=True)
+
+    snapshot =BashSnapshotBareAliasTest.snapshot
+    refused_for_members = BashSnapshotBareAliasTest.refused_for_members
+    silent_for_everyone = BashSnapshotBareAliasTest.silent_for_everyone
+    findings = BashSnapshotBareAliasTest.findings
+
+    def test_a_global_alias_under_expand_aliases_on_is_refused_unread(self):
+        self.snapshot("bash", "shopt -s expand_aliases\n")
+        for command in self.GLOBAL_SHAPES:
+            with self.subTest(command):
+                self.refused_for_members(command, "bash has no global alias")
+        self.assertIn(("unread", ("bash-alias", "git push")), self.findings("alias -g git=echo; eval git push"))
+
+    def test_a_bash_snapshot_beside_a_zsh_one_is_enough(self):
+        self.snapshot("zsh", "", "1700000000001")
+        self.snapshot("bash", "shopt -s expand_aliases\n", "1700000000002")
+        for command in self.GLOBAL_SHAPES[:2]:
+            with self.subTest(command):
+                self.refused_for_members(command, "bash has no global alias")
+
+    def test_global_aliases_under_zsh_and_no_snapshot_read_as_before(self):
+        for command in self.GLOBAL_SHAPES:
+            with self.subTest(command, snapshot=None):
+                self.silent_for_everyone(command)
+        self.assertEqual(self.findings("alias -g push=status; eval git push"), [("git", ("status", None))])
+        self.snapshot("zsh")
+        for command in self.GLOBAL_SHAPES:
+            with self.subTest(command, snapshot="zsh"):
+                self.silent_for_everyone(command)
+
+    def test_a_global_alias_control_stays_allowed(self):
+        """A global alias the text being read never spells expands nothing there, and one in the line's own words is
+        zsh's reading alone, as before."""
+        self.snapshot("bash", "shopt -s expand_aliases\n")
+        for ok in ("alias -g push=status; eval git log", "alias -g push=status; echo $(git status)",
+                   "alias -g L='| less'; git log L", "eval git status"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+
 if __name__ == "__main__":
     unittest.main()
