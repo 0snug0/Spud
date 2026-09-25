@@ -27,7 +27,8 @@ Where each alias stands, as the reading now has it (the comments below hold the 
   any of it runs, nor in a word of the same text that defined it, nor in a new shell's text (analyse.analyse_new_shell)
   -- but for a later line of text a shell reads a line at a time, each parsed once the lines before it ran: a script fed
   to a shell, sh's, dash's and ksh's `-c` string, bash's both ways, and the Bash tool's own line where its shell may be
-  bash (ShellWalk.new_line, held_text.text_lines and tool_lines, SPD-291);
+  bash (ShellWalk.new_line, held_text.text_lines and tool_lines, SPD-291); and in a bash's text, which may expand no
+  alias at all, both ways wherever it stands: the alias and the word as written (spelled_too, AliasView.bare, SPD-322);
 - the snapshot's global and suffix aliases in the line's own text as the snapshot holds them, and in text parsed as the
   line runs as the line left them (held_aliases, held_names, SPD-283); its plain aliases on a command word
   (shell_aliased); none of them in a function body the snapshot defines, parsed before its aliases, except in the text
@@ -119,17 +120,24 @@ class AliasView:
     SPD-301: `held` is PARTLY in a new zsh that sources part of the startup files the snapshot came from -- started
     interactive or login but not both, or plain where a .zshenv exists (held_text.shell_start) -- where the hook cannot
     tell which of the snapshot's names those files define: its plain aliases and functions are read both ways, the body
-    and the command as spelled (held_partly), and its global and suffix aliases doubted (held_aliases, held_names)."""
+    and the command as spelled (held_partly), and its global and suffix aliases doubted (held_aliases, held_names).
 
-    __slots__ = ("table", "doubted", "unknown", "lines", "held", "early", "key")
+    SPD-322: `bare`, the shell that parses the text may expand no alias in it at all -- a bash, whose expand_aliases is
+    off where it is not interactive (held_text.expands_no_alias), set where analyse.analyse_new_shell reads its text and
+    inherited, as `held` is, by every text parsed inside it: there a command word a plain or suffix alias of the view
+    stands in is read both ways, the alias and the word as written, and a word a global alias stands in, which bash has
+    none of, is refused a member unread (spelled_too)."""
 
-    def __init__(self, a, lines, held=None, early=False):
+    __slots__ = ("table", "doubted", "unknown", "lines", "held", "early", "bare", "key")
+
+    def __init__(self, a, lines, held=None, early=False, bare=None):
         self.table = dict(a.aliases)
         self.doubted = frozenset(k for k in self.table if alias_doubted(a, k))
         self.unknown, self.lines = a.alias_unknown, lines
         self.held = (a.alias_view is None or a.alias_view.held) if held is None else held
         self.early = early
-        self.key = (frozenset(self.table.items()), self.doubted, self.unknown, lines, self.held, early)
+        self.bare = (a.alias_view is not None and a.alias_view.bare) if bare is None else bare
+        self.key = (frozenset(self.table.items()), self.doubted, self.unknown, lines, self.held, self.bare, early)
 
     def parsed_late(self):
         """This view, but for text parsed with the snapshot's aliases in force: a function body the line defines, read
@@ -137,7 +145,7 @@ class AliasView:
         if not self.early:
             return self
         view = object.__new__(AliasView)
-        for field in ("table", "doubted", "unknown", "lines", "held"):
+        for field in ("table", "doubted", "unknown", "lines", "held", "bare"):
             setattr(view, field, getattr(self, field))
         view.early, view.key = False, self.key[:-1] + (False,)
         return view
@@ -190,6 +198,26 @@ def parsed_doubted(a, key):
     """alias_doubted, as the text being read was parsed: its AliasView's doubt, else the doubt as it stands."""
     view = parsed_view(a)
     return alias_doubted(a, key) if view is None else key in view.doubted
+
+
+# SPD-322: bash expands no alias at all where it is not interactive -- in eval's words and a substitution's body as in its
+# own text -- so an alias its text defines, which the hook reads in the text parsed as that text runs (the view above),
+# may stand there or not.  Probed through tests/probes/shell_probe.py (2026-09-25), zsh 5.9 -f -o nobareglobqual, zsh 5.9
+# -f and bash 3.2.57 each driving /bin/bash 3.2.57 after `alias ls="echo ALIASED"`: `bash -c` with `eval ls -d /` printed
+# `/`, and so did `echo "[$(ls -d /)]"`, its backtick form, `cat <(ls -d /)`, `trap "ls -d /" EXIT`, `eval "eval ls -d
+# /"`, a `$( )` inside a `$( )`, a function's `eval ls -d /`, the eval on the text's next line, `bash -l -c`, and the text
+# fed to bash by a pipe, with `-s` and without; `shopt -s expand_aliases` before it, `-O expand_aliases`, `-i` and
+# `--posix` printed `ALIASED -d /`, as `/bin/sh -c` did.  Such a command word is read both ways, the alias and on as it
+# is written (analyse.dispatch_words), as one the text spells quoted and not is (quoted_too) -- a suffix alias's too.
+# bash has no global or suffix alias at all (`alias -g X=...` printed `alias: -g: invalid option`, and `alias -s
+# txt=...` the same of -s, each status 2, defining nothing: a later `eval X` found no command X), so a word a global
+# alias stands in runs as written, which the hook, reading the alias's words in its place, refuses a member unread
+# (global_aliased, walk.ShellWalk.expand_globals).
+def spelled_too(a):
+    """Whether a command word of the text being read runs as it is written as well as the alias the text was parsed with
+    (SPD-322, above): the text is parsed as the line runs by a shell that may expand no alias at all (AliasView.bare)."""
+    view = parsed_view(a)
+    return view is not None and view.bare
 
 
 def alias_arguments(words):
@@ -1008,6 +1036,8 @@ def global_aliased(text, a):
     out = _expand_global(text, names, a, frozenset(), budget)
     if unknown_global(a, names) and any(plain for _, _, plain in alias_words(out)):
         unread.record_unread(a, "alias-word", unread.unread_shown(text))
+    if out != text and spelled_too(a):  # a bash runs the words as written, which this reading does not (SPD-322)
+        unread.record_unread(a, "bash-alias", unread.unread_shown(text))
     return out
 
 

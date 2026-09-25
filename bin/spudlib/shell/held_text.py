@@ -409,12 +409,24 @@ _LINE_SHELLS = frozenset({"dash", "ksh", "ash"})
 def text_lines(base, fed):
     """How the shell `base` reads a text of its own -- its `-c` string, or, `fed`, a script it reads on standard input
     (above): True a line at a time (dash, ksh and ash, and sh and zsh fed one); syntax.LINES_BOTH for bash, a line at a
-    time where expand_aliases is on and with no alias at all where it is off, as it is unless something turns it on, and
+    time where expand_aliases is on and with no alias at all where it is off, as it is unless something turns it on (in
+    eval's words and its substitutions too, which the whole reading does not stand for: expands_no_alias, SPD-322), and
     for sh's `-c` string, which the shell /bin/sh stands for may read either way; False whole (zsh's `-c` string; csh,
     tcsh and fish, whose `alias` the reader does not read)."""
     if base == "bash" or base == "sh" and not fed:
         return syntax.LINES_BOTH
     return base in _LINE_SHELLS or fed and base in ("sh", "zsh")
+
+
+def expands_no_alias(base):
+    """Whether the shell `base` may expand no alias anywhere in its text -- eval's words, a `$( )`, backtick or `<( )`
+    body and a trap's action included, which the whole reading text_lines gives it reads as text parsed as it runs, with
+    the text's own aliases (SPD-322, line_aliases.spelled_too has the probe): bash, whose expand_aliases is off unless it
+    is interactive, in POSIX mode or turned on, and which is read both ways wherever it may be (line_aliases.AliasView
+    .bare).  The others expand one in eval's words (probed through tests/probes/shell_probe.py, 2026-09-25: after `alias
+    ls="echo ALIASED"`, `eval ls -d /` printed `ALIASED -d /` in /bin/sh -- bash 3.2.57 in POSIX mode -- /bin/dash,
+    /bin/ksh and /bin/zsh, from a `-c` string and fed by a pipe alike)."""
+    return base == "bash"
 
 
 def tool_lines(a):

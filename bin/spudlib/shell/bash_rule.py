@@ -211,6 +211,10 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 #             SPD-283, SPD-287), a word the shell expands before eval reads it, which may spell one's name, or global
 #             aliases that expand into one another past line_aliases.GLOBAL_EXPANSIONS (line_aliases.global_aliased);
 #             shown is the word, or the text.  SPD-289: worded for every such place, not eval's alone.
+# "bash-alias" a global alias the line's reading expanded in text a bash parses as it runs (eval's words, a `$( )`,
+#             backtick or `<( )` body, a trap's action: line_aliases.global_aliased, ShellWalk.expand_globals), where
+#             bash, which has no global alias, runs the words as written, which that reading did not read
+#             (line_aliases.spelled_too, SPD-322); shown is the text, or the word.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
@@ -276,6 +280,11 @@ UNREAD_MESSAGES = {
                    "spell out what the alias stands for in place of its name, and give eval its words spelled out; define"
                    " no global or suffix alias on the line, or define it with its name and body written out, outside any"
                    " branch, subshell, pipeline or loop"),
+    "bash-alias": ("a global alias (`alias -g`, zsh's `galiases`) stands in `%s`, text a bash parses as it runs (eval's"
+                   " words, a `$( )`, backtick or `<( )` body, a trap's action), which the hook reads with the alias's"
+                   " words in its place, as zsh would; but bash has no global alias -- its `alias -g` is an invalid"
+                   " option -- so it runs the words as written, which the hook did not read",
+                   "define no global alias in text a bash runs, and spell out in its place the words you mean it to run"),
 }
 
 

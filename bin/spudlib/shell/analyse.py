@@ -245,7 +245,7 @@ def analyse_isolated(a, command, depth, stdin=None, fed=False, new_shell=False, 
     a.function_bodies = bodies  # a function the body defines stays in its process, and no call after it runs it (SPD-212)
 
 
-def analyse_new_shell(a, command, depth, stdin=None, fed=False, held=False, lines=False):
+def analyse_new_shell(a, command, depth, stdin=None, fed=False, held=False, lines=False, bare=False):
     """A body another shell process reads: a `-c` string, a here-document fed to a shell, the words `env -S` or `script -c`
     hand on.  An alias the line defined does not reach it (probed: `alias gp='git push'; eval 'sh -c gp'` ran
     nothing, while `eval 'echo $(gp)'` ran it, the substitution being parsed by the shell that holds the alias).  It runs
@@ -273,11 +273,15 @@ def analyse_new_shell(a, command, depth, stdin=None, fed=False, held=False, line
     SPD-291: the text is the new shell's own line only where the shell parses it whole -- zsh's `-c` string, and a shell
     that reads no alias.  sh, dash and ksh read a `-c` string a line at a time, and every one of them, zsh and bash
     among them, a script it reads on standard input, so an alias one line defines stands in the next line's words:
-    `lines`, as held_text.text_lines says it for the shell (analyse_command, walk.ShellWalk.new_line)."""
+    `lines`, as held_text.text_lines says it for the shell (analyse_command, walk.ShellWalk.new_line).
+
+    SPD-322: a bash may expand no alias at all in its text, eval's words and its substitutions included (`bare`, as
+    held_text.expands_no_alias says it for the shell): the text is read with an AliasView so marked, which every text
+    parsed inside it inherits, and a word an alias stands in there is read both ways (line_aliases.spelled_too)."""
     state = (a.alias_scope, a.aliases, a.alias_unknown, a.alias_view)
     doubts = {k for k in a.doubt if k.startswith(syntax.ALIAS_KEY)}
     a.alias_scope, a.aliases, a.alias_unknown = 0, {}, False
-    a.alias_view = line_aliases.AliasView(a, False, held=held)
+    a.alias_view = line_aliases.AliasView(a, False, held=held, bare=bare)
     if held:
         line_aliases.held_aliases(a)
     try:
@@ -585,6 +589,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             if other_doubtful:
                 a.findings.append(("alias", word))
             as_spelled = other is None and not other_doubtful
+        # SPD-322: in text a bash parses as it runs, where it may expand no alias at all, the word runs as it is written as
+        # well: read on after the alias (line_aliases.spelled_too; `bash -c 'alias git=echo; eval git push'` pushes)
+        as_spelled = as_spelled or line_aliases.spelled_too(a)
         # SPD-308: where the text spells the name both quoted and unquoted the hook cannot tell which this word is, so it
         # reads the alias an unquoted one runs, then on as a quoted one runs: its suffix alias, then the command it names
         # (probed in zsh 5.9: under `alias ls='echo ALIASED'`, eval's `'ls' -d /; ls -d /` printed `/`, then `ALIASED -d
@@ -718,6 +725,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # -- say which of the user's startup files it sources, and so whether the snapshot's aliases and functions stand
         # in its text (`held`)
         end, dash_c, held = held_text.shell_start(base, words)
+        bare = held_text.expands_no_alias(base)  # SPD-322: a bash, which may expand no alias in its text at all
         string = None
         if dash_c:
             string = prepare.deglob(words[end]) if end < len(words) else None
@@ -731,9 +739,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 # read with its own quotes, `sh -c 'g?t push'`, and on the shell's standard input, which its commands
                 # read where nothing of their own replaces it: `sh -c sh < x.sh` runs x.sh (SPD-210, CompoundInputTest);
                 # a line at a time where the shell reads it so (SPD-291)
-                analyse_new_shell(a, string, depth + 1, stdin, fed, held, held_text.text_lines(base, False))
+                analyse_new_shell(a, string, depth + 1, stdin, fed, held, held_text.text_lines(base, False), bare)
         for body in bodies:
-            analyse_new_shell(a, body, depth + 1, stdin, fed, held, held_text.text_lines(base, True))
+            analyse_new_shell(a, body, depth + 1, stdin, fed, held, held_text.text_lines(base, True), bare)
         if not dash_c and stdin_text.reads_commands(words):
             # With no -c string and no script of its own the shell runs what it reads on standard input, and
             # the line spells that text: `echo 'git push' | sh`, `bash -s <<< 'git push'`, `cat <<'EOF' | sh` -- zsh's
@@ -742,7 +750,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             fed_bodies = {body + "\n" for body in bodies}
             for text in stdin_text.each_reading(stdin):
                 if text not in fed_bodies:
-                    analyse_new_shell(a, text, depth + 1, stdin, fed, held, held_text.text_lines(base, True))
+                    analyse_new_shell(a, text, depth + 1, stdin, fed, held, held_text.text_lines(base, True), bare)
         # ... and every shell whose commands come from a file: a script operand, standard input the line does not spell,
         # an xargs string from such input, a HOME of the line's own (shell/script_files, refused a member in bash_rule)
         script_files.read_shell(words, a, dash_c, string, xargs_input, stdin, fed)

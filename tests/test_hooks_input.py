@@ -2429,6 +2429,103 @@ class LineAtATimeAliasTest(BashHookCase):
                 self.silent_for_everyone(ok)
 
 
+class BashUnexpandedAliasTest(BashHookCase):
+    """SPD-322: a bash that is not interactive expands no alias anywhere in its text, eval's words and its substitutions
+    included, where the hook read those as text parsed as the text runs (SPD-283, SPD-286) and expanded the text's own
+    alias there: `bash -c 'alias git=echo; eval git push'`, `bash -c 'alias git=echo; echo $(git push)'` and `echo 'alias
+    git=echo; eval git push' | bash` pushed with no finding (Law 7).  In a bash's text such a word is now read both ways,
+    the alias and on as it is written (line_aliases.spelled_too, AliasView.bare, held_text.expands_no_alias).
+
+    Probed through tests/probes/shell_probe.py (2026-09-25), zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual, -f
+    and GNU bash 3.2.57 each driving /bin/bash 3.2.57, /bin/sh, /bin/dash, /bin/ksh and /bin/zsh, each printing the same,
+    after `alias ls="echo ALIASED"`:
+
+    - /bin/bash -c: `eval ls -d /` printed `/`, and so did `echo "[$(ls -d /)]"` (`[/]`), its backtick form, `cat <(ls -d
+      /)`, `trap "ls -d /" EXIT`, `eval "eval ls -d /"`, `echo "[$(echo $(ls -d /))]"`, `f() { eval ls -d /; }; f`, the
+      eval on the text's next line, `bash --noprofile -l -c`, and the text fed to bash by a pipe, with `-s` and without, the
+      `$( )` and the eval on lines after the alias's too;
+    - `shopt -s expand_aliases` before it, `bash -O expand_aliases`, `bash --norc -i` and `bash --posix` printed `ALIASED
+      -d /`, and so did `eval ls -d /` in /bin/sh (bash in POSIX mode), /bin/dash, /bin/ksh and /bin/zsh, from `-c` and fed
+      by a pipe: those read the alias, as before;
+    - `bash -c 'alias -g X="echo G"'` and `alias -s txt=...` printed `alias: -g: invalid option` (`-s`), status 2, and a
+      later `eval X` found no command X: bash has no global alias, so a word one stands in runs as written, which the
+      hook's reading of the alias does not read -- refused a member unread ("bash-alias").
+
+    AGENT_A and AGENT_B plan tests/** and bin/spud."""
+
+    def refused_for_members(self, command, needle="Law 7"):
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_A, AGENT_B, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def findings(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path))).findings
+
+    def test_the_tickets_evidence_commands(self):
+        for command in ("bash -c 'alias git=echo; eval git push'", "bash -c 'alias git=echo; echo $(git push)'",
+                        "echo 'alias git=echo; eval git push' | bash"):
+            with self.subTest(command):
+                self.refused_for_members(command)
+                self.assertIn(("git", ("push", "push")), self.findings(command))
+
+    def test_every_text_bash_parses_as_it_runs(self):
+        for command in ("bash -c 'alias git=echo; echo `git push`'", "bash -c 'alias git=echo; cat <(git push)'",
+                        "bash -c 'alias git=echo; eval \"eval git push\"'",
+                        "bash -c 'alias git=echo; echo $(echo $(git push))'", "bash -c 'alias git=echo; f() { eval git push; }; f'",
+                        "bash -c 'alias git=echo\neval git push'", "bash -c 'alias git=echo\necho $(git push)'",
+                        "bash -l -c 'alias git=echo; eval git push'", "bash -s <<< 'alias git=echo; eval git push'",
+                        "bash <<'EOF'\nalias git=echo\neval git push\nEOF", "printf 'alias git=echo; echo $(git push)\\n' | bash -s",
+                        "env bash -c 'alias git=echo; eval git push'", "echo 'alias git=echo; eval git push' | xargs -0 bash -c",
+                        "bash -c 'alias git=echo; eval \"git push\"'", "bash -c 'unalias -a; alias git=echo; eval git push'",
+                        "sh -c \"bash -c 'alias git=echo; eval git push'\""):
+            with self.subTest(command):
+                self.refused_for_members(command)
+        # a trap's action, whose alias the hook doubts (the reason it names), now holds the push as written too
+        trap = "bash -c 'alias git=echo; trap \"git push\" EXIT'"
+        self.refused_for_members(trap, "the command word `git` runs an alias")
+        self.assertIn(("git", ("push", "push")), self.findings(trap))
+
+    def test_shells_that_expand_the_alias_read_as_before(self):
+        """sh, dash, ksh and zsh expand the alias in eval's words, and a bash's own line reads none: each as before."""
+        for ok in ("sh -c 'alias git=echo; eval git push'", "dash -c 'alias git=echo; eval git push'",
+                   "ksh -c 'alias git=echo; eval git push'", "zsh -c 'alias git=echo; eval git push'",
+                   "zsh -c 'alias git=echo; echo $(git push)'", "echo 'alias git=echo; eval git push' | sh",
+                   "alias git=echo; eval git push", "bash -c 'zsh -c \"alias git=echo; eval git push\"'"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_a_control_stays_allowed(self):
+        """Both ways reads the alias and the word as written, so an alias whose word runs nothing refused stays allowed."""
+        for ok in ("bash -c 'alias ll=\"ls -l\"; eval ll'", "bash -c 'alias ll=\"ls -l\"; echo $(ll)'",
+                   "echo 'alias ll=\"ls -l\"; eval ll' | bash", "bash -c 'alias git=echo; eval git log'"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_what_was_refused_stays_refused(self):
+        for command in ("bash -c 'alias gp=\"git push\"; eval gp'", "bash -c 'alias gp=\"git push\"; echo $(gp)'",
+                        "bash -c 'alias -s txt=\"git push\"; eval a.txt'", "bash -c 'alias git=\"git push\"; eval git'"):
+            with self.subTest(command):
+                self.refused_for_members(command)
+
+    def test_a_global_alias_bash_has_none_of_is_refused_unread(self):
+        for command in ("bash -c 'alias -g push=status; eval git push'", "bash -c 'alias -g push=status; echo $(git push)'",
+                        "bash -c 'alias -g push=status; cat <(git push)'", "bash -c 'alias -g GG=hi; eval echo GG'"):
+            with self.subTest(command):
+                self.refused_for_members(command, "bash has no global alias")
+        self.refused_for_members("bash -c 'alias -g X=\"; git push\"; eval echo X'")  # ... after the alias's own push
+        for ok in ("zsh -c 'alias -g push=status; eval git push'", "bash -c 'alias -g GG=hi\necho GG'"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+
 class BashToolLineAliasTest(BashHookCase):
     """SPD-291: Claude Code runs the member's line through eval in the shell it starts, which zsh parses whole (SPD-286) and
     bash 3.2, whose snapshot turns expand_aliases on, a line at a time (probed through tests/probes/shell_probe.py: `bash -c
