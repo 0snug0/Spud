@@ -11,7 +11,7 @@ keeps by are one rule, and read_shell_name and read_body are its only way in.  A
 is read at each call through the same per-state reading (read_once, read_function, SPD-277), since a call runs it where
 the shell stands then exactly as it runs a snapshot's."""
 
-from . import analyse, directories, expansions, globbing, held_shadows, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
+from . import analyse, directories, expansions, globbing, held_shadows, line_aliases, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
 from ..hooks import hookio, snapshots
 
 
@@ -27,12 +27,25 @@ def read_body(a, text, depth, stdin, fed):
     Its directory changes stay too (SPD-252): a cd, pushd or popd in the body, or in a function it calls, is where the
     line's shell is when the call returns, as the same cd on the line leaves it -- either directory after one that may
     not run or may fail, and one the hook cannot follow where the body cds into a value it cannot settle.  What the body
-    runs in a process of its own (a subshell, a substitution, a pipeline element) its walk already puts back."""
+    runs in a process of its own (a subshell, a substitution, a pipeline element) its walk already puts back.
+
+    A body the shell holds (text, not a LineBody) was parsed where its snapshot defined it, before its aliases and long
+    before the line's, so no alias of the line's table is expanded in its own text, wherever the call stands -- eval's
+    words, a substitution (SPD-283: ShellAnalysis.alias_scope is 0 while it is read, and line_aliases.held_names gives the
+    shell's own none there; probed: a snapshot's `f() { echo in-f X; }`, defined before `alias -g X=snapshot`, printed
+    `in-f X`).  An eval or a substitution inside it is parsed as it runs, where they stand again."""
     values, doubted, own, left = dict(a.vars), frozenset(a.doubt), {}, []
+    parsed = isinstance(text, str)
 
     def run():
         a.body_locals = (a.body_locals or []) + [{}]
-        analyse.analyse_command(text, a, depth, stdin, fed)
+        scope = a.alias_scope
+        if parsed:
+            a.alias_scope = 0
+        try:
+            analyse.analyse_command(text, a, depth, stdin, fed)
+        finally:
+            a.alias_scope = scope
         own.update(a.body_locals[-1])
         left.append(a.cwds)
 
@@ -87,7 +100,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     cmd = prepare.deglob(words[0])
     before = a.cwds
     if aliased:
-        text, own_words, expanded, unreadable = expansions.shell_aliased(words, a)
+        text, own_words, expanded, unreadable = line_aliases.shell_aliased(words, a)
         a.shell_expanded.extend(expanded)
         if unreadable is not None:  # the chain reached a body whose quoting the hook cannot take off: it runs the line, unread
             a.kinds.append("other")
@@ -105,7 +118,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
         return False
     # a body the line itself defines under the name (SPD-277)
     line_moved = line_functions.read_call(a, cmd, depth, stdin, fed)
-    body = expansions.shell_function(cmd, a)
+    body = line_aliases.shell_function(cmd, a)
     if body is None and line_moved is not line_functions.NO_BODY:
         a.cwds = directories.settle(effect, before, line_moved)
     elif body is not None:

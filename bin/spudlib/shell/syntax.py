@@ -696,8 +696,10 @@ class ShellAnalysis:
         # place on one line where a name the line aliased is expanded (a shell expands an alias when it parses the text);
         # `alias_unknown`, the line defined an alias whose name the hook cannot read.  Each name's doubt lives in `doubt`
         # under ALIAS_KEY + name, so a definition in a branch, a subshell, a pipeline or a loop body is doubted as a
-        # variable's assignment there is.
-        self.aliases, self.alias_scope, self.alias_unknown = {}, 0, False
+        # variable's assignment there is.  SPD-286: `alias_view`, the line_aliases.AliasView the innermost such text was
+        # parsed with -- the table as it stood where its reading began, which its own words read while `aliases` takes what
+        # it defines for text parsed after it -- or None where no such text is being read.
+        self.aliases, self.alias_scope, self.alias_unknown, self.alias_view = {}, 0, False, None
         # The shell the Bash tool starts sources Claude Code's snapshot of the user's interactive shell, so a
         # command word may already be one of that profile's aliases or functions before anything on the line runs.
         # `shell_expanded`, (the name, what the shell runs for it) per expansion on this line, in order, so a reason can
@@ -811,13 +813,15 @@ class ShellAnalysis:
     def reading_state(self):
         """The state a reading of text starts from that decides what it finds, beside the text and its standard input: the
         directories the shell may be in, the loop and function depth a relative cd repeats in, the line's variables with
-        their doubt, the aliases' scope, what shell/loop_bindings settled (SPD-146, SPD-221), and whether an option
-        builtin ran (arith_opaque, cdable, chase).  analyse.analyse_isolated reads a body in its own process once per such
-        state, and held_text.read_shell_name a function's body once per call from one (SPD-252); a field that changes what a
-        reading finds belongs here."""
+        their doubt, the aliases -- their scope, the table as it stands and the one the text being read was parsed with
+        (SPD-283, SPD-286: `f() { eval gp; }; f; alias gp='git push'; f` pushes in the second call) -- what
+        shell/loop_bindings settled (SPD-146, SPD-221), and whether an option builtin ran (arith_opaque, cdable, chase).
+        analyse.analyse_isolated reads a body in its own process once per such state, and held_text.read_shell_name a
+        function's body once per call from one (SPD-252); a field that changes what a reading finds belongs here."""
         return (self.cwds, self.loop_depth, tuple(sorted(self.vars.items())), frozenset(self.doubt), frozenset(self.sticky),
-                self.all_doubt, self.alias_scope, tuple(sorted(self.loop_words.items())), tuple(sorted(self.derived.items())),
-                self.func_depth, tuple(sorted(self.loop_derived.items())), self.arith_opaque, self.cdable, self.chase)
+                self.all_doubt, self.alias_scope, frozenset(self.aliases.items()), self.alias_unknown, self.alias_view,
+                tuple(sorted(self.loop_words.items())), tuple(sorted(self.derived.items())), self.func_depth,
+                tuple(sorted(self.loop_derived.items())), self.arith_opaque, self.cdable, self.chase)
 
 
 def loop_name(word, first=False):

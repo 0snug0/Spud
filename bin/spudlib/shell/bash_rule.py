@@ -203,7 +203,7 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 #             an OLD the shell's snapshot defines (line_functions.copy_function, SPD-279); shown is the command.
 # "alias-word" a word eval reads again that the line may have made a global or a suffix alias the hook cannot resolve --
 #             a name or body it does not spell, a definition or `unalias` that may not have run -- or a word the shell
-#             expands before eval reads it, which may spell one's name (expansions.global_aliased, SPD-109); shown is the
+#             expands before eval reads it, which may spell one's name (line_aliases.global_aliased, SPD-109); shown is the
 #             word, or the text.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
