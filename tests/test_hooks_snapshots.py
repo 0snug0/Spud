@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import json
 import os
+import shlex
 import shutil
 import sys
 import time
@@ -4348,6 +4349,96 @@ class NewShellStartupTest(ShellSnapshotCase):
             with self.subTest(line):
                 self.refused_for_members(line, "never run `git push`")  # the string's push, not a script operand
         self.silent_for_everyone("sh -c 'echo hi' -x")
+
+
+DQ_BRACE = "bash reads quotes inside a double-quoted `${ }` differently from this hook"  # SPD-204's reason, a member's
+SPUD_TOUCH = "Law 1: a write by argument (`touch` x)"  # Spud's answer to `touch x` in home/tests, before SPD-204 and after
+
+
+class DoubleQuotedBraceQuoteTest(ShellSnapshotCase):
+    """SPD-204, filed by SPUD-202/Frederica: the hook reads every quote inside double quotes as text, so in
+    `"${u:-'"'}"` it ends the double quotes at the inner `"` and opens a single-quoted span after it, while bash 3.2 reads
+    that `"` as a quote nested in the expansion and the apostrophes as text.  Two such words balance for both readings,
+    and the commands between them are hidden from the hook in text bash runs.  The ticket's evidence, through
+    tests/probes/shell_probe.py (2026-09-23; zsh 5.9 -f and -f -o nobareglobqual, GNU bash 3.2.57): eval of `echo
+    "${u:-'"'}" ; echo RAN > l/dqsq ; echo "${u:-'"'}"` wrote l/dqsq in bash and failed in zsh (`unmatched double quote`),
+    so the Bash tool's own zsh line runs nothing and the gap is bash's.
+
+    The rule now, fail-closed and nothing more (Eric's call, 2026-09-25): in text bash or sh reads -- a `bash -c` or
+    `sh -c` string, a here-document fed to one, a shell the hook cannot name, and the Bash tool's own line where a bash
+    snapshot may be the one it sources -- any `'`, `"` or backtick inside a double-quoted `${ }` is an "unread" finding,
+    refused a member; Spud reads on, and zsh's top-level line reads as it did.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; every line runs in home/tests, where `touch x` is theirs."""
+
+    INNER = "echo \"${u:-'a'}\"; touch x"
+    PLAIN = "echo \"${u:-a}\"; touch x"
+    EVIDENCE = "echo \"${u:-'\"'}\" ; touch x ; echo \"${u:-'\"'}\""
+
+    def setUp(self):
+        super().setUp()
+        self.tests_dir = str(self.home.path / "tests")
+
+    @staticmethod
+    def bash_texts(inner):
+        """The inner text as bash or sh reads it: a `bash -c` and an `sh -c` string, and a here-document fed to bash."""
+        return ("bash -c " + shlex.quote(inner), "sh -c " + shlex.quote(inner), "bash <<'EOF'\n%s\nEOF" % inner)
+
+    def spud_reads_on(self, line, misread=False):
+        """Spud's answer as before SPD-204: the hook reads the words, and `touch x` in home/tests is Law 1's (Spud never
+        produces a deliverable), with nothing of SPD-204's reason -- except where the line holds the ticket's evidence
+        (`misread`), which the hook reads as one echo of one word, so Spud is left silent there as he was: the laws bind
+        him where the hook cannot see."""
+        with self.subTest(line=line, agent_id="spud"):
+            if misread:
+                self.assertSilent(line, None, self.tests_dir)
+                return
+            r = self.assertRefused(line, SPUD_TOUCH, None, self.tests_dir)
+            self.assertNotIn(DQ_BRACE, r.reason)
+
+    def refused_to_members_alone(self, line, misread=False):
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertRefused(line, DQ_BRACE, agent_id, self.tests_dir)
+        self.spud_reads_on(line, misread)
+
+    def read_as_before(self, line, misread=False):
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(line=line, agent_id=agent_id):
+                self.assertSilent(line, agent_id, self.tests_dir)
+        self.spud_reads_on(line, misread)
+
+    def test_a_quote_inside_a_double_quoted_brace_is_refused_a_member_in_text_bash_reads(self):
+        for inner in (self.INNER, self.EVIDENCE, "echo \"${u:-\"a\"}\"; touch x", "echo \"${u:-`echo a`}\"; touch x",
+                      "echo \"x${u:-${v:-'a'}}y\"; touch x", "echo \"${u:+'a'}\" \"${v:-'b'}\"; touch x"):
+            for line in self.bash_texts(inner):
+                self.refused_to_members_alone(line, inner == self.EVIDENCE)
+
+    def test_the_reason_names_the_expansion_and_how_to_respell_it(self):
+        r = self.assertRefused(self.bash_texts(self.INNER)[0], DQ_BRACE, AGENT_A, self.tests_dir)
+        self.assertIn("${u:-'a'}", r.reason)
+        self.assertIn("variable", r.reason)
+
+    def test_the_same_text_with_no_quote_inside_is_allowed(self):
+        for inner in (self.PLAIN, "echo ${u:-'a'}; touch x", "echo \"a\" ${u:-'b'}; touch x", "echo \"${u:-\\'}\"; touch x",
+                      "echo \"\\${u:-'a'}\"; touch x", "echo \"${u:-a}\" 'b'; touch x"):
+            for line in self.bash_texts(inner):
+                self.read_as_before(line)
+
+    def test_zshs_top_level_line_and_a_zsh_string_read_as_before(self):
+        """The Bash tool's own line with only a zsh snapshot, and a `zsh -c` string: read as before SPD-204, allowed."""
+        for line in (self.INNER, self.PLAIN, "zsh -c " + shlex.quote(self.INNER), "zsh -f <<'EOF'\n%s\nEOF" % self.INNER):
+            self.read_as_before(line)
+        for line in (self.EVIDENCE, "zsh -c " + shlex.quote(self.EVIDENCE)):
+            self.read_as_before(line, misread=True)
+
+    def test_a_bash_snapshot_makes_the_tools_own_line_text_bash_reads(self):
+        """Where a bash snapshot may be the one the Bash tool sources, its line is text bash reads; a `zsh -c` string is not."""
+        self.write_snapshot("snapshot-bash-1700000000001-bbbbbb.sh", live_bash_snapshot())
+        self.refused_to_members_alone(self.INNER)
+        self.refused_to_members_alone(self.EVIDENCE, misread=True)
+        for line in (self.PLAIN, "zsh -c " + shlex.quote(self.INNER)):
+            self.read_as_before(line)
 
 
 if __name__ == "__main__":

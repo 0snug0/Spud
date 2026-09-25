@@ -57,6 +57,13 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False, line
         # SPD-103: a `${ }` nested past the bound; recorded (a member's refusal) and read on, so Spud's own refusal on an
         # unresolvable target still stands.  The scan stops at the bound, so a run of openings is refused at once.
         unread.record_unread(a, "braces", (unread.BRACE_DEPTH, unread.unread_shown(command)))
+    if "${" in command and '"' in command and held_text.bash_reads(a):
+        # SPD-204: a `'`, `"` or backtick inside a double-quoted `${ }`, which bash 3.2 reads apart from the hook (a `"` a
+        # nested quote, a `'` text), so two such words can hide the commands between them in text bash runs; recorded (a
+        # member's refusal, fail-closed rather than modelled) and read on, so Spud's reading and zsh's text are unchanged.
+        shown = unread.dq_brace_quote(command)
+        if shown is not None:
+            unread.record_unread(a, "dq-brace", shown)
     for m in syntax._ASSIGNING_EXPANSION_RE.finditer(command):  # `${X:=git}` assigns X wherever it is expanded (probed)
         a.doubt.add(m.group(1))
         a.sticky.add(m.group(1))

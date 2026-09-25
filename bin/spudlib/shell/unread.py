@@ -138,6 +138,59 @@ def process_sub_in(tokens):
                for k, t in enumerate(tokens))
 
 
+def dq_brace_quote(text):
+    """The first `${ }` that opens inside double quotes and holds a `'`, `"` or backtick, shown as unread_shown spells it,
+    or None (SPD-204): bash 3.2 reads a `"` there as a quote nested in the expansion and a `'` as text, where the hook
+    ends the double quotes at the `"` and opens a single-quoted span at the `'`, so text bash runs can hide commands
+    between two such words.  The quotes around it are read as the hook reads them (single quotes, `$'...'` with its
+    escapes, double quotes; a backslash outside single quotes skips one character); inside the `${ }` a backslash skips
+    one character, and a nested `${` is counted to the `}` that closes the outer one."""
+    i, n, quote = 0, len(text), None
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            quote = None if c == "'" else quote
+        elif c == "\\":
+            i += 1
+        elif quote == "$'":
+            quote = None if c == "'" else quote
+        elif quote == '"' and c == "$" and text.startswith("${", i):
+            end, quoted = _dq_brace_extent(text, i + 2)
+            if quoted:
+                return unread_shown(text[i:_dq_brace_extent(text, i + 2, False)[0]])
+            i = end - 1
+        elif quote == '"':
+            quote = None if c == '"' else quote
+        elif c == "'":
+            quote = "$'" if i and text[i - 1] == "$" else "'"
+        elif c == '"':
+            quote = '"'
+        i += 1
+    return None
+
+
+def _dq_brace_extent(text, i, stop=True):
+    """(the index past the `}` closing the `${` whose text starts at i -- the text's end where none does -- and whether a
+    quote or backtick stands before it, the scan ending at the first one where `stop`), for dq_brace_quote."""
+    n, depth = len(text), 1
+    while i < n:
+        c = text[i]
+        if c == "\\":
+            i += 2
+            continue
+        if c in "'\"`" and stop:
+            return i, True
+        if text.startswith("${", i):
+            depth, i = depth + 1, i + 2
+            continue
+        i += 1
+        if c == "}":
+            depth -= 1
+            if not depth:
+                return i, False
+    return n, False
+
+
 def brace_depth_exceeds(text, bound):
     """True when a `${ }` parameter expansion nests deeper than `bound` in `text` (SPD-103), read as the shells parse it:
     single-quoted runs and a backslash-escaped character do not open one, and a `}` closes the innermost `${` still open
