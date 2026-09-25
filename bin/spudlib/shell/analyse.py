@@ -36,6 +36,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         return line_functions.read_line_body(a, command, depth, stdin, fed)
     if depth == 0:
         held_options.line_options(a)  # the options the shell's snapshot set before the line (SPD-263)
+        line_aliases.held_aliases(a)  # ... and its global and suffix aliases, in the line's own table (SPD-283)
     if depth == 0 and not command.isascii() and unread.has_marker(command):
         # SPD-199: a private-use marker the member typed into the reading's own alphabet, on the raw line before any pass
         # writes one; recorded and read on, so a refusal the readable words earn keeps its own reason.
@@ -55,9 +56,10 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
             end += 1
         expansions.fill_from(a, (m.group(1),), command[m.end() : end])
     text, bodies, expanded = heredocs.strip_heredocs(command)
-    if a.alias_scope and a.aliases:
-        # text the shell parses again where the line's aliases stand (eval's, an alias body, a substitution in them): a
-        # global alias is expanded in every word zsh reads unquoted, not only the command word (SPD-109)
+    if a.aliases:
+        # a global alias is expanded in every word zsh reads unquoted, not only the command word (SPD-109): in text the
+        # shell parses as the line runs (eval's, a substitution's, an alias body in them), each the line's table holds;
+        # in the line's own text and an alias body read in it, the shell's own as its snapshot holds them (SPD-283)
         text = line_aliases.global_aliased(text, a)
     text, apart = prepare.ansi_c_quotes(text)
     if apart is not None and a.unparseable is None:
@@ -139,13 +141,29 @@ def isolated(a, run):
 def analyse_isolated(a, command, depth, stdin=None, fed=False):
     """analyse_command on a body that runs in its own process, once per body and starting state: both readings of a line walk
     its substitutions, and a nested line must not double its work at every level.  `stdin` and `fed`: the standard input
-    the body runs on (analyse_command), part of that state (SPD-210)."""
-    key = (command, depth, stdin_text.reading_key(stdin, fed), a.reading_state())
+    the body runs on (analyse_command), part of that state (SPD-210).
+
+    The shell parses such a body as the line runs, not with it (SPD-283, probed in zsh 5.9 -f and -f -o nobareglobqual: a
+    `$( )` or backtick body when it runs it, `alias gp="echo GP-RAN"; echo $(gp)` printing GP-RAN; a trap's action when
+    `trap` sets it, `alias gp="echo GP-RAN"; trap gp EXIT` running the alias where `trap "echo X" EXIT; alias -g X=line`
+    printed the X held before; an (e) flag's value when it is expanded), so the aliases the line's table holds stand
+    there as they do in eval's words: it is read a level into ShellAnalysis.alias_scope while the table holds any
+    (line_aliases).  A new shell's body, whose table analyse_new_shell empties, holds none, and a line with none is read
+    as it always was.  The table is part of the state a body is read once per, beside ShellAnalysis.reading_state: `echo
+    $(gp); alias gp='git push'; echo $(gp)` pushes in the second substitution, which a reading cached from the first had
+    skipped, and so did the same pair of eval's."""
+    key = (command, depth, stdin_text.reading_key(stdin, fed), a.reading_state(), frozenset(a.aliases.items()),
+           a.alias_unknown)
     if key in a.isolated_done:
         return
     a.isolated_done.add(key)
     bodies, a.function_bodies = a.function_bodies, walk.bodies_copy(a.function_bodies)
-    isolated(a, lambda: analyse_command(command, a, depth, stdin, fed))
+    parsed = 1 if a.aliases or a.alias_unknown else 0
+    a.alias_scope += parsed
+    try:
+        isolated(a, lambda: analyse_command(command, a, depth, stdin, fed))
+    finally:
+        a.alias_scope -= parsed
     a.function_bodies = bodies  # a function the body defines stays in its process, and no call after it runs it (SPD-212)
 
 
@@ -413,31 +431,36 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # `BASH_FUNC_<name>%%=...` is no assignment to a shell, but sudo reads it as one, and env reads it so
         # wherever strip_wrapper did not: refused as the environment it spells, whatever takes it
         a.findings.append(("env-function", prepare.deglob(cmd.partition("=")[0])))
-    if a.alias_scope and command_position:
-        # Inside `eval`, a command word the line aliased runs the alias's body, not a command of its own.  The body
-        # is read as the shell text it is, with its own quotes, as eval's rejoined words are, and the words after it as
-        # eval's text spells them, quotes and all: the shell parses them after the body (SPD-201, prepare.requoted).
-        # A suffix alias the line defined runs its body before a command word ending in its suffix, that word kept after
-        # the body (`a.txt x` runs `<body> a.txt x`), where no plain alias of the word's name does (SPD-109).
-        body, doubtful = line_aliases.alias_substitution(cmd, a)
-        kept = 1
+    if command_position and (a.alias_scope or a.aliases):
+        # Inside `eval` or a substitution the shell parses as the line runs (a.alias_scope), a command word the line
+        # aliased runs the alias's body, not a command of its own.  The body is read as the shell text it is, with its own
+        # quotes, as eval's rejoined words are, and the words after it as eval's text spells them, quotes and all: the
+        # shell parses them after the body (SPD-201, prepare.requoted).  A suffix alias runs its body before a command
+        # word ending in its suffix, that word kept after the body (`a.txt x` runs `<body> a.txt x`), where no plain alias
+        # of the word's name does (SPD-109): there, one of the line's table; in the line's own text, parsed before any of
+        # it runs, one the shell's snapshot holds, as it holds it, for a word no expansion gave (SPD-283).
+        word = prepare.deglob(cmd)
+        body, doubtful = line_aliases.alias_substitution(cmd, a) if a.alias_scope else (None, False)
+        kept, doubt = 1, None
         if body is None and not doubtful:
-            (body, doubtful), kept = line_aliases.suffix_substitution(prepare.deglob(cmd), a), 0
-            if body is None and doubtful:  # a body the hook cannot read: refused a member, the word read on as spelled
-                unread.record_unread(a, "alias-word", prepare.deglob(cmd))
-                doubtful = False
+            (body, doubt), kept = line_aliases.suffix_substitution(word, a, fresh), 0
+            if body is None and doubt is not None:  # a body the hook cannot read: refused a member, the word read on as spelled
+                line_aliases.note_alias_doubt(a, doubt)
+                doubt = None
         if body is not None or doubtful:
             if body is not None:
+                if not a.alias_scope:  # the shell's own suffix alias, named where a reason says what the word ran
+                    a.shell_expanded.append((word, line_aliases.held_shown("a suffix alias", body)))
                 rest = " ".join(line_aliases.alias_requoted(w, a) for w in words[kept:])
                 before = a.cwds
                 analyse_command(body + (" " + rest if rest else ""), a, depth + 1, stdin, fed)
                 a.cwds = directories.settle(effect, before, a.cwds)  # its cd, where the command runs (SPD-252)
             else:
                 a.kinds.append("other")
-            if doubtful and kept:  # after the body, so a refusal the body itself earns keeps its own reason
-                a.findings.append(("alias", prepare.deglob(cmd)))
-            elif doubtful:
-                unread.record_unread(a, "alias-word", prepare.deglob(cmd))
+            if doubtful:  # after the body, so a refusal the body itself earns keeps its own reason
+                a.findings.append(("alias", word))
+            elif doubt is not None:
+                line_aliases.note_alias_doubt(a, doubt)
             return
     if seeks_function is True:
         looked_up.append(cmd)

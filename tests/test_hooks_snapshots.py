@@ -3134,5 +3134,247 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
         self.assertSilent("f=tests/k.py; pkill -f f; echo hi > $f", AGENT_B)
 
 
+# SPD-283: a snapshot whose alias block keeps each alias's kind, as `alias -L` prints one (`alias -g GL=...`, and `alias
+# -s txt=...` with `-s`).  Claude Code's own snapshots hold neither kind: they list zsh's plain `alias`, which prints a
+# global alias with no flag and a suffix alias not at all (hooks/snapshots.ALIAS_RE).  The functions come first, as the
+# snapshot writes them, before the aliases.
+HELD_WORD_ALIASES = """\
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+# Functions
+pushfn () {
+\techo in-f GP
+}
+runtxt () {
+\tnotes.txt
+}
+evalfn () {
+\teval "$1"
+}
+# Shell Options
+setopt autocd
+# Aliases
+alias -- ls='ls -G'
+alias -g -- GP='; git push'
+alias -g GS='| git status'
+alias -g -- NUL='> /dev/null 2>&1'
+alias -g -- GW='$(git push)'
+alias -g -- GC='git push'
+alias -s -- txt='git push'
+alias -s md='git status'
+alias -- pa='echo pa GP'
+alias -g -- BROKEN='git push
+alias -s -- cfg='git push
+"""
+# The reason a member earns where a global or a suffix alias the line's text stands in may run and the hook cannot
+# resolve it (bash_rule's unread form "alias-word", SPD-109), and where one the shell holds has a body it cannot read.
+ALIAS_WORD_WORDING = "global or suffix alias"
+HELD_BODY_WORDING = "whose body the hook cannot read"
+
+
+class HeldWordAliasTest(ShellSnapshotCase):
+    """SPD-283 (SPD-109's proposal): the shell's snapshot may hold a global alias (`alias -g`), which zsh expands in every
+    word it reads unquoted, and a suffix alias (`alias -s`), which runs its body before a command word ending in its
+    suffix.  The table read a `-g` line as a plain alias, reached only in command position, and dropped every `-s` line,
+    so on the member's own line `echo hi GP` (GP='; git push') and `a.txt` (txt='git push') pushed past Law 7.  Each kind
+    now has a table of its own (Table.galiases, Table.saliases, cache format 3), and a line starts from them
+    (line_aliases.held_aliases).  No snapshot Claude Code writes today holds either kind (hooks/snapshots.ALIAS_RE: its
+    alias block is zsh's plain `alias` listing), so this reads a writer that keeps the flag, as `alias -L` does.
+
+    Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py, a fresh `zsh -f -c` sourcing such a
+    snapshot (`unalias -a`, functions, then `alias -g X=snapshot`, `alias -s txt='echo SUFFIX'`) and evaluating the line, as
+    the Bash tool's shell does (bash 3.2 has neither kind):
+
+    - the line's own words: `echo hi X` printed `hi snapshot`, `a.txt top` ran the suffix alias, and so did every place
+      SPD-109 probed in eval's text, `nocorrect a.txt` and `time a.txt`, `(a.txt)`, a pipe's element and a glob's word
+      (`a?.txt`); `noglob`, `command`, `builtin`, `env` and `-` before it ran none, nor did `$F` holding a.txt;
+    - the line parses its own text before any of it runs: after `alias -g X=line`, `alias -s txt=...` or `unalias -s txt`
+      on the same line, its own X and a.txt still ran the snapshot's, and so did an alias body read in it (`unalias 'X';
+      pa`, pa='echo pa X', printed `pa snapshot`); `unalias X` had its own X expanded ("no such hash table element:
+      snapshot");
+    - text parsed as the line runs -- eval's, a `$( )` body's -- after the line's change: `alias -g X=line; echo sub $(echo
+      X)` printed `sub line`, `unalias 'X'; eval "echo hi X"` printed `hi X`, `alias X=plain` made X plain, `unalias -a`
+      cleared X and left txt, `unalias -s txt` cleared txt, and `alias -s txt="echo LINE"` replaced it;
+    - a function the snapshot defines before its aliases expands none (`f() { echo in-f X; }` printed `in-f X`, `g() {
+      a.txt; }` found no command a.txt), and a new shell holds none.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", HELD_WORD_ALIASES)
+        self.m = load_spud_module()
+
+    def refused_for_members(self, command, needle="Law 7", cwd=None):
+        r = super().refused_for_members(command, needle, cwd)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None, cwd=cwd)
+        return r
+
+    def analysis(self, command):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            forget_process_caches()  # the table this process read before a snapshot the test wrote since
+            return self.m.analyse_command(command, self.m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+
+    def test_the_table_reads_each_kind_apart(self):
+        built = self.m.build_table([str(self.snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh")])
+        self.assertEqual(built.aliases, {"ls": "ls -G", "pa": "echo pa GP"})
+        self.assertEqual(built.galiases, {"GP": "; git push", "GS": "| git status", "NUL": "> /dev/null 2>&1",
+                                          "GW": "$(git push)", "GC": "git push", "BROKEN": None})
+        self.assertEqual(built.saliases, {"txt": "git push", "md": "git status", "cfg": None})
+        self.assertEqual(sorted(built.functions), ["evalfn", "pushfn", "runtxt"])
+
+    def test_an_alias_line_names_its_kind(self):
+        definition = self.m.alias_definition
+        self.assertEqual(definition("alias -- gp='git push'"), ("plain", "gp", "git push"))
+        self.assertEqual(definition("alias -r -- gp=x"), ("plain", "gp", "x"))
+        self.assertEqual(definition("alias -g GL='| cat'"), ("global", "GL", "| cat"))  # `alias -L`'s spelling
+        self.assertEqual(definition("alias -g -- GL='| cat'"), ("global", "GL", "| cat"))
+        self.assertEqual(definition("alias -s txt='echo SUF'"), ("suffix", "txt", "echo SUF"))
+        self.assertEqual(definition("alias -s -- cfg='git push"), ("suffix", "cfg", None))  # quoting that never closes
+        self.assertIsNone(definition("alias -gs q=Q"))  # "illegal combination of options": zsh defines nothing (probed)
+        self.assertIsNone(definition("alias -g GL"))  # a query
+
+    def test_a_snapshot_is_read_in_line_order_each_kind_in_its_table(self):
+        """A plain and a global alias share zsh's one table, so the later replaces the earlier; a suffix alias has a table
+        of its own, which `unalias -a` leaves alone and `unalias -s` clears (probed)."""
+        text = ("alias -g X=g1\nalias X=p1\nalias Y=p2\nalias -g Y=g2\nalias -s txt=s1\nalias txt=p3\n"
+                "alias -g Z=g3\nunalias Z\nalias -s cfg=s3\nunalias -s cfg\n")
+        aliases, _, named, _ = self.m.read_snapshot(text.encode(), 0)
+        self.assertEqual(aliases, {"plain": {"X": "p1", "txt": "p3"}, "global": {"Y": "g2"}, "suffix": {"txt": "s1"}})
+        self.assertEqual(set(named), {"X", "Y", "txt", "Z", ("suffix", "txt"), ("suffix", "cfg")})
+        aliases, _, _, _ = self.m.read_snapshot(b"alias -g G=g\nalias p=q\nalias -s md=s\nunalias -a\n", 0)
+        self.assertEqual(aliases, {"plain": {}, "global": {}, "suffix": {"md": "s"}})
+        aliases, _, _, _ = self.m.read_snapshot(b"alias -g G=g\nalias -s md=s\nalias -s ini=t\nunalias -as\n", 0)
+        self.assertEqual(aliases, {"plain": {}, "global": {"G": "g"}, "suffix": {}})
+
+    def test_the_newest_snapshot_that_names_one_decides_it(self):
+        older = ("alias -g -- GP='; git status'\nalias -g -- OLD='; git push'\nalias -s -- ini='git push'\n"
+                 "alias -s -- md='git push'\nalias -s -- gone='git push'\n")
+        self.write_snapshot("snapshot-zsh-1600000000000-bbbbbb.sh", older, mtime=1600000000)
+        self.write_snapshot("snapshot-zsh-1800000000000-cccccc.sh", "unalias -s gone\n", mtime=1800000000)
+        os.utime(self.snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh", (1700000000, 1700000000))
+        self.refused_for_members("echo hi GP")  # the newer file's `; git push`
+        self.refused_for_members("echo hi OLD")  # named by the older file alone
+        self.refused_for_members("a.ini")
+        for line in ("a.md", "a.gone"):  # the newer file's `git status`; a suffix the newest cleared
+            self.silent_for_everyone(line)
+
+    def test_a_global_alias_in_every_word_of_the_line(self):
+        for line in ("echo hi GP", "echo hi GP; echo after", "true && echo GP", "(echo GP)", "{ echo GP; }",
+                     "echo a | cat GP", "echo $(echo GP)", "echo `echo GP`", "cat <(echo GP)", "f() { echo GP; }; f",
+                     "if true; then echo GP; fi", "for i in a; do echo GP; done", "eval 'echo GP'", 'eval "echo GP"',
+                     "evalfn 'echo GP'", "GC origin", "sudo echo GP", "pa", "[[ GW == x ]]", "case GW in x) :;; esac",
+                     "for i in GW; do :; done", "arr=(a GW b)", "X=1 echo GP"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+        for line in ("echo hi > GW", "echo hi 2>GW"):  # a target a substitution names refuses Spud too, spelled out
+            with self.subTest(line):
+                for agent_id in (AGENT_A, AGENT_B):
+                    self.assertRefused(line, "Law 7", agent_id)
+                self.assertRefused(line, "", agent_id=None)
+        self.assertEqual(self.analysis("echo hi GP").findings, [("git", ("push", "push"))])
+        self.assertEqual(self.analysis("echo hi GS").findings, [("git", ("status", None))])
+        self.silent_for_everyone("ls NUL")
+
+    def test_a_suffix_alias_on_a_command_word_of_the_line(self):
+        for line in ("a.txt", "a.txt x y", "./d/a.txt", "b.a.txt", "X=1 a.txt", "true; a.txt", "echo x | a.txt",
+                     "(a.txt)", "{ a.txt; }", "if true; then a.txt; fi", "nocorrect a.txt", "time a.txt",
+                     "echo $(a.txt)", "eval a.txt", "a?.txt", "echo G | a.txt"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+        self.assertEqual(self.analysis("x.md").findings, [("git", ("status", None))])
+        self.silent_for_everyone("x.md")
+
+    def test_where_no_alias_stands(self):
+        """Quoted, escaped or glued to other text, in an assignment's value, a `${ }`, arithmetic or a comment; a suffix
+        alias's word as an argument or behind a wrapper that takes the command position; a word an expansion gave; the
+        text a new shell reads; and a function the snapshot defines, whose body it parsed before its aliases."""
+        for line in ("echo hi 'GP'", 'echo hi "GP"', "echo hi \\GP", "echo hi G\\P", "echo GPX XGP", "X=GP",
+                     "echo ${GP}", "echo x # GP", "echo X=GP", "(( GP == 1 ))", "echo a.txt", "cat a.txt",
+                     "command a.txt", "noglob a.txt", "env a.txt", "builtin a.txt", "- a.txt", "a.TXT", ".txt", "txt",
+                     "F=a.txt; $F", "sh -c 'echo GP'", "sh -c a.txt", "zsh -c 'echo GP; a.txt'", "pushfn",
+                     "eval pushfn", "x=$(pushfn)", "runtxt", "eval runtxt"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+    def test_the_lines_own_change_stands_in_the_text_the_shell_parses_after_it(self):
+        """The line's own `alias -g`, `alias -s`, plain `alias` of the name or `unalias` reaches eval's text and a
+        substitution's body after it, never the line's own words or an alias body read in them, which the shell parsed
+        first (probed)."""
+        for line in ("unalias 'GP'; eval 'echo hi GP'", "unalias \\GP; eval 'echo hi GP'",
+                     "alias -g GP=ls; eval 'echo hi GP'", "alias GP=ls; eval 'echo hi GP'",
+                     "unalias -a; eval 'echo hi GP'", "unalias -s txt; eval a.txt", "alias -s txt='git status'; eval a.txt",
+                     "unalias 'GP'; echo $(echo GP)", "alias -s txt=ls; echo $(a.txt)", "unalias -s txt; echo $(a.txt)"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+        for line in ("unalias -a; eval a.txt",  # `unalias -a` clears no suffix alias
+                     "unalias GP; eval 'echo hi'",  # its own GP is expanded: `unalias ; git push`
+                     "unalias 'GP'; echo hi GP", "alias -g GP=ls; echo hi GP", "unalias -s txt; a.txt",
+                     "alias -s txt=ls; a.txt", "unalias 'GP'; pa", "alias -g GP=ls; pa"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+
+    def test_a_change_that_may_not_have_run_is_refused_a_member(self):
+        for line in ("if true; then unalias 'GS'; fi; eval 'echo GS'", "(unalias -s md); eval a.md",
+                     "true || alias -s md=ls; eval x.md", "X=GP; eval echo $X", "X=a.md; eval $X"):
+            with self.subTest(line):
+                self.refused_for_members(line, ALIAS_WORD_WORDING)
+
+    def test_a_body_the_hook_cannot_read_is_refused_a_member(self):
+        for line in ("echo BROKEN", "echo $(echo BROKEN)", "eval 'echo BROKEN'", "a.cfg", "eval a.cfg", "x=$(b.cfg)"):
+            with self.subTest(line):
+                r = self.refused_for_members(line, HELD_BODY_WORDING)
+                self.assertIn("shell-snapshots", r.reason)
+
+    def test_the_reason_names_what_the_shell_defined(self):
+        r = self.assertRefused("echo hi GP", "Law 7")
+        self.assertIn("`GP` as a global alias for `; git push`", r.reason)
+        r = self.assertRefused("a.txt", "Law 7")
+        self.assertIn("`a.txt` as a suffix alias for `git push`", r.reason)
+
+    def test_the_harness_shadows_still_read_silent(self):
+        """A line whose table holds the shell's own aliases takes the full reading of the harness's grep, find, rg and
+        pkill (held_shadows' fast path wants an empty one), which is silent all the same."""
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh",
+                            HELD_WORD_ALIASES + HARNESS_SHADOWS[HARNESS_SHADOWS.index("# Shadow find/grep"):])
+        for line in ("grep -rn x .", "find . -name x", "rg x", "pkill -f x", "grep a f | grep -v b", "x=$(grep -c a f)"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+        self.refused_for_members("grep -rn x . GP")
+
+    def test_a_table_with_neither_kind_puts_nothing_in_the_lines(self):
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", SHELL_SNAPSHOT)
+        a = self.analysis("echo $(echo hi); eval 'echo hi'")
+        self.assertEqual((a.aliases, a.alias_scope), ({}, 0))
+        self.assertEqual(self.analysis("echo hi GP").aliases, {})
+
+    def test_the_cache_holds_each_kind_and_an_older_format_is_rebuilt(self):
+        """Format 2 held a global alias among the plain ones and no suffix alias: read as it stands, `echo hi GP` would
+        expand nothing and `a.txt` run no alias, so a cache of it is built again, never read."""
+        cache = self.home.path / ".spud" / "shell-snapshot.json"
+        self.refused_for_members("echo hi GP")
+        stored = json.loads(cache.read_text(encoding="utf-8"))
+        self.assertEqual(stored["format"], sys.modules["spudlib.hooks.snapshots"].CACHE_FORMAT)
+        self.assertEqual((stored["galiases"]["GP"], stored["saliases"]["txt"]), ("; git push", "git push"))
+        self.assertNotIn("GP", stored["aliases"])
+        old = {k: v for k, v in stored.items() if k not in ("galiases", "saliases")}
+        old.update(format=2, aliases=dict(stored["aliases"], **stored["galiases"]))
+        for written in (old, {k: v for k, v in stored.items() if k != "saliases"}):
+            with self.subTest(written=sorted(written)):
+                cache.write_text(json.dumps(written), encoding="utf-8")
+                self.refused_for_members("echo hi GP")
+                self.refused_for_members("a.txt")
+                self.assertEqual(json.loads(cache.read_text(encoding="utf-8")), stored)
+
+    def test_doctor_counts_each_kind(self):
+        notes = self.home.json("doctor")["notes"]
+        self.assertTrue(any("shell snapshot: 11 aliases" in n and "(6 global and 3 suffix aliases among them)" in n
+                            and "BROKEN" in n and "cfg" in n for n in notes), notes)
+
+
 if __name__ == "__main__":
     unittest.main()

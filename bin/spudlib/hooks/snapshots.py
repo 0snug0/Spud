@@ -1,4 +1,8 @@
-"""hooks/snapshots: the aliases, functions and options the Bash tool's shell already holds, read from Claude Code's shell snapshot."""
+"""hooks/snapshots: the aliases, functions and options the Bash tool's shell already holds, read from Claude Code's shell snapshot.
+
+Past 250 lines as one reading: the snapshot file's grammar -- its alias, unalias, option and function lines and the
+quoting on them (unquote_word, ansi_c_value), the harness's own shadows it appends -- and the table and cache built from
+it, which every reader of the shell's own text asks (shell/line_aliases, shell/held_options, shell/held_shadows)."""
 
 import contextlib
 import json
@@ -67,8 +71,9 @@ SNAPSHOTS = "shell-snapshots"
 SNAPSHOT_PREFIX = "snapshot-"
 CACHE_NAME = "shell-snapshot.json"  # the parsed table, under the home's .spud/, keyed by every snapshot's size and mtime
 # What a cache holds, which changes whenever the table does: one of another format, or of none (written before SPD-263
-# added the options), is built again, never read, since a table read from it would lack what this one reads.
-CACHE_FORMAT = 2
+# added the options), is built again, never read, since a table read from it would lack what this one reads -- format 2's
+# held a global alias among the plain ones and no suffix alias at all (SPD-283).
+CACHE_FORMAT = 3
 # A snapshot's option lines, which the shell runs before every Bash call (SPD-263): zsh's `setopt <name>` (and unsetopt),
 # bash's `shopt -s|-u <name>`, and `set -o|+o <name>`, each at the start of a line of its own (a function's body, which
 # runs only when called, is skipped as a whole).  Read as (kind, the option as spelled, on or off), with the line itself
@@ -78,13 +83,22 @@ CACHE_FORMAT = 2
 OPTION_RE = re.compile(r"^(?P<builtin>setopt|unsetopt|shopt|set)(?P<rest>(?:\s.*)?)$", re.S)
 OPTION_WORD_RE = re.compile(r"[A-Za-z0-9_]+\Z")
 BODY_CAP = 64 * 1024  # the most of one function body the hook reads; nothing a profile defines comes near it
-# A snapshot's `alias` line: zsh writes `alias -- name=body`, with the options it was defined with before the `--`.  A
-# global (`-g`) alias is expanded in every word, not only in command position, which the hook does not yet read on a line
-# the member writes, nor this table: it is recorded here all the same, since covering its command position is strictly more
-# than covering none of it.  A suffix (`-s`) alias runs a program for a word ending in its extension and names no command
-# word, so it is skipped.  Neither form is in this Mac's snapshots (497 aliases, all plain).
+# A snapshot's `alias` line: `alias -- name=body`, any options before the `--`.  Claude Code writes the alias block from
+# zsh's plain `alias` listing, one `alias -- ` line per entry, and that listing prints a global alias with no flag and a
+# suffix alias not at all (probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py: after
+# `alias -g GL='| cat'` and `alias -s txt=...`, `alias` printed `GL='| cat'` and no txt, and a file of its lines sourced
+# back made GL plain).  So a profile's global alias is a plain one in the shell the Bash tool starts, and no snapshot
+# today holds either form: this Mac's oh-my-zsh defines `alias -g ...='../..'` (lib/directories.zsh), its snapshots write
+# `alias -- ...=../..`, and in a member's own Bash call on 2026-09-24 `echo ... ....` printed `... ....`, `alias -g` and
+# `alias -s` nothing.  A line that names `-g` or `-s` is read as the kind it names all the same (SPD-283), for a writer
+# that keeps the flag, as `alias -L` does (it printed `alias -g GL='| cat'`, and `alias -L -s` `alias -s txt=...`): a
+# global alias, which zsh expands in every word it reads unquoted, and a suffix alias, which runs its body before a
+# command word ending in its suffix, each in a table of its own (Table.galiases, Table.saliases), read by
+# shell/line_aliases.held_aliases.  zsh keeps a plain and a global alias in one table, so one of a name replaces the
+# other, and a suffix alias in another; a line naming both flags defines nothing ("illegal combination of options").
 ALIAS_RE = re.compile(r"^alias(?P<options>(?: +-[A-Za-z]+)*)(?: +--)? +(?P<rest>\S.*)$", re.S)
-UNALIAS_RE = re.compile(r"^unalias(?P<options>(?: +-[A-Za-z]+)*) +(?P<rest>\S.*)$", re.S)
+ALIAS_KINDS = ("plain", "global", "suffix")  # read_snapshot's tables of aliases, one per kind (alias_definition)
+UNALIAS_RE = re.compile(r"^unalias(?P<options>(?: +-[A-Za-z]+)*)(?: +(?P<rest>\S.*))?$", re.S)  # `unalias -a` alone too
 # `name () {` as zsh prints a function, and `function name {` as Claude Code writes the commands it shadows; the body runs
 # to the first line that is `}` alone.  A definition may be indented (the harness writes its `rg` shadow inside an `if`),
 # and the closing brace of an indented one is at column 0 there, so the closer is read stripped.
@@ -144,15 +158,19 @@ def harness_shadow(name, body):
 
 
 class Table:
-    """What the shell the Bash tool starts already defines: `aliases`, each name's body as the shell stores it (None for a
-    body the hook cannot read); `functions`, each name's body as (which snapshot, its first byte, its length); `options`,
-    every option line any snapshot runs, as (kind, the option or None, on, the line, which snapshot) -- kind "setopt",
-    "shopt" or "set" -- each once, from the newest snapshot that has it (SPD-263: which snapshot a session sources is not in
-    the hook's input, so an option any of them sets may be in force); `gap`, what stopped the table being read, or None.
-    An empty table is the answer on a machine with no snapshots, and it keeps every line the reading it had without one."""
+    """What the shell the Bash tool starts already defines: `aliases`, each plain alias's name -> its body as the shell
+    stores it (None for a body the hook cannot read); `galiases` and `saliases`, the same for each global alias and each
+    suffix alias, keyed by its suffix (SPD-283, ALIAS_RE); `functions`, each name's body as (which snapshot, its first byte,
+    its length); `options`, every option line any snapshot runs, as (kind, the option or None, on, the line, which snapshot)
+    -- kind "setopt", "shopt" or "set" -- each once, from the newest snapshot that has it (SPD-263: which snapshot a session
+    sources is not in the hook's input, so an option any of them sets may be in force); `gap`, what stopped the table being
+    read, or None.  An empty table is the answer on a machine with no snapshots, and it keeps every line the reading it had
+    without one."""
 
-    def __init__(self, aliases=None, functions=None, files=(), gap=None, options=()):
+    def __init__(self, aliases=None, functions=None, files=(), gap=None, options=(), galiases=None, saliases=None):
         self.aliases = aliases if aliases is not None else {}
+        self.galiases = galiases if galiases is not None else {}
+        self.saliases = saliases if saliases is not None else {}
         self.functions = functions if functions is not None else {}
         self.files = list(files)
         self.gap = gap
@@ -219,9 +237,10 @@ def load_table(home):
         with open(cache, encoding="utf-8") as f:
             stored = json.load(f)
         if (stored["format"] == CACHE_FORMAT and stored["fingerprint"] == [list(e) for e in entries]
-                and isinstance(stored["aliases"], dict)):
+                and all(isinstance(stored[k], dict) for k in ("aliases", "galiases", "saliases"))):
             return Table(stored["aliases"], {k: tuple(v) for k, v in stored["functions"].items()}, files,
-                         options=(tuple(o) for o in stored["options"]))
+                         options=(tuple(o) for o in stored["options"]), galiases=stored["galiases"],
+                         saliases=stored["saliases"])
     built = build_table(files)
     if built.gap is None:
         write_cache(cache, entries, built)
@@ -230,8 +249,9 @@ def load_table(home):
 
 def build_table(files):
     """The union of these snapshots, newest first: the first one that names a name decides what that name is, so a name a
-    newer snapshot unaliased is not taken from an older one."""
-    aliases, functions, decided, options = {}, {}, set(), {}
+    newer snapshot unaliased is not taken from an older one.  A suffix alias's suffix is a name of its own (("suffix",
+    name) in read_snapshot's list), as zsh keeps those apart from every other alias and from functions."""
+    aliases, functions, decided, options = {kind: {} for kind in ALIAS_KINDS}, {}, set(), {}
     for index, path in enumerate(files):
         try:
             with open(path, "rb") as f:
@@ -243,20 +263,28 @@ def build_table(files):
             if name in decided:
                 continue
             decided.add(name)
-            if name in file_aliases:
-                aliases[name] = file_aliases[name]
+            if isinstance(name, tuple):
+                if name[1] in file_aliases["suffix"]:
+                    aliases["suffix"][name[1]] = file_aliases["suffix"][name[1]]
+            elif name in file_aliases["plain"]:
+                aliases["plain"][name] = file_aliases["plain"][name]
+            elif name in file_aliases["global"]:
+                aliases["global"][name] = file_aliases["global"][name]
             elif name in file_functions:
                 functions[name] = file_functions[name]
         for option in file_options:  # every snapshot's, since any may be the one a session sourced (SPD-263)
             options.setdefault(option[:3] if option[1] is not None else option[3], option)
-    return Table(aliases, functions, files, options=options.values())
+    return Table(aliases["plain"], functions, files, options=options.values(), galiases=aliases["global"],
+                 saliases=aliases["suffix"])
 
 
 def read_snapshot(data, index):
-    """(the aliases this snapshot leaves defined, its functions as (index, the body's first byte, its length), every name
-    any of its lines names, its option lines as Table.options holds them).  The lines are read in order, so a later
-    `unalias` clears an alias and a later definition replaces an earlier one, as the shell reading the same file does."""
-    aliases, functions, named, options = {}, {}, [], []
+    """(the aliases this snapshot leaves defined, a table per kind -- ALIAS_KINDS -- of each name's body, its functions as
+    (index, the body's first byte, its length), every name any of its lines names -- a suffix alias's as ("suffix", its
+    suffix) -- its option lines as Table.options holds them).  The lines are read in order, so a later `unalias` clears an
+    alias and a later definition replaces an earlier one, as the shell reading the same file does: a plain and a global
+    alias share zsh's one table and a function the name, a suffix alias has a table of its own (ALIAS_RE)."""
+    aliases, functions, named, options = {kind: {} for kind in ALIAS_KINDS}, {}, [], []
     lines = data.split(b"\n")
     offsets, at = [], 0
     for raw in lines:
@@ -272,15 +300,21 @@ def read_snapshot(data, index):
         if raw.startswith(b"alias"):
             found = alias_definition(line)
             if found is not None:
-                name, body = found
-                aliases[name] = body
-                functions.pop(name, None)
-                named.append(name)
+                kind, name, body = found
+                aliases[kind][name] = body
+                if kind == "suffix":
+                    named.append(("suffix", name))
+                else:
+                    aliases["global" if kind == "plain" else "plain"].pop(name, None)
+                    functions.pop(name, None)
+                    named.append(name)
             continue
         if raw.startswith(b"unalias"):
-            for name in unalias_names(line, aliases):
-                aliases.pop(name, None)
-                named.append(name)
+            suffix, names = unalias_names(line, aliases)
+            for name in names:
+                for kind in (("suffix",) if suffix else ("plain", "global")):
+                    aliases[kind].pop(name, None)
+                named.append(("suffix", name) if suffix else name)
             continue
         if raw.startswith((b"setopt", b"unsetopt", b"shopt", b"set")):
             found = option_line(line, index)
@@ -298,7 +332,8 @@ def read_snapshot(data, index):
             continue
         name = m.group("name")
         functions[name] = (index, offsets[start], offsets[i] - offsets[start])
-        aliases.pop(name, None)
+        aliases["plain"].pop(name, None)
+        aliases["global"].pop(name, None)
         named.append(name)
         i += 1
     return aliases, functions, named, options
@@ -336,36 +371,44 @@ def option_line(line, index):
 
 
 def alias_definition(line):
-    """(the name, the body as the shell stores it) of a snapshot's `alias` line, or None for a suffix alias, a query, or a
-    line that is no definition.  The body is None where the hook cannot take the line's quoting off it."""
+    """(its kind -- "plain", "global" for `-g` among the options, "suffix" for `-s` -- the name, the body as the shell
+    stores it) of a snapshot's `alias` line, or None for a query, a line naming both kinds (which zsh refuses), or a line
+    that is no definition.  The body is None where the hook cannot take the line's quoting off it."""
     m = ALIAS_RE.match(line)
-    if m is None or "-s" in m.group("options").split():
+    if m is None:
+        return None
+    flags = "".join(option[1:] for option in m.group("options").split())
+    if "g" in flags and "s" in flags:
         return None
     spelled, sep, body = m.group("rest").partition("=")
     if not sep:
         return None  # `alias name` prints a definition and makes none
     name = unquote_word(spelled) or spelled
-    return (name, unquote_word(body)) if name else None
+    kind = "global" if "g" in flags else "suffix" if "s" in flags else "plain"
+    return (kind, name, unquote_word(body)) if name else None
 
 
 def unalias_names(line, aliases):
-    """The alias names an `unalias` line clears: every name it lists, or every name defined so far for `-a`.  The words
-    after a redirection or a list operator belong to the rest of the line (`unalias find 2>/dev/null || true`), and `-m`
-    takes patterns, which the hook does not match -- it clears nothing rather than guess."""
+    """(whether it clears suffix aliases, the names it clears) for an `unalias` line: every name it lists, or for `-a`
+    every name defined so far -- the suffix aliases' alone with `-s`, which clears no other kind, and without it every plain
+    and global one and no suffix alias (probed: `unalias -a` left `alias -s txt=...` running).  `aliases` is read_snapshot's
+    tables.  The words after a redirection or a list operator belong to the rest of the line (`unalias find 2>/dev/null ||
+    true`), and `-m` takes patterns, which the hook does not match -- it clears nothing rather than guess."""
     m = UNALIAS_RE.match(line)
     if m is None:
-        return []
-    options = m.group("options").split()
-    if "-a" in options:
-        return list(aliases)
-    if "-m" in options:
-        return []
+        return False, []
+    flags = "".join(option[1:] for option in m.group("options").split())
+    suffix = "s" in flags
+    if "a" in flags:
+        return suffix, list(aliases["suffix"]) if suffix else list(aliases["plain"]) + list(aliases["global"])
+    if "m" in flags:
+        return suffix, []
     names = []
-    for word in m.group("rest").split():
+    for word in (m.group("rest") or "").split():
         if word in ("||", "&&", ";", "|", "&") or any(c in word for c in "<>|&;()"):
             break
         names.append(unquote_word(word) or word)
-    return names
+    return suffix, names
 
 
 def unquote_word(text):
@@ -430,6 +473,7 @@ def write_cache(cache, entries, built):
     with contextlib.suppress(OSError):
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump({"format": CACHE_FORMAT, "fingerprint": [list(e) for e in entries], "aliases": built.aliases,
+                       "galiases": built.galiases, "saliases": built.saliases,
                        "functions": {k: list(v) for k, v in built.functions.items()},
                        "options": [list(o) for o in built.options]}, f)
         os.replace(tmp, cache)
@@ -445,9 +489,13 @@ def table_report(home):
                 " alias or function of the shell's runs unread: %s" % found.gap), None
     if not found.files:
         return None, "no shell snapshot in %s: the hook reads a member's command word as written" % snapshot_dir()
-    unreadable = sorted(n for n, body in found.aliases.items() if body is None)
+    kinds = (found.aliases, found.galiases, found.saliases)
+    unreadable = sorted(n for table in kinds for n, body in table.items() if body is None)
     note = "shell snapshot: %d aliases and %d functions from %d file%s" % (
-        len(found.aliases), len(found.functions), len(found.files), "" if len(found.files) == 1 else "s")
+        sum(len(table) for table in kinds), len(found.functions), len(found.files), "" if len(found.files) == 1 else "s")
+    if found.galiases or found.saliases:
+        note += " (%d global and %d suffix alias%s among them)" % (len(found.galiases), len(found.saliases),
+                                                                   "" if len(found.saliases) == 1 else "es")
     if unreadable:
         note += "; %d alias bod%s the hook cannot read (%s)" % (len(unreadable), "y" if len(unreadable) == 1 else "ies",
                                                                 ", ".join(unreadable[:5]))

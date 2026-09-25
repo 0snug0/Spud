@@ -1554,6 +1554,71 @@ class GlobalAliasEvalTest(BashHookCase):
                 self.silent_for_everyone(ok)
 
 
+class SubstitutionAliasTest(BashHookCase):
+    """SPD-283: zsh parses a `$( )` or backtick body when it runs it, not with the line, so an alias the line defined
+    before it stands there as it does in eval's words -- and the hook read such a body with no alias of the line's, where
+    only eval's text had them, so `alias gp='git push'; echo $(gp)` pushed past Law 7.  Probed in zsh 5.9 -f and -f -o
+    nobareglobqual through tests/probes/shell_probe.py: `alias gp="echo GP-RAN"; echo $(gp)` printed GP-RAN, and so did
+    `echo "$(gs)"` and `` echo `gq` ``; `(gr)`, a subshell parsed with the line, found no command; `alias -g X=line; echo
+    sub $(echo X)` printed `sub line`, `alias -s txt="echo LINE"; echo $(a.txt s)` ran LINE, `trap gp EXIT` and `x='$(gp)';
+    echo ${(e)x}` after the alias ran it; and `echo first $(gp); alias gp="echo GP-RAN"; echo second $(gp)` printed
+    `first` then `second GP-RAN`, and the same pair of eval's too.  A body
+    is now read a level into the aliases' scope while the line's table holds any (analyse.analyse_isolated), and read
+    once per state of that table, where the reading cached for the first of such a pair had skipped the second -- inside
+    eval as well, before this.  A line that defines no alias reads its substitutions as it always did.  (`cat <(gt)` ran
+    the line's alias too, but the walk reads a `<( )` body with the line's own words, where none of the line's stands.)
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_a_substitution_after_the_definition(self):
+        for cmd in ("alias gp='git push'; echo $(gp)", "alias gp='git push'; echo \"$(gp)\"",
+                    "alias gp='git push'; echo `gp`", "alias gp='git push'; x=$(gp)",
+                    "alias gp='git push'; echo $(true && gp)", "alias gp='git push'; echo $(echo $(gp))",
+                    "alias -g gp='; git push'; echo $(echo gp)", "alias -s txt='git push'; echo $(a.txt)",
+                    "galiases[gp]='; git push'; echo $(echo gp)", "alias gp='git push'; trap gp EXIT",
+                    "alias gp='git push'; x='$(gp)'; echo ${(e)x}",
+                    "echo $(gp); alias gp='git push'; echo $(gp)",
+                    "eval 'echo $(gp)'; alias gp='git push'; eval 'echo $(gp)'"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.assertEqual(self.analysis("echo $(gp); alias gp='git push'; echo $(gp)").findings, [("git", ("push", "push"))])
+
+    def test_where_the_lines_alias_does_not_reach(self):
+        for ok in ("alias gp='git push'; (gp)", "alias gp='git push'; { gp; }", "alias gp='git push'; gp",
+                   "echo $(gp); alias gp='git push'", "alias gp='git push'; sh -c 'echo $(gp)'",
+                   "alias gp='git push'; unalias gp; echo $(gp)", "alias -g gp='; git push'; echo $(echo 'gp')",
+                   "alias -s txt='git push'; echo $(echo a.txt)", "echo $(echo hi); eval 'echo hi'"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_a_definition_that_may_not_have_run(self):
+        for cmd in ("if true; then alias gp='git status'; fi; echo $(gp)", "(alias gp='git status'); echo $(gp)"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "cannot resolve")
+        self.refused_for_members("if true; then alias -g gp='; git status'; fi; echo $(echo gp)", ALIAS_WORD_WORDING)
+
+
 class PathInForceTest(BashHookCase):
     """SPD-062: the hook reads a line's command words by name -- git, spud, python3.14, sqlite3, tee, a shell, a wrapper --
     and the shell then finds each of them on PATH, so a member that puts a directory of its own first runs its own program
