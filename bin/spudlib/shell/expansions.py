@@ -4,7 +4,7 @@ Its alias reading, the aliases a line defines for eval and the ones the shell al
 
 import functools
 
-from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_programs, git_writes, globbing, loop_bindings, prepare, spud_calls, syntax, unread
+from . import analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, git_programs, git_writes, globbing, line_functions, loop_bindings, prepare, spud_calls, syntax, unread
 from ..core import lazy
 from ..hooks import hookio
 
@@ -159,10 +159,12 @@ def read_arithmetic(a, text, doubtful=False):
 
 
 def record_arithmetic(a, found, shown, doubtful=False):
-    """read_arithmetic's record, for the names arithmetic_names or word_arithmetic found (None: one it cannot read)."""
+    """read_arithmetic's record, for the names arithmetic_names or word_arithmetic found (None: one it cannot read), once
+    each function it calls that zsh's `functions -M` names is read where it runs (line_functions.read_math_calls, SPD-282)."""
     if found is None:
         unread.record_unread(a, "assigned", ("an arithmetic evaluation", unread.unread_shown(shown)))
         return
+    found = line_functions.read_math_calls(a, found, shown)
     if found:  # arithmetic over what the member supplies fills the names it assigns (SPD-258); a substitution in it, unpaired
         fill_from(a, [name for name, _ in found], shown, (None,) if hookio.SUBST in shown else (), arithmetic=True)
     for name, value in found:

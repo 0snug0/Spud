@@ -70,7 +70,8 @@ names.
 import os
 import re
 
-from . import arg_writes, directories, expansions, globbing, heredocs, line_aliases, line_functions, prepare, syntax
+from . import (arg_writes, directories, expansions, globbing, held_text, heredocs, line_aliases, line_functions, prepare,
+               syntax)
 from ..hooks import snapshots
 
 # The operands that name the standard input the line gave the shell rather than a script file of its own (probed:
@@ -519,7 +520,21 @@ def _shadowed(name, a, called=None):
     ...; }; echo hi | sh` ran the function's text, and so did a function named printf, print, cat, tee, true, `:`, test,
     builtin or command, one defined inside an `if` too, while one defined in a subshell did not reach a call after it).
     A function the line defines is read for the text its body prints where a call runs it (LineCall, SPD-272), so
-    `called` names one this leaves aside: the command's reading beside the call's, or whether anything else shadows it."""
+    `called` names one this leaves aside: the command's reading beside the call's, or whether anything else shadows it.
+
+    SPD-300: a snapshot alias only where the snapshot's aliases stand (line_aliases.held_standing, SPD-290): not in a
+    function body the snapshot defines before its aliases, nor in a new shell's text (probed in zsh 5.9 -f through
+    tests/probes/shell_probe.py, a file of functions then `alias cat='echo CAT-ALIAS'` sourced: a body's `printf 'echo
+    PIPED\\n' | cat | sh` printed PIPED, the real cat, where the same line outside the body ran CAT-ALIAS).
+
+    SPD-303: a snapshot function only where the shell sourced the snapshot (held_text.snapshot_sourced, SPD-298): a new
+    shell's text runs its own printer, so under a profile's `echo () { ...; }` `sh -c 'echo git status | sh'` pipes the
+    builtin's text, read as the line spells it (tests/test_hooks_groups.py NewShellSnapshotLookupTest).
+
+    SPD-307: a snapshot function only where line_functions.held_function still finds it standing -- "sure" or "maybe" --
+    rather than merely present in the snapshot's table: a line's own `unset -f echo` (or `cat`) takes it, `sure` where the
+    removal surely ran, so the shell reads its own name's text and this module follows it, `maybe` keeping today's
+    cautious reading where the removal may not have (tests/test_hooks_groups.py SnapshotPrinterRemovalTest)."""
     if a is None:
         return False
     if name in a.functions and name != called or syntax.UNKNOWN_NAME in a.functions or _hashed(name, a):
@@ -529,7 +544,8 @@ def _shadowed(name, a, called=None):
         if body is not None or doubtful:
             return True
     table = snapshots.shell_table(a.home)
-    return name in table.functions or name in table.aliases and name not in a.expanding
+    return bool(line_functions.held_function(a, name)) \
+        or name in table.aliases and name not in a.expanding and line_aliases.held_standing(a)
 
 
 def _hashed(name, a):

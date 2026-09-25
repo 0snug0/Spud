@@ -94,6 +94,8 @@ def read_shadow(a, name, claude, words, depth):
                        (a.sticky, ()), (a.typed, ()), (a.derived, ()), (a.unseen_assigned, ()), (a.line_members, ())):
         if any(n in held and n not in left for n in names):
             return False
+    # no held_text.snapshot_sourced here (SPD-303): a shadow is read only past read_shell_name's own gate, and its body
+    # runs in the shell that sourced the snapshot, where every one of its functions and aliases stands
     table = snapshots.shell_table(a.home)
     if any(w in table.aliases or w in table.functions for w in _SHADOW_LOOKUPS + ((claude,) if claude else ())):
         return False

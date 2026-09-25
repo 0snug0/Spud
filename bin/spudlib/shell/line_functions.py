@@ -6,14 +6,16 @@ settle_definitions, which share the walk's frames, position and lifted text and 
 parameter and its hook arrays bind and queue one (assign_function, hook_functions).  The text a call's reading prints
 (SPD-272) is left here too, in ShellAnalysis.read_printed and call_printed.  zsh's `functions -c` binds a copy of one
 (copy_function, SPD-279), and `unset -f` and its kin remove the bodies bound to a name (remove_functions, SPD-281), which
-line_bodies, the bodies a call runs, reads.  Past 250 lines as one table: every function here binds, reads or settles the
-LineBody objects ShellAnalysis.function_bodies holds, and a copy or a removal is a binding read by the same line_bodies."""
+line_bodies, the bodies a call runs, reads, and the function the shell's snapshot defines under it (held_function, SPD-305).  zsh's `functions -M` registers a function arithmetic calls (math_function,
+SPD-282), a binding in the same table, and each arithmetic call of one reads that function's body where it stands
+(read_math_calls).  Past 250 lines as one table: every function here binds, reads or settles the LineBody objects
+ShellAnalysis.function_bodies holds, and a copy, a removal or a registration is a binding read by the same _settled."""
 
 import functools
 
-from . import (analyse, arg_writes, assigning_builtins, assignment_words, directories, expansions, held_text, prepare,
-               script_files, stdin_text, syntax, unread, walk)
-from ..hooks import snapshots
+from . import (analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, directories, expansions,
+               held_text, line_aliases, prepare, script_files, stdin_text, syntax, unread, walk)
+from ..hooks import hookio, snapshots
 
 
 class LineBody:
@@ -29,6 +31,14 @@ class LineBody:
     substitution bodies and here-documents those tokens lift, `glued`, which reading of the line (zsh's, or bash's) they
     are, and `into`, whether the body is a compound command, where a call's input stands as a pipe into it does (SPD-212:
     zsh reads the call's and then the definition's own); or `text`, a body zsh's `functions` parameter is handed (SPD-278).
+    `written` (SPD-311): the text the walk that read the definition was reading (walk.ShellWalk.bind) -- the one zsh parsed
+    the body with, which says how it wrote each of the body's words, quoted or not, as the tokens cannot (SPD-295,
+    SPD-308) -- or None where that walk had none; kept on the body, since a call may read it after that walk is over (a
+    body an eval's text defined) or from a walk of the body's own tokens (a body defined inside another's reading).
+    `parsed` (SPD-312): (ShellAnalysis.alias_scope, ShellAnalysis.alias_view) where zsh parsed the definition -- whether
+    the line's own aliases stand in that text, and the line_aliases.AliasView they stand with -- which every reading of
+    the body reads it with (read_line_body), wherever the call stands: zsh expands a body's aliases once, as it parses the
+    definition, and never again at a call (walk.ShellWalk.bind; assign_function for a `functions` body).
 
     `pending`, what its reading in place added to the analysis's lists (walk._RECORDS), taken out when the definition ends and
     put back where it stood when the walk ends (walk.ShellWalk.settle_definitions) unless a call read the body (`called`) --
@@ -44,13 +54,14 @@ class LineBody:
     `&` read after it takes its certainty back as it takes a definition's (walk.ShellWalk.uncertain_element)."""
 
     __slots__ = ("names", "line", "serial", "start", "consumed", "tokens", "inner", "docs", "expanded", "glued", "into",
-                 "text", "pending", "marks", "caches", "called", "readings", "active", "certain", "removes")
+                 "text", "written", "parsed", "pending", "marks", "caches", "called", "readings", "active", "certain", "removes")
 
     def __init__(self, names, line, a):
         self.names, self.line = tuple(names), line
         a.body_serial += 1
         self.serial = a.body_serial
-        self.start, self.consumed, self.tokens, self.text = 0, (0, 0), None, None
+        self.start, self.consumed, self.tokens, self.text, self.written = 0, (0, 0), None, None, None
+        self.parsed = (0, None)
         self.inner, self.docs, self.expanded, self.glued, self.into = (), (), (), True, False
         self.pending = self.marks = self.caches = None
         self.called, self.readings, self.active, self.certain, self.removes = False, 0, 0, False, False
@@ -69,6 +80,28 @@ class LineBody:
 
     def __hash__(self):
         return hash((self.serial, self.names))
+
+    def state(self):
+        """What a call of this body runs, as ShellAnalysis.reading_state holds it (SPD-296): its text, whether it is
+        complete, whether it surely runs, whether it is a removal's mark -- values, so a key holding them does not change
+        when the body does.  Not its serial nor the reading of the line that bound it: zsh's reading of a line and the other
+        shell's bind bodies of their own, which are alike where both read the text alike, and a substitution after them is
+        read once for both, as it was before the table was part of the state.
+
+        With the tokens, the text the definition was read from (`written`, SPD-311), since tokens alike may run apart:
+        under `alias git=hub`, `f() { git push; }` runs hub's push and `f() { 'git' push; }` git's, one token list, so a
+        reading cached under the one table is not the other's: in `echo $(eval 'f() { git push; }'; echo $(f)); echo
+        $(eval "f() { 'git' push; }"; echo $(f))`, which pushes in the second, the second `$(f)` had been taken for the
+        first's reading (analyse.analyse_isolated) and skipped.  Both shells' readings of one line walk the same text, so
+        it keeps their bodies alike.
+
+        And the alias view it was parsed under (`parsed`, SPD-312), for the same reason: one text parsed with and without
+        `alias git=hub` runs hub's push and git's, so `(alias git=hub; eval 'f() { git push; }'; unalias git; echo $(f));
+        (eval 'f() { git push; }'; echo $(f))`, the table alike at both calls, pushes in the second.  Both shells' readings
+        bind a body with the view the text they walk was opened with, which only a text boundary replaces, so it keeps
+        their bodies alike too."""
+        return (self.tokens, self.text, self.written, self.parsed, self.inner, self.docs, self.expanded, self.into,
+                self.certain, self.removes)
 
     def __str__(self):
         return self.text if self.text is not None else " ".join(prepare.deglob(t) for t in self.tokens or ())
@@ -123,13 +156,34 @@ def read_line_body(a, body, depth, stdin, fed):
 
     The text the reading prints (SPD-272) is left in ShellAnalysis.read_printed for held_text.read_function: the walk's,
     and the one it prints where a pipe follows the call (walk.ShellWalk.body_piped); None for a `functions` body's text,
-    whose readings (zsh's and bash's) this does not follow."""
-    if body.text is not None:
-        analyse.analyse_command(body.text, a, max(depth, 1), stdin, fed)
-        a.read_printed = None
-        return a
-    shell_walk = walk.walk_line(a, list(body.tokens), body.inner, body.docs, body.expanded, depth, walk.reading_start(a),
-                                body.glued, stdin, fed, body.into)
+    whose readings (zsh's and bash's) this does not follow.
+
+    SPD-311: the tokens are read by the text the definition was read from (LineBody.written), the one zsh parsed them
+    with: the quotes line_aliases.spellings finds there (a.quoted_text, which analyse_command puts back when this
+    returns) and the plain words ShellWalk.expand_globals takes for a global alias's name in a `<( )` body -- so a body
+    an eval's text defined, called after that eval, and one defined inside another body's reading, are read as they run,
+    not every aliased word both ways (probed in zsh 5.9: under `alias ls='echo ALIASED'`, `eval 'f() { ls -d /; }'; f`
+    printed `ALIASED -d /`, tests/test_hooks_groups.py DefiningTextBodyTest).
+
+    SPD-312: and with the aliases zsh parsed them with (LineBody.parsed), not the call's: zsh expands a body's command
+    words once, where it parses the definition, so a call inside eval or a substitution, after an `unalias`, or before
+    an alias the line defines later, runs the body as it was parsed then (probed in zsh 5.9 -f and -f -o
+    nobareglobqual: under `alias ls='echo ALIASED'`, `eval 'f() { ls -d /; }'; unalias ls; f` printed `ALIASED -d /`,
+    and `f() { ls -d /; }; eval f` printed `/`, the line's own text being parsed before its alias ran;
+    tests/test_hooks_groups.py ParsedAliasBodyTest).  What the body parses as it runs -- its eval's words, its `$( )`
+    and `<( )` bodies -- opens a view of the table as it stands then, as anywhere."""
+    scope, view = a.alias_scope, a.alias_view
+    a.alias_scope, a.alias_view = body.parsed
+    try:
+        if body.text is not None:
+            analyse.analyse_command(body.text, a, max(depth, 1), stdin, fed)
+            a.read_printed = None
+            return a
+        a.quoted_text, a.quoted_sets = body.written, None
+        shell_walk = walk.walk_line(a, list(body.tokens), body.inner, body.docs, body.expanded, depth,
+                                    walk.reading_start(a), body.glued, stdin, fed, body.into, body.written)
+    finally:
+        a.alias_scope, a.alias_view = scope, view
     printed = shell_walk.frame_printed
     a.read_printed = (printed, printed if shell_walk.body_piped is None else shell_walk.body_piped)
     return a
@@ -150,9 +204,14 @@ def assign_function(a, found):
     if not a.walks:
         return
     shell_walk = a.walks[-1]
+    # SPD-312: zsh parses the text where the assignment runs, as eval parses its words, so the body's aliases are the
+    # table as it stands here, not where the walk's text was parsed (probed in zsh 5.9 -f and -f -o nobareglobqual: under
+    # `alias ls='echo ALIASED'`, `functions[f]="ls -d /"; unalias ls; f` printed `ALIASED -d /`, and `functions[f]="ls -d
+    # /"; alias ls=...; eval f` printed `/`)
+    scope = 1 if a.aliases or a.alias_unknown else 0  # as analyse.analyse_isolated opens a body's
     for name, text in pairs:
         body = shell_walk.bind([name])
-        body.text = text
+        body.text, body.parsed = text, (scope, line_aliases.AliasView(a, "\n" in text))
         shell_walk.queue(body)
 
 
@@ -203,6 +262,47 @@ def line_bodies(a, name):
     return [body for body in kept if not body.removes and body.complete()], sure
 
 
+def in_builtins_place(a, name):
+    """SPD-304: whether a function runs where a call of the builtin `name` (cd, chdir, pushd, popd) looked up as a function
+    stands (directories.directory_change): "function" where one surely does -- a body the line defines that surely runs, or
+    one the shell's snapshot holds where the text being read sourced it and no removal took it (held_function, SPD-305),
+    each read at the call by held_text.read_shell_name -- "either" where one may: a definition that may not have run,
+    beside the builtin's reading, whose start the call no longer holds, a snapshot's function a removal that may not have
+    run left, a name the line binds with a body the hook does not have, or a function whose name it cannot read
+    (UNKNOWN_NAME); None where none does: `unset -f cd; cd /tmp` under a snapshot cd is the builtin's move."""
+    name = prepare.deglob(name)
+    bodies, sure = line_bodies(a, name)
+    held = held_function(a, name)
+    if bodies and sure or held == "sure":
+        return "function"
+    if bodies or held or name in a.functions or syntax.UNKNOWN_NAME in a.functions:
+        return "either"
+    return None
+
+
+def held_function(a, name):
+    """SPD-305: whether the function the shell's snapshot defines under `name` stands where the text being read runs --
+    "sure", "maybe", or None where the snapshot defines none, the text's shell never sourced it (held_text.snapshot_sourced),
+    or a removal the line made surely took it (remove_functions).  A removal that may not have run leaves it "maybe": the
+    function read beside the command of that name.  The line's own bodies do not bring it back, and its removals' order
+    among them does not matter: once gone from the shell it is gone for the rest of the line, a definition after it being
+    the line's own (line_bodies).  Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual
+    and -f and bash 3.2.57, a file defining `cd () { builtin cd u }` sourced first: `unset -f cd; cd /tmp` left /tmp, and so
+    did an `eval 'cd /tmp'`, a `$(cd /tmp; pwd)` and a `{ unset -f cd; }` before it, while a removal in `( ... )`, in `$(
+    )` or before `&` left the function running (./u); zsh's `unfunction cd` removed it and bash's plain `unset cd` did,
+    each in its own shell alone (tests/test_hooks_groups.py SnapshotFunctionRemovalTest)."""
+    if not held_text.snapshot_sourced(a) or name not in snapshots.shell_table(a.home).functions:
+        return None
+    found = "sure"
+    for key in (name, syntax.UNKNOWN_NAME):  # a removal of a name the hook cannot read may have removed this one
+        for body in a.function_bodies.get(key, ()):
+            if body.removes and body.certain:
+                return None
+            if body.removes:
+                found = "maybe"
+    return found
+
+
 def merge_readings(a, zsh_bodies):
     """analyse_command's two readings of one line, zsh's `zsh_bodies` and the other shell's in ShellAnalysis.function_bodies:
     each name keeps the bodies either reading defines, each reading's removals settled in it first (_settled), so one
@@ -217,6 +317,13 @@ def merge_readings(a, zsh_bodies):
             doubt = LineBody((name,), None, a)
             doubt.removes = True
             bodies.add(doubt)
+        # SPD-305: a removal that surely ran, which _settled drops with what it took, still took the snapshot's function
+        # (held_function): kept before every body, surely where both readings made one and maybe where one did
+        gone = [any(body.removes and body.certain for body in each.get(name, ())) for each in (zsh_bodies, a.function_bodies)]
+        if any(gone):
+            mark = LineBody((name,), None, a)
+            mark.serial, mark.removes, mark.certain = 0, True, all(gone)
+            bodies.add(mark)
         merged[name] = bodies
     a.function_bodies.clear()
     a.function_bodies.update(merged)
@@ -241,7 +348,8 @@ def copy_function(words, a):
         return
     old, new = found
     bodies, sure = line_bodies(a, old) if old is not None else ([], False)
-    profile = old is not None and not sure and old in snapshots.shell_table(a.home).functions
+    # a snapshot function the line removed is copied by no one (`no such function`, SPD-305: held_function)
+    profile = old is not None and not sure and held_function(a, old) is not None
     if old is None or new is None or profile:
         unread.record_unread(a, "function-copy", unread.unread_shown(" ".join(words)))
     if _in_place(a):
@@ -259,6 +367,9 @@ def copy_function(words, a):
     for body in bodies:
         copy = shell_walk.bind([new])
         copy.line, copy.tokens, copy.text, copy.inner, copy.docs = body.line, body.tokens, body.text, body.inner, body.docs
+        # the copy runs OLD's body as zsh parsed it, its text and its aliases (SPD-311, SPD-312: under `alias ls='echo
+        # ALIASED'`, `eval 'f() { ls -d /; }'; unalias ls; functions -c f g; g` printed `ALIASED -d /`)
+        copy.written, copy.parsed = body.written, body.parsed
         copy.expanded, copy.glued, copy.into = body.expanded, body.glued, body.into
         if in_line is not None:
             shell_walk.queue(copy, in_line)
@@ -283,19 +394,160 @@ def remove_functions(words, a, effect):
     the command's reading, everywhere else, and for every name the line defines where the builtin may remove any.  Probed
     2026-09-24 as assigning_builtins.function_removals says, and: a removal before `&` or `|`, in `{ ...; } &` or in a
     subshell did not reach a call after it, while one in a called body or an eval did (tests/test_hooks_words.py
-    FunctionRemovalTest)."""
+    FunctionRemovalTest).
+
+    SPD-305: a function the shell's snapshot defines, where the text being read sourced it, is marked as the line's own
+    are, under its name, and every one of them under UNKNOWN_NAME where the builtin may remove any, so a call after the
+    removal reads no body of the snapshot's (held_function) and a `$( )` or an eval after it is read again (the mark is
+    part of ShellAnalysis.function_state, SPD-296)."""
     found = assigning_builtins.function_removals([words[0]] + [arg_writes.resolved(w, a) for w in words[1:]],
                                                  functools.partial(expansions.settled_text, a))
     if found is None or not a.walks or _in_place(a):
         return
     names, sure = found
     shell_walk = a.walks[-1]
+    # SPD-305: a function the shell's snapshot defines is removed as the line's own are, its mark bound under its name
+    # (held_function), and under UNKNOWN_NAME where the builtin may remove any
+    profile = snapshots.shell_table(a.home).functions if held_text.snapshot_sourced(a) else ()
     if names is None:
-        names, sure = list(a.function_bodies), False
+        names, sure = list(a.function_bodies) + ([syntax.UNKNOWN_NAME] if profile else []), False
     sure = sure and effect == "shell" and not a.unsure and shell_walk.certain_definition()
-    held = [name for name in dict.fromkeys(names) if name in a.function_bodies]
+    held = [name for name in dict.fromkeys(names) if name in a.function_bodies or name in profile
+            or name == syntax.UNKNOWN_NAME]
     if held:
         mark = shell_walk.bind(held)
         mark.removes, mark.certain = True, sure
     if sure:
         a.functions.difference_update(names)
+
+
+# SPD-282: the tag of a `functions -M` registration's key in ShellAnalysis.function_bodies, (MATH, the name arithmetic
+# calls, the shell function that runs): kept beside the bodies, so a subshell, a substitution, a pipeline element and the
+# line's second reading scope a registration as they scope a definition, and a tuple, so no function's name is one
+MATH = "functions -M"
+
+
+def math_function(words, a, effect):
+    """SPD-282: zsh's `functions -M mathfn [min [max [shellfn]]]` -- `-Ms`, `-M -s` or `-sM` for its string form --
+    registers mathfn as a function arithmetic calls (`$(( mathfn() ))`), which runs the shell function shellfn, mathfn's
+    own where none is named, looked up at each call: each registration is bound as a definition is, under (MATH, mathfn,
+    shellfn), one that may not have run, since bash has no `functions` builtin, and read at each call (read_math_calls).
+    `functions +M mathfn ...` removes those names' registrations, as remove_functions marks a removal: surely where the
+    builtin surely runs in the line's shell.  `-M` or `+M` alone, and `-M -m pattern`, list; `+M -m pattern` removes what
+    the pattern matches, which is read as a removal that may not have run, and so is a name the line does not spell.
+    Probed 2026-09-24 as tests/test_hooks_input.py MathFunctionCallTest says: `-M mf x`, `-Mu`, `-Ms a1 2` and a min
+    after the name (`-M a1 -s`) registered nothing, which is bound as a registration all the same (the call's reading
+    costs nothing where none runs), five operands registered nothing and bind nothing, and a second `-M` of one name
+    replaced the first, whose function is read beside the second's (zsh keeps it where it refused the second).
+
+    A registration the hook cannot follow refuses a member as SPD-217 refuses text it did not read, naming the respelling:
+    a math name or a shell function the line does not spell, or an operand that may become several words or none.  An
+    option word the hook cannot read is one function_copy refuses already (copy_function: it may be `-c` or `-M`), and
+    `-c` among the options is a copy, which zsh makes before it looks for `-M` (`functions -M -c f g` copied f)."""
+    found = _math_words(words, a)
+    if found is None:
+        return
+    removing, operands = found
+    reaches = [assigning_builtins._word_reach(word) for word in operands]
+    if not removing:
+        if len(operands) > 4:
+            return  # `-M: too many arguments`
+        if "any" in reaches or reaches[0] != "plain" or (len(operands) == 4 and reaches[3] != "plain"):
+            unread.record_unread(a, "function-math", unread.unread_shown(" ".join(words)))
+            return
+    if _in_place(a) or not a.walks:
+        return
+    shell_walk = a.walks[-1]
+    if not removing:
+        name = prepare.deglob(operands[0])
+        shell_walk.bind([(MATH, name, prepare.deglob(operands[3]) if len(operands) == 4 else name)])
+        return
+    names = {prepare.deglob(word) for word, reach in zip(operands, reaches) if reach == "plain"}
+    held = [key for key in a.function_bodies if _registration(key) and key[1] in names]
+    if held:
+        mark = shell_walk.bind(held)
+        mark.removes = True
+        mark.certain = effect == "shell" and not a.unsure and shell_walk.certain_definition()
+
+
+def _math_words(words, a):
+    """(whether `words`, a `functions` line, remove math functions, the operands naming them or the one it registers),
+    or None where it registers and removes none: no `M` among its options, a `c` (a copy), an `m` (a listing, or a
+    removal by pattern), no operands (a listing), or an option word the scan cannot read (function_copy's).  A `+M`
+    removes, zsh reading the last sign an option letter was given with (assigning_builtins._scan reads the letters)."""
+    args = [arg_writes.resolved(word, a) for word in words[1:]]
+    for options, operands, stuck in assigning_builtins._scan(args, "x", plus=True,
+                                                             settle=functools.partial(expansions.settled_text, a)):
+        letters = {c for c, _ in options}
+        if stuck is not None or "c" in letters or "M" not in letters or "m" in letters or not operands:
+            return None
+        signs = [prepare.deglob(word)[:1] for word in args[: len(args) - len(operands)] if "M" in prepare.deglob(word)]
+        return signs[-1:] == ["+"], operands
+    return None
+
+
+def _math_registrations(a):
+    """Each name arithmetic may call here -> the shell functions its registrations run: every one no removal surely took
+    (_settled), in the order the line registered them."""
+    found = {}
+    for key, bodies in a.function_bodies.items():
+        if _registration(key) and any(not body.removes for body in _settled(bodies)[0]):
+            found.setdefault(key[1], []).append(key[2])
+    return found
+
+
+def _registration(key):
+    """Whether a key of ShellAnalysis.function_bodies is a `functions -M` registration's (MATH), not a function's name."""
+    return isinstance(key, tuple) and key[0] == MATH
+
+
+def read_math_calls(a, found, shown):
+    """SPD-282: the calls among what an arithmetic expression, `shown`, assigns and calls (`found`, as
+    arithmetic_assignments.arithmetic_names gives it: shell/expansions.record_arithmetic's), each call of a name
+    `functions -M` registered read as the function it runs is at a call by its own name (held_text.read_shell_name): the
+    bodies the line defines under it (read_call) and the one the shell's snapshot holds, from the directories, the
+    variables and the input the expression stands in, their findings standing at the call -- and the names the
+    expression assigns, returned for the caller to record.
+
+    zsh runs the function in the shell that evaluates the expression, so its cd reaches the rest of the line; bash has no
+    math functions and fails the expression, so the line may stay where it was as well (probed: `mc() { cd d; };
+    functions -M mc; echo $(( mc() )); pwd` printed d in zsh 5.9, while bash 3.2.57 ran the rest of the line where it
+    stood).  A value the expression assigns around a call is one the hook does not know, before the call and after it:
+    the function may read or assign the name.  A call whose name the hook cannot read (`$(( $n() ))`), where the line
+    registers any, refuses a member as SPD-217 refuses text it did not read; where it registers none, zsh calls no
+    function of the line's (`unknown function`)."""
+    calls = [each for each in found if isinstance(each, arithmetic_assignments.MathCall)]
+    if not calls:
+        return found
+    assigned = [each for each in found if not isinstance(each, arithmetic_assignments.MathCall)]
+    registered, read = _math_registrations(a), False
+    for call in calls:
+        if call[0] == syntax.UNKNOWN_NAME:
+            if registered:
+                unread.record_unread(a, "function-math", unread.unread_shown(shown))
+            continue
+        if call[0] not in registered:
+            continue
+        if not read:
+            read = True
+            for name, _ in assigned:
+                expansions.assign_unknown(a, name)
+        _read_math_call(a, registered[call[0]], call.arguments)
+    return [(name, None) for name, _ in assigned] if read else assigned
+
+
+def _read_math_call(a, shells, arguments):
+    """One arithmetic call of the functions `shells`, each read from where the call stands, with `arguments` words the
+    hook does not know as its positional parameters (a snapshot body's; zsh passes the numbers the arguments evaluate
+    to, or with -s the text between the parentheses), on the input a substitution in the words being read runs on
+    (walk.ShellWalk.substitution_input: zsh's, the list's); the line after it in any directory one of them leaves it in,
+    or the one it stood in."""
+    shell_walk = a.walks[-1] if a.walks else None
+    depth = shell_walk.depth if shell_walk is not None else 0
+    stdin, fed = shell_walk.substitution_input() if shell_walk is not None else (None, False)
+    before = after = a.cwds
+    for shell in shells:
+        a.cwds = before
+        held_text.read_shell_name([shell] + [hookio.SUBST] * arguments, a, depth, stdin, fed, "either", aliased=False)
+        after = directories.union_dirs(after, a.cwds)
+    a.cwds = after

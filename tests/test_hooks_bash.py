@@ -796,10 +796,10 @@ class InProcessParityTest(BashHookCase):
             ("x=$(cat f); echo ${(e)x}", AGENT_A, None, "deny", "zsh's (e) flag"),
             ("echo $(echo $(echo $(echo $(echo $(echo $(echo $(git push)))))))", AGENT_A, None, "deny", "cannot read part of what this line runs"),
             ("X=ls; trap 'X=git' DEBUG; $X push", AGENT_A, None, "deny", "may not hold the value"),
-            ("alias g=$Y; eval 'g push'", AGENT_A, None, "deny", "`eval` runs the command word"),
+            ("alias g=$Y; eval 'g push'", AGENT_A, None, "deny", "runs an alias this line defines that the hook cannot resolve"),
             # SPD-286: eval parses its text whole, so the alias it defines stands in none of its own commands
             ("eval 'alias git=echo; git push'", AGENT_A, None, "deny", "Law 7: spudagents never run `git push`"),
-            ("broken", AGENT_A, None, "deny", "is an alias your shell already defines"),
+            ("broken", AGENT_A, None, "deny", "runs an alias your shell already defines"),
             ("gp", AGENT_A, None, "deny", "(The shell this command runs in already defines `gp`"),
             ("[gp][iu][st]* x", AGENT_A, None, "deny", "is a glob the shell expands"),
             ("%s --as spud board" % cli, AGENT_A, None, "deny", "Law 6: `--as spud` is Spud's"),
@@ -1016,6 +1016,213 @@ class SubstitutionShownTest(BashHookCase):
                     reason = self.bash(command, agent_id).reason or ""
                     self.assertNotIn(subst, reason)
                     self.assertNotIn(procsub, reason)
+
+
+class AliasReasonTest(BashHookCase):
+    """SPD-289: the "alias", "alias-word" and "shell-alias" reasons were written for `eval` and a command word -- "`eval`
+    runs the command word", "`eval` reads ... again", "the command word ... is an alias your shell already defines" -- but
+    each now arises elsewhere: the line's aliases in every text zsh parses as the line runs, a `$( )` or `<( )` body as
+    well as eval's words (SPD-283, SPD-287), and the shell's own global alias in any word, its suffix alias on a command
+    word ending in its suffix (SPD-283).  Each reason now reads true in every such place and says what to respell.  The
+    snapshot holds a plain, a global and a suffix alias whose quoting never closes, as test_hooks_snapshots'
+    HeldWordAliasTest does.  AGENT_A plans tests/** and bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh").write_text(
+            "alias -- broken='git push\nalias -g -- BROKEN='git push\nalias -s -- cfg='git push\n", encoding="utf-8")
+
+    def test_a_command_word_the_lines_alias_may_run(self):
+        for line in ("alias g=$Y; eval 'g push'", "alias g=$Y; echo $(g push)", "alias g=$Y; cat <(g push)",
+                     "if true; then alias gp='git status'; fi; cat <(gp)", "(alias gp='git status'); echo $(gp)"):
+            with self.subTest(line):
+                r = self.assertRefused(line, "runs an alias this line defines that the hook cannot resolve")
+                self.assertIn("text zsh parses as the line runs -- eval's words, a `$( )`, backtick or `<( )` body", r.reason)
+                self.assertIn("spell out the command the alias stands for in place of its name", r.reason)
+                self.assertNotIn("`eval` runs", r.reason)
+                self.assertSilent(line, agent_id=None)
+
+    def test_a_word_the_lines_global_or_suffix_alias_may_stand_in(self):
+        for line in ("if true; then alias -g gp='; git status'; fi; echo $(echo gp)",
+                     "if true; then alias -g gp='; git status'; fi; eval 'echo gp'",
+                     "alias -g gp='; git status'; X=gp; eval echo $X"):
+            with self.subTest(line):
+                r = self.assertRefused(line, "a global or suffix alias the hook cannot resolve")
+                self.assertIn("text zsh parses as the line runs", r.reason)
+                self.assertIn("spell out what the alias stands for in place of its name", r.reason)
+                self.assertNotIn("`eval` reads", r.reason)
+                self.assertSilent(line, agent_id=None)
+
+    def test_an_alias_of_the_shell_whose_body_the_hook_cannot_read(self):
+        for line, word in (("broken", "broken"), ("echo hi BROKEN", "BROKEN"), ("a.cfg", "a.cfg"), ("x=$(b.cfg)", "b.cfg")):
+            with self.subTest(line):
+                r = self.assertRefused(line, "the word `%s` runs an alias your shell already defines whose body the hook"
+                                             " cannot read" % word)
+                self.assertIn("a global alias (`alias -g`) in any word", r.reason)
+                self.assertIn("spell out the command the alias stands for in its place, or quote the word where you mean"
+                              " it as written (`'%s'`): zsh expands no alias of a quoted word" % word, r.reason)
+                self.assertIn("quoting only this one leaves any other spelling of the same name, or one ending in the"
+                              " same suffix, unquoted there still read as the alias", r.reason)
+                self.assertNotIn("the command word", r.reason)
+                self.assertSilent(line, agent_id=None)
+
+    def test_the_quoted_word_the_reason_offers_is_no_alias(self):
+        # the respelling the shell-alias reason offers, for every kind since SPD-295: zsh expands no alias of a word quoted
+        # in any way, and no suffix alias of one quoted after its last dot (QuotedAliasWordTest)
+        for line in ("echo hi 'BROKEN'", "echo hi \\BROKEN", 'echo hi "BROKEN"', "'broken'", "'a.cfg'", "x=$('b.cfg')"):
+            with self.subTest(line):
+                r = self.bash(line, AGENT_A, None)
+                self.assertNotIn("alias your shell already defines", r.reason or "", (line, r))
+                self.assertSilent(line)
+
+
+class QuotedAliasWordTest(BashHookCase):
+    """SPD-295: zsh expands no plain alias of a word quoted in any way -- a quote or a backslash anywhere in it -- and a
+    suffix alias only where the text after the word's last dot holds none, the line's own aliases as well as its
+    snapshot's (probed in zsh 5.9 -f and -f -o nobareglobqual, the snapshot sourced and the line eval'd as the Bash tool's
+    shell runs it: `\\ls`, `l''s`, `"ls"`, `'ls'`, `ls''` and `$'ls'` ran no alias, in eval and `$( )` too; `'a.cfg'`,
+    `a.'cfg'`, `a.cf\\g` and `a.cfg''` ran no suffix alias, where `a\\.cfg`, `"a".cfg` and `'a'.cfg` did).  The hook read
+    the command word with its quotes gone, so a quoted respelling earned the refusal its alias did.  Now a name every word
+    of the text spells quoted stands for no alias there, while the quoted word is still the command it names: under
+    `alias git=hub`, `'git' push` is git's push.  A name the text also spells unquoted keeps the alias reading."""
+
+    def setUp(self):
+        super().setUp()
+        self.snapshot("alias -- broken='git push\nalias -s -- cfg='git push\nalias -- gp='git push'\n")
+
+    def snapshot(self, text):
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh").write_text(text, encoding="utf-8")
+
+    def test_a_quoted_command_word_runs_no_plain_alias(self):
+        for line in ("'broken'", "\\broken", "bro''ken", '"broken"', "broken''", "$'broken'", "'broken' x; echo hi",
+                     "eval \"'broken'\"", "echo $('broken')", "cat <('broken')", "'gp'", "g\\p", "echo $(\"gp\")"):
+            with self.subTest(line):
+                self.assertSilent(line)
+        self.assertRefused("broken", "the word `broken` runs an alias your shell already defines")
+        self.assertRefused("gp", "Law 7")
+
+    def test_a_quoted_suffix_runs_no_suffix_alias(self):
+        for line in ("'a.cfg'", "a.'cfg'", "a.cf\\g", "a.cfg''", '"a.cfg"', "echo $('b.cfg')"):
+            with self.subTest(line):
+                self.assertSilent(line)
+        # ... where only the text after the last dot counts: a quote or an escape before it leaves the suffix alias
+        for line, word in (("a\\.cfg", "a.cfg"), ('"a".cfg', "a.cfg"), ("'a'.cfg", "a.cfg"), ("\\a.cfg", "a.cfg")):
+            with self.subTest(line):
+                self.assertRefused(line, "the word `%s` runs an alias your shell already defines" % word)
+
+    def test_a_name_the_text_spells_unquoted_too_keeps_the_alias(self):
+        # the hook cannot tell which word of the text is the quoted one, so each is read as the alias as well as the command
+        # it names (SPD-308, QuotedAndUnquotedAliasWordTest); a suffix is read by the word's own spellings, so `'a.cfg'`
+        # runs no suffix alias beside `b.cfg`, which does
+        for line, needle in (("'broken'; broken", "`broken` runs an alias"), ("'broken' x; echo broken", "`broken` runs an alias"),
+                             ("'a.cfg'; b.cfg", "`b.cfg` runs an alias"), ("'a.cfg'; a.cfg", "`a.cfg` runs an alias"),
+                             ("'gp'; gp", "Law 7")):
+            with self.subTest(line):
+                self.assertRefused(line, needle)
+        # ... but only in that text: a substitution's is its own
+        self.assertSilent("echo $('broken'); echo broken")
+
+    def test_a_quoted_command_word_is_still_the_command_it_names(self):
+        self.snapshot("alias -- git=hub\n")
+        for line in ("'git' push", "\\git push", '"git" push', "g''it push", "eval \"'git' push\"", "echo $('git' push)"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+        self.assertSilent("git push")  # the snapshot's alias: hub's push
+
+    def test_the_lines_own_alias_of_a_quoted_word(self):
+        for line in ("alias gq='git push'; eval \"'gq'\"", "alias gq='git push'; echo $('gq')",
+                     "alias gq='git push'; eval 'g\\q'", "alias -s txt='git push'; eval \"a.'txt'\"",
+                     "alias ls='git push'; eval \"'ls' -d /\""):
+            with self.subTest(line):
+                self.assertSilent(line)
+        for line in ("alias gq='git push'; eval gq", "alias gq='git push'; echo $(gq)", "alias gq='git push'; eval \"'gq'; gq\"",
+                     "alias -s txt='git push'; eval a.txt", "alias -s txt='git push'; eval \"'a'.txt\""):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+
+
+class QuotedAndUnquotedAliasWordTest(BashHookCase):
+    """SPD-308: zsh reads each word's quotes where it parses it, so a text that spells an alias's name both quoted and
+    unquoted runs the command the name spells where it is quoted and the alias where it is not (probed in zsh 5.9 -f and
+    -f -o nobareglobqual through tests/probes/shell_probe.py, the lines run by eval as the Bash tool's shell runs them:
+    under `alias ls='echo ALIASED'`, `'ls' -d /; ls -d /` printed `/` then `ALIASED -d /`, and the other order the other
+    way; so did a function body the line defines, `f() { 'ls' -d /; ls -d /; }; f`; after `alias v='V=1 '` or `alias
+    t='nocorrect '`, `v 'ls' -d /` ran the real ls; and with `function a.txt` and `alias -s txt=...`, `'a.txt'`,
+    `a.'txt'` and `a.tx\\t` ran the function where `a.txt` and `"a".txt` ran the suffix alias).  SPD-295 read every word
+    of such a name as the alias, so under a profile's `alias git=hub`, `'git' push; git status` was read as hub's push
+    and let through while zsh pushed.  The tokens carry no quotes, so the hook reads such a word both ways -- the alias,
+    and the command it names -- and reads by each word's own spellings whether a suffix alias may run."""
+
+    def snapshot(self, text):
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000000-aaaaaa.sh").write_text(text, encoding="utf-8")
+
+    def test_a_name_spelled_quoted_and_unquoted_is_read_both_ways(self):
+        self.snapshot("alias -- git=hub\n")
+        for line in ("'git' push; git status", "git status; 'git' push", "'git' push; echo git", "echo git; \\git push",
+                     "\"git\" push && git log", "git log; g''it push", "'git' push; git push"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+        # ... and where it spells it one way, as it is: quoted, the command; unquoted, the alias
+        self.assertRefused("'git' push", "Law 7")
+        for line in ("git push", "git status", "git push; git status", "'git' status; git status", "git status; 'git' log"):
+            with self.subTest(line):
+                self.assertSilent(line)
+
+    def test_a_function_body_the_line_defines(self):
+        # a body's tokens hold no quotes either: read by the text that defined it where the line is still reading it
+        self.snapshot("alias -- git=hub\n")
+        for line in ("f() { 'git' push; }; f", "f() { 'git' push; }; eval f", "f() { git status; 'git' push; }; f",
+                     "eval \"f() { 'git' push; }\"; f"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+        self.assertSilent("f() { git push; }; f")
+
+    def test_the_word_after_an_alias_ending_in_a_blank(self):
+        # zsh expands an alias of the word after one whose body ends in a blank, and none of a quoted word there
+        self.snapshot("alias -- git=hub\nalias -- v='V=1 '\nalias -- t='nocorrect '\n")
+        for line in ("v 'git' push", "t 'git' push", "v 'git' push; v git status", "v git status; v 'git' push",
+                     "alias w='V=2 '; eval \"w 'git' push\""):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+        for line in ("v git push", "t git push", "alias w='V=2 '; eval 'w git push'"):
+            with self.subTest(line):
+                self.assertSilent(line)
+
+    def test_a_suffix_alias_by_the_words_own_spellings(self):
+        self.snapshot("a.txt () {\n\tgit push\n}\nalias -s -- txt=cat\n")
+        for line in ("'a.txt'; b.txt", "b.txt; a.'txt'", "a.tx\\t; a.txt", "a.txt; 'a.txt'", "'a.txt'"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+        for line in ("a.txt", "a.txt; b.txt", '"a".txt', '"a".txt; a.txt', "'b.txt'; a.txt"):
+            with self.subTest(line):
+                self.assertSilent(line)
+
+    def test_the_lines_own_alias(self):
+        self.snapshot("a.txt () {\n\tgit push\n}\n")
+        for line in ("alias git=hub; eval \"'git' push; git status\"", "alias git=hub; eval \"git status; 'git' push\"",
+                     "alias git=hub; echo $('git' push; git status)", "alias git=hub; eval \"'git' push\"",
+                     "alias -s txt=cat; eval \"'a.txt'; b.txt\"", "alias -s txt=cat; eval \"b.txt; a.'txt'\""):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+        for line in ("alias git=hub; eval 'git push'", "alias git=hub; eval 'git push; git status'",
+                     "alias -s txt=cat; eval 'a.txt; b.txt'"):
+            with self.subTest(line):
+                self.assertSilent(line)
+
+    def test_words_a_global_alias_puts_in_a_process_substitution(self):
+        # the walk reads a `<( )` body's words from the global alias's text, which the line does not spell (SPD-293), so
+        # where one may stand every word is read both ways
+        self.snapshot("alias -- git=hub\nalias -g -- QP=\"'git' push\"\n")
+        for line in ("cat <(QP)", "cat <(echo x); 'git' push"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+        self.assertSilent("cat <(echo x); git status")
 
 
 if __name__ == "__main__":

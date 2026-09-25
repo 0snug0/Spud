@@ -16,7 +16,7 @@ from ..state import ledgerdb
 #
 # `spud hook <event>` reads the harness payload on stdin and answers the documented way:
 # JSON on stdout with exit 0, or exit 2 with the reason on stderr.  Enforcing hooks
-# (PreToolUse for Agent, Bash and the edit tools; Stop) fail closed: a planned refusal is
+# (PreToolUse for Agent, Bash, the edit tools and SendMessage; Stop) fail closed: a planned refusal is
 # `permissionDecision: deny` with the reason (so the model reads why), anything unexpected
 # is exit 2.  Recording hooks (PostToolUse for Agent, SubagentStart, SubagentStop,
 # SessionStart, UserPromptSubmit) fail open: exit 0 whatever happens, the gap written to the spool
@@ -25,7 +25,9 @@ from ..state import ledgerdb
 
 HOOK_EVENTS = ("PreToolUse", "PostToolUse", "SubagentStart", "SubagentStop", "SessionStart", "Stop", "UserPromptSubmit")
 EDIT_TOOLS = ("Write", "Edit", "MultiEdit", "NotebookEdit")
-ENFORCED_TOOLS = ("Agent", "Bash") + EDIT_TOOLS
+# SendMessage (SPD-318): a spudagent is never resumed by a message, since the resumed run passes no PreToolUse(Agent)
+# member check and shows no progress in the desktop app; hooks/pretool.hook_send_message refuses one and names member respawn.
+ENFORCED_TOOLS = ("Agent", "Bash") + EDIT_TOOLS + ("SendMessage",)
 # Spud's hand-written set (Law 1, as corrected when the hooks were designed); everything else in the
 # repository is a deliverable, and ledger/** and reports/** are generated.
 SPUD_PATHS = ("spud.config.json", "CLAUDE.md", ".claude/**", "docs/superpowers/specs/**",

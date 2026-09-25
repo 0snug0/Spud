@@ -985,5 +985,102 @@ class GlobSemanticsTest(unittest.TestCase):
             self.assertTrue(spud.path_matches_glob(witness, glob), (glob, witness))
 
 
+class DirectoryFunctionTest(PathAliasAsserts, HookCase):
+    """SPD-304 (found on SPD-296): zsh and bash run a function before a builtin of the same name, so after `cd() { ...; }`
+    on the line a bare `cd` runs the body, which may move elsewhere or not at all -- but the hook read the builtin's move
+    after reading the body, so a git call or a relative write after it was checked in the directory cd's operand names,
+    where it does not run.  `cd() { builtin cd t; }; cd /tmp; git status` was read as git in /tmp and `cd() { true; }; cd
+    /tmp; git status` the same, where the shells run git in ./t and where the line started; a member whose deliverables are
+    tests/** had `cd() { true; }; cd tests; echo x > out.txt` pass, which writes ./out.txt.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and -f
+    and GNU bash 3.2.57, `$PWD` printed after each: `cd() { builtin cd t; }; cd /tmp` left ./t, `cd() { true; }; cd /tmp`
+    the start, and pushd, popd and chdir functions, `eval 'cd /tmp'`, `$(cd /tmp; pwd)`, `\\cd /tmp` and `'cd' /tmp` ran
+    the body alike; `builtin cd /tmp` went to /tmp, and so did a `cd /tmp` after `unset -f cd`; `command cd /tmp` went to
+    /tmp in bash and stayed in zsh (/usr/bin/cd); `noglob cd /tmp` and `- cd /tmp` ran the body in zsh and nothing in bash.
+
+    The rule now: a call the shell looks up as a function (analyse.dispatch_words' seeks_function) where the line or the
+    shell's snapshot defines one under that name is its body's reading alone (directories.directory_change, looked_up); a
+    definition that may not have run, or a name the hook cannot read, leaves the directory unknown, as a cd it cannot
+    follow does (line_functions.in_builtins_place).  The lead, AGENT_A, holds tests/**."""
+
+    in_process = True  # SPD-231
+
+    def build_home(self):
+        super().build_home()
+        (self.home.path / "tests").mkdir(exist_ok=True)
+        (self.home.path / "t").mkdir(exist_ok=True)
+        self.lead = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:tests/**"]), AGENT_A)
+
+    def setUp(self):
+        super().setUp()
+        self.m = load_spud_module()
+        self.snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+
+    def write_snapshot(self, functions):
+        """A snapshot of the shape Claude Code writes, defining these functions, as tests/test_hooks_snapshots.py writes one."""
+        self.snapshots.mkdir(parents=True, exist_ok=True)
+        text = "# Snapshot file\n# Functions\n" + "".join("%s () {\n\t%s\n}\n" % f for f in functions) + "# Aliases\n"
+        (self.snapshots / "snapshot-zsh-1700000000304-cdcdcd.sh").write_text(text, encoding="utf-8")
+
+    def git_dirs(self, command):
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        home = str(self.home.path)
+        with mock.patch.dict(os.environ, env, clear=True):
+            a = self.m.analyse_command(command, self.m.ShellAnalysis(cwd=home, home=home))
+        return [cwds for _, cwds in a.git_calls]
+
+    def test_the_tickets_evidence(self):
+        home = str(self.home.path)
+        self.assertEqual(self.git_dirs("cd() { builtin cd t; }; cd /tmp; git status"), [frozenset([home + "/t"])])
+        self.assertEqual(self.git_dirs("cd() { true; }; cd /tmp; git status"), [frozenset([home])])
+
+    def test_the_function_runs_in_the_builtins_place(self):
+        home, t = str(self.home.path), str(self.home.path / "t")
+        for command, expected in (
+                ("pushd() { builtin cd t; }; pushd /tmp; git status", {t}),
+                ("popd() { builtin cd t; }; popd; git status", {t}),
+                ("chdir() { builtin cd t; }; chdir /tmp; git status", {t}),
+                ("function cd { builtin cd t; }; cd /tmp; git status", {t}),
+                ("cd() { builtin cd t; }; eval 'cd /tmp'; git status", {t}),
+                ("cd() { builtin cd t; }; \\cd /tmp; git status", {t}),
+                ("cd() { builtin cd t; }; 'cd' /tmp; git status", {t}),
+                ("cd() { builtin cd t; }; echo $(cd /tmp; git status)", {t}),
+                # zsh's noglob and `-` keep the function lookup; bash finds no such command and stays
+                ("cd() { builtin cd t; }; noglob cd /tmp; git status", {home, t}),
+                ("cd() { builtin cd t; }; - cd /tmp; git status", {home, t}),
+                # ... and builtin, command, and a removal the builtin's move, as before
+                ("cd() { true; }; builtin cd /tmp; git status", {"/tmp"}),
+                ("cd() { true; }; command cd /tmp; git status", {"/tmp", home}),
+                ("cd() { true; }; unset -f cd; cd /tmp; git status", {"/tmp"}),
+                ("( cd() { true; } ); cd /tmp; git status", {"/tmp"}),
+                ("cd /tmp; git status", {"/tmp"})):
+            with self.subTest(command=command):
+                self.assertEqual(self.git_dirs(command), [frozenset(expected)])
+
+    def test_a_function_that_may_not_run_leaves_the_directory_unknown(self):
+        for command in ("true && cd() { builtin cd t; }; cd /tmp; git status",
+                        "cd() { builtin cd \"$1\"; }; cd t; git status"):  # a body whose operand the hook does not settle
+            with self.subTest(command=command):
+                self.assertEqual(self.git_dirs(command), [None])
+
+    def test_a_snapshot_function_runs_in_the_builtins_place(self):
+        home, t = str(self.home.path), str(self.home.path / "t")
+        self.write_snapshot([("cd", "builtin cd t"), ("pushd", "true")])
+        self.assertEqual(self.git_dirs("cd /tmp; git status"), [frozenset([t])])
+        self.assertEqual(self.git_dirs("pushd /tmp; git status"), [frozenset([home])])
+        self.assertEqual(self.git_dirs("builtin cd /tmp; git status"), [frozenset(["/tmp"])])
+        self.assertEqual(self.git_dirs("cd() { true; }; cd /tmp; git status"), [frozenset([home, t])])  # either may run
+        self.assertEqual(self.git_dirs("sh -c 'cd /tmp; git status'"), [frozenset(["/tmp"])])  # a new shell never sources it
+
+    def test_a_relative_write_after_the_call_is_held_where_it_lands(self):
+        self.assertBashRefused("cd() { true; }; cd tests; echo x > out.txt", "deliverables")
+        self.assertBashSilent("cd() { builtin cd tests; }; cd /tmp; echo x > out.txt")
+        self.assertBashSilent("cd() { true; }; builtin cd tests; echo x > out.txt")
+        self.write_snapshot([("pushd", "true")])
+        self.assertBashRefused("pushd tests; echo x > out.txt", "deliverables")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -38,7 +38,8 @@ FIXTURE = {
 }
 
 EVENTS = {
-    "PreToolUse": ["Agent|Bash|Write|Edit|MultiEdit|NotebookEdit"],  # SPD-223: one row, where every sync before it wrote three
+    # SPD-223: one row, where every sync before it wrote three; SendMessage since SPD-318
+    "PreToolUse": ["Agent|Bash|Write|Edit|MultiEdit|NotebookEdit|SendMessage"],
     "PostToolUse": ["Agent"],
     "SubagentStart": [None],
     "SubagentStop": [None],
@@ -424,7 +425,7 @@ class HookTableTest(unittest.TestCase):
         # the same command; and PreToolUse's matcher names exactly the tools the hook enforces, the list pretool reads
         # back from the payload's tool_name, so the harness's filter and the program's are one list of names.
         self.assertEqual(len(spud.HOOK_TABLE), len(spud.TABLE_EVENTS))
-        self.assertEqual(dict(spud.HOOK_TABLE)["PreToolUse"], "Agent|Bash|Write|Edit|MultiEdit|NotebookEdit")
+        self.assertEqual(dict(spud.HOOK_TABLE)["PreToolUse"], "Agent|Bash|Write|Edit|MultiEdit|NotebookEdit|SendMessage")
         self.assertEqual(dict(spud.HOOK_TABLE)["PreToolUse"].split("|"), list(spud.ENFORCED_TOOLS))
 
 

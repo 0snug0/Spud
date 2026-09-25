@@ -131,7 +131,9 @@ def format_tree(nodes, depth=0):
     lines = []
     for n in nodes:
         run = "spawned %s, finished %s" % (kernel.fm_minute(n["spawned_at"]) or "-", kernel.fm_minute(n["finished_at"]) or "-")
-        line = "%s- %s (%s, %s, %s) %s; %s" % ("  " * depth, n["name"], n["lineage"], n["persona"] if n["persona"] != "contractor" else "contractor on %s" % n["agent_type"], n["model"], n["status"], run)
+        chain = ", ".join(w + " " + ref.split("/", 1)[-1] for w, ref in (("re-spawns", n.get("respawns")), ("re-spawned as", n.get("respawned_as"))) if ref)
+        line = "%s- %s (%s, %s, %s%s) %s; %s" % ("  " * depth, n["name"], n["lineage"], n["persona"] if n["persona"] != "contractor" else "contractor on %s" % n["agent_type"],
+                                           n["model"], "; " + chain if chain else "", n["status"], run)  # SPD-321: the re-spawn chain, as on the Team card
         if n.get("tokens"):
             line += "; %s · %s" % (teamcard.tokens_text(n["tokens"]), "$" + n["cost_usd"] if n.get("cost_usd") else "— (%s)" % "; ".join(n.get("not_priced") or ["not priced"]))
         lines.append(line)

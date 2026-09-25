@@ -16,9 +16,10 @@ from ..state import ledgerdb
 # dispatches on it, so one row does what the three rows every sync wrote before SPD-223 did (Agent; Bash;
 # Write|Edit|MultiEdit|NotebookEdit, each carrying the same command): a call to any of those tools matches one row and runs
 # one process.  A matcher of letters and `|` alone is a list of exact tool names to the harness, not a regular expression
-# (Claude Code's hooks reference, "Matcher patterns"), so it matches those six tools and no other.
+# (Claude Code's hooks reference, "Matcher patterns"), so it matches those seven tools and no other.  SendMessage joined
+# them on SPD-318, so a message that would resume a spudagent outside PreToolUse(Agent)'s member check is refused.
 HOOK_TABLE = (
-    ("PreToolUse", "Agent|Bash|Write|Edit|MultiEdit|NotebookEdit"),
+    ("PreToolUse", "Agent|Bash|Write|Edit|MultiEdit|NotebookEdit|SendMessage"),
     ("PostToolUse", "Agent"),
     ("SubagentStart", None),
     ("SubagentStop", None),

@@ -13,9 +13,10 @@ def render_team_section(con, t, pricing=None):
         return ""
     lines = list(teamcard.TEAM_TABLE_HEAD) + [teamcard.team_table_row(t["team_key"], t["created_at"], m, pricing) for m in rows]
     lines += [teamcard.team_total_row(teamcard.team_totals(rows, pricing)), ""]
+    respawns = teamcard.respawn_words(con, t)  # SPD-321: a re-spawn chain, linked both ways in the tree
     for m in rows:
         text = workedon.worked_on(m)
-        lines.append("  " * (m["depth"] - 1) + teamcard.team_line(t["team_key"], m) + (" — " + text if text else ""))
+        lines.append("  " * (m["depth"] - 1) + teamcard.team_line(t["team_key"], m, respawns.get(m["id"], "")) + (" — " + text if text else ""))
     lines += ["", teamcard.TEAM_VIEW_EMBED]
     return "\n".join(lines)
 
@@ -117,7 +118,8 @@ def render_log_rows(con, member, after=0):
 
 def render_subagent_rows(con, member, team_key, after=0):
     rows = con.execute("SELECT * FROM members WHERE parent_id = ? AND id > ? ORDER BY lineage", (member["id"], after)).fetchall()
-    return "\n".join(teamcard.team_line(team_key, m) for m in rows)
+    respawns = teamcard.respawn_words(con, lookup.get_ticket_by_id(con, member["ticket_id"])) if rows else {}
+    return "\n".join(teamcard.team_line(team_key, m, respawns.get(m["id"], "")) for m in rows)
 
 
 def render_proposal_rows(con, member, after=0):

@@ -2,10 +2,11 @@
 
 A module of its own since SPD-259, taken out of shell/assignment_words: shell/expansions records what arithmetic_names
 reads in an arithmetic command, a `let`, a `for (( ... ))` header, a `[[ ]]` operand or a typed variable's value, and what
-word_arithmetic reads in a word's `$(( ... ))`, `$[ ... ]` and `${ ... }`.  It reads text only and imports nothing of the
-shell reading's import cycle.  Past 250 lines as one reading: arithmetic_names and word_arithmetic share one recursive
-reader (_read_arithmetic, _expanded_arithmetic and _braced call one another, with one budget), which no cut would leave
-whole."""
+word_arithmetic reads in a word's `$(( ... ))`, `$[ ... ]` and `${ ... }` -- and, among those names, each function the
+expression calls (MathCall, SPD-282), which shell/line_functions reads where zsh's `functions -M` names one.  It reads
+text only and imports nothing of the shell reading's import cycle.  Past 250 lines as one reading: arithmetic_names and
+word_arithmetic share one recursive reader (_read_arithmetic, _expanded_arithmetic and _braced call one another, with one
+budget), which no cut would leave whole."""
 
 from . import syntax
 from ..core import lazy
@@ -34,10 +35,27 @@ _NAME_START_RE = lazy.LazyPattern(r"[A-Za-z_][A-Za-z0-9_]*")
 _NAME_LETTER_RE = lazy.LazyPattern(r"[A-Za-z_]")
 _BRACED_PREFIX_RE = lazy.LazyPattern(r"[#!^=~+]*(?:\([^)]*\))?[#!^=~+]*(?:[A-Za-z_][A-Za-z0-9_]*)?")
 _PAIRS = {"(": ")", "[": "]", "{": "}"}
+_CALLED = ("name", "opaque")  # what a `(` glued to it calls: a name, or one an expansion gives that the hook cannot read
 # A masked word's text with the hook's marks restored, but for the two that say a `$` expands nothing -- single-quoted,
 # escaped, `$'...'` -- which word_arithmetic reads (reevaluation._WORD_TEXT's table)
 _DOLLAR_MARKS = (syntax._LITERAL_DOLLAR, syntax._QUOTED_DOLLAR)
 _KEEP_DOLLAR_MARKS = str.maketrans({k: v for k, v in syntax._SENTINEL_TEXT.items() if k not in _DOLLAR_MARKS})
+
+
+class MathCall(tuple):
+    """SPD-282: a call of a function in an arithmetic expression, `name(...)`, as `found` holds it among the names the
+    expression assigns: `(name, None)`, in the order the shell makes it -- after its arguments, which it evaluates first
+    (probed: `$(( a1(b1()) ))` ran b1, then a1) -- with syntax.UNKNOWN_NAME for a name an expansion gives that the hook
+    cannot read, and `arguments`, how many the call passes.  zsh calls such a name only where `functions -M` registered
+    it, with no blank before its `(` (`$(( mf (1) ))` was a bad math expression; `$(( mf ))` read a variable), and bash
+    calls none (a syntax error in the expression), so shell/line_functions.read_math_calls decides which of them run a
+    function's body.  A pair, so a reader of `found` that knows no calls reads one as a name assigned a value it does not
+    know."""
+
+    def __new__(cls, name, arguments):
+        call = super().__new__(cls, (name, None))
+        call.arguments = arguments
+        return call
 
 
 def arithmetic_names(text, settle, doubtful=False):
@@ -54,7 +72,8 @@ def arithmetic_names(text, settle, doubtful=False):
     expression reads is evaluated as arithmetic in turn (`Y='X=18'; (( Y ))` assigned X in both shells), followed
     ARITH_DEPTH deep; past that bound, or past _ARITH_BUDGET expressions, the text is one the hook did not read, and the
     answer is None.  A value the line does not spell -- the environment's, a substitution's output -- is not read so: a
-    member's number, not text it wrote."""
+    member's number, not text it wrote.  Each function the expression calls stands among the names as a MathCall, where
+    the shell calls it (SPD-282)."""
     found = []
     return found if _read_arithmetic(text, settle, 0, found, doubtful, [_ARITH_BUDGET, set()]) else None
 
@@ -68,13 +87,33 @@ def _read_arithmetic(text, settle, depth, found, doubtful, budget):
     expanded = _expanded_arithmetic(text, settle, depth, found, doubtful, budget)
     if expanded is None:
         return False
-    tokens = [(m.lastgroup if m.group() != ARITH_OPAQUE else "opaque", m.group())
-              for m in _ARITH_TOKEN_RE.finditer(expanded) if m.lastgroup]
+    tokens, spans, calls = [], [], set()
+    for m in _ARITH_TOKEN_RE.finditer(expanded):
+        if not m.lastgroup:
+            continue
+        if m.group() == "(" and spans and m.start() == spans[-1][1] and tokens[-1][0] in _CALLED:
+            calls.add(len(tokens) - 1)  # a name glued to its `(`: a call (MathCall)
+        tokens.append((m.lastgroup if m.group() != ARITH_OPAQUE else "opaque", m.group()))
+        spans.append(m.span())
+
+    def between(opener, close):
+        """The text between the pair at tokens[opener] and tokens[close], as spelled, so a call inside stays glued."""
+        return expanded[spans[opener][1] : spans[close][0] if close < len(spans) else len(expanded)]
+
     branching = doubtful or any(kind == "op" and t in _BRANCHING for kind, t in tokens)
     i, n = 0, len(tokens)
     while i < n:
         kind, t = tokens[i]
         i += 1
+        if i - 1 in calls:
+            # its arguments, evaluated before the call, then the call (SPD-282); never the value of a variable of its name
+            close = _token_close(tokens, i)
+            inner = tokens[i + 1 : close]
+            if inner and not _read_arithmetic(between(i, close), settle, depth + 1, found, branching, budget):
+                return False
+            found.append(MathCall(t if kind == "name" else syntax.UNKNOWN_NAME, _arguments(inner)))
+            i = close + 1
+            continue
         if kind == "op" and t in _STEPS and i < n and tokens[i][0] in ("name", "opaque"):
             if tokens[i][0] == "opaque":  # `++$N`
                 return False
@@ -85,7 +124,7 @@ def _read_arithmetic(text, settle, depth, found, doubtful, budget):
         subscripted = i < n and tokens[i][1] == "["
         if subscripted:  # an element: its subscript is arithmetic, which an associative array's is not
             close = _token_close(tokens, i)
-            if not _read_arithmetic(" ".join(t for _, t in tokens[i + 1 : close]), settle, depth + 1, found, True, budget):
+            if not _read_arithmetic(between(i, close), settle, depth + 1, found, True, budget):
                 return False
             i = close + 1
         op = tokens[i][1] if i < n else None
@@ -134,16 +173,31 @@ def _decimal_operand(tokens, start):
 
 
 def _token_close(tokens, start):
-    """The index of the `]` that closes the `[` at tokens[start], or the tokens' end when none does."""
-    level = 0
+    """The index of the `]` or `)` that closes the `[` or `(` at tokens[start], or the tokens' end when none does."""
+    opener, level = tokens[start][1], 0
+    closer = _PAIRS[opener]
     for k in range(start, len(tokens)):
-        if tokens[k][1] == "[":
+        if tokens[k][1] == opener:
             level += 1
-        elif tokens[k][1] == "]":
+        elif tokens[k][1] == closer:
             level -= 1
             if level == 0:
                 return k
     return len(tokens)
+
+
+def _arguments(tokens):
+    """How many arguments a call's tokens between its parentheses pass: none for none, else one more than the commas
+    outside any pair inside them."""
+    level, commas = 0, 0
+    for _, t in tokens:
+        if t in _PAIRS:
+            level += 1
+        elif t in (")", "]", "}"):
+            level -= 1
+        elif t == "," and level == 0:
+            commas += 1
+    return commas + 1 if tokens else 0
 
 
 def _close(text, start):
@@ -237,8 +291,9 @@ def word_arithmetic(word, settle, raw=False):
     """[(name, value or None)] for the names the shells assign expanding this word -- its arithmetic expansions, `$((
     ... ))` and `$[ ... ]` (probed: `echo $((X=5))`, `/bin/echo $((X=6))`, `echo "$((X=16))"` and `echo $[X=12]` assigned
     X in all three shells), and the arithmetic a `${ ... }` may evaluate (_braced) -- in order, as arithmetic_names gives
-    them; None when one of them cannot be read.  `word` is a masked word, where a `$` the hook marked literal (single-quoted,
-    escaped) expands nothing, or, with `raw`, an unquoted here-document's body, where a backslash escapes what follows it."""
+    them, each call a MathCall among them; None when one of them cannot be read.  `word` is a masked word, where a `$` the
+    hook marked literal (single-quoted, escaped) expands nothing, or, with `raw`, an unquoted here-document's body, where a
+    backslash escapes what follows it."""
     if "$" not in word:
         return []
     text = word if raw else word.translate(_KEEP_DOLLAR_MARKS)

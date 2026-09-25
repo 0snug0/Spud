@@ -104,8 +104,45 @@ def ticket_dict(con, t):
     }
 
 
+def respawn_links(con, ticket_id):
+    """{the re-spawn's member id: the id of the member it re-spawns} on one ticket (SPD-321).  The link is data on the
+    re-spawn's member.planned event, `respawns_id` beside the handle `respawns`, written by `member respawn` in the plan's
+    own transaction: an event field rather than a column, since the link is a fact of the planning, written once and
+    never changed, and the append-only log already holds it -- no migration.  A re-spawn is planned on the ticket of the
+    member it re-spawns, so one indexed read of the ticket's events finds every link on it."""
+    rows = con.execute("SELECT member_id, json_extract(data, '$.respawns_id') AS old FROM events WHERE ticket_id = ?"
+                       " AND kind = 'member.planned' AND json_extract(data, '$.respawns_id') IS NOT NULL", (ticket_id,))
+    return {r["member_id"]: r["old"] for r in rows}
+
+
+def respawn_chain(con, member):
+    """The ids of `member`'s re-spawn chain in run order (SPD-321): the first run, each re-spawn of it in turn, `member`
+    among them.  A chain is linear, since a member is re-spawned once (state/ops.respawn_target), so the walk back is
+    one link a step and so is the walk forward; a loop, which the planning cannot make, ends it."""
+    links = respawn_links(con, member["ticket_id"])
+    forward = {old: new for new, old in links.items()}
+    first, seen = member["id"], {member["id"]}
+    while links.get(first) is not None and links[first] not in seen:
+        first = links[first]
+        seen.add(first)
+    chain, seen = [first], {first}
+    while forward.get(chain[-1]) is not None and forward[chain[-1]] not in seen:
+        chain.append(forward[chain[-1]])
+        seen.add(chain[-1])
+    return chain
+
+
+def respawn_refs(con, m, links=None):
+    """(the handle of the member `m` re-spawns, the handle of the member that re-spawned `m`), each None when there is
+    none.  `links` is respawn_links of m's ticket, when the caller already read it for a whole team."""
+    links = respawn_links(con, m["ticket_id"]) if links is None else links
+    after = next((new for new, old in links.items() if old == m["id"]), None)
+    return member_ref(con, links.get(m["id"])), member_ref(con, after)
+
+
 def member_dict(con, m):
     ticket = get_ticket_by_id(con, m["ticket_id"])
+    respawns, respawned_as = respawn_refs(con, m)
     return {
         "id": m["id"],
         "ref": "%s/%s" % (ticket["team_key"], m["name"]),
@@ -120,6 +157,8 @@ def member_dict(con, m):
         "effort": m["effort"],
         "tier_reason": m["tier_reason"],
         "escalates": member_ref(con, m["escalates_id"]),
+        "respawns": respawns,  # SPD-321: the member this row re-spawns, and the one that re-spawned it
+        "respawned_as": respawned_as,
         "status": m["status"],
         "parent": member_ref(con, m["parent_id"]),
         "brief": m["brief"],

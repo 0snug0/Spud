@@ -46,7 +46,7 @@ at once; no definition here is long."""
 
 import itertools
 
-from . import arg_writes, globbing, git_programs, prepare, redirect_globs, syntax, zsh
+from . import arg_writes, globbing, git_programs, held_text, line_functions, prepare, redirect_globs, syntax, zsh
 from ..core import lazy
 from ..hooks import hookio, pathrule, snapshots
 
@@ -351,13 +351,26 @@ def basename_spec(body):
 
 def basename_runs(a):
     """True when `basename` on this line runs the program: no function, alias or hash of the line's or of the shell's
-    snapshot takes the name, the line assigns no PATH, and the snapshot could be read."""
+    snapshot takes the name, the line assigns no PATH, and the snapshot could be read.
+
+    SPD-303: the snapshot only where the shell sourced it (held_text.snapshot_sourced, SPD-298): a new shell's text runs
+    the program, so under a profile's `basename () { ...; }` `sh -c 'echo hi > "tests/$(basename a/x.txt)"'` writes
+    tests/x.txt, and a snapshot it never sources, or could not read, hides nothing there (tests/test_hooks_groups.py
+    NewShellSnapshotLookupTest).  Its aliases too, which a snapshot body's substitution, parsed as the body runs, does
+    expand, so line_aliases.held_standing, whose `early` mark such a body carries, is not the test here.
+
+    SPD-307: the snapshot's function only where line_functions.held_function still finds it standing there, so a line's
+    own `unset -f basename` (sure or maybe -- a removal that may not have run keeps today's cautious reading) takes the
+    program back, or leaves it, in place of a bare snapshot lookup (tests/test_hooks_groups.py
+    SnapshotPrinterRemovalTest)."""
     if {"basename", syntax.UNKNOWN_NAME} & (a.functions | a.hashed) or "basename" in a.aliases or a.alias_unknown:
         return False
     if git_programs.path_in_force(a.vars) is not None:
         return False
+    if not held_text.snapshot_sourced(a):
+        return True
     table = snapshots.shell_table(a.home)
-    return table.gap is None and "basename" not in table.aliases and "basename" not in table.functions
+    return table.gap is None and "basename" not in table.aliases and not line_functions.held_function(a, "basename")
 
 
 def evaluate_basename(spec, a):
