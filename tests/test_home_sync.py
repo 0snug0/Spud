@@ -305,16 +305,23 @@ class CheckTest(HomeSyncCase):
 
 class BoardSyncTest(RepoMixin, HomeSyncCase):
     """SPD-324: the Kanban board of every non-archived project, `ledger/<project name>.base`, written when absent and
-    never replaced.  Init writes none, so the first sync of every home here writes project 1's."""
+    never replaced.  Init writes project 1's since SPD-325, so a test of a sync that writes one removes it first, as a
+    home built before either ticket would have none."""
 
     def board_of(self, key):
         return "ledger/%s.base" % self.cli_json("project", "show", key)["project"]["name"]
 
+    def without_board(self, key):
+        """The project's board, removed: what a home from before SPD-324 holds."""
+        board = self.board_of(key)
+        self.assertTrue(self.home_file(board).is_file(), board)  # init, or add, wrote it
+        os.remove(self.home_file(board))
+        return board
+
     def test_a_sync_backfills_every_project_s_board_and_a_second_writes_none(self):
         self.add_project(self.make_repo("second-"), "second", "SEC", "SECS", "merge", "--name", "Second Project")
-        os.remove(self.home_file("ledger/Second Project.base"))  # add wrote it; a home from before this ticket has none
-        spud_board = self.board_of("spud")
-        self.assertFalse(self.home_file(spud_board).exists())
+        self.without_board("second")
+        spud_board = self.without_board("spud")
         first = self.sync()
         self.assertEqual([(b["project"], b["path"], b["board"]) for b in first["boards"]],
                          [("spud", spud_board, "written"), ("second", "ledger/Second Project.base", "written")])
@@ -347,7 +354,7 @@ class BoardSyncTest(RepoMixin, HomeSyncCase):
         self.assertFalse(self.home_file("ledger/Gone.base").exists())
 
     def test_check_names_the_board_it_would_write_and_writes_none(self):
-        board = self.board_of("spud")
+        board = self.without_board("spud")
         record = self.sync("--check")
         self.assertEqual(record["boards"][0]["board"], "written")
         self.assertFalse(self.home_file(board).exists())
@@ -355,13 +362,14 @@ class BoardSyncTest(RepoMixin, HomeSyncCase):
         self.assertFalse(self.home_file(board).exists())
 
     def test_a_board_template_that_is_gone_refuses_before_anything_is_written(self):
+        board = self.without_board("spud")
         self.home_file("ledger/Home.md").write_text("mine now\n", encoding="utf-8")
         os.remove(self.home.own_share() / spud.BOARD_TEMPLATE)
         proc = self.home.run("home", "sync", actor="spud", check=False)
         self.assertEqual(proc.returncode, EXIT_ERROR)
         self.assertIn("no shipped", proc.stderr)
         self.assertEqual(self.read("ledger/Home.md"), "mine now\n")
-        self.assertFalse(self.home_file(self.board_of("spud")).exists())
+        self.assertFalse(self.home_file(board).exists())
 
 
 class RefusalTest(HomeSyncCase):

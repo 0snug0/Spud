@@ -173,7 +173,8 @@ def build_parser():
                         " `bun run`, `pnpm run`, `yarn NAME`, `make NAME`, and npm's pre/post hooks and lifecycle scripts by their own names)"
                         " while the file that defines it is outside the member's deliverables (repeatable)")
     q.add_argument("--drop-runner", action="append", metavar="NAME", help="take a runner name off the allow-list (repeatable)")
-    q.add_argument("--name")
+    q.add_argument("--name", help="display name; its board ledger/<old>.base moves to ledger/<new>.base, untouched, when nothing is there,"
+                                  " and otherwise stays where it is, the output saying why")
     q.add_argument("--landing", choices=("merge", "pr"))
     q.add_argument("--sessions", choices=("claim", "always"))
     q.add_argument("--default-branch")

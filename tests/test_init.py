@@ -873,6 +873,45 @@ class InstallTailTest(MachineMixin, unittest.TestCase):
         self.assertIn("open %s as a vault in Obsidian" % self.target, out["by_hand"])
         self.assertNotIn("settings sync", out["by_hand"])
 
+    def test_step_7_writes_project_1_s_board_and_a_rerun_keeps_it(self):
+        """SPD-325: init writes project 1's Kanban board, `ledger/<project name>.base`, at step 7, by `project install`'s
+        own rule and through the same call: written when absent, kept whatever it holds, and said only when written."""
+        rel = "ledger/%s.base" % self.REPO_DIR
+        board = self.target / rel
+        dry = self.spud(*self.init_argv("--dry-run")).stdout
+        self.assertRegex(dry, r"and its Kanban board, \S*/%s, when the home has none" % rel.replace(".", r"\."))
+        self.assertFalse(self.target.exists())
+        out = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertEqual(out["install"]["board"], {"project": self.REPO_KEY, "path": rel, "board": "written"})
+        spud = load_spud_module()
+        self.assertEqual(board.read_text(encoding="utf-8"),
+                         spud.board_text(self.ctx(), {"key": self.REPO_KEY, "name": self.REPO_DIR}))
+        self.assertIn("    wrote %s, project %s's board" % (rel, self.REPO_KEY), out["done"])
+        self.assertEqual(out["doctor"]["problems"], [])
+        events = self.rows("SELECT data FROM events WHERE kind = 'project.installed'")
+        self.assertEqual(json.loads(events[-1]["data"])["board"]["board"], "written")
+        # a board somebody tuned is kept byte for byte, and the rerun says nothing about it and changes nothing
+        board.write_text("views: []\n", encoding="utf-8")
+        again = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertEqual(again["install"]["board"]["board"], "kept")
+        self.assertEqual(board.read_text(encoding="utf-8"), "views: []\n")
+        self.assertIn("7. project %s installed: unchanged" % self.REPO_KEY, again["done"])
+        self.assertEqual([line for line in again["done"] if rel in line or "board" in line], [])
+        self.assertEqual(len(self.rows("SELECT id FROM events WHERE kind = 'project.installed'")), 1)
+        # one that is gone is written back, and that is all the rerun did
+        board.unlink()
+        third = json.loads(self.spud("--json", *self.init_argv()).stdout)
+        self.assertEqual(third["install"]["board"]["board"], "written")
+        self.assertIn("7. project %s installed: its files unchanged" % self.REPO_KEY, third["done"])
+        self.assertTrue(board.is_file())
+
+    def test_a_project_name_that_cannot_name_a_board_gets_none_and_init_is_still_green(self):
+        out = json.loads(self.spud("--json", *self.init_argv("--project-name", "Board")).stdout)
+        self.assertEqual(out["install"]["board"]["board"], "skipped")
+        self.assertIn("    no board for project %s: its name 'Board' is the name of the view ledger/Board.base the tool ships"
+                      % self.REPO_KEY, out["done"])
+        self.assertEqual(out["doctor"]["problems"], [])
+
     def test_no_project_reaches_a_green_doctor_with_step_7_skipped(self):
         out = json.loads(self.spud("--json", *self.init_argv(project=False)).stdout)
         self.assertIsNone(out["install"])
