@@ -234,17 +234,33 @@ def analyse_isolated(a, command, depth, stdin=None, fed=False, new_shell=False, 
     SPD-323: so is a body of several lines the shell parses as the line runs, where that shell reads it so -- sh and
     bash, a `$( )` or backtick body (`lines` None, held_text.parsed_lines) and a trap's action, whose caller says it
     (expansions.read_action) -- each line with the aliases the lines before it left, not the table the body opened with:
-    `sh -c 'echo "$(alias gq=\"git push\"<newline>unalias gq; gq)"'` pushes."""
+    `sh -c 'echo "$(alias gq=\"git push\"<newline>unalias gq; gq)"'` pushes.
+
+    SPD-326: dash parses a `$( )` or backtick body with the text around it, so where the shell running that text may be
+    dash (dash, ash, sh and one the hook cannot name) and the aliases that text was parsed with differ from the table as
+    it stands -- its own line defined, changed or cleared one before the body -- the body is read with those too, whole
+    (held_text.substitution_view): `dash -c 'alias git=echo; echo $(git push)'` pushes."""
+    with_text = None
     if lines is None:
+        with_text = held_text.substitution_view(a) if not new_shell and isinstance(command, str) else None
         lines = held_text.parsed_lines(a, True) if not new_shell and isinstance(command, str) and "\n" in command else False
-    key = (command, depth, stdin_text.reading_key(stdin, fed), a.reading_state(), lines)
+    _read_isolated(a, command, depth, stdin, fed, new_shell, lines, None)
+    if with_text is not None:
+        _read_isolated(a, command, depth, stdin, fed, False, False, with_text)
+
+
+def _read_isolated(a, command, depth, stdin, fed, new_shell, lines, with_text):
+    """analyse_isolated's reading of the body once, with the view `with_text` where it is not None (SPD-326)."""
+    key = (command, depth, stdin_text.reading_key(stdin, fed), a.reading_state(), lines, with_text)
     if key in a.isolated_done:
         return
     a.isolated_done.add(key)
     bodies, a.function_bodies = a.function_bodies, walk.bodies_copy(a.function_bodies)
-    parsed = 1 if (a.aliases or a.alias_unknown) and not new_shell else 0
+    parsed = 1 if (a.aliases or a.alias_unknown or with_text is not None) and not new_shell else 0
     view = a.alias_view
-    if isinstance(command, str):
+    if with_text is not None:
+        a.alias_view = with_text
+    elif isinstance(command, str):
         a.alias_view = line_aliases.AliasView(a, "\n" in command)
     a.alias_scope += parsed
     try:

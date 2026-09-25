@@ -479,6 +479,31 @@ def parsed_lines(a, substitution=False):
     return shell not in _WHOLE_PARSED and syntax.LINES_BOTH
 
 
+# SPD-326: dash and ash parse a `$( )` or backtick body with the text around it (above), so the body's words expand the
+# aliases that text was parsed with, not the ones its own line defined, changed or cleared before the body.  Probed
+# through tests/probes/shell_probe.py (2026-09-25), zsh 5.9 -f -o nobareglobqual, -f and bash 3.2.57 each driving
+# /bin/dash, after `alias ls="echo ALIASED"` on the same line: `echo "[$(ls -d /)]"` printed `[/]`, and so did its
+# backtick form and the text fed by a pipe; on the next line `[ALIASED -d /]`, and eval's `echo [\$(ls -d /)]` too, eval
+# parsing its words when it runs; /bin/sh (bash in POSIX mode), ksh and zsh printed `[ALIASED -d /]` on the same line.
+# The shell /bin/sh stands for may be dash, and so may one the hook cannot name.
+_SUBSTITUTION_WITH_TEXT = _LINE_PARSED | {"sh", ""}
+
+
+def substitution_view(a):
+    """The alias table a `$( )` or backtick body about to be read may have been parsed with besides the table as it stands
+    (SPD-326, above): where the shell running the text being read may be dash, the AliasView of that text -- its line's,
+    as ShellWalk.new_line opens it, the new shell's where it is the text's first line, eval's or an enclosing body's --
+    read whole, as dash parses the body with it (AliasView.whole); None where that view reads what the table as it
+    stands does, or the shell parses the body when it runs it (bash, zsh, ksh and the Bash tool's own)."""
+    view = a.alias_view
+    if view is None or view.shell not in _SUBSTITUTION_WITH_TEXT:
+        return None
+    now = line_aliases.AliasView(a, False)
+    if (now.table, now.doubted, now.unknown) == (view.table, view.doubted, view.unknown):
+        return None
+    return view.whole()
+
+
 # ShellAnalysis.body_dirs' marks for a function body whose reading is under way, and for one a call inside that reading
 # reached again from the same state (read_once)
 _READING, _REENTERED = object(), object()

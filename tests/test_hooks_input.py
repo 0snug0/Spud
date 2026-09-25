@@ -2642,6 +2642,90 @@ class ParsedTextLineAliasTest(BashHookCase):
         self.refused_for_members(line)
 
 
+class DashSubstitutionAliasTest(BashHookCase):
+    """SPD-326: dash parses a `$( )` or backtick body with the text around it, so the body expands the aliases that text
+    was parsed with, where the hook read it as text parsed as the line runs (SPD-283) and expanded what the line had
+    defined before it: `dash -c 'alias git=echo; echo $(git push)'`, its backtick form and the text fed to dash by a pipe
+    pushed with no finding (Law 7).  Where the shell running the text may be dash -- dash, ash, sh, whose /bin/sh may be
+    dash, and a shell the hook cannot name -- such a body is now read with the aliases of the text around it too, whole,
+    wherever they differ from the table as it stands (held_text.substitution_view, line_aliases.AliasView.whole).
+
+    Probed through tests/probes/shell_probe.py (2026-09-25), zsh 5.9 -f -o nobareglobqual, zsh 5.9 -f and GNU bash
+    3.2.57 each driving /bin/dash, each printing the same:
+
+    - after `alias ls="echo ALIASED"` on the same line, `echo "[$(ls -d /)]"` printed `[/]`, and so did its backtick form,
+      the text fed by a pipe, `$(echo $(ls -d /))`, eval's `alias ...; echo [$(ls -d /)]` (eval's text is parsed whole
+      with its body), and a compound command whose second line holds the body after its first defined the alias;
+    - the body on the next line printed `[ALIASED -d /]`, and so did eval's `echo [\\$(ls -d /)]` after the alias, eval
+      parsing its words when it runs; so did `unalias ls; echo "[$(ls -d /)]"` and `alias ls="echo SECOND"; echo "[$(ls
+      -d /)]"` on the line after the alias's, the line parsed before its own unalias or alias ran;
+    - `f() { echo "[$(ls -d /)]"; }` on the first line, the alias on the second, `f` on the third printed `[/]`;
+    - /bin/sh (bash 3.2.57 in POSIX mode) printed `[ALIASED -d /]` on the same line.
+
+    AGENT_A and AGENT_B plan tests/** and bin/spud."""
+
+    def refused_for_members(self, command, needle="Law 7"):
+        for agent_id in (AGENT_A, AGENT_B):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_A, AGENT_B, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def findings(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path))).findings
+
+    def test_the_tickets_shapes(self):
+        for command in ("dash -c 'alias git=echo; echo $(git push)'", "dash -c 'alias git=echo; echo `git push`'",
+                        "echo 'alias git=echo; echo $(git push)' | dash", "dash <<'EOF'\nalias git=echo; echo $(git push)\nEOF",
+                        "dash -c 'alias git=echo; echo \"$(git push)\"'", "ash -c 'alias git=echo; echo $(git push)'",
+                        "sh -c 'alias git=echo; echo $(git push)'", "echo 'alias git=echo; echo `git push`' | sh"):
+            with self.subTest(command):
+                self.refused_for_members(command)
+                self.assertIn(("git", ("push", "push")), self.findings(command))
+
+    def test_the_table_the_text_around_it_was_parsed_with(self):
+        """The body reads the table its line was parsed with, whatever that line changed or cleared before it: an alias a
+        line before defined, the text a compound command or eval parses whole, a function body the line defined."""
+        for command in ("dash -c 'alias gq=\"git push\"\nunalias gq; echo $(gq)'",
+                        "dash -c 'alias gq=\"git push\"\nalias gq=\"git status\"; echo $(gq)'",
+                        "dash -c 'alias git=echo; echo $(echo $(git push))'",
+                        "dash -c 'if true; then alias git=echo\necho $(git push); fi'",
+                        "dash <<'EOF'\neval 'alias git=echo; echo $(git push)'\nEOF",
+                        "dash -c 'f() { echo $(git push); }\nalias git=echo\nf'",
+                        "bash <<'EOF'\ndash -c 'alias git=echo; echo $(git push)'\nEOF"):
+            with self.subTest(command):
+                self.refused_for_members(command)
+
+    def test_the_next_line_and_eval_read_as_before(self):
+        """A body on a later line, and eval's, which dash parses when it runs, expand the alias the line defined."""
+        for ok in ("dash -c 'alias git=echo\necho $(git push)'", "dash <<'EOF'\nalias git=echo\necho `git push`\nEOF",
+                   "echo 'alias git=echo\necho $(git push)' | dash", "dash <<'EOF'\nalias git=echo; eval 'echo $(git push)'\nEOF",
+                   "dash -c 'alias gq=\"git push\"\nunalias gq\necho $(gq)'"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+        self.assertEqual(self.findings("dash -c 'alias git=echo\necho $(git push)'"), [])
+
+    def test_shells_that_parse_the_body_when_it_runs_read_as_before(self):
+        for ok in ("zsh -c 'alias git=echo; echo $(git push)'", "ksh -c 'alias git=echo; echo $(git push)'",
+                   "alias git=echo; echo $(git push)", "zsh <<'EOF'\nalias git=echo; echo $(git push)\nEOF"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+        self.refused_for_members("bash -c 'alias git=echo; echo $(git push)'")  # expands no alias at all (SPD-322)
+
+    def test_a_control_stays_allowed(self):
+        """Both tables read, an alias whose word runs nothing refused either way stays allowed."""
+        for ok in ("dash -c 'alias ll=\"ls -l\"; echo $(ll)'", "dash -c 'alias git=echo; echo $(git log)'",
+                   "sh -c 'alias ll=\"ls -l\"; echo `ll`'", "dash -c 'alias gq=\"git status\"\nunalias gq; echo $(gq)'"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+
 class BashToolLineAliasTest(BashHookCase):
     """SPD-291: Claude Code runs the member's line through eval in the shell it starts, which zsh parses whole (SPD-286) and
     bash 3.2, whose snapshot turns expand_aliases on, a line at a time (probed through tests/probes/shell_probe.py: `bash -c

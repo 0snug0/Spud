@@ -162,6 +162,17 @@ class AliasView:
         view.early, view.key = False, self.key[:-1] + (False,)
         return view
 
+    def whole(self):
+        """This view for a text the shell parsed with the text it stands for, whole: a dash's `$( )` or backtick body,
+        parsed with the line around it (held_text.substitution_view, SPD-326)."""
+        if not self.lines:
+            return self
+        view = object.__new__(AliasView)
+        for field in ("table", "doubted", "unknown", "held", "early", "bare", "shell"):
+            setattr(view, field, getattr(self, field))
+        view.lines, view.key = False, self.key[:3] + (False,) + self.key[4:]
+        return view
+
     def __eq__(self, other):
         return isinstance(other, AliasView) and self.key == other.key
 
