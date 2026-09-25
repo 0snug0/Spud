@@ -198,7 +198,13 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 #             which may change how the shell reads every line; shown is the snapshot's line and its file.  No spelling of
 #             the line gets past it, so the respelling is the profile's.
 # "function-body" a function body zsh's `functions` parameter is handed that the line does not spell -- a variable, a
-#             substitution, text appended to a body (walk.assign_function, SPD-278); shown is the assignment.
+#             substitution, text appended to a body (line_functions.assign_function, SPD-278); shown is the assignment.
+# "function-copy" zsh's `functions -c OLD NEW` where the hook cannot follow the copy -- a name the line does not spell, or
+#             an OLD the shell's snapshot defines (line_functions.copy_function, SPD-279); shown is the command.
+# "alias-word" a word eval reads again that the line may have made a global or a suffix alias the hook cannot resolve --
+#             a name or body it does not spell, a definition or `unalias` that may not have run -- or a word the shell
+#             expands before eval reads it, which may spell one's name (expansions.global_aliased, SPD-109); shown is the
+#             word, or the text.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
@@ -243,6 +249,17 @@ UNREAD_MESSAGES = {
                       " a substitution, or text appended to a body, which runs when the function is called, or by itself"
                       " for a TRAPxxx, zshexit or chpwd name",
                       "define the function with name() { ... } on the line, where the hook reads its body"),
+    "function-copy": ("zsh's `functions -c` copies a function whose body the hook cannot follow to a new name (`%s`): a"
+                      " name the line does not spell, or a function the shell's profile defines, whose body runs when the"
+                      " new name is called, or by itself for a chpwd or zshexit name",
+                      "define the new name with name() { ... } on the line, where the hook reads its body"),
+    "alias-word": ("`eval` reads `%s` again where this line may have defined a global or suffix alias the hook cannot"
+                   " resolve (`alias -g`, `alias -s`, zsh's `galiases` or `saliases`): its name or body holds an expansion"
+                   " or a substitution, the definition or an `unalias` may not have run, or a word the shell expands before"
+                   " eval reads it may spell its name -- and zsh expands a global alias in any word and a suffix alias"
+                   " on a command word ending in its suffix, so the command that runs is not the one written",
+                   "spell the commands out and define no global or suffix alias on the line, or define it with its name"
+                   " and body written out, outside any branch, subshell, pipeline or loop"),
 }
 
 

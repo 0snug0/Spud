@@ -6,7 +6,7 @@ and the options it holds, which a line starts from, shell/held_options (SPD-267)
 
 import os
 
-from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, git_writes, globbing, held_options, held_text, heredocs, inline_programs, interpreter_words, loop_bindings, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
+from . import arg_writes, assignment_words, directories, downloads, expansions, find_xargs, git_programs, git_verbs, git_writes, globbing, held_options, held_text, heredocs, inline_programs, interpreter_words, line_functions, loop_bindings, prepare, runtime_shells, script_files, script_runners, script_text, spelled_writes, spud_calls, stdin_text, syntax, tree_writes, unread, walk, zsh
 from ..hooks import hookio
 
 
@@ -30,10 +30,10 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         a.cwds = None
         a.dir_moves += 1
         return a
-    if isinstance(command, walk.LineBody):
+    if isinstance(command, line_functions.LineBody):
         # a function body the line defines, read where a call or a trap runs it (SPD-277, SPD-276): its tokens, as the
         # walk that read the definition had them
-        return walk.read_line_body(a, command, depth, stdin, fed)
+        return line_functions.read_line_body(a, command, depth, stdin, fed)
     if depth == 0:
         held_options.line_options(a)  # the options the shell's snapshot set before the line (SPD-263)
     if depth == 0 and not command.isascii() and unread.has_marker(command):
@@ -55,6 +55,10 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
             end += 1
         expansions.fill_from(a, (m.group(1),), command[m.end() : end])
     text, bodies, expanded = heredocs.strip_heredocs(command)
+    if a.alias_scope and a.aliases:
+        # text the shell parses again where the line's aliases stand (eval's, an alias body, a substitution in them): a
+        # global alias is expanded in every word zsh reads unquoted, not only the command word (SPD-109)
+        text = expansions.global_aliased(text, a)
     text, apart = prepare.ansi_c_quotes(text)
     if apart is not None and a.unparseable is None:
         # an ANSI-C string that never closes, or a quote zsh and bash end apart (SPD-202): the words the reading finds are
@@ -101,8 +105,7 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
                    False, stdin, fed)
     if zsh_locals is not None:  # a name is surely local only where both readings declared it so (SPD-246)
         a.body_locals[-1] = {name: before for name, before in a.body_locals[-1].items() if name in zsh_locals}
-    for name, found in zsh_bodies.items():  # a function body either reading defines (SPD-212, walk.read_call)
-        a.function_bodies.setdefault(name, set()).update(found)
+    line_functions.merge_readings(a, zsh_bodies)  # a function body either reading defines (SPD-212), or removes (SPD-281)
     a.cwds = directories.union_dirs(zsh_cwds, a.cwds)
     a.doubt.update(set(zsh_vars) ^ set(a.vars))  # a variable only one reading assigns
     for name, value in zsh_vars.items():
@@ -414,17 +417,27 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # Inside `eval`, a command word the line aliased runs the alias's body, not a command of its own.  The body
         # is read as the shell text it is, with its own quotes, as eval's rejoined words are, and the words after it as
         # eval's text spells them, quotes and all: the shell parses them after the body (SPD-201, prepare.requoted).
+        # A suffix alias the line defined runs its body before a command word ending in its suffix, that word kept after
+        # the body (`a.txt x` runs `<body> a.txt x`), where no plain alias of the word's name does (SPD-109).
         body, doubtful = expansions.alias_substitution(cmd, a)
+        kept = 1
+        if body is None and not doubtful:
+            (body, doubtful), kept = expansions.suffix_substitution(prepare.deglob(cmd), a), 0
+            if body is None and doubtful:  # a body the hook cannot read: refused a member, the word read on as spelled
+                unread.record_unread(a, "alias-word", prepare.deglob(cmd))
+                doubtful = False
         if body is not None or doubtful:
             if body is not None:
-                rest = " ".join(prepare.requoted(w) for w in words[1:])
+                rest = " ".join(expansions.alias_requoted(w, a) for w in words[kept:])
                 before = a.cwds
                 analyse_command(body + (" " + rest if rest else ""), a, depth + 1, stdin, fed)
                 a.cwds = directories.settle(effect, before, a.cwds)  # its cd, where the command runs (SPD-252)
             else:
                 a.kinds.append("other")
-            if doubtful:  # after the body, so a refusal the body itself earns keeps its own reason
+            if doubtful and kept:  # after the body, so a refusal the body itself earns keeps its own reason
                 a.findings.append(("alias", prepare.deglob(cmd)))
+            elif doubtful:
+                unread.record_unread(a, "alias-word", prepare.deglob(cmd))
             return
     if seeks_function is True:
         looked_up.append(cmd)
@@ -437,6 +450,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         # `read X`, `printf -v X`, `unset X`, `getopts o X`, `let X=1`: the line's own assignments, each builtin's names read
         # by its grammar (SPD-254, SPD-225); a builtin's program run by its path or behind env assigns nothing here
         expansions.read_assigning_builtin(words, a, effect)
+    if cmd in line_functions.REMOVING and directories.builtin_runs_here(effect):
+        # `unset -f f`, `unfunction f`: a call of f after it runs the command of that name, not the line's body (SPD-281)
+        line_functions.remove_functions(words, a, effect)
     options = cmd in ("setopt", "unsetopt", "emulate") or cmd == "set" and any(prepare.deglob(w)[:2] in ("-o", "+o") for w in words[1:])
     if options:
         a.arith_opaque = True  # an option may change how arithmetic reads a number (SPD-225, ShellAnalysis.arith_opaque)
@@ -564,6 +580,10 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         before = a.cwds
         a.alias_scope += 1  # an alias the line defined is expanded where eval parses its words again
         eval_text = prepare.deglob(" ".join(words[1:]))
+        if expansions.word_aliases(a) and any(expansions.expansion_word(w) for w in words[1:]):
+            # a word the shell expands before eval reads it again may become a global or suffix alias's name, which
+            # eval then expands (`X=gp; eval echo $X`): text the hook does not read (SPD-109, SPD-217)
+            unread.record_unread(a, "alias-word", unread.unread_shown(" ".join(words[1:])))
         if unread.escaped_substitution(eval_text):
             unread.record_unread(a, "escaped-subst", unread.escaped_shown(eval_text))  # SPD-196
         try:
@@ -680,6 +700,10 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             expansions.record_alias_line(words, a)
         else:
             expansions.clear_alias_line(words, a)
+    elif cmd == "functions" and directories.builtin_runs_here(effect):
+        # zsh's `functions -c OLD NEW` binds NEW to OLD's body, as a definition of NEW would (SPD-279)
+        a.kinds.append("other")
+        line_functions.copy_function(words, a)
     elif cmd == "hash" and directories.builtin_runs(effect):
         # The builtin, spelled exactly, puts a file of the line's own choosing in the shell's command table, so a
         # later bare call of that name runs it whatever PATH holds.  Probed in bash 3.2 and sh (`hash -p <dir>/<name> <name>`)
@@ -721,9 +745,9 @@ def record_assignment(a, found):
     that reads the variable as a plain assignment does -- PATH and zsh's `path` for shadowed_name, CDPATH, GIT_*.
     An element of zsh's `functions`, `commands` or `aliases` binds the name it keys as a definition, a `hash` or an `alias`
     line would, a name the hook cannot read standing for all of them -- and a `functions` element's body is read as a
-    definition's is, where the line spells it (walk.assign_function, SPD-278); an element of zshexit_functions or
-    chpwd_functions names a function zsh runs by itself (walk.hook_functions, SPD-276); and a BASH_FUNC_ variable is
-    refused outright.
+    definition's is, where the line spells it (line_functions.assign_function, SPD-278); an element of zshexit_functions
+    or chpwd_functions names a function zsh runs by itself (line_functions.hook_functions, SPD-276); and a BASH_FUNC_
+    variable is refused outright.
 
     SPD-225: a subscript is arithmetic, which the shells evaluate before they assign (`arr[X=1]=q` and `declare
     arr2[X=1]=q` assigned X in zsh 5.9 and bash 3.2.57, probed), and so is the value a name with the integer or float
@@ -739,18 +763,19 @@ def record_assignment(a, found):
     if special is not None:
         table, pairs = special
         if table == "alias":
+            kinds = expansions.ALIAS_TABLE_KINDS[name]  # aliases, galiases or saliases (SPD-109)
             if pairs is None:
-                a.alias_unknown = True
+                expansions.record_alias_unknown(a, kinds)
             for key, body in pairs or ():
-                expansions.record_alias_definition(a, key, body)
+                expansions.record_alias_definition(a, key, body, kinds)
         else:
             names = a.functions if table == "function" else a.hashed
             names.update([syntax.UNKNOWN_NAME] if pairs is None else [prepare.deglob(key) for key, _ in pairs])
             if table == "function":
-                walk.assign_function(a, found)  # ... and the body it spells, read as a definition's is (SPD-278)
+                line_functions.assign_function(a, found)  # ... and the body it spells, read as a definition's is (SPD-278)
     if name in expansions.HOOK_ARRAYS:
         # zshexit_functions, chpwd_functions: functions zsh runs by itself, read as a trap's action is (SPD-276)
-        walk.hook_functions(a, assignment_words.listed_names(value), expansions.HOOK_ARRAYS[name])
+        line_functions.hook_functions(a, assignment_words.listed_names(value), expansions.HOOK_ARRAYS[name])
     if name in a.typed:
         expansions.read_arithmetic(a, prepare.deglob(value), doubtful=bool(append or subscript is not None))
         expansions.assign_unknown(a, name)

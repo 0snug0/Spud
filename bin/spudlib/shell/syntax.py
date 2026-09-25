@@ -704,8 +704,8 @@ class ShellAnalysis:
         # say what the word it names actually was; `expanding`, the alias names whose expansion is in flight, which zsh
         # does not expand again inside their own body (`alias ls='ls -G'` terminates); `bodies_read`, each function name ->
         # the (text, call's words, (standard input, starting state)) its body was read as on this line, once each however
-        # often the line calls it so (held_text.read_shell_name) -- and each walk.LineBody the line defines -> the (name,
-        # standard input, starting state, writes so far) it was read at (held_text.read_function, SPD-277);
+        # often the line calls it so (held_text.read_shell_name) -- and each line_functions.LineBody the line defines -> the
+        # (name, standard input, starting state, writes so far) it was read at (held_text.read_function, SPD-277);
         # `shell_reading`, how deep inside such text the reading is,
         # so the outermost of them prunes once, against the member's own words; `shell_words`, those words, while the
         # outermost reading is under way; `shell_kept`, the indices of the findings a function's body earned that the
@@ -757,8 +757,8 @@ class ShellAnalysis:
         # for one whose name the hook cannot read.
         self.functions = set()
         # The bodies of those definitions, which each call reads from its own state and on its own standard input
-        # (SPD-212, SPD-277: walk.read_call): `function_bodies`, each name -> the walk.LineBody objects a call of it may
-        # run, every definition kept and scoped as `functions` is (zsh's `functions[name]=body` too, SPD-278);
+        # (SPD-212, SPD-277: line_functions.read_call): `function_bodies`, each name -> the line_functions.LineBody objects a
+        # call of it may run, every definition kept and scoped as `functions` is (zsh's `functions[name]=body` too, SPD-278);
         # `walking`, the readings of a line under way (walk_line), a body defined in one of which a call reads with its
         # input, and `walks`, the ShellWalk objects under way, innermost last; `body_walks`, the readings of a body on a
         # call's input the whole analysis has made, which positional.READINGS_PER_NAME bounds (SPD-212); `body_serial`,
@@ -768,8 +768,8 @@ class ShellAnalysis:
         # `body_printed`, each reading of a body held_text.read_function made (its LineBody and its key) -> a pair of texts:
         # where the call's standard output goes, and where a pipe follows the call, which zsh joins the definition's own
         # output redirections to (MULTIOS); either None where the hook cannot spell it.  `read_printed`, the pair of the
-        # reading walk.read_line_body made last, and `call_printed`, (the name, its bodies' pair) of the call walk.read_call
-        # read last: the channels ShellWalk.finish reads a call's text through (stdin_text.LineCall).
+        # reading line_functions.read_line_body made last, and `call_printed`, (the name, its bodies' pair) of the call
+        # line_functions.read_call read last: the channels ShellWalk.finish reads a call's text through (stdin_text.LineCall).
         self.body_printed, self.read_printed, self.call_printed = {}, None, None
         # SPD-276: `hook_names`, each name a zshexit_functions, chpwd_functions or zsh_directory_name_functions array on
         # the line lists, or an action a shell runs later calls -> whether zsh may run it inside the line (UNKNOWN_NAME for

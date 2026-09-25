@@ -1396,6 +1396,164 @@ class AliasEvalTest(BashHookCase):
         self.assertRefused("alias e='echo x | tee ledger/tickets/SPD-001.md'; eval e", "Law 1", agent_id=None)
 
 
+# SPD-109: the refusal a member earns where eval reads a word again that the line may have made a global or suffix alias
+# the hook cannot resolve (bash_rule's unread form "alias-word").
+ALIAS_WORD_WORDING = "global or suffix alias"
+
+
+class GlobalAliasEvalTest(BashHookCase):
+    """SPD-109 (Adirondack's SPD-085 proposal): zsh expands a global alias (`alias -g`, `galiases`) in any word of text it
+    parses, not only in command position, and a suffix alias (`alias -s`, `saliases`) on a command word ending in its
+    suffix, and the hook read both only where a plain alias stands, so `alias -g gp='; git push'; eval 'echo hi gp'` and
+    `alias -s txt='git push'; eval a.txt` pushed past Law 7.  Probed in zsh 5.9 -f and -f -o nobareglobqual
+    (tests/probes/shell_probe.py; bash 3.2 has neither form: `alias -g` is an invalid option there), with `alias -g gp=EXP`:
+
+    - eval's words expand it as an argument, a redirection target (`> gp` wrote EXP, `2>gp` too), in `[[ ]]`, as a case
+      word, in a for list, an array's elements, a `$( )` or backtick body, a function's name and body where eval defines
+      them, after `&&`, `|` or `(`, and an `eval` inside eval's text; a body that ends in `;` ends the command (`echo hi gp;
+      echo after` printed hi, the body's command, then after), a body holding another global alias expands it, and a name is
+      not expanded again inside its own expansion (`rc='rc more'` gave `rc more`).  Where a `;` leaves zsh no line it can
+      parse (`> gp`, `[[ gp ]]`, `case gp`, `for i in gp`) it runs nothing, and in an array's elements it only separates
+      them, so those are tested with a body `$(...)`, which each of them ran (`$(echo RAN >&2)` printed RAN in all six);
+    - `alias -$o q=Q` with o=g defined a global alias: an option word the shell expands may be any kind;
+    - it is not expanded in quotes or behind a backslash, whole or in part (`'gp'`, `"gp"`, `\\gp`, `g\\p`, `g'p'`), in an
+      assignment's value (`X=gp`), a `${ }`, arithmetic, a case pattern or a comment;
+    - a suffix alias runs its body with the word after it (`a.txt x` printed `SUF a.txt x`) where the word is a command word
+      (after `X=1`, `;`), matched on the text after its last dot (`b.a.txt`, `./d/a.txt`, `'a'.txt` and `\\a.txt` all ran it,
+      `a.'txt'`, `.txt` and `a.TXT` did not), never as an argument or behind `command`; a plain alias of the same name wins;
+    - `alias +g` defines a global alias as `-g` does, `alias q=` after `alias -g q=` makes q plain again, `unalias q` clears
+      a global alias, `unalias -a` clears no suffix alias and `unalias -s txt` clears that one.
+
+    The reader now expands a global alias the line defines wherever eval's text, an alias body or a substitution in them
+    holds it unquoted, and a suffix alias on a command word, reading the body as the text it is; a word that may be one the
+    reader cannot resolve (its name or body the line does not spell, or a definition that may not have run) refuses a
+    member unread (SPD-217).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        p = self.home.path / "ledger/tickets/SPD-001.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("orig\n", encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_the_tickets_evidence_commands(self):
+        self.refused_for_members("alias -g gp='; git push'; eval 'echo hi gp'")
+        self.refused_for_members("alias -s txt='git push'; eval 'a.txt'")
+        self.assertEqual(self.analysis("alias -g gp='; git status'; eval 'echo hi gp'").findings, [("git", ("status", None))])
+        self.assertEqual(self.analysis("alias -s txt='git status'; eval a.txt").findings, [("git", ("status", None))])
+
+    def test_every_word_zsh_expands_a_global_alias_in(self):
+        # where a `;` would leave zsh a line it cannot parse (a target, `[[ ]]`, a case word, a for list), a substitution
+        for cmd in ("alias -g gs='$(git push)'; eval 'echo hi > gs'", "alias -g gs='$(git push)'; eval 'echo hi 2>gs'"):
+            # a target a substitution names is one Spud is refused too, as on the line itself
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(command=cmd, agent_id=agent_id):
+                    self.assertRefused(cmd, "Law 7", agent_id)
+            self.assertRefused(cmd, "", agent_id=None)
+        for cmd in ("alias -g gp='; git push'; eval 'echo hi gp;echo after'", "alias -g gs='$(git push)'; eval '[[ gs == x ]]'",
+                    "alias -g gs='$(git push)'; eval 'case gs in x) :;; esac'",
+                    "alias -g gs='$(git push)'; eval 'for i in gs; do :; done'",
+                    "alias -g gs='$(git push)'; eval 'arr=(a gs b)'", "alias -g gp='; git push'; eval 'echo $(echo gp)'",
+                    "alias -g gp='; git push'; eval 'echo `echo gp`'", "alias -g gp='; git push'; eval 'f() { echo gp; }; f'",
+                    "alias -g gp='; git push'; eval 'true && echo gp'", "alias -g gp='; git push'; eval '(echo gp)'",
+                    "alias -g gp='; git push'; eval 'echo a | cat gp'", "alias -g gp='; git push'; eval 'eval \"echo gp\"'",
+                    "alias -g gp='; git push'; eval echo hi gp", "alias -g gp='git push'; eval gp",
+                    "alias -g G='| git push'; eval 'echo hi G'", "alias -g gp='; hop'; alias -g hop='git push'; eval 'echo gp'",
+                    "alias +g gp='; git push'; eval 'echo gp'", "alias -g -- gp='; git push'; eval 'echo gp'",
+                    "galiases[gp]='; git push'; eval 'echo gp'", "galiases=(gp '; git push'); eval 'echo gp'",
+                    "alias gp=ls; alias -g gp='; git push'; eval 'echo gp'",
+                    "alias -g gp='; git push'; alias e='echo'; eval 'e gp'",
+                    "alias -g gp='; git push'; f() { eval 'echo gp'; }; f"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_a_suffix_alias_on_a_command_word(self):
+        for cmd in ("alias -s txt='git push'; eval 'a.txt x y'", "alias -s txt='git push'; eval ./d/a.txt",
+                    "alias -s txt='git push'; eval b.a.txt", "alias -s txt='git push'; eval 'X=1 a.txt'",
+                    "alias -s txt='git push'; eval 'true; a.txt'", "saliases[txt]='git push'; eval a.txt",
+                    "alias -s txt='git push'; unalias -a; eval a.txt",
+                    "alias -s txt='git push'; eval \"'a'.txt\""):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_spud_keeps_his_own_checks_inside_the_body(self):
+        self.assertRefused("alias -g gp='> ledger/tickets/SPD-001.md'; eval 'echo x gp'", "Law 1", agent_id=None)
+        self.assertRefused("alias -g gp='> ledger/tickets/SPD-001.md'; eval 'echo x gp'", "generated", AGENT_C)
+        self.assertRefused("alias -s md='tee'; eval 'ledger/tickets/SPD-001.md'", "Law 1", agent_id=None)
+
+    def test_a_quoted_or_escaped_word_is_not_expanded(self):
+        for ok in ("alias -g gp='; git push'; eval \"echo hi 'gp'\"", "alias -g gp='; git push'; eval 'echo hi \"gp\"'",
+                   "alias -g gp='; git push'; eval 'echo hi \\gp'", "alias -g gp='; git push'; eval 'echo hi g\\p'",
+                   "alias -g gp='; git push'; eval \"echo hi g'p'\"", "alias -g gp='; git push'; eval 'X=gp'",
+                   "alias -g gp='; git push'; eval 'echo ${gp}'", "alias -g gp='; git push'; eval 'echo x # gp'",
+                   "alias -g gp='; git push'; eval 'echo X=gp'", "alias -g gp='; git push'; eval 'echo gpx xgp'",
+                   "alias -g gp='; git push'; eval \"echo \\$'gp'\"", "alias -g gp='; git push'; eval '(( gp == 1 ))'",
+                   "alias -g gp='; git push'; eval 'echo $HOME'", "alias -g gp='; git push'; alias e=echo; eval \"e 'gp'\""):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_plain_eval_and_a_plain_alias_are_unchanged(self):
+        for ok in ("alias -g gp='; git push'; echo hi gp", "alias -g gp='; git push'; eval 'echo hi'",
+                   "alias gp='; git push'; eval 'echo hi gp'", "alias -s txt='git push'; eval 'echo a.txt'",
+                   "alias -s txt='git push'; eval 'cat a.txt'", "alias -s txt='git push'; eval txt",
+                   "alias -s txt='git push'; eval 'command a.txt'", "alias -s txt='git push'; a.txt",
+                   "alias -s txt='git push'; eval a.TXT", "alias -s txt='git push'; eval .txt",
+                   "alias -g gp='; git push'; unalias gp; eval 'echo gp'", "alias -g gp='; git push'; unalias -a; eval 'echo gp'",
+                   "alias -g gp='; git push'; alias gp=ls; eval 'echo gp'", "alias -s txt='git push'; unalias -s txt; eval a.txt",
+                   "alias -g gp='; git push'; sh -c 'eval \"echo gp\"'", "alias -g gp='; git push'; eval 'echo \"a gp b\"'",
+                   "alias -g rc='rc more'; eval 'echo rc'", "alias -g gp='; git status'; eval 'echo hi gp'"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+        self.assertEqual(self.analysis("alias gp='git push'; eval gp").aliases, {"gp": "git push"})
+
+    def test_a_word_the_hook_cannot_resolve_is_refused_a_member(self):
+        for cmd in ("alias -g $N='; git status'; eval 'echo hi'", "alias -g ${N}=x; eval 'echo hi'",
+                    "alias -g gp=\"$X\"; eval 'echo gp'", "alias -g gp=\"$(echo x)\"; eval 'echo gp'",
+                    "if true; then alias -g gp='; git status'; fi; eval 'echo gp'",
+                    "(alias -g gp='; git status'); eval 'echo gp'",
+                    "alias -g gp='; git status'; if true; then unalias gp; fi; eval 'echo gp'",
+                    "galiases[$k]=x; eval 'echo hi'", "galiases+=($pairs); eval 'echo hi'", "galiases[gp]=\"$X\"; eval 'echo gp'",
+                    "alias -s $S='git status'; eval a.txt", "alias -s txt=\"$X\"; eval a.txt",
+                    "saliases[$k]=x; eval a.txt", "if true; then alias -s txt='git status'; fi; eval a.txt",
+                    # a word the shell expands before eval reads it again may spell the alias's name
+                    "alias -g gp='; git status'; X=gp; eval echo $X", "alias -s txt='git status'; X=a.txt; eval \"$X\""):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, ALIAS_WORD_WORDING)
+        # a word `alias` reads that the line does not spell may define any kind of alias, a plain one among them, whose
+        # command-word refusal comes first
+        self.refused_for_members("X='gp=x'; alias $X; eval 'echo gp'", "cannot resolve")
+        self.refused_for_members("X='gp=x'; alias $X; eval 'x gp'", "cannot resolve")
+        # a refusal the body itself earns keeps its own reason
+        self.assertIn("Law 7", self.refused_for_members("if true; then alias -g gp='; git push'; fi; eval 'echo gp'", "").reason)
+        # an alias whose kind the hook cannot read is read as each kind it can be, and the word that may be options may be
+        # a definition too, of a plain alias whose name the hook cannot read
+        self.assertIn("Law 7", self.refused_for_members("alias -$o gp='; git push'; eval 'echo gp'").reason)
+        self.assertIn("Law 7", self.refused_for_members("alias -$o txt='git push'; eval a.txt").reason)
+        self.refused_for_members("alias $o gp='; git push'; eval 'echo gp'", "cannot resolve")
+        # no word to expand, or text another shell reads
+        for ok in ("alias -g $N=x; eval", "alias -g $N=x; sh -c 'eval \"echo hi\"'", "alias -g $N=x; eval \"'echo' 'hi'\""):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+
 class PathInForceTest(BashHookCase):
     """SPD-062: the hook reads a line's command words by name -- git, spud, python3.14, sqlite3, tee, a shell, a wrapper --
     and the shell then finds each of them on PATH, so a member that puts a directory of its own first runs its own program
@@ -1778,8 +1936,9 @@ class FunctionShadowTest(BashHookCase):
     line of several commands a refusal the words as spelled already earn answers first.  A definition in a `( ... )` subshell
     is dropped when it closes (ShellWalk restores the set); one in a branch, a loop, a function body, a background list, a
     pipeline or a command substitution is kept (refuse on doubt, never allow on doubt), as is one an `unset -f` or
-    `unfunction` may have removed (the hook keeps refusing rather than allow on doubt).  Law 7 does not bind Spud.  AGENT_A
-    plans tests/** and bin/spud; AGENT_C plans **.
+    `unfunction` may have removed (the hook keeps refusing rather than allow on doubt); one an `unset -f` surely removed
+    is dropped (SPD-281, FunctionRemovalTest).  Law 7 does not bind Spud.  AGENT_A plans tests/** and bin/spud; AGENT_C
+    plans **.
 
     SPD-105 (Atlantic's SPD-084 proposal): zsh also binds a function through its special `functions` association, which the
     hook read as a command word or an unrelated variable.  Probed in zsh 5.9 -f and -o nobareglobqual (bash and sh have no
@@ -1934,8 +2093,8 @@ class FunctionShadowTest(BashHookCase):
                     "git() { true; } & wait; git status",
                     "git() { true; } | cat; git status",
                     "X=$(git() { true; }; echo d); git status",
-                    "git() { true; }; unset -f git; git status",
-                    "git() { true; }; unfunction git; git status"):
+                    "git() { true; }; unfunction git; git status",
+                    "git() { true; }; true && unset -f git; git status"):
             with self.subTest(cmd):
                 r = self.refused_for_members(cmd)
                 self.assertIn("shell function", r.reason)
@@ -2093,6 +2252,159 @@ class FunctionsParameterBodyTest(PlantedRepository, BashHookCase):
     def test_the_controls_read_as_before(self):
         for command in ("functions[deploy]='echo hi'; deploy", "functions+=(deploy 'echo hi')", "echo $functions[f]",
                         "functions[$k]=true; ls", "unset 'functions[f]'", "dis_functions[f]='git status'; cd tests/fake"):
+            self.silent_for(command)
+
+
+# SPD-279: the refusal a member earns for zsh's `functions -c` where the hook cannot say which body the new name holds,
+# which names the respelling.
+FUNCTION_COPY_WORDING = "define the new name with name() { ... }"
+
+
+class FunctionCopyTest(PlantedRepository, BashHookCase):
+    """SPD-279 (Elmer's SPD-277 proposal): zsh's `functions -c OLD NEW` copies OLD's body to NEW, but the reader never
+    bound NEW: a call of NEW after a cd was read as no function at all, while OLD's body, read in place where nothing
+    called it, had its git checked in the directory the definition stood in -- `f() { git status; }; functions -c f g;
+    cd tests/fake; g` ran git in a planted repository unchecked; NEW was no shadowing definition (`functions -c f git; git
+    status` ran the copy); and a copy under a name zsh runs by itself was no deferred runner.  NEW is now bound to OLD's
+    bodies as a definition of NEW is (line_functions.copy_function) -- read at each call, a shadowing name, a runner --
+    as one that may not have run, since bash has no `functions` builtin; a copy the hook cannot follow (a name the line
+    does not spell, a function the shell's profile defines) refuses a member as SPD-217 refuses text it did not read.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and -f,
+    each case in a subshell or a `zsh -f -c` child, `echo $PWD` standing for git: `f() { echo F-in $PWD; }; functions -c f
+    g; cd d; g` printed d; `functions -c f echo; echo x` ran the copy; `functions -c -- f g`, `+c`, `-uc`, `-ck`, `-M -c`
+    and `builtin functions -c` copied, `-cm`, `-x 2 -c` and `-c +u` were invalid options, one or three operands `requires
+    two arguments`, and a missing OLD `no such function`; a copy made in a subshell or before a `|` did not reach a call
+    after it, one made in a called body did; redefining or unsetting OLD left the copy as it was.  A copy named chpwd,
+    zshexit, command_not_found_handler or zsh_directory_name ran as those do, and so did one a chpwd_functions array
+    names, but one named TRAPEXIT, TRAPUSR1 or TRAPDEBUG installed no trap (zsh sets a trap when it defines a TRAPxxx
+    function, not when it copies one).  GNU bash 3.2.57 has no `functions` builtin and ran none of them."""
+
+    def test_the_tickets_lines(self):
+        """Silent on main for every caller: g's call read nothing, and f's body was read in place in the home."""
+        for command in ("f() { git status; }; functions -c f g; cd tests/fake; g",
+                        "f() { git status; }; functions -c f g; cd tests/fake && g",
+                        "f() { git status; }; cd tests/fake; functions -c f g; g",
+                        "f() { git status; }; functions -c -- f g; cd tests/fake; g",
+                        "f() { git status; }; functions +c f g; cd tests/fake; g",
+                        "f() { git status; }; functions -uc f g; cd tests/fake; g",
+                        "f() { git status; }; builtin functions -c f g; cd tests/fake; g",
+                        "f() { git status; }; h() { functions -c f g; }; h; cd tests/fake; g",
+                        "f() { git status; }; functions -c f g; unset -f f; cd tests/fake; g",
+                        "functions[f]='git status'; functions -c f g; cd tests/fake; g"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        # ... as the definition's own call already was
+        self.members_refused("f() { git status; }; cd tests/fake; f", GIT_NESTED_WORDING)
+
+    def test_the_copy_is_a_shadowing_definition(self):
+        for command in ("f() { true; }; functions -c f git; git status", "f() { true; }; functions -c f env; env git status"):
+            r = self.members_refused(command, "shell function")
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+        self.assertEqual(self.analysis("f() { true; }; functions -c f git; git status").findings,
+                         [("git", ("status", None)), ("function", "git")])
+        self.assertIn("git", r.reason)
+
+    def test_a_copy_zsh_runs_by_itself_is_read_as_a_traps_action(self):
+        for command in ("f() { git status; }; functions -c f chpwd; cd tests/fake",
+                        "f() { git status; }; functions -c f zshexit; cd tests/fake",
+                        "f() { git status; }; functions -c f g; chpwd_functions=(g); cd tests/fake",
+                        "chpwd_functions=(g); f() { git status; }; functions -c f g; cd tests/fake"):
+            self.members_refused(command, TRAP_WORDING)
+            self.spud_refused(command)
+        self.members_refused("f() { git status; }; functions -c f command_not_found_handler", TRAP_WORDING)
+
+    def test_a_copy_the_hook_cannot_follow_is_refused_a_member(self):
+        for command in ("f() { true; }; functions -c f $x", "f() { true; }; functions -c $x g; g",
+                        "functions -c $x $y", "f() { true; }; functions -c f \"$x\"",
+                        "f() { true; }; functions -c f $(echo g)"):
+            r = self.members_refused(command, FUNCTION_COPY_WORDING)
+            self.assertIn("functions -c", r.reason)
+            with self.subTest(command=command, agent_id="spud"):
+                self.assertSilent(command, agent_id=None)
+        # a name the line settles is the name it spells
+        self.members_refused("f() { git status; }; n=g; functions -c f $n; cd tests/fake; g", GIT_NESTED_WORDING)
+        # a function the shell's profile defines, whose body the hook reads at its own name's calls alone
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000279-279279.sh").write_text("gs () {\n\tgit status\n}\n", encoding="utf-8")
+        self.members_refused("functions -c gs g; cd tests/fake; g", FUNCTION_COPY_WORDING)
+
+    def test_the_controls_read_as_before(self):
+        """A copy that does not reach the call, or names no function, binds nothing; a TRAPxxx copy is no trap."""
+        for command in ("f() { git status; }; (functions -c f g); cd tests/fake; g",
+                        "functions -c nosuch g; cd tests/fake; g", "f() { git status; }; functions -c f; cd tests/fake",
+                        "f() { git status; }; functions -c f g h; cd tests/fake; g",
+                        "f() { git status; }; functions -c f TRAPEXIT; cd tests/fake",
+                        "f() { git status; }; functions -c f g; unset -f g; cd tests/fake; g", "functions", "functions -c",
+                        "f() { true; }; functions f"):
+            self.silent_for(command)
+        self.assertEqual(self.git_dirs("f() { git status; }; functions -c f g"), [frozenset([str(self.home.path)])])
+
+
+class FunctionRemovalTest(PlantedRepository, BashHookCase):
+    """SPD-281 (Bertha's SPD-272 proposal): nothing told the reading that `unset -f NAME`, `unfunction NAME` or `unhash -f
+    NAME` removed a function the line defines, so a later call was read as the body while the shell runs the command of
+    that name: `f() { git status; }; unset -f f; cd tests/fake; f` was refused as git in a planted repository, and
+    `echo() { printf hi; }; unset -f echo; echo 'git push' | sh` read `hi` where the builtin prints `git push`
+    (tests/test_hooks_input.py PrinterShadowTest).  A removal that surely runs in the line's shell now drops the name's
+    bodies and its shadowing from that point on (line_functions.remove_functions); one that may not -- after `&&`, before
+    a `|` or a `&`, in a body or an eval, behind `command`, or a builtin one of the two shells does not have -- leaves the
+    name maybe defined, which SPD-272's reading takes as a definition that may not have run.
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and
+    -f and GNU bash 3.2.57, each case in a subshell, a function echo printing `hi`: `unset -f echo`, `builtin unset -f
+    echo` and `unset -f -- echo` ran the builtin in all three; `unfunction echo`, `unhash -f echo`, `disable -f echo`,
+    `unset -fv echo` and the -m pattern forms in zsh alone (bash: command not found, or an error), and `enable -f echo`
+    gave the function back; a plain `unset echo` in bash alone, where no variable echo was set; `command unset -f echo` in
+    bash alone; a removal before `&`, before `|`, in `{ ...; } &` or in a subshell did not reach the call; one in a called
+    body or an eval did; `unset -v echo` and `unset 'functions[echo]'` removed nothing."""
+
+    def test_a_removed_function_is_not_read_at_a_later_call(self):
+        """Refused every caller on main: the call read the removed body in the planted repository."""
+        for command in ("f() { git status; }; unset -f f; cd tests/fake; f",
+                        "f() { git status; }; builtin unset -f f; cd tests/fake; f",
+                        "f() { git status; }; unset -f -- f; cd tests/fake; f",
+                        "f() { git status; }; unset -f x f; cd tests/fake; f",
+                        "f() { git status; }; n=f; unset -f $n; cd tests/fake; f",
+                        "git() { true; }; unset -f git; git status", "git() { true; }; unset -f git; git log"):
+            self.silent_for(command)
+        self.assertEqual(self.analysis("git() { true; }; unset -f git; git status").findings, [("git", ("status", None))])
+        self.assertEqual(self.analysis("git() { true; }; unset -f git").functions, set())
+
+    def test_a_removal_that_may_not_have_run_leaves_the_body_read(self):
+        for command in ("f() { git status; }; true && unset -f f; cd tests/fake; f",
+                        "f() { git status; }; unset -f f & cd tests/fake; f",
+                        "f() { git status; }; unset -f f | cat; cd tests/fake; f",
+                        "f() { git status; }; { unset -f f; } & cd tests/fake; f",
+                        "f() { git status; }; (unset -f f); cd tests/fake; f",
+                        "f() { git status; }; unfunction f; cd tests/fake; f",
+                        "f() { git status; }; unhash -f f; cd tests/fake; f",
+                        "f() { git status; }; disable -f f; cd tests/fake; f",
+                        "f() { git status; }; unset f; cd tests/fake; f",
+                        "f() { git status; }; unset -fv f; cd tests/fake; f",
+                        "f() { git status; }; command unset -f f; cd tests/fake; f",
+                        "f() { git status; }; unset -f $x; cd tests/fake; f",
+                        "f() { git status; }; unfunction -m 'f*'; cd tests/fake; f",
+                        "f() { git status; }; eval 'unset -f f'; cd tests/fake; f",
+                        "f() { git status; }; h() { unset -f f; }; h; cd tests/fake; f",
+                        "f() { git status; }; unset -f f; f() { git status; }; cd tests/fake; f"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        # the shadowing of git stays where the removal may not have run
+        for command in ("git() { true; }; unfunction git; git status", "git() { true; }; true && unset -f git; git status",
+                        "git() { true; }; unset -f git | cat; git status"):
+            self.members_refused(command, "shell function")
+
+    def test_the_controls_read_as_before(self):
+        for command in ("f() { git status; }; unset -v f; cd tests/fake; f", "f() { git status; }; unset -f g; cd tests/fake; f",
+                        "f() { git status; }; unset 'functions[f]'; cd tests/fake; f"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        # a removed function's body is still read in place, where nothing calls it (SPD-277)
+        self.members_refused("f() { git push; }; unset -f f", "Law 7")
+        for command in ("unset -f f", "unfunction f", "unset -f", "unset x; git status"):
             self.silent_for(command)
 
 

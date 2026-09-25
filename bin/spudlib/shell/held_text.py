@@ -11,13 +11,13 @@ keeps by are one rule, and read_shell_name and read_body are its only way in.  A
 is read at each call through the same per-state reading (read_once, read_function, SPD-277), since a call runs it where
 the shell stands then exactly as it runs a snapshot's."""
 
-from . import analyse, directories, expansions, globbing, held_shadows, loop_bindings, positional, prepare, stdin_text, syntax, walk
+from . import analyse, directories, expansions, globbing, held_shadows, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
 from ..hooks import hookio, snapshots
 
 
 def read_body(a, text, depth, stdin, fed):
-    """Read a function's body the shell holds -- or one the line defines, a walk.LineBody, which analyse_command reads as
-    the walk had its tokens (SPD-277) -- isolated, in a scope of its own (SPD-246): a name it surely declares local
+    """Read a function's body the shell holds -- or one the line defines, a line_functions.LineBody, which analyse_command
+    reads as the walk had its tokens (SPD-277) -- isolated, in a scope of its own (SPD-246): a name it surely declares local
     (assignment_words.local_names) is not the line's while it runs, and when it returns the shell drops the local, so the
     name is what it was before -- its value in `vars`, no loop binding or basename of the body's, and its doubt as it
     stood before the call, unless the body assigned the name before declaring it (`V=x; local V`), which changed the
@@ -65,8 +65,8 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     started (tests/test_hooks_snapshots.py FunctionDirectoryTest).
 
     A function the line itself defines under that name is read at the call as well, from the state the call starts in and
-    on its standard input, `stdin` (`fed`: whether anything stands there) -- walk.read_call and read_function, SPD-212 and
-    SPD-277 -- and where both it and the snapshot define the name, each body is read from the call's start and the
+    on its standard input, `stdin` (`fed`: whether anything stands there) -- line_functions.read_call and read_function,
+    SPD-212 and SPD-277 -- and where both it and the snapshot define the name, each body is read from the call's start and the
     directories either leaves the line in are joined, since the line's definition may not have run.  An alias's body and
     a snapshot function's read that same input here, so `xs < x.sh` (alias xs=sh) and `shfn < x.sh` (a snapshot `shfn(){
     sh }`) read the file's program as `sh < x.sh` does, past SPD-145 and SPD-150 (SPD-215); a body is read once per call's
@@ -103,9 +103,10 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
             return True
     if not function:
         return False
-    line_moved = walk.read_call(a, cmd, depth, stdin, fed)  # a body the line itself defines under the name (SPD-277)
+    # a body the line itself defines under the name (SPD-277)
+    line_moved = line_functions.read_call(a, cmd, depth, stdin, fed)
     body = expansions.shell_function(cmd, a)
-    if body is None and line_moved is not walk.NO_BODY:
+    if body is None and line_moved is not line_functions.NO_BODY:
         a.cwds = directories.settle(effect, before, line_moved)
     elif body is not None:
         a.cwds = before  # ... which may not be the one that runs: the snapshot's is read from the same start
@@ -133,7 +134,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
                                    fed=fed, filled=filled)
 
         after = read_once(a, cmd, read, before, run)
-        if line_moved is not walk.NO_BODY:
+        if line_moved is not line_functions.NO_BODY:
             after = directories.union_dirs(after, line_moved)  # either function may be the one that runs
         a.cwds = directories.settle(effect, before, after)
     return False
@@ -167,8 +168,8 @@ def read_once(a, cmd, read, before, run):
 
 
 def read_function(a, cmd, body, depth, stdin, fed):
-    """A call's reading of a function body the line defines (SPD-277, walk.read_call), a LineBody: read as a body the
-    shell's snapshot holds is (read_body), in a scope of its own, from the state the call starts in, once per that state
+    """A call's reading of a function body the line defines (SPD-277, line_functions.read_call), a LineBody: read as a body
+    the shell's snapshot holds is (read_body), in a scope of its own, from the state the call starts in, once per that state
     and standard input (read_once) -- but as the member's own text, which no finding is pruned from -- and the directories
     the line is in after it.  Its readings are bounded as SPD-212 bounded them: a reading on a call's input counts
     against positional.READINGS_PER_NAME across the analysis (ShellAnalysis.body_walks), past which a call's input is

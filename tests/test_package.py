@@ -53,7 +53,9 @@ DISPATCH = "hooks.dispatch"
 # body and a function's, read and pruned, taken out of shell.analyse (SPD-264), shell.held_options for the options the
 # shell holds and shell.held_shadows for a call of Claude Code's own grep, find, rg or pkill, taken out of shell.held_text
 # (SPD-267), shell.archive_names for the names an archive or a patch the line names would write (SPD-144), which reaches
-# tarfile and zipfile only through core.lazy (HookPathTest.test_a_hook_lists_an_archive_only_on_a_line_that_extracts_one).
+# tarfile and zipfile only through core.lazy (HookPathTest.test_a_hook_lists_an_archive_only_on_a_line_that_extracts_one),
+# shell.line_functions for a function body the line defines and its reading at each call, taken out of shell.walk
+# (SPD-280).
 HOOK_PATH = {
     "core.homeconf", "core.kernel", "core.launchagents", "core.lazy",
     "state.actors", "state.backup", "state.ledgerdb", "state.lookup", "state.ops", "state.schema", "state.transcripts",
@@ -62,7 +64,7 @@ HOOK_PATH = {
     "hooks.snapshots", "hooks.stophook", "hooks.subagent_stop", "hooks.worktrees",
     "shell.analyse", "shell.archive_names", "shell.arg_writes", "shell.arithmetic_assignments", "shell.assigning_builtins", "shell.assignment_words", "shell.bash_rule", "shell.directories", "shell.downloads", "shell.expansions", "shell.find_xargs",
     "shell.git_config", "shell.git_programs", "shell.git_verbs", "shell.git_writes", "shell.globbing", "shell.held_options", "shell.held_shadows", "shell.held_text", "shell.heredocs", "shell.inline_programs",
-    "shell.interpreter_words", "shell.loop_bindings", "shell.positional", "shell.prepare", "shell.program_writes", "shell.redirect_globs", "shell.reevaluation", "shell.runner_files", "shell.runtime_shells", "shell.spud_calls",
+    "shell.interpreter_words", "shell.line_functions", "shell.loop_bindings", "shell.positional", "shell.prepare", "shell.program_writes", "shell.redirect_globs", "shell.reevaluation", "shell.runner_files", "shell.runtime_shells", "shell.spud_calls",
     "shell.script_files", "shell.script_runners", "shell.script_text", "shell.spelled_writes", "shell.stdin_text", "shell.syntax", "shell.tree_walk", "shell.tree_writes",
     "shell.unread", "shell.walk", "shell.zsh",
 }
