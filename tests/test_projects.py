@@ -3,6 +3,7 @@
 BadTakes with the key badtakes and the prefixes BAD / BADS (Eric, 2026-09-14)."""
 
 import json
+import os
 import sqlite3
 import unittest
 from pathlib import Path
@@ -113,6 +114,46 @@ class ProjectAddTest(RepoMixin, SpudTestCase):
         proc = self.cli("project", "add", self.other, "--key", "badtakes", "--ticket-prefix", "BAD", "--team-prefix", "BADS", "--landing", "pr", actor=m["ref"], check=False)
         self.assertEqual(proc.returncode, 3, proc)
 
+    def add_named(self, name, check=True):
+        return self.cli("--json", "project", "add", self.other, "--key", "badtakes", "--ticket-prefix", "BAD", "--team-prefix", "BADS",
+                        "--landing", "pr", "--name", name, actor="spud", check=check)
+
+    def test_add_writes_the_project_s_kanban_board_and_says_so(self):
+        # SPD-324: ledger/<name>.base, rendered from the shipped template for this project and no other.
+        out = json.loads(self.add_named("Bad Takes").stdout)
+        board = self.home.path / "ledger" / "Bad Takes.base"
+        self.assertEqual(out["board"], {"project": "badtakes", "path": "ledger/Bad Takes.base", "board": "written"})
+        text = board.read_text(encoding="utf-8")
+        self.assertEqual(text, spud.board_text(spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.tool),
+                                               {"key": "badtakes", "name": "Bad Takes"}))
+        view = spud.read_base(text)["views"][0]
+        self.assertEqual((view["type"], view["name"]), ("notion-board", "Bad Takes"))
+        self.assertIn('project == "badtakes"', view["filters"]["and"])
+        second = self.make_repo("second-")
+        proc = self.cli("project", "add", second, "--key", "second", "--ticket-prefix", "SEC", "--team-prefix", "SECS", "--landing", "pr",
+                        "--name", "Second", actor="spud")
+        self.assertIn("wrote ledger/Second.base, project second's board", proc.stdout)
+
+    def test_add_keeps_a_board_that_is_already_there_byte_for_byte(self):
+        board = self.home.path / "ledger" / "Bad Takes.base"
+        board.write_text("views: []\n", encoding="utf-8")
+        out = json.loads(self.add_named("Bad Takes").stdout)
+        self.assertEqual(out["board"]["board"], "kept")
+        self.assertEqual(board.read_text(encoding="utf-8"), "views: []\n")
+
+    def test_a_name_that_cannot_name_a_board_gets_none_and_the_add_still_happens(self):
+        shipped_board = (self.home.path / "ledger" / "Board.base").read_bytes()
+        out = json.loads(self.add_named("Board").stdout)
+        self.assertEqual(out["project"]["key"], "badtakes")
+        self.assertEqual(out["board"]["board"], "skipped")
+        self.assertIn("ledger/Board.base", out["board"]["reason"])
+        self.assertEqual((self.home.path / "ledger" / "Board.base").read_bytes(), shipped_board)
+        second = self.make_repo("second-")
+        proc = self.cli("project", "add", second, "--key", "second", "--ticket-prefix", "SEC", "--team-prefix", "SECS", "--landing", "pr",
+                        "--name", "a/b", actor="spud")
+        self.assertIn("no board for project second: its name 'a/b' holds a path separator", proc.stdout)
+        self.assertFalse((self.home.path / "ledger" / "a").exists())
+
     def test_list_and_show(self):
         self.add_project(self.other)
         rows = self.cli_json("project", "list")["projects"]
@@ -195,6 +236,117 @@ class ProjectEditRemoveTest(RepoMixin, SpudTestCase):
         second = self.make_repo("second-")
         proc = self.add_project(second, "second", "BAD", "SECS", check=False)
         self.assertIn("project badtakes's", proc.stderr)
+
+
+class ProjectRenameBoardTest(RepoMixin, SpudTestCase):
+    """SPD-325: `project edit --name` and the project's Kanban board.  The board moves to the new name, its bytes
+    untouched, when nothing is at the new path; otherwise the old file stays, and the one line the edit prints says it
+    is no longer the project's board and why.  Each case is one line, and a board left behind is still a board."""
+
+    OLD = "ledger/Bad Takes.base"
+    NEW = "ledger/Takes.base"
+
+    def setUp(self):
+        super().setUp()
+        self.add_project(self.make_repo("badtakes-"), "badtakes", "BAD", "BADS", "pr", "--name", "Bad Takes")
+        self.assertTrue(self.at(self.OLD).is_file())  # add wrote it
+        self.at(self.OLD).write_text("views: []\n", encoding="utf-8")  # tuned by hand: a move must keep this
+
+    def at(self, rel):
+        return self.home.path / rel
+
+    def board_line(self, name):
+        """The edit's text output: the first line is the edit, the second, the only other, the board's."""
+        lines = self.cli("project", "edit", "badtakes", "--name", name, actor="spud").stdout.splitlines()
+        self.assertEqual(len(lines), 2, lines)
+        self.assertEqual(lines[0], "project badtakes edited: name")
+        return lines[1].strip()
+
+    def boards(self):
+        ctx = spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.tool)
+        con = sqlite3.connect(self.home.path / ".spud" / "ledger.db")
+        con.row_factory = sqlite3.Row
+        try:
+            return spud.board_paths(ctx, con)
+        finally:
+            con.close()
+
+    def doctor_notes(self):
+        return self.cli_json("doctor", check=False)["notes"]
+
+    def test_the_board_moves_to_the_new_name_as_it_was(self):
+        line = self.board_line("Takes")
+        self.assertEqual(line, "moved ledger/Bad Takes.base to ledger/Takes.base, project badtakes's board, its contents as they were")
+        self.assertFalse(self.at(self.OLD).exists())
+        self.assertEqual(self.at(self.NEW).read_text(encoding="utf-8"), "views: []\n")
+        event = self.home.json("events", "--kind", "project.edited")["events"][-1]
+        self.assertEqual((event["data"]["board"]["board"], event["data"]["board"]["to"]), ("move", self.NEW))
+        # nothing is left behind, so nothing is noted, and a sync writes no second board
+        self.assertEqual([n for n in self.doctor_notes() if "no longer has" in n], [])
+        boards = {b["project"]: b["board"] for b in self.cli_json("home", "sync", actor="spud")["boards"]}
+        self.assertEqual(boards["badtakes"], "kept")
+        self.assertEqual(sorted(p.name for p in (self.home.path / "ledger").glob("*Takes.base")), ["Takes.base"])
+
+    def test_json_names_the_move(self):
+        out = self.cli_json("project", "edit", "badtakes", "--name", "Takes", actor="spud")
+        self.assertEqual(out["changed"], ["name"])
+        self.assertEqual({k: out["board"][k] for k in ("project", "from", "to", "board")},
+                         {"project": "badtakes", "from": self.OLD, "to": self.NEW, "board": "move"})
+
+    def test_a_change_of_case_alone_is_a_move_too(self):
+        # On a file system that ignores case, ledger/bad takes.base "exists" already: it is the same file.
+        self.assertEqual(self.board_line("bad takes"),
+                         "moved ledger/Bad Takes.base to ledger/bad takes.base, project badtakes's board, its contents as they were")
+        self.assertEqual([p.name for p in (self.home.path / "ledger").glob("*akes.base")], ["bad takes.base"])
+        self.assertEqual(self.at("ledger/bad takes.base").read_text(encoding="utf-8"), "views: []\n")
+
+    def test_a_file_at_the_new_name_leaves_the_old_board_where_it_is_and_says_so(self):
+        self.at(self.NEW).write_text("mine\n", encoding="utf-8")
+        self.assertEqual(self.board_line("Takes"),
+                         "ledger/Bad Takes.base stays where it is and is no longer project badtakes's board:"
+                         " ledger/Takes.base is already there, and is its board now")
+        self.assertEqual(self.at(self.OLD).read_text(encoding="utf-8"), "views: []\n")
+        self.assertEqual(self.at(self.NEW).read_text(encoding="utf-8"), "mine\n")
+        # the file left behind is still a board, never a view the tool ships, and doctor names it once as a note
+        self.assertTrue(spud.is_board(self.OLD, self.boards()))
+        self.assertTrue(spud.is_board(self.NEW, self.boards()))
+        orphans = [n for n in self.doctor_notes() if "no longer has" in n]
+        self.assertEqual(len(orphans), 1, orphans)
+        self.assertTrue(orphans[0].startswith("ledger/Bad Takes.base was project badtakes's board"), orphans)
+        os.remove(self.at(self.OLD))
+        self.assertEqual([n for n in self.doctor_notes() if "no longer has" in n], [])
+
+    def test_a_new_name_that_gets_no_board_leaves_the_old_one_and_says_why(self):
+        self.assertEqual(self.board_line("a/b"),
+                         "ledger/Bad Takes.base stays where it is and is no longer project badtakes's board:"
+                         " the project gets none, as its new name 'a/b' holds a path separator, a drive or a root")
+        self.assertEqual(self.at(self.OLD).read_text(encoding="utf-8"), "views: []\n")
+        self.assertFalse(self.at("ledger/a").exists())
+        self.assertTrue(spud.is_board(self.OLD, self.boards()))
+        self.assertEqual(len([n for n in self.doctor_notes() if "no longer has" in n]), 1)
+
+    def test_with_no_old_board_nothing_moves_and_the_line_names_what_writes_the_new_one(self):
+        os.remove(self.at(self.OLD))
+        self.assertEqual(self.board_line("Takes"),
+                         "project badtakes had no board to move; `home sync` or `project install` writes ledger/Takes.base")
+        self.assertFalse(self.at(self.NEW).exists())  # an edit moves a board and never writes one
+        self.assertEqual(self.board_line("Board"),
+                         "project badtakes had no board to move; the project gets none, as its new name 'Board'"
+                         " is the name of the view ledger/Board.base the tool ships")
+        # from a name that could never name a board (ledger/Board.base is the tool's), to one whose path is taken
+        shipped_board = self.at("ledger/Board.base").read_bytes()
+        self.at("ledger/Other.base").write_text("mine\n", encoding="utf-8")
+        self.assertEqual(self.board_line("Other"),
+                         "project badtakes had no board to move; ledger/Other.base is already there, and is its board now")
+        self.assertEqual(self.at("ledger/Board.base").read_bytes(), shipped_board)
+        self.assertEqual(self.at("ledger/Other.base").read_text(encoding="utf-8"), "mine\n")
+
+    def test_an_edit_that_leaves_the_name_says_nothing_about_the_board(self):
+        out = self.cli_json("project", "edit", "badtakes", "--name", "Bad Takes", "--landing", "merge", actor="spud")
+        self.assertEqual(out["changed"], ["landing"])
+        self.assertNotIn("board", out)
+        self.assertEqual(self.cli("project", "edit", "badtakes", "--landing", "pr", actor="spud").stdout.splitlines(),
+                         ["project badtakes edited: landing"])
 
 
 class ProjectScriptsTest(RepoMixin, SpudTestCase):

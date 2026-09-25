@@ -40,7 +40,7 @@ readers, and all three are off it (`tests/test_package.py`'s HOOK_PATH).  It mus
 
 import re
 
-from . import vaultinstall, vaultlock
+from . import projectboards, vaultinstall, vaultlock
 from ..core import kernel, shipped
 from ..state import actors, backup, ledgerdb
 
@@ -59,10 +59,10 @@ SKILLS = "skills"
 HOME_SKILLS = ".claude/skills"
 # Where a copy of a file this command overwrites goes, under the home's backups directory.
 HOME_SYNC_BACKUPS = "home-sync"
-# The three marks that have no value in a home with no project (`core/shipped.marks` leaves them empty).  A line
+# The four marks that have no value in a home with no project (`core/shipped.marks` leaves them empty).  A line
 # carrying one is a line about project 1, so with no project registered `without_project_lines` leaves that line out and
 # the command says how many it left out: the shipped prose is share/'s to write and a command's to place.
-PROJECT_MARKS = ("project_key", "project_root", "project_remote")
+PROJECT_MARKS = ("project_key", "project_name", "project_root", "project_remote")
 MARK_LEFT = re.compile(r"\{\{[a-z_]+\}\}")
 NOT_RENDERED = ("the shipped %s still carries %s after rendering; core/shipped.MARKS and <tool>/share/ have drifted"
                 " (tests/test_share.py is the guard)")
@@ -190,20 +190,27 @@ def sync_files(ctx, files, stamp, check_only, record):
             kernel.write_whole(path, text)
 
 
-def sync_home(ctx, project, check_only=False):
-    """(record, lines): every file the tool owns in this home, regenerated from `<tool>/share/`.
+def sync_home(ctx, project, check_only=False, projects=()):
+    """(record, lines): every file the tool owns in this home, regenerated from `<tool>/share/`, and the Kanban board
+    of each of `projects` that has none (`commands/projectboards`, SPD-324).
 
-    Takes no actor and opens no database -- `cmd_home_sync` does the ownership check and reads project 1 -- so the two
-    preconditions here are the ones about the tool's own files: every shipped file renders for this home, and the
-    vault's lock is one this tool will install from.  Both are checked before the first byte is written.
+    Takes no actor and opens no database -- `cmd_home_sync` does the ownership check and reads project 1 and the
+    non-archived projects -- so the two preconditions here are the ones about the tool's own files: every shipped file
+    and every missing board renders for this home, and the vault's lock is one this tool will install from.  Both are
+    checked before the first byte is written.
+
+    A board is written only when absent and is never replaced, so it is no tool-owned file: it is not in `tool_owned`,
+    doctor names no drift in one, and `--check` says only which would be written.
     """
     files, dropped = rendered_files(ctx, project)
+    boards = projectboards.plan_boards(ctx, projects)
     vaultlock.read_lock(ctx)  # a lock this tool will not install from refuses here, before anything is written
     stamp = backup.copy_stamp(ctx, HOME_SYNC_BACKUPS)  # this run's own folder, whatever the clock says
     record = {"home": str(ctx.home), "share": str(shipped.share_dir(ctx)), "check": bool(check_only),
               "written": [], "replaced": [], "unchanged": [], "dropped_lines": dropped,
               "backups": str(backup.backups_dir(ctx) / HOME_SYNC_BACKUPS / stamp)}
     sync_files(ctx, files, stamp, check_only, record)
+    record["boards"] = projectboards.write_boards(ctx, boards, check_only)
     record["vault"], vault_lines = vaultinstall.install_vault(ctx, check_only=check_only)
     return record, sync_lines(ctx, record, vault_lines)
 
@@ -230,6 +237,7 @@ def sync_lines(ctx, record, vault_lines):
     if record["dropped_lines"]:
         lines.append("  %d line(s) about project 1 left out, for want of one: `project add`, then they are yours to write back"
                      % record["dropped_lines"])
+    lines.extend("  %s" % line for line in projectboards.board_lines(record["boards"], check))
     lines.extend("  %s" % line for line in vault_lines)
     if record["vault"]["refused"]:
         lines.append("  " + SYNC_REFUSED % (len(record["vault"]["refused"]), ctx.launcher))
@@ -249,9 +257,11 @@ def cmd_home_sync(ctx, args):
         actor = actors.resolve_actor(con, args.actor)
         actors.require_spud(con, actor, "regenerating the files the tool owns in the home")
         project = project_one(con)
+        projects = [dict(row) for row in con.execute(
+            "SELECT key, name, archived_at FROM projects WHERE archived_at IS NULL ORDER BY id").fetchall()]
     finally:
         con.close()
-    record, lines = sync_home(ctx, project, args.check)
+    record, lines = sync_home(ctx, project, args.check, projects)
     return kernel.Result(record, "\n".join(lines))
 
 

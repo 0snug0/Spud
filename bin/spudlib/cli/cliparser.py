@@ -146,13 +146,13 @@ def build_parser():
     p = sub.add_parser("project", help="repositories Spud works in besides his home")
     ps = p.add_subparsers(dest="subcommand", metavar="<subcommand>")
     ps.required = True
-    q = ps.add_parser("add", help="register a repository's main checkout as a project; installs nothing (Spud's)")
+    q = ps.add_parser("add", help="register a repository's main checkout as a project and write its Kanban board, ledger/<name>.base, when absent; installs nothing (Spud's)")
     q.add_argument("path", help="the repository's main checkout")
     q.add_argument("--key", required=True, help="lower-case key, [a-z][a-z0-9-]{0,31}; home is reserved")
     q.add_argument("--ticket-prefix", required=True, help="upper-case ticket prefix (BAD gives BAD-001)")
     q.add_argument("--team-prefix", required=True, help="upper-case team prefix (BADS gives BADS-001)")
     q.add_argument("--landing", required=True, choices=("merge", "pr"), help="how a verified branch lands: merge into the default branch, or a pull request")
-    q.add_argument("--name", help="display name (default: the root's directory name)")
+    q.add_argument("--name", help="display name, which also names its board ledger/<name>.base (default: the root's directory name)")
     q.add_argument("--sessions", choices=("claim", "always"), default="claim", help="claim (default): a session there is Spud only after /spud claims it; always: every session is")
     q.add_argument("--default-branch", help="default: origin/HEAD's branch, else main")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes")
@@ -173,7 +173,8 @@ def build_parser():
                         " `bun run`, `pnpm run`, `yarn NAME`, `make NAME`, and npm's pre/post hooks and lifecycle scripts by their own names)"
                         " while the file that defines it is outside the member's deliverables (repeatable)")
     q.add_argument("--drop-runner", action="append", metavar="NAME", help="take a runner name off the allow-list (repeatable)")
-    q.add_argument("--name")
+    q.add_argument("--name", help="display name; its board ledger/<old>.base moves to ledger/<new>.base, untouched, when nothing is there,"
+                                  " and otherwise stays where it is, the output saying why")
     q.add_argument("--landing", choices=("merge", "pr"))
     q.add_argument("--sessions", choices=("claim", "always"))
     q.add_argument("--default-branch")
@@ -181,7 +182,7 @@ def build_parser():
     q.add_argument("--ticket-prefix")
     q.add_argument("--team-prefix")
     q.set_defaults(func=registry.cmd_project_edit)
-    q = ps.add_parser("install", help="write the ledger hooks into the project's untracked .claude/settings.local.json, spudagent and the /spud skill at user scope (Spud's)")
+    q = ps.add_parser("install", help="write the ledger hooks into the project's untracked .claude/settings.local.json, spudagent and the /spud skill at user scope, and its Kanban board ledger/<name>.base in the home when absent (Spud's)")
     q.add_argument("key")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes")
     q.set_defaults(func=install.cmd_project_install)
@@ -218,7 +219,7 @@ def build_parser():
     q.add_argument("--dry-run", action="store_true", help="check the preconditions and print the steps; move nothing")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry the move writes")
     q.set_defaults(func=homemove.cmd_home_move)
-    q = ps.add_parser("sync", help="write every file the tool owns in this home again from <tool>/share/, keeping a copy of each one it replaces (Spud's)",
+    q = ps.add_parser("sync", help="write every file the tool owns in this home again from <tool>/share/, keeping a copy of each one it replaces, and each project's Kanban board where it has none (Spud's)",
                       description=helptexts.HOME_SYNC_DESCRIPTION, formatter_class=lazy.argparse.RawDescriptionHelpFormatter)
     q.add_argument("--check", action="store_true", help="print what would change, file by file, and write nothing")
     q.set_defaults(func=homesync.cmd_home_sync)

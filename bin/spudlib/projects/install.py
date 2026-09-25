@@ -7,7 +7,7 @@ import shlex
 from pathlib import Path
 
 from . import agentdef, registry, sessions
-from ..commands import reportentry, settings_sync
+from ..commands import projectboards, reportentry, settings_sync
 from ..core import homeconf, kernel
 from ..hooks import worktrees
 from ..state import actors, ledgerdb, lookup
@@ -294,6 +294,19 @@ def uninstall_project(ctx, con, p):
     return changed, warnings
 
 
+def install_with_board(ctx, con, p):
+    """`install_project`, and the project's Kanban board written when absent (`commands/projectboards`, SPD-324): what
+    `project install` does, and what init's step 7 does for project 1 (SPD-325), in one place.  Returns
+    `install_project`'s three values and the board's entry from `projectboards.write_boards`.
+
+    The board is decided and rendered before install writes anything, so a tool whose template is gone refuses the
+    install whole.  It is here and not in `install_project`, which `project sync` and a home move run too: those rewrite
+    what install generates, and a board is the home's once written."""
+    board = projectboards.plan_board(ctx, p)
+    record, written, first_agent = install_project(ctx, con, p)
+    return record, written, first_agent, projectboards.write_boards(ctx, [board])[0]
+
+
 def cmd_project_install(ctx, args):
     con = ledgerdb.connect(ctx)
     try:
@@ -303,22 +316,25 @@ def cmd_project_install(ctx, args):
         p = lookup.get_project(con, args.key)
         if p["archived_at"]:
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is archived" % p["key"])
-        record, written, first_agent = install_project(ctx, con, p)
+        record, written, first_agent, board = install_with_board(ctx, con, p)
+        wrote_board = board["board"] == "written"
         at = kernel.now()
         entry = None
         with ledgerdb.write_txn(con):
             con.execute("UPDATE projects SET installed = ? WHERE id = ?", (json.dumps(record), p["id"]))
-            if written or not p["installed"] or args.next is not None:
+            if written or wrote_board or not p["installed"] or args.next is not None:
                 ledgerdb.write_event(con, at, actor.label, "project.installed", "project %s installed: %d file%s written" % (p["key"], len(written), "" if len(written) == 1 else "s"),
-                            data={"project": p["key"], "written": written, "sync": False})
+                            data={"project": p["key"], "written": written, "sync": False, "board": board})
                 entry = reportentry.write_report_entry(con, at, "Project %s installed: %s" % (p["key"], worktrees.project_root(ctx, p)), "project install", None, next_line=args.next)
             d = registry.project_dict(ctx, con, lookup.get_project(con, args.key))
     finally:
         con.close()
-    lines = ["project %s installed%s" % (d["key"], "" if written else ": unchanged, nothing written")] + ["  wrote %s" % w for w in written]
+    lines = ["project %s installed%s" % (d["key"], "" if written or wrote_board else ": unchanged, nothing written")] + ["  wrote %s" % w for w in written]
+    # A board already there is the home's and says nothing here, so a second install still reads as unchanged.
+    lines += ["  " + line for line in projectboards.board_lines([board]) if board["board"] != "kept"]
     if first_agent:
         lines.append("restart open sessions in %s to see spudagent (the first agent file in a scope is seen only after a restart)" % d["key"])
-    return reportentry.with_report_entry({"project": d, "written": written, "restart": first_agent}, "\n".join(lines), entry)
+    return reportentry.with_report_entry({"project": d, "written": written, "board": board, "restart": first_agent}, "\n".join(lines), entry)
 
 
 def cmd_project_uninstall(ctx, args):

@@ -135,6 +135,18 @@ def shipped():
             for path in sorted(SHARE.rglob("*")) if path.is_file()]
 
 
+# SPD-324: share/ledger/_templates/project.base carries `name: {{project_name}}`, which a plain read takes for a flow
+# mapping.  So every shipped `.base` is read as a home gets it: the template rendered for a sample project, the way
+# commands/projectboards renders it (the files with no mark are unchanged by that).
+BOARD_SAMPLE = {"key": "myrepo", "name": "My Repo"}
+
+
+def base_text(path):
+    """A shipped `.base` file's text as a home gets it."""
+    return spud.render(path.read_text(encoding="utf-8"),
+                       {"project_key": BOARD_SAMPLE["key"], "project_name": spud.board_name_scalar(BOARD_SAMPLE["name"])})
+
+
 def render_target_paths():
     """The relative paths render/notefiles.render_targets writes, read from that module's own string literals.
 
@@ -215,13 +227,13 @@ class ShippedBaseTest(unittest.TestCase):
     def test_every_shipped_base_file_reads_in_the_subset(self):
         for path in self.bases():
             try:
-                spud.read_base(path.read_text(encoding="utf-8"))
+                spud.read_base(base_text(path))
             except spud.YamlRefusal as refusal:
                 self.fail("%s: %s" % (path.relative_to(REPO), refusal))
 
     def test_every_view_of_every_shipped_base_file_is_a_whole_view_of_a_type_they_use(self):
         for path in self.bases():
-            self.assertEqual(view_problems(spud.read_base(path.read_text(encoding="utf-8"))), [], path.relative_to(REPO))
+            self.assertEqual(view_problems(spud.read_base(base_text(path))), [], path.relative_to(REPO))
 
     def test_a_planted_view_type_and_a_truncated_view_both_fail(self):
         # The incident, in both halves, against the file as it ships: this is what the check would have caught.
@@ -248,7 +260,7 @@ class ShippedBaseTest(unittest.TestCase):
     def test_every_view_type_the_lock_names_is_used_by_a_shipped_base_file_or_is_a_sibling_of_one(self):
         # A type in the lock that no shipped view uses is not wrong -- extended-base registers three and the files use
         # two -- but a type must come from a plugin that is actually pinned, never from a hand-written set.
-        used = {view["type"] for path in self.bases() for view in spud.read_base(path.read_text(encoding="utf-8"))["views"]}
+        used = {view["type"] for path in self.bases() for view in spud.read_base(base_text(path))["views"]}
         self.assertTrue(used - {BUILT_IN_VIEW_TYPE}, "no shipped view uses a plugin's type; this check passes vacuously")
         self.assertLessEqual(used, view_types())
 
@@ -265,8 +277,61 @@ class ShippedBaseTest(unittest.TestCase):
     def test_every_folder_a_shipped_base_file_filters_on_is_one_the_renderer_writes(self):
         allowed = render_target_folders() | {"ledger/_templates"}  # where the renderer writes, and the templates it skips
         for path in self.bases():
-            for folder in re.findall(r"file\.inFolder\(\"([^\"]*)\"\)", path.read_text(encoding="utf-8")):
+            for folder in re.findall(r"file\.inFolder\(\"([^\"]*)\"\)", base_text(path)):
                 self.assertIn(folder, allowed, path.relative_to(REPO))
+
+
+class ProjectBoardTemplateTest(unittest.TestCase):
+    """SPD-324: share/ledger/_templates/project.base, the Kanban board every registered project gets as
+    ledger/<name>.base, and the two rules commands/projectboards renders it by."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.home = helpers.Home()
+        cls.ctx = spud.Ctx(cls.home.path, "SPUD_HOME", False, tool=REPO)
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.home.cleanup()
+
+    def test_a_board_is_board_base_s_formulas_properties_and_kanban_view_filtered_to_its_project(self):
+        # The template is not copied from Board.base at run time, so this is what keeps the two in step: every key but
+        # `views` is Board.base's, and the one view is Board.base's first, the Kanban, named after the project and with
+        # one more filter.  A project called Spud whose key is spud gets exactly the file Eric first built by hand.
+        board = spud.read_base(spud.board_text(self.ctx, {"key": "spud", "name": "Spud"}))
+        shipped_board = spud.read_base((SHARE / "ledger" / "Board.base").read_text(encoding="utf-8"))
+        self.assertEqual({k: v for k, v in board.items() if k != "views"}, {k: v for k, v in shipped_board.items() if k != "views"})
+        kanban = json.loads(json.dumps(shipped_board["views"][0]))
+        self.assertEqual((kanban["type"], kanban["name"]), ("notion-board", "Kanban"))
+        kanban["name"] = "Spud"
+        kanban["filters"]["and"].append('project == "spud"')
+        self.assertEqual(board["views"], [kanban])
+
+    def test_a_name_yaml_would_read_as_something_else_is_quoted_and_reads_back_whole(self):
+        for name in ("Spud", "BadTakes", "Ching Team", "bad-takes", "v2.0 (beta)"):
+            self.assertEqual(spud.board_name_scalar(name), name)
+        for name in ("true", "No", "123", "1.5", "a: b", "#tag", "- dash", "[x]", "it's", "trailing ", "Zoë"):
+            scalar = spud.board_name_scalar(name)
+            self.assertTrue(scalar.startswith('"'), (name, scalar))
+            self.assertEqual(json.loads(scalar), name)
+        board = spud.read_base(spud.board_text(self.ctx, {"key": "odd", "name": "a: b"}))
+        self.assertEqual(board["views"][0]["name"], "a: b")
+
+    def test_a_name_that_cannot_name_a_file_or_is_a_shipped_view_s_is_refused(self):
+        known = spud.shipped_views(self.ctx)
+        self.assertEqual(sorted(known.values()), ["ledger/Board.base", "ledger/Fleet.base"])
+        for name, needle in (("", "empty"), ("..", "directory above"), ("a/b", "path separator"), (".hidden", "dot"),
+                             ("Board", "ledger/Board.base"), ("fleet", "ledger/Fleet.base"), ("a\x00b", "NUL")):
+            self.assertIn(needle, spud.name_problem(name, known) or "", name)
+        for name in ("Spud", "Ching Team", "Boardroom"):
+            self.assertIsNone(spud.name_problem(name, known), name)
+
+    def test_the_template_is_no_shipped_view_and_never_a_home_s_own_file(self):
+        # Every glob that takes share/ledger/*.base for the shipped views is flat, and init and home sync write only
+        # what SCAFFOLDING names: the template is in neither.
+        self.assertNotIn(spud.BOARD_TEMPLATE, [rel for rel, _home_rel in spud.tool_owned(self.ctx)])
+        self.assertNotIn("project.base", [p.name for p in (SHARE / "ledger").glob("*.base")])
+        self.assertTrue((SHARE / spud.BOARD_TEMPLATE).is_file())
 
 
 class ShippedMarkTest(unittest.TestCase):
@@ -498,6 +563,7 @@ class ShippedSetTest(unittest.TestCase):
             "ledger/Fleet.base",
             "ledger/Home.md",
             "ledger/Spud.md",
+            "ledger/_templates/project.base",  # SPD-324: each registered project's Kanban board is rendered from it
             "ledger/_templates/spudagent.md",
             "ledger/_templates/ticket.md",
             "obsidian/app.json",
@@ -532,8 +598,11 @@ class ShippedSetTest(unittest.TestCase):
             self.assertNotIn("agents/spudagent.md", spud.SCAFFOLDING)
             shipped_paths = [rel for rel, _ in shipped()]
             vault = {rel for rel in shipped_paths if rel == LOCK.name or rel.startswith("obsidian/")}
+            # SPD-324: the project board template is read by commands/projectboards and rendered once per project to
+            # ledger/<name>.base, never copied to its own share-relative path.
+            self.assertNotIn(spud.BOARD_TEMPLATE, spud.SCAFFOLDING)
             self.assertEqual(sorted(set(shipped_paths) - set(spud.SCAFFOLDING) - vault - {"spud.config.json"}),
-                             ["agents/spudagent.md", "skills/spud-reference/SKILL.md"])
+                             ["agents/spudagent.md", spud.BOARD_TEMPLATE, "skills/spud-reference/SKILL.md"])
         finally:
             home.cleanup()
 

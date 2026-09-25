@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from ..commands import reportentry, settings_sync
+from ..commands import projectboards, reportentry, settings_sync
 from ..core import homeconf, kernel
 from ..hooks import worktrees
 from ..state import actors, ledgerdb, lookup
@@ -165,6 +165,7 @@ def cmd_project_add(ctx, args):
         remote = homeconf.git_remote_url(root)
         branch = args.default_branch or origin_head_branch(root) or "main"
         name = args.name or os.path.basename(root)
+        board = projectboards.plan_board(ctx, {"key": args.key, "name": name, "archived_at": None})
         at = kernel.now()
         with ledgerdb.write_txn(con):
             check_project_key(con, args.key)
@@ -182,8 +183,12 @@ def cmd_project_add(ctx, args):
             d = project_dict(ctx, con, lookup.get_project(con, args.key))
     finally:
         con.close()
-    return reportentry.with_report_entry({"project": d}, "project %s added: %s (%s-nnn tickets, %s-nnn teams, landing %s, sessions %s); nothing installed yet:"
-                             " `spud --as spud project install %s`" % (d["key"], d["root"], d["ticket_prefix"], d["team_prefix"], d["landing"], d["sessions"], d["key"]), entry)
+    # SPD-324: the project's Kanban board, written when absent once the row is in; decided and rendered above, before
+    # the insert, so a tool whose template is gone refuses the add rather than half-doing it.
+    board = projectboards.write_boards(ctx, [board])
+    text = ("project %s added: %s (%s-nnn tickets, %s-nnn teams, landing %s, sessions %s); nothing installed yet:"
+            " `spud --as spud project install %s`" % (d["key"], d["root"], d["ticket_prefix"], d["team_prefix"], d["landing"], d["sessions"], d["key"]))
+    return reportentry.with_report_entry({"project": d, "board": board[0]}, "\n".join([text] + ["  " + line for line in projectboards.board_lines(board)]), entry)
 
 
 def cmd_project_list(ctx, args):
@@ -300,11 +305,21 @@ def cmd_project_edit(ctx, args):
                 check_prefixes(con, tp, tm, exclude_id=p["id"])
                 updates.update(ticket_prefix=tp, team_prefix=tm)
             updates = {k: v for k, v in updates.items() if v != p[k]}
+            # SPD-325: what a new name does to the project's board, decided here and done once the edit has committed.
+            board = projectboards.plan_rename(ctx, p, updates["name"]) if "name" in updates else None
             if updates:
+                data = {"project": p["key"], "fields": sorted(updates), "from": {k: p[k] for k in updates}, "to": updates}
+                if board is not None:
+                    data["board"] = board
                 con.execute("UPDATE projects SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), p["id"]))
                 ledgerdb.write_event(con, at, actor.label, "project.edited", "project %s edited: %s" % (p["key"], ", ".join(sorted(updates))),
-                            data={"project": p["key"], "fields": sorted(updates), "from": {k: p[k] for k in updates}, "to": updates})
+                            data=data)
             d = project_dict(ctx, con, lookup.get_project(con, args.key))
     finally:
         con.close()
-    return kernel.Result({"project": d, "changed": sorted(updates)}, "project %s edited: %s" % (d["key"], ", ".join(sorted(updates)) or "nothing to change"))
+    lines = ["project %s edited: %s" % (d["key"], ", ".join(sorted(updates)) or "nothing to change")]
+    out = {"project": d, "changed": sorted(updates)}
+    if board is not None:
+        out["board"], line = projectboards.rename_board(ctx, board)
+        lines.append("  " + line)
+    return kernel.Result(out, "\n".join(lines))

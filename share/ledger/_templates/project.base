@@ -1,0 +1,93 @@
+formulas:
+  status_rank: if(status == "active", 1, if(status == "queued", 2, if(status == "parked", 3, if(status == "done", 4, 5))))
+  Untitled: ""
+  card_title: title
+  card_priority: priority
+  card_project: project
+  card_lead: lead
+  lane_sort: if(status == "done", "", priority)
+  lane: if(status == "queued", "1 Queued", if(status == "active", "2 Active", if(status == "parked", "3 Parked", "4 Done")))
+  lane_created: if(status == "queued", created, if(status == "parked", created, ""))
+  lane_recent: if(status == "queued", "", if(status == "parked", "", file.mtime))
+properties:
+  file.name:
+    displayName: Ticket
+  project:
+    displayName: Project
+  status:
+    displayName: Status
+  priority:
+    displayName: P
+  parked_until:
+    displayName: Until
+  parked_reason:
+    displayName: Why
+  pr_state:
+    displayName: Landing
+  title:
+    displayName: Title
+  lead:
+    displayName: Lead
+  origin:
+    displayName: Origin
+  proposed_by:
+    displayName: Proposed by
+  created:
+    displayName: Created
+  file.mtime:
+    displayName: Updated
+  formula.card_title:
+    displayName: Title
+  formula.card_priority:
+    displayName: P
+  formula.card_project:
+    displayName: Project
+  formula.card_lead:
+    displayName: Lead
+views:
+  - type: notion-board
+    name: {{project_name}}
+    filters:
+      and:
+        - not:
+            - file.inFolder("ledger/_templates")
+            - not:
+                - status != "done"
+                - file.mtime >= today()
+        - file.inFolder("ledger/tickets")
+        - status != "declined"
+        - project == "{{project_key}}"
+    groupBy:
+      property: formula.lane
+      direction: ASC
+    order:
+      - file.name
+      - formula.card_title
+      - formula.card_priority
+      - formula.card_project
+      - formula.card_lead
+    sort:
+      - property: formula.lane_sort
+        direction: ASC
+      - property: formula.lane_created
+        direction: ASC
+      - property: formula.lane_recent
+        direction: DESC
+      - property: file.name
+        direction: ASC
+    openMode: tab
+    pillProperties:
+      - card_priority
+      - card_project
+      - project
+    pinnedColors:
+      - 1 Queued=yellow
+      - 2 Active=green
+      - 3 Parked=red
+      - 4 Done=gray
+      - P0=purple
+      - P1=red
+      - P2=orange
+      - P3=yellow
+      - badtakes=blue
+      - spud=purple

@@ -34,7 +34,7 @@ def values():
     with open(CONFIG_MARKS, encoding="utf-8") as f:
         fixture = {mark[2:-2]: value for mark, value in json.load(f).items()}
     filled = dict(fixture, launcher=TOOL + "/bin/spud", home=HOME, tool=TOOL, project_key="a-project",
-                  project_root=PROJECT_ROOT, project_remote="https://github.com/an-account/a-project-repository.git",
+                  project_name="A Project Repository", project_root=PROJECT_ROOT, project_remote="https://github.com/an-account/a-project-repository.git",
                   identity_model="claude-fable-5-1",
                   memory_dir="~/.claude/projects/" + HOME.replace("/", "-").replace(".", "-") + "/memory")
     assert set(filled) == set(spud.MARKS), set(filled) ^ set(spud.MARKS)

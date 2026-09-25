@@ -492,8 +492,9 @@ def read_base(text):
 # ----------------------------------------------------------------------------
 
 
-def vault_findings(ctx):
+def vault_findings(ctx, boards=frozenset()):
     """[(what, sentence)] for every shipped settings file, `.base` file, plugin or theme the home has *and* has changed.
+    `boards` is `commands/projectboards.board_paths`, the projects' own Kanban boards, which are no shipped view.
 
     A file the home does not have is no finding at all: it means the vault was never installed from this template, or
     that plugin is not in it, and neither is something capture can settle -- `vault install` is the command for that,
@@ -514,7 +515,7 @@ def vault_findings(ctx):
             rel = VAULT_BASES + "/" + path.name
             findings.append((rel, DIFFERS % (rel, path)))
     findings.extend(locked_findings(ctx))
-    findings.extend(missing_plugin_findings(ctx))
+    findings.extend(missing_plugin_findings(ctx, boards))
     return findings
 
 
@@ -545,7 +546,7 @@ def locked_findings(ctx):
     return findings
 
 
-def missing_plugin_findings(ctx):
+def missing_plugin_findings(ctx, boards=frozenset()):
     """[(what, sentence)]: a view in one of the home's own `ledger/*.base` files whose type the currently-shipped
     lock names a plugin for, but that plugin is not in this home's `.obsidian/plugins/` -- a view the home ships and
     cannot render.
@@ -555,6 +556,10 @@ def missing_plugin_findings(ctx):
     plugins, not the repository's views, so a type the current lock has never heard of says nothing about either.  A
     `.base` file the restricted reader refuses is skipped the same way: it is not one of the shipped ones (those are
     guarded elsewhere), and a hand-written file of the reader's own need not fit the subset that catches `type: bases`.
+
+    A project's own Kanban board (`boards`, casefolded home-relative paths from `commands/projectboards.board_paths`)
+    is skipped too (SPD-324): it is no view the tool ships, and its one view is `Board.base`'s Kanban, whose note here
+    already names the same plugin once for the whole home rather than once more per registered project.
     """
     try:
         lock = read_lock(ctx)
@@ -566,6 +571,9 @@ def missing_plugin_findings(ctx):
             providers.setdefault(view_type, []).append(entry.get("id"))
     findings = []
     for path in sorted((ctx.home / VAULT_BASES).glob("*.base")):
+        # projectboards.is_board's test, spelled here because that module imports this one
+        if (VAULT_BASES + "/" + path.name).casefold() in boards:
+            continue
         try:
             data = read_base(path.read_text(encoding="utf-8"))
         except YamlRefusal:

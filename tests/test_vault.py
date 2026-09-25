@@ -560,6 +560,32 @@ class CaptureTest(VaultCase):
         for path in keep:
             self.assertTrue(path.is_file(), path)
 
+    def test_a_project_s_board_is_never_captured_and_a_view_of_the_home_s_own_is(self):
+        # SPD-324: ledger/<project name>.base is this home's, one per project it registered, and shipped it would reach
+        # every other home filtered to a project that home may not have.  The template is what the tool ships instead.
+        name = self.cli_json("project", "show", "spud")["project"]["name"]
+        board = self.home.path / "ledger" / (name + ".base")  # init wrote it (SPD-325)
+        self.assertTrue(board.is_file())
+        (self.home.path / "ledger" / "Mine.base").write_text("views: []\n", encoding="utf-8")
+        record = json.loads(self.capture().stdout)
+        self.assertIn("share/ledger/Mine.base", record["written"])
+        self.assertNotIn("share/ledger/%s.base" % name, record["written"] + record["unchanged"])
+        self.assertFalse((self.wt / "share" / "ledger" / (name + ".base")).exists())
+        self.assertTrue((self.wt / "share" / spud.BOARD_TEMPLATE).is_file())  # a capture leaves the template alone
+
+    def test_a_board_a_rename_left_behind_is_never_captured_either(self):
+        # SPD-325: `project edit --name` leaves the old board where it is when the new path is taken, and the old name
+        # is no project's name any more -- but the file is still a board, never a view for every other home.
+        self.add_project(self.make_repo("takes-"), "takes", "TAK", "TAKS", "merge", "--name", "Takes")
+        (self.home.path / "ledger" / "Renamed.base").write_text("views: []\n", encoding="utf-8")
+        self.assertIn("is no longer project takes's board",
+                      self.cli("project", "edit", "takes", "--name", "Renamed", actor="spud").stdout)
+        self.assertTrue((self.home.path / "ledger" / "Takes.base").is_file())
+        record = json.loads(self.capture().stdout)
+        for name in ("Takes.base", "Renamed.base"):
+            self.assertNotIn("share/ledger/" + name, record["written"] + record["unchanged"])
+            self.assertFalse((self.wt / "share" / "ledger" / name).exists())
+
     def test_a_file_a_capture_removes_goes_through_the_deliverable_check_with_the_rest(self):
         # The written paths are all inside these globs and the stale one is not, so the refusal can only be about what
         # this capture would delete.
@@ -695,6 +721,32 @@ class DoctorVaultTest(VaultCase):
         self.assertIn(rel, note)
         self.assertIn(PLUGIN_ONE["id"], note)
         self.assertIn("vault install", note)
+
+    def test_a_project_s_board_is_no_note_where_the_same_view_elsewhere_is_one(self):
+        # SPD-324: a board is the home's and no shipped view, and its one view is Board.base's Kanban, whose note already
+        # names the plugin once for the whole home.  The same view in a file that is no board is still a note.
+        name = self.cli_json("project", "show", "spud")["project"]["name"]
+        self.base_view(PLUGIN_ONE["views"][0], filename=name + ".base")
+        other = self.base_view(PLUGIN_ONE["views"][0], filename="Extra.base")
+        shutil.rmtree(self.vault(spud.PLUGINS, PLUGIN_ONE["id"]))
+        self.assertEqual(self.notes(), [other])
+        # A board that differs from anything the tool ships is no drift either.
+        self.assertEqual([n for n in self.report()["notes"] if name + ".base" in n], [])
+
+    def test_a_board_a_rename_left_behind_is_one_note_of_its_own_and_no_missing_plugin(self):
+        # SPD-325: the old board is still a board, so the missing-plugin scan leaves it out as it leaves out every
+        # board; doctor says instead, once, that it is no project's board now.  Removed, it is no note at all.
+        self.add_project(self.make_repo("takes-"), "takes", "TAK", "TAKS", "merge", "--name", "Takes")
+        self.base_view(PLUGIN_ONE["views"][0], filename="Takes.base")
+        (self.home.path / "ledger" / "Renamed.base").write_text("views: []\n", encoding="utf-8")
+        self.cli("project", "edit", "takes", "--name", "Renamed", actor="spud")
+        shutil.rmtree(self.vault(spud.PLUGINS, PLUGIN_ONE["id"]))
+        self.assertEqual(self.notes(), [])
+        orphans = [n for n in self.report()["notes"] if "ledger/Takes.base" in n]
+        self.assertEqual(len(orphans), 1, orphans)
+        self.assertIn("was project takes's board under a name it no longer has", orphans[0])
+        os.remove(self.home.path / "ledger" / "Takes.base")
+        self.assertEqual([n for n in self.report()["notes"] if "ledger/Takes.base" in n], [])
 
     def test_a_table_only_base_file_is_quiet_even_without_the_plugin(self):
         # `table` is Obsidian's own view type: it names no plugin, so removing one changes nothing for it.
