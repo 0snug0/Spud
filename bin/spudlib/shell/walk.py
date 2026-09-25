@@ -5,8 +5,8 @@ has consumed are what a definition's body is taken down from (ShellWalk.define t
 reading stays with the walk.  LineBody and the module functions that read one at a call (read_call, read_line_body,
 assign_function, hook_functions) are a seam of their own, shell/line_functions (SPD-280)."""
 
-from . import (analyse, assignment_words, directories, expansions, globbing, heredocs, line_aliases, line_functions,
-               loop_bindings, prepare, reevaluation, stdin_text, syntax, unread)
+from . import (analyse, assignment_words, directories, expansions, globbing, held_text, heredocs, line_aliases,
+               line_functions, loop_bindings, prepare, reevaluation, stdin_text, syntax, unread)
 from ..hooks import hookio
 
 # The loops whose header names a variable, one header grammar to zsh (its parser's par_for; ShellWalk.names_end)
@@ -245,7 +245,9 @@ class ShellWalk:
       (line_functions.read_line_body);
     - a shell that reads its text a line at a time (`lines`: a script fed to it, sh's `-c` string) parses each line once
       the lines before it ran, a compound command's lines with the line it starts on, so a newline (syntax.LINE_END)
-      that ends one starts the next with the aliases the lines before it left (new_line, SPD-291)."""
+      that ends one starts the next with the aliases the lines before it left (new_line, SPD-291) -- eval's words, a
+      trap's action and a `$( )` body too where the shell parses them so (held_text.parsed_lines), and a `<( )` body's
+      lines where it parses that so (new_body_line, SPD-323)."""
 
     def __init__(self, a, inner, bodies, expanded, depth, glued=True, stdin=None, fed=False, inputs=None, line=None, into=False,
                  text=None, lines=False):
@@ -464,7 +466,9 @@ class ShellWalk:
         own words (`cat <(alias g3=...; g3)` found no command g3, on one line or two).  bash 3.2 with `shopt -s
         expand_aliases` reads the body a line at a time (`cat <(alias g4=...<newline>g4)` ran it), and the walk's tokens
         no longer tell a newline from a `;`, so the view is one of several lines (line_aliases.line_reading): a body's
-        own alias is read for its later words on one line too, a reading of more than runs, never less.  A line with no
+        own alias is read for its later words on one line too, a reading of more than runs, never less; where they do,
+        in text read a line at a time, each line of the body after the first is read with the aliases the lines before
+        it left (new_body_line, SPD-323).  A line with no
         alias reads its process substitutions as it always did.  pop closes the scope with the frame.  The global aliases
         that stand there are expanded in the body's words as the scope opens (expand_globals, SPD-293).
 
@@ -571,16 +575,40 @@ class ShellWalk:
         parsed before its unalias ran; a function a later line defined ran the alias after it was unaliased; and zsh fed
         `alias -g GG=...` then `ls -d GG` expanded it, and `alias -s txt=...` then `a.txt x` ran it."""
         a = self.a
-        if not (self.stack or self.pending_body is not None or self.function_next or self.skip or before in _CARRIED) \
-                and (self.line_scope or a.aliases or a.alias_unknown):
+        ends = not (self.pending_body is not None or self.function_next or self.skip or before in _CARRIED)
+        if ends and not self.stack and (self.line_scope or a.aliases or a.alias_unknown):
             if not self.line_scope:
                 self.line_saved, self.line_scope = a.alias_view, 1
                 a.alias_scope += 1
             a.alias_view = line_aliases.AliasView(a, False)
+        elif ends and self.stack and self.stack[-1].kind == "sub" and not self.stack[-1].prints:
+            self.new_body_line(self.stack[-1])
         # ... and in every line after that, a compound's too, but for one inside a `<( )` or `>( )` body (the "sub" frame
         # whose output goes to the file it stands for), whose words expand_globals read where it opened
         if self.line_scope and not any(frame.kind == "sub" and not frame.prints for frame in self.stack):
             self.expand_line_globals()
+
+    def new_body_line(self, frame):
+        """SPD-323: a newline just ended a line of the `<( )` or `>( )` body `frame` is, nothing opened inside it still open,
+        in text the shell reads a line at a time.  bash, which parses such a body when it runs it, parses it a line at a
+        time as it does eval's words, each line once the lines before it ran (held_text.parsed_lines has the probe: `cat
+        <(alias ls=...<newline>unalias ls; ls -d /)` printed ALIASED), so the body's next line is read with the aliases
+        the lines before it left (line_aliases.AliasView), a level into ShellAnalysis.alias_scope that the frame opened
+        where it opened (open_process_substitution) or opens now, and pop closes.  Where the shell parses the body whole
+        (zsh, ksh) the view it opened with stands for every line of it, and so it does in zsh's reading (`glued`) where
+        the shell may read the body either way (syntax.LINES_BOTH: an sh that may be zsh), as analyse.walk_readings reads
+        such a text."""
+        a, opened = self.a, frame.alias_view is not None and frame.alias_view[1]
+        if not (opened or a.aliases or a.alias_unknown):
+            return
+        how = held_text.parsed_lines(a, True)
+        if not how or how == syntax.LINES_BOTH and self.glued:
+            return
+        if not opened:
+            view, _, quoted = frame.alias_view or (a.alias_view, 0, None)
+            frame.alias_view = (view, 1, quoted)
+            a.alias_scope += 1
+        a.alias_view = line_aliases.AliasView(a, False)
 
     def expand_line_globals(self):
         """The global aliases that stand in the next line of the text, expanded in its words as zsh parses it (SPD-291):

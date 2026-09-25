@@ -27,7 +27,9 @@ Where each alias stands, as the reading now has it (the comments below hold the 
   any of it runs, nor in a word of the same text that defined it, nor in a new shell's text (analyse.analyse_new_shell)
   -- but for a later line of text a shell reads a line at a time, each parsed once the lines before it ran: a script fed
   to a shell, sh's, dash's and ksh's `-c` string, bash's both ways, and the Bash tool's own line where its shell may be
-  bash (ShellWalk.new_line, held_text.text_lines and tool_lines, SPD-291); and in a bash's text, which may expand no
+  bash (ShellWalk.new_line, held_text.text_lines and tool_lines, SPD-291), and eval's words, a trap's action and a `$(
+  )`, backtick or `<( )` body where the shell running them parses them so, as sh and bash do (held_text.parsed_lines,
+  AliasView.shell, ShellWalk.new_body_line, SPD-323); and in a bash's text, which may expand no
   alias at all, both ways wherever it stands: the alias and the word as written (spelled_too, AliasView.bare, SPD-322);
 - the snapshot's global and suffix aliases in the line's own text as the snapshot holds them, and in text parsed as the
   line runs as the line left them (held_aliases, held_names, SPD-283); its plain aliases on a command word
@@ -83,7 +85,10 @@ from ..hooks import snapshots
 # found: zzq".  bash 3.2 (with `shopt -s expand_aliases`) and sh read such text a line at a time instead: `eval $'alias
 # ls=...\nls -d /'`, `sh -c` on two lines, a `$( )` body and a trap's action on two lines each ran the alias there, and on
 # one line none did -- which AliasView.lines keeps for line_reading, and, for a new shell's text and a bash Bash tool's
-# line, whose lines the walk tells apart, walk.ShellWalk.new_line (SPD-291).
+# line, whose lines the walk tells apart, walk.ShellWalk.new_line (SPD-291), which reads eval's words, a trap's action and
+# a substitution's body the same way where the shell running them parses them a line at a time (held_text.parsed_lines,
+# SPD-323: `sh -c 'eval "alias gq=\"git push\"<newline>unalias gq; gq"'` pushes, the second line parsed before its
+# unalias ran).
 def record_alias(a, name, body, doubtful=False):
     """Record `alias NAME=body`, or an `unalias` (whose body is None), where the shell reads it.  The name goes into
     `assigned` under a key no variable can have, so every rule that doubts a variable the line assigned -- a branch that may
@@ -126,18 +131,25 @@ class AliasView:
     off where it is not interactive (held_text.expands_no_alias), set where analyse.analyse_new_shell reads its text and
     inherited, as `held` is, by every text parsed inside it: there a command word a plain or suffix alias of the view
     stands in is read both ways, the alias and the word as written, and a word a global alias stands in, which bash has
-    none of, is refused a member unread (spelled_too)."""
+    none of, is refused a member unread (spelled_too).
 
-    __slots__ = ("table", "doubted", "unknown", "lines", "held", "early", "bare", "key")
+    SPD-323: `shell`, the name of the shell that parses the text -- TOOL_SHELL for the Bash tool's own, a new shell's
+    base name where analyse.analyse_new_shell reads its text, "" for one the hook cannot name -- inherited, as `held` is,
+    by every text parsed inside it: how that shell reads eval's words, a substitution's body and a trap's action, whole
+    or a line at a time (held_text.parsed_lines)."""
 
-    def __init__(self, a, lines, held=None, early=False, bare=None):
+    __slots__ = ("table", "doubted", "unknown", "lines", "held", "early", "bare", "shell", "key")
+
+    def __init__(self, a, lines, held=None, early=False, bare=None, shell=None):
         self.table = dict(a.aliases)
         self.doubted = frozenset(k for k in self.table if alias_doubted(a, k))
         self.unknown, self.lines = a.alias_unknown, lines
         self.held = (a.alias_view is None or a.alias_view.held) if held is None else held
         self.early = early
         self.bare = (a.alias_view is not None and a.alias_view.bare) if bare is None else bare
-        self.key = (frozenset(self.table.items()), self.doubted, self.unknown, lines, self.held, self.bare, early)
+        self.shell = (TOOL_SHELL if a.alias_view is None else a.alias_view.shell) if shell is None else shell
+        self.key = (frozenset(self.table.items()), self.doubted, self.unknown, lines, self.held, self.bare, self.shell,
+                    early)
 
     def parsed_late(self):
         """This view, but for text parsed with the snapshot's aliases in force: a function body the line defines, read
@@ -145,7 +157,7 @@ class AliasView:
         if not self.early:
             return self
         view = object.__new__(AliasView)
-        for field in ("table", "doubted", "unknown", "lines", "held", "bare"):
+        for field in ("table", "doubted", "unknown", "lines", "held", "bare", "shell"):
             setattr(view, field, getattr(self, field))
         view.early, view.key = False, self.key[:-1] + (False,)
         return view
@@ -159,6 +171,8 @@ class AliasView:
 
 # SPD-301: AliasView.held for a new zsh that sources part of the files Claude Code's snapshot came from (AliasView)
 PARTLY = "partly"
+# SPD-323: AliasView.shell for the Bash tool's own shell, zsh or bash as held_text.tool_lines reads it: no shell's name
+TOOL_SHELL = "the Bash tool's shell"
 
 
 def held_partly(a):
@@ -547,12 +561,33 @@ def line_reading(name, a):
     they read a line at a time, where a line before this one defined, changed or cleared it (AliasView.lines, SPD-286):
     the table as it stands, where it differs from the one zsh parsed the text with; None where it does not, and in a text
     of one line, which every shell parses whole.  The table as it stands holds what this command's own line did too, which
-    neither shell expands there: a reading of more than runs, never less."""
+    neither shell expands there: a reading of more than runs, never less.
+
+    SPD-323: and never the table a later line was parsed with, where this command's own line cleared or changed what a
+    line before defined, which is why the walk reads each line of such a text with the table the lines before it left
+    where the shell running it parses it a line at a time and the text, or an alias body it may run, spells a word that
+    changes the table (held_text.parsed_lines, body_spells, walk.ShellWalk.new_line and new_body_line); this stays for
+    the rest -- the text's first line, zsh's reading of it, and a text whose table only a function changes (whose
+    `alias` is doubted, record_alias) or that the walk reads with no newline told apart (a `<( )` body in text read
+    whole)."""
     view = parsed_view(a)
     if view is None or not view.lines or quoted_name(a, name):  # bash and sh expand no alias of a quoted word either
         return None
     now =(a.aliases[name], alias_doubted(a, name)) if name in a.aliases else (None, a.alias_unknown)
     return None if now == parsed_alias(name, a) else now
+
+
+def body_spells(a, words):
+    """Whether an alias that may run in the text being read has a body that spells one of `words` -- the table's as it
+    stands, and the snapshot's plain aliases where they stand (held_standing): analyse.analyse_command reads a text of
+    several lines a line at a time where a line may change the table, and one may through an alias whose body does
+    (SPD-323, probed through tests/probes/shell_probe.py with GNU bash 3.2.57, zsh 5.9 -f and -f -o nobareglobqual
+    driving each shell: after `alias f='alias ls="echo ALIASED"' g='unalias ls'`, eval's `f` then `g; ls -d /` on the
+    next line printed `ALIASED -d /` in /bin/sh, /bin/dash and /bin/bash -O expand_aliases, `/` in /bin/zsh -f)."""
+    bodies = [body for body in a.aliases.values() if body]
+    if held_standing(a):
+        bodies += [body for body in snapshots.shell_table(a.home).aliases.values() if body]
+    return any(word in body for body in bodies for word in words)
 
 
 def alias_doubted(a, key):

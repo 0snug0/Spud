@@ -446,6 +446,39 @@ def tool_lines(a):
     return False
 
 
+# SPD-323: a shell parses eval's words, a trap's action and a `$( )` or backtick body as its text runs (line_aliases,
+# SPD-286), and sh and bash parse such a text a line at a time too, each line once the lines before it ran, where zsh
+# parses it whole.  Probed through tests/probes/shell_probe.py (2026-09-25), GNU bash 3.2.57 driving each shell with the
+# text on two lines, `alias ls='echo ALIASED'` then `unalias ls; ls -d /`: eval's printed `ALIASED -d /` in /bin/sh
+# (bash 3.2.57 in POSIX mode), /bin/dash and /bin/bash after `shopt -s expand_aliases`, from `-c` and fed by a pipe, and
+# `/` in /bin/zsh -f (from `-c` and fed) and /bin/ksh (AJM 93u+ 2012-08-01), and in /bin/bash with expand_aliases off
+# (line_aliases.spelled_too reads that); with `alias ls='echo SECOND'; ls -d /` for the second line, ALIASED in the
+# first three; a trap's action read as eval's in each shell; a `$( )` and a backtick body printed ALIASED in sh and bash,
+# `/` in zsh, ksh and dash, which parses the body with the line around it (SPD-326's), and so did `$(alias ls=...
+# <newline>ls -d /)`, the alias on the body's first line, zsh -f and -f -o nobareglobqual driving them too; a `<( )`
+# body printed ALIASED in bash, `/` in zsh and ksh, and is a syntax error in sh and dash.  With the unalias alone on the
+# second line and `ls -d /` on a third, eval's, a trap's, a `$( )` body's and a `<( )` body's printed `/` in each.
+_WHOLE_PARSED = frozenset({"zsh", "ksh", "csh", "tcsh", "fish"})
+_LINE_PARSED = frozenset({"dash", "ash"})
+
+
+def parsed_lines(a, substitution=False):
+    """How the shell that runs the text being read reads a text it parses as that text runs -- eval's words and a trap's
+    action, or (`substitution`) a `$( )` or backtick body -- as analyse.analyse_command's `lines` says it (SPD-323,
+    above): the shell line_aliases.AliasView.shell names, the Bash tool's own read as tool_lines reads its line; whole in
+    zsh and ksh (False, and in csh, tcsh and fish, whose `alias` the reader does not read); a line at a time in dash and
+    ash (True), but for a substitution's body, which they parse with the line around it, read whole as before; and in
+    bash, sh and a shell the hook cannot name either way (syntax.LINES_BOTH): bash may expand no alias at all, and the
+    shell /bin/sh stands for may be zsh."""
+    view = a.alias_view
+    shell = line_aliases.TOOL_SHELL if view is None else view.shell
+    if shell == line_aliases.TOOL_SHELL:
+        return tool_lines(a)
+    if shell in _LINE_PARSED:
+        return not substitution
+    return shell not in _WHOLE_PARSED and syntax.LINES_BOTH
+
+
 # ShellAnalysis.body_dirs' marks for a function body whose reading is under way, and for one a call inside that reading
 # reached again from the same state (read_once)
 _READING, _REENTERED = object(), object()

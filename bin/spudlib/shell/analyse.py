@@ -24,8 +24,9 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False, line
     no redirection or pipe of their own replaces it -- a `-c` string's and eval's, their command's (SPD-210).
 
     `lines`: the shell reads the text a line at a time (True), or may read it so or expand no alias (syntax.LINES_BOTH),
-    as held_text.text_lines says for a new shell's text and held_text.tool_lines for the Bash tool's own line (SPD-291):
-    then each of its lines is read with the aliases the lines before it left (walk_readings, line_tokens)."""
+    as held_text.text_lines says for a new shell's text and held_text.tool_lines for the Bash tool's own line (SPD-291),
+    and held_text.parsed_lines for eval's words, a trap's action and a substitution's body (SPD-323): then each of its
+    lines is read with the aliases the lines before it left (walk_readings, line_tokens)."""
     a = analysis or syntax.ShellAnalysis()
     if depth > READING_DEPTH:
         unread.record_unread(a, "depth", (READING_DEPTH, unread.unread_shown(str(command))))  # SPD-195: past the bound, refused a member
@@ -100,7 +101,8 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False, line
             analyse_isolated(a, sub, depth + 1, stdin, fed)
         return a
     other_tokens = None
-    if lines and syntax.LINE_BREAK in outer and any(word in command for word in _TABLE_WORDS):
+    if lines and syntax.LINE_BREAK in outer and (any(word in command for word in _TABLE_WORDS)
+                                                 or line_aliases.body_spells(a, _TABLE_WORDS)):
         tokens, other_tokens = line_tokens(plain, marked, other, tokens)
     else:
         lines = False  # one line, or no word that changes the alias table: every line reads the table it starts with
@@ -117,7 +119,8 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False, line
 
 # SPD-291: the words that start a builtin that changes the alias table (alias, unalias, zsh's aliases, galiases and saliases
 # parameters, unhash, disable, enable): a text that spells none of them leaves every line of it the table it starts with,
-# so reading it a line at a time would read what reading it whole does
+# so reading it a line at a time would read what reading it whole does -- unless an alias it may run spells one in its
+# body (line_aliases.body_spells, SPD-323); a function body's `alias` is doubted wherever it runs (record_alias)
 _TABLE_WORDS = ("alias", "unhash", "disable", "enable")
 
 
@@ -203,7 +206,7 @@ def isolated(a, run):
     a.doubt.update(a.assigned[mark:])
 
 
-def analyse_isolated(a, command, depth, stdin=None, fed=False, new_shell=False, lines=False):
+def analyse_isolated(a, command, depth, stdin=None, fed=False, new_shell=False, lines=None):
     """analyse_command on a body that runs in its own process, once per body and starting state: both readings of a line walk
     its substitutions, and a nested line must not double its work at every level.  `stdin` and `fed`: the standard input
     the body runs on (analyse_command), part of that state (SPD-210).
@@ -226,7 +229,14 @@ def analyse_isolated(a, command, depth, stdin=None, fed=False, new_shell=False, 
     A new shell's text (`new_shell`, analyse_new_shell) opens no scope: it is that shell's own line, parsed before any of
     it runs, whose table holds only the snapshot's global and suffix aliases a zsh sourcing the startup files holds there
     (SPD-301), read as the Bash tool's line reads them -- and, where that shell reads it a line at a time (`lines`,
-    analyse_command), each line after the first as text parsed once the lines before it ran (SPD-291)."""
+    analyse_command), each line after the first as text parsed once the lines before it ran (SPD-291).
+
+    SPD-323: so is a body of several lines the shell parses as the line runs, where that shell reads it so -- sh and
+    bash, a `$( )` or backtick body (`lines` None, held_text.parsed_lines) and a trap's action, whose caller says it
+    (expansions.read_action) -- each line with the aliases the lines before it left, not the table the body opened with:
+    `sh -c 'echo "$(alias gq=\"git push\"<newline>unalias gq; gq)"'` pushes."""
+    if lines is None:
+        lines = held_text.parsed_lines(a, True) if not new_shell and isinstance(command, str) and "\n" in command else False
     key = (command, depth, stdin_text.reading_key(stdin, fed), a.reading_state(), lines)
     if key in a.isolated_done:
         return
@@ -245,7 +255,7 @@ def analyse_isolated(a, command, depth, stdin=None, fed=False, new_shell=False, 
     a.function_bodies = bodies  # a function the body defines stays in its process, and no call after it runs it (SPD-212)
 
 
-def analyse_new_shell(a, command, depth, stdin=None, fed=False, held=False, lines=False, bare=False):
+def analyse_new_shell(a, command, depth, stdin=None, fed=False, held=False, lines=False, bare=False, shell=""):
     """A body another shell process reads: a `-c` string, a here-document fed to a shell, the words `env -S` or `script -c`
     hand on.  An alias the line defined does not reach it (probed: `alias gp='git push'; eval 'sh -c gp'` ran
     nothing, while `eval 'echo $(gp)'` ran it, the substitution being parsed by the shell that holds the alias).  It runs
@@ -277,11 +287,15 @@ def analyse_new_shell(a, command, depth, stdin=None, fed=False, held=False, line
 
     SPD-322: a bash may expand no alias at all in its text, eval's words and its substitutions included (`bare`, as
     held_text.expands_no_alias says it for the shell): the text is read with an AliasView so marked, which every text
-    parsed inside it inherits, and a word an alias stands in there is read both ways (line_aliases.spelled_too)."""
+    parsed inside it inherits, and a word an alias stands in there is read both ways (line_aliases.spelled_too).
+
+    SPD-323: `shell`, the shell's name ("" where the caller cannot name it), which the view carries for every text parsed
+    inside it: eval's words, a substitution's body and a trap's action are read a line at a time where that shell reads
+    them so (held_text.parsed_lines)."""
     state = (a.alias_scope, a.aliases, a.alias_unknown, a.alias_view)
     doubts = {k for k in a.doubt if k.startswith(syntax.ALIAS_KEY)}
     a.alias_scope, a.aliases, a.alias_unknown = 0, {}, False
-    a.alias_view = line_aliases.AliasView(a, False, held=held, bare=bare)
+    a.alias_view = line_aliases.AliasView(a, False, held=held, bare=bare, shell=shell)
     if held:
         line_aliases.held_aliases(a)
     try:
@@ -663,7 +677,8 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 a.findings.append(("var", runtime_shells.runner_shown(words + unspelled)))  # text an xargs reads, unspelled
             elif form == "text":  # npm's, npx's and pnpm's run by `sh -c`, a line at a time (SPD-291)
                 analyse_new_shell(a, body.replace(syntax.INPUT_OPERAND, input_string or ""), depth + 1, stdin, fed,
-                                  lines=held_text.text_lines(runtime_shells.RUNNER_SHELLS.get(base), False))
+                                  lines=held_text.text_lines(runtime_shells.RUNNER_SHELLS.get(base), False),
+                                  shell=runtime_shells.RUNNER_SHELLS.get(base, base))
             else:
                 a.findings.append(("var", body))
     if base in script_runners.RUNNER_BASES:
@@ -739,9 +754,9 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
                 # read with its own quotes, `sh -c 'g?t push'`, and on the shell's standard input, which its commands
                 # read where nothing of their own replaces it: `sh -c sh < x.sh` runs x.sh (SPD-210, CompoundInputTest);
                 # a line at a time where the shell reads it so (SPD-291)
-                analyse_new_shell(a, string, depth + 1, stdin, fed, held, held_text.text_lines(base, False), bare)
+                analyse_new_shell(a, string, depth + 1, stdin, fed, held, held_text.text_lines(base, False), bare, base)
         for body in bodies:
-            analyse_new_shell(a, body, depth + 1, stdin, fed, held, held_text.text_lines(base, True), bare)
+            analyse_new_shell(a, body, depth + 1, stdin, fed, held, held_text.text_lines(base, True), bare, base)
         if not dash_c and stdin_text.reads_commands(words):
             # With no -c string and no script of its own the shell runs what it reads on standard input, and
             # the line spells that text: `echo 'git push' | sh`, `bash -s <<< 'git push'`, `cat <<'EOF' | sh` -- zsh's
@@ -750,7 +765,7 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             fed_bodies = {body + "\n" for body in bodies}
             for text in stdin_text.each_reading(stdin):
                 if text not in fed_bodies:
-                    analyse_new_shell(a, text, depth + 1, stdin, fed, held, held_text.text_lines(base, True), bare)
+                    analyse_new_shell(a, text, depth + 1, stdin, fed, held, held_text.text_lines(base, True), bare, base)
         # ... and every shell whose commands come from a file: a script operand, standard input the line does not spell,
         # an xargs string from such input, a HOME of the line's own (shell/script_files, refused a member in bash_rule)
         script_files.read_shell(words, a, dash_c, string, xargs_input, stdin, fed)
@@ -767,11 +782,14 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             unread.record_unread(a, "escaped-subst", unread.escaped_shown(eval_text))  # SPD-196
         # eval parses its text whole before any of it runs, with the aliases as they stand here, so one the text itself
         # defines or clears stands in none of its own words, only in text parsed after it (SPD-286: `eval 'alias git=echo;
-        # git push'` pushes, and `eval 'alias gp="git push"'; eval gp` too)
+        # git push'` pushes, and `eval 'alias gp="git push"'; eval gp` too) -- in zsh; sh and bash parse a text of several
+        # lines a line at a time, each once the lines before it ran (held_text.parsed_lines, SPD-323: `sh -c 'eval
+        # "alias gq=\"git push\"<newline>unalias gq; gq"'` pushes)
+        lines = held_text.parsed_lines(a) if "\n" in eval_text else False
         view, a.alias_view = a.alias_view, line_aliases.AliasView(a, "\n" in eval_text)
         try:
             # eval reads its words again, their quotes gone, and runs them on its own standard input (SPD-210)
-            analyse_command(eval_text, a, depth + 1, stdin, fed)
+            analyse_command(eval_text, a, depth + 1, stdin, fed, lines)
         finally:
             a.alias_scope -= 1
             a.alias_view = view
