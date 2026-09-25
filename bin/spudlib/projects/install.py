@@ -7,7 +7,7 @@ import shlex
 from pathlib import Path
 
 from . import agentdef, registry, sessions
-from ..commands import reportentry, settings_sync
+from ..commands import projectboards, reportentry, settings_sync
 from ..core import homeconf, kernel
 from ..hooks import worktrees
 from ..state import actors, ledgerdb, lookup
@@ -303,22 +303,30 @@ def cmd_project_install(ctx, args):
         p = lookup.get_project(con, args.key)
         if p["archived_at"]:
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is archived" % p["key"])
+        # SPD-324: the project's Kanban board, rendered before install writes anything and written when absent.  Here
+        # and not in install_project, which `project sync`, a home move and init's install step run too: the board is
+        # the home's once written, and those rewrite what install generates.
+        board = projectboards.plan_board(ctx, p)
         record, written, first_agent = install_project(ctx, con, p)
+        board = projectboards.write_boards(ctx, [board])[0]
+        wrote_board = board["board"] == "written"
         at = kernel.now()
         entry = None
         with ledgerdb.write_txn(con):
             con.execute("UPDATE projects SET installed = ? WHERE id = ?", (json.dumps(record), p["id"]))
-            if written or not p["installed"] or args.next is not None:
+            if written or wrote_board or not p["installed"] or args.next is not None:
                 ledgerdb.write_event(con, at, actor.label, "project.installed", "project %s installed: %d file%s written" % (p["key"], len(written), "" if len(written) == 1 else "s"),
-                            data={"project": p["key"], "written": written, "sync": False})
+                            data={"project": p["key"], "written": written, "sync": False, "board": board})
                 entry = reportentry.write_report_entry(con, at, "Project %s installed: %s" % (p["key"], worktrees.project_root(ctx, p)), "project install", None, next_line=args.next)
             d = registry.project_dict(ctx, con, lookup.get_project(con, args.key))
     finally:
         con.close()
-    lines = ["project %s installed%s" % (d["key"], "" if written else ": unchanged, nothing written")] + ["  wrote %s" % w for w in written]
+    lines = ["project %s installed%s" % (d["key"], "" if written or wrote_board else ": unchanged, nothing written")] + ["  wrote %s" % w for w in written]
+    # A board already there is the home's and says nothing here, so a second install still reads as unchanged.
+    lines += ["  " + line for line in projectboards.board_lines([board]) if board["board"] != "kept"]
     if first_agent:
         lines.append("restart open sessions in %s to see spudagent (the first agent file in a scope is seen only after a restart)" % d["key"])
-    return reportentry.with_report_entry({"project": d, "written": written, "restart": first_agent}, "\n".join(lines), entry)
+    return reportentry.with_report_entry({"project": d, "written": written, "board": board, "restart": first_agent}, "\n".join(lines), entry)
 
 
 def cmd_project_uninstall(ctx, args):

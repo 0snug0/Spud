@@ -303,6 +303,67 @@ class CheckTest(HomeSyncCase):
         self.assertEqual(settings.read_text(encoding="utf-8"), '{"defaultViewMode": "source"}\n')
 
 
+class BoardSyncTest(RepoMixin, HomeSyncCase):
+    """SPD-324: the Kanban board of every non-archived project, `ledger/<project name>.base`, written when absent and
+    never replaced.  Init writes none, so the first sync of every home here writes project 1's."""
+
+    def board_of(self, key):
+        return "ledger/%s.base" % self.cli_json("project", "show", key)["project"]["name"]
+
+    def test_a_sync_backfills_every_project_s_board_and_a_second_writes_none(self):
+        self.add_project(self.make_repo("second-"), "second", "SEC", "SECS", "merge", "--name", "Second Project")
+        os.remove(self.home_file("ledger/Second Project.base"))  # add wrote it; a home from before this ticket has none
+        spud_board = self.board_of("spud")
+        self.assertFalse(self.home_file(spud_board).exists())
+        first = self.sync()
+        self.assertEqual([(b["project"], b["path"], b["board"]) for b in first["boards"]],
+                         [("spud", spud_board, "written"), ("second", "ledger/Second Project.base", "written")])
+        self.assertNotIn(spud_board, first["written"] + first["unchanged"])  # a board is no tool-owned file
+        self.assertIn('project == "second"', self.read("ledger/Second Project.base"))
+        second = self.sync()
+        self.assertEqual([b["board"] for b in second["boards"]], ["kept", "kept"])
+        self.assertEqual((second["written"], second["replaced"]), ([], []))
+        out = self.text()
+        self.assertIn("ledger/Second Project.base is already there, so project second's board is left as it is", out)
+
+    def test_a_board_somebody_tuned_is_kept_byte_for_byte_and_no_copy_is_made(self):
+        self.settle()
+        board = self.board_of("spud")
+        self.home_file(board).write_text("views: []\n", encoding="utf-8")
+        stamps = self.stamps()
+        self.assertEqual(self.sync()["boards"][0]["board"], "kept")
+        self.assertEqual(self.read(board), "views: []\n")
+        self.assertEqual(self.stamps(), stamps)
+
+    def test_an_archived_project_gets_no_board(self):
+        repo = self.make_repo("gone-")
+        self.add_project(repo, "gone", "GON", "GONS", "merge", "--name", "Gone")
+        ticket = self.new_ticket("Keeps it archived", project="gone")
+        self.cli("ticket", "move", ticket["key"], "--status", "declined", actor="spud")
+        self.assertIn("archived", self.cli("project", "remove", "gone", actor="spud").stdout)
+        os.remove(self.home_file("ledger/Gone.base"))
+        record = self.sync()
+        self.assertEqual([b["project"] for b in record["boards"]], ["spud"])
+        self.assertFalse(self.home_file("ledger/Gone.base").exists())
+
+    def test_check_names_the_board_it_would_write_and_writes_none(self):
+        board = self.board_of("spud")
+        record = self.sync("--check")
+        self.assertEqual(record["boards"][0]["board"], "written")
+        self.assertFalse(self.home_file(board).exists())
+        self.assertIn("would write %s, project spud's board" % board, self.text("--check"))
+        self.assertFalse(self.home_file(board).exists())
+
+    def test_a_board_template_that_is_gone_refuses_before_anything_is_written(self):
+        self.home_file("ledger/Home.md").write_text("mine now\n", encoding="utf-8")
+        os.remove(self.home.own_share() / spud.BOARD_TEMPLATE)
+        proc = self.home.run("home", "sync", actor="spud", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("no shipped", proc.stderr)
+        self.assertEqual(self.read("ledger/Home.md"), "mine now\n")
+        self.assertFalse(self.home_file(self.board_of("spud")).exists())
+
+
 class RefusalTest(HomeSyncCase):
     """The refusals that come before any write, and the one about who may run the command."""
 

@@ -137,6 +137,29 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertEqual({p: p.stat().st_mtime_ns for p in stamps}, stamps)
         self.assertEqual(len(self.installed_events()), 1)
 
+    def board(self):
+        name = self.cli_json("project", "show", "badtakes")["project"]["name"]
+        return self.home.path / "ledger" / (name + ".base")
+
+    def test_install_writes_a_missing_board_and_keeps_one_that_is_there(self):
+        # SPD-324: `project add` wrote it; a home that lost it, or predates it, gets it back from install, never over it.
+        board = self.board()
+        self.assertTrue(board.is_file())
+        board.unlink()
+        out = self.cli_json("project", "install", "badtakes", actor="spud")
+        self.assertEqual(out["board"]["board"], "written")
+        self.assertTrue(board.is_file())
+        self.assertEqual(self.installed_events()[-1]["data"]["board"]["board"], "written")
+        board.write_text("views: []\n", encoding="utf-8")
+        text = self.install().stdout
+        self.assertIn("unchanged, nothing written", text)
+        self.assertNotIn("board", text)  # a board already there is the home's and says nothing
+        self.assertEqual(board.read_text(encoding="utf-8"), "views: []\n")
+        board.unlink()
+        text = self.install().stdout
+        self.assertIn("wrote ledger/%s, project badtakes's board" % board.name, text)
+        self.assertNotIn("unchanged", text)
+
     def test_uninstall_gives_back_the_original_bytes(self):
         before_exclude = self.exclude()
         self.install()

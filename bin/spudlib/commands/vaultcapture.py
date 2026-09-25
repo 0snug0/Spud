@@ -29,7 +29,7 @@ import os
 import re
 from pathlib import Path
 
-from . import vaultlock, worktreebind
+from . import projectboards, vaultlock, worktreebind
 from ..core import kernel
 from ..hooks import pathrule, worktrees
 from ..state import actors, ledgerdb, lookup, ops
@@ -170,14 +170,21 @@ def capture_settings(ctx, plugins, snippets):
     return out
 
 
-def capture_bases(ctx):
-    """{the path under share/: its text} for every `.base` file in the home's `ledger/`, copied verbatim.
+def capture_bases(ctx, boards=frozenset()):
+    """{the path under share/: its text} for every `.base` file in the home's `ledger/`, copied verbatim, except the
+    projects' own Kanban boards (`boards`, `commands/projectboards.board_paths`).
 
     Verbatim and not canonical: a `.base` is Obsidian's own YAML, and the point of shipping it is the views Eric built,
-    down to the column widths he dragged.  No note is ever read -- only `ledger/*.base`.
+    down to the column widths he dragged.  No note is ever read -- only `ledger/*.base`.  A project's board is left out
+    because it is this home's, one per project it registered (SPD-324): shipped, it would reach every other home as a
+    view filtered to a project that home may not have, and the tool ships the template every board is rendered from.
     """
-    return {"%s/%s" % (vaultlock.VAULT_BASES, path.name): path.read_text(encoding="utf-8")
-            for path in sorted((ctx.home / vaultlock.VAULT_BASES).glob("*.base"))}
+    out = {}
+    for path in sorted((ctx.home / vaultlock.VAULT_BASES).glob("*.base")):
+        rel = "%s/%s" % (vaultlock.VAULT_BASES, path.name)
+        if not projectboards.is_board(rel, boards):
+            out[rel] = path.read_text(encoding="utf-8")
+    return out
 
 
 # ----------------------------------------------------------------------------
@@ -277,8 +284,9 @@ def manifest_of(kind, name, directory):
 # ----------------------------------------------------------------------------
 
 
-def capture_files(ctx, previous):
-    """{the path under the worktree: its text} for everything this capture writes: the settings, the lock, the views.
+def capture_files(ctx, previous, boards=frozenset()):
+    """{the path under the worktree: its text} for everything this capture writes: the settings, the lock, the views
+    (the projects' own boards, `boards`, left out).
 
     The lock it built is read back through `vaultlock.lock_problems`, the same check `vault install` makes of the lock
     it is about to install from: what capture writes is what everyone else's `spud init` obeys, so a lock this tool
@@ -288,7 +296,7 @@ def capture_files(ctx, previous):
     files = {}
     for rel, text in capture_settings(ctx, plugins, snippets).items():
         files["%s/%s" % (SHARE, rel)] = text
-    for rel, text in capture_bases(ctx).items():
+    for rel, text in capture_bases(ctx, boards).items():
         files["%s/%s" % (SHARE, rel)] = text
     lock = capture_lock(ctx, plugins, theme, previous)
     problems = vaultlock.lock_problems(lock)
@@ -335,7 +343,7 @@ def cmd_vault_capture(ctx, args):
                                    NOT_THE_BOUND_WORKTREE % (ticket_row["key"], bound, worktree, bound))
         previous = read_json(vaultlock.lock_path(ctx), "the lock this capture overwrites") \
             if vaultlock.lock_path(ctx).is_file() else None
-        files, lock = capture_files(ctx, previous)
+        files, lock = capture_files(ctx, previous, projectboards.board_paths(ctx, con))
         removed = stale_files(worktree, files)
         check_deliverables(con, actor, key, sorted(files) + removed)
         ref, ticket = actor.ref(con), ticket_row["key"]

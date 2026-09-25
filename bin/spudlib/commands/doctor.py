@@ -4,7 +4,7 @@ import os
 import sqlite3
 import sys
 
-from . import ghread, homesync, logread, prcmds, publish, settings_sync, vaultlock
+from . import ghread, homesync, logread, prcmds, projectboards, publish, settings_sync, vaultlock
 from ..core import homeconf, kernel, launchagents, shipped
 from ..hooks import gitrepos, hookio, snapshots, worktrees
 from ..projects import agentdef, install, sessions
@@ -440,9 +440,10 @@ def doctor_vault(ctx, notes):
     copy is simply behind, and only a ticket can settle it, because `vault capture` writes into a worktree.  A problem
     would also fail every later `spud init`, which stops on each one (`commands/homeinit.verify`).  What the home does
     not have at all is no finding: `vault install` is the command for that, and init already says so when a download was
-    refused.
+    refused.  A project's own Kanban board, `ledger/<project name>.base` (SPD-324), is the home's and no shipped view,
+    so it is left out of every one of these notes.
     """
-    findings = vaultlock.vault_findings(ctx)
+    findings = vaultlock.vault_findings(ctx, projectboards.home_board_paths(ctx))
     notes.extend(sentence for _what, sentence in findings)
     try:
         pinned = len(vaultlock.locked(vaultlock.read_lock(ctx)))
