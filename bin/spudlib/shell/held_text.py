@@ -11,6 +11,8 @@ keeps by are one rule, and read_shell_name and read_body are its only way in.  A
 is read at each call through the same per-state reading (read_once, read_function, SPD-277), since a call runs it where
 the shell stands then exactly as it runs a snapshot's."""
 
+import re
+
 from . import analyse, directories, expansions, globbing, held_shadows, line_aliases, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
 from ..hooks import hookio, snapshots
 
@@ -113,21 +115,9 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     ever other words cannot multiply one line's readings without bound."""
     cmd = prepare.deglob(words[0])
     before = a.cwds
-    if aliased:
-        text, own_words, expanded, unreadable = line_aliases.shell_aliased(words, a)
-        a.shell_expanded.extend(expanded)
-        if unreadable is not None:  # the chain reached a body whose quoting the hook cannot take off: it runs the line, unread
-            a.kinds.append("other")
-            a.findings.append(("shell-alias", unreadable))
-            return True
-        if expanded:
-            a.expanding.extend(name for name, _ in expanded)
-            try:
-                analyse_shell_text(a, text, depth + 1, own_words, stdin=stdin, fed=fed)
-            finally:
-                del a.expanding[len(a.expanding) - len(expanded):]
-            a.cwds = directories.settle(effect, before, a.cwds)
-            return True
+    if aliased and read_shell_alias(words, a, depth, stdin, fed, effect):
+        return True
+    before = a.cwds  # ... where the word may be read on as spelled from either directory (SPD-308)
     if not function:
         return False
     # a body the line itself defines under the name (SPD-277)
@@ -171,6 +161,102 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
             after = directories.union_dirs(after, before)  # ... or neither: the command, whose own move is dispatched after
         a.cwds = directories.settle(effect, before, after)
     return False
+
+
+def read_shell_alias(words, a, depth, stdin, fed, effect):
+    """read_shell_name's reading of a command word the shell's snapshot aliases (line_aliases.shell_aliased): each text the
+    alias may put in its place, read as the shell text it is from where the command starts, the directories each leaves
+    joined; True when that is the whole reading, False where the word is no such alias or may run as spelled too.
+
+    SPD-308: where the text being read spells the name both quoted and unquoted, the hook cannot tell which this word is,
+    so it reads the alias an unquoted one runs and then, returning False, the word as a quoted one runs it -- the function
+    or the command it names, which read_shell_name and analyse.dispatch_words go on to read from the directories either
+    reading may leave (probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py: under `alias
+    ls='echo ALIASED'`, `'ls' -d /; ls -d /` printed `/`, then `ALIASED -d /`).  Under `alias git=hub`, `'git' push; git
+    status` is read as hub's push and git's too, and refused a member."""
+    before = a.cwds
+    readings, expanded, unreadable, as_spelled = line_aliases.shell_aliased(words, a)
+    a.shell_expanded.extend(expanded)
+    if unreadable is not None:  # the chain reached a body whose quoting the hook cannot take off: it runs the line, unread
+        a.kinds.append("other")
+        a.findings.append(("shell-alias", unreadable))
+    after = before
+    for k, (text, own_words, names) in enumerate(readings):
+        a.cwds = before
+        names = body_flight(a, words[0], text, own_words, names)  # SPD-316: in flight for the body's words, not the member's
+        a.expanding.extend(names)
+        try:
+            analyse_shell_text(a, text, depth + 1, own_words, stdin=stdin, fed=fed)
+        finally:
+            del a.expanding[len(a.expanding) - len(names):]
+        moved = directories.settle(effect, before, a.cwds)
+        after = moved if k == 0 else directories.union_dirs(after, moved)
+    a.cwds = after
+    if not (readings or unreadable is not None):
+        return False
+    if as_spelled:
+        a.cwds = directories.union_dirs(before, after)
+    return not as_spelled
+
+
+# SPD-316: zsh keeps an alias's name in flight while the text of its body is being read, through its last word, and no
+# longer: the words after the body are read from the line once it is over, and one named like the alias is looked up as any
+# other (probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py, with `alias s='nice '`,
+# `x='echo; s'`, `gp='echo SNAP-GP'`: `x x gp` printed two blank lines, then SNAP-GP, the second x chained behind the
+# body's s; so did `x2 x2 gp` with x2='echo X2;', where the member's x2 stands at a command word, and `z z gp` with
+# z='echo Z; s x', the z read after x's expansion ran on past z's body; `x3` with x3='echo A3; x3' printed A3 and found no
+# command x3, the body's own last word still in its flight).  The hook reads a body and the member's words after it as one
+# text, where a name is in flight for all of it or none of it (ShellAnalysis.expanding), so it holds a name only where the
+# body may look it up -- where that text could otherwise expand it again -- and nowhere else, where the member's words
+# are.  A name both may look up stays in flight for both, the reading before this ticket, which reads less than zsh only
+# where a body that names its own alias also chains into the member's words, and never reads without end.
+_FLIGHT_WORD_RE = re.compile(r"[^\s;&|<>()'\"\\$`{}=]+")  # every name a text may look up, and more
+
+
+def body_flight(a, head, text, own_words, names):
+    """The names of `names` -- the alias `head` and each its body's first word expanded (line_aliases.shell_aliased) --
+    to hold in flight while `text`, the body then the member's `own_words` after it, is read (SPD-316, above): those the
+    body may look up, where zsh reads them inside its flight; every one where the hook cannot say.  The body is the text
+    before the member's words where it ends in them as alias_rest spells them, and otherwise -- a body ending in a blank,
+    whose chain spelled them in -- the head's own, which that text's part before them is a chain of."""
+    rest = line_aliases.alias_rest(own_words, a)
+    if not rest:
+        return names  # nothing of the member's after the body
+    if text.endswith(" " + rest):
+        body = text[: -len(rest) - 1]
+    else:
+        body = snapshots.shell_table(a.home).aliases.get(prepare.deglob(head))
+    reached = looked_up(a, body)
+    return names if reached is None else [name for name in names if name in reached]
+
+
+def looked_up(a, text):
+    """Every word `text` may look up as a name, as an alias it names may on down the chain (the shell's snapshot's, and the
+    line's table as it stands and as the text being read was parsed with it) -- a superset, every word of each body --
+    or None where it may look up what the hook cannot see: a function (whose body may expand an alias as eval's text
+    does), a body the hook cannot read, an alias whose name it cannot read, past line_aliases.CHAIN_STEPS bodies."""
+    found, view = snapshots.shell_table(a.home), a.alias_view
+    if text is None or a.alias_unknown or view is not None and view.unknown or syntax.UNKNOWN_NAME in a.functions:
+        return None
+    tables = [a.aliases] if view is None else [a.aliases, view.table]
+    seen, texts, left = set(), [text], line_aliases.CHAIN_STEPS
+    while texts:
+        for word in _FLIGHT_WORD_RE.findall(texts.pop()):
+            if word in seen:
+                continue
+            seen.add(word)
+            if word in found.functions or word in a.functions:
+                return None
+            suffix = word.rpartition(".")[2] if "." in word else None
+            bodies = [table[key] for table in tables for key in (word, line_aliases.GLOBAL_ALIAS + word,
+                      line_aliases.SUFFIX_ALIAS + suffix if suffix else None) if key in table]
+            bodies += [table[key] for table, key in ((found.aliases, word), (found.galiases, word), (found.saliases, suffix))
+                       if key in table]
+            left -= len(bodies)
+            if left < 0 or None in bodies:
+                return None
+            texts.extend(bodies)
+    return seen
 
 
 def snapshot_sourced(a):

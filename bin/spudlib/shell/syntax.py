@@ -705,11 +705,13 @@ class ShellAnalysis:
         # parsed with -- the table as it stood where its reading began, which its own words read while `aliases` takes what
         # it defines for text parsed after it -- or None where no such text is being read.
         self.aliases, self.alias_scope, self.alias_unknown, self.alias_view = {}, 0, False, None
-        # SPD-295: `quoted_text`, the text being read as analyse_command tokenizes it (None where the reading has no text:
-        # a function body's tokens), set for each text it reads and put back after it; `quoted_sets`, what
-        # line_aliases.quoted_only finds in it, the names it spells only in a quoted word and the suffixes it writes after
-        # a word's last dot only quoted, for which zsh expands no plain or suffix alias there -- found at the first lookup
-        # that asks, so a text no alias could reach never pays for the scan
+        # SPD-295: `quoted_text`, the text being read as analyse_command tokenizes it (for a function body the line defines,
+        # the text its definition was read from, LineBody.written, SPD-311; None where the reading has
+        # no text whose quotes it can see), set for each text it reads and put back after it; `quoted_sets`, what
+        # line_aliases.quoted_words finds in it, each word it writes quoted at least once -> how it writes it (unquoted,
+        # quoted, quoted after its last dot: line_aliases.spellings), for which zsh expands no plain or suffix alias
+        # where it is quoted, and a word written more than one way is read as each runs (SPD-308) -- found at the first
+        # lookup that asks, so a text no alias could reach never pays for the scan
         self.quoted_text = self.quoted_sets = None
         # The shell the Bash tool starts sources Claude Code's snapshot of the user's interactive shell, so a
         # command word may already be one of that profile's aliases or functions before anything on the line runs.

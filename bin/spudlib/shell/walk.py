@@ -150,9 +150,10 @@ class ShellFrame:
         # (SPD-145: `bash <(curl ...)` runs that file's text as a script; SPD-190).
         self.procsub = False
         # a process substitution's body read a level into the line's alias scope (ShellWalk.open_process_substitution,
-        # SPD-287): the AliasView in force where it opened, put back when it closes, and how many levels of alias scope it
-        # opened (1, or 0 where it only put the snapshot's aliases back in force inside a snapshot function's body, SPD-300);
-        # None for every other frame
+        # SPD-287): the AliasView in force where it opened, put back when it closes, how many levels of alias scope it
+        # opened (1, or 0 where it only put the snapshot's aliases back in force inside a snapshot function's body, SPD-300),
+        # and, where a global alias's words were set among its own (expand_globals), the ShellAnalysis.quoted_text and
+        # quoted_sets it opened with, put back as well (SPD-315), else None; None for every other frame
         self.alias_view = None
         # which compound command of the walk this is, counting from 0 in the order they open -- the same in every walk of
         # one line's tokens, which is how walk_line hands the second walk each compound's input (SPD-210) -- and whether
@@ -284,10 +285,11 @@ class ShellWalk:
         # read_loop_again's walk of a loop once more (SPD-294): `once`, it ends where the loop it opens first closes, and
         # `header_state`, (the table the loop's header ran with, the one its body is read with) until the header is over
         self.once, self.header_state = False, None
-        # SPD-293: the text the tokens were read from (analyse_command's; None for a body line_functions reads), whose
-        # unquoted words inside a `<( )` body are the ones expand_globals may take for a global alias's name, found when it
-        # first asks (`plain`); and, once it has set an alias's expansion in a word's place, `origin`: each token's index
-        # among the tokens as the line spelled them, which `source` then holds (pristine)
+        # SPD-293: the text the tokens were read from (analyse_command's; for a body line_functions reads, the text its
+        # definition was read from, LineBody.written, SPD-311), whose unquoted words inside a `<( )` body are the ones
+        # expand_globals may take for a global alias's name, found when it first asks (`plain`); and, once it has set an
+        # alias's expansion in a word's place, `origin`: each token's index among the tokens as the line spelled them,
+        # which `source` then holds (pristine)
         self.text, self.plain, self.origin = text, None, None
         self.start_list()
         self.pipe_feeds = into  # a call's input, a pipe into the compound body (SPD-212)
@@ -377,8 +379,10 @@ class ShellWalk:
         self.end_list()  # ... which joins the last element's text to the rest of what this compound command printed
         frame = self.stack.pop()
         if frame.alias_view is not None:  # its body is read: the scope open_process_substitution opened closes (SPD-287)
-            self.a.alias_view, opened = frame.alias_view
+            self.a.alias_view, opened, quoted = frame.alias_view
             self.a.alias_scope -= opened
+            if quoted is not None:  # ... and the text's quotes are seen again past it (SPD-315)
+                self.a.quoted_text, self.a.quoted_sets = quoted
         # the compound command's own output stands where it opened, in the element that holds it
         self.printed = stdin_text.joined(frame.printed, self.frame_printed) if frame.prints else frame.printed
         self.frame_printed, (self.element_mark, self.list_defined) = frame.earlier, frame.element_mark
@@ -460,15 +464,26 @@ class ShellWalk:
         `echo x > >(gp)` and a loop's `cat <(gp)` ran GP-RAN, where the body's own `gp` and `cat <(sh -c gp)` found no
         command gp).  Where the line's table holds none the view above is not made, so the frame still puts the body's
         view back in force as a text parsed late (AliasView.parsed_late), opening no alias scope: the line's table,
-        empty, stands there as it does."""
+        empty, stands there as it does.
+
+        SPD-315: the body's command word reads exactly as a `$( )` body's does -- the alias where the text spells it
+        unquoted, the command it names where quoted, both where both (SPD-308) -- by the line's own quotes
+        (line_aliases.spellings), which spell every word of the body but the ones a global alias set there
+        (expand_globals).  Where one did, the body is read as a text whose quotes the hook cannot see
+        (ShellAnalysis.quoted_text None: every word both ways, more than zsh runs, never less) until it closes, when pop
+        puts the text back; every other body is read by the line's quotes, so under the line's `alias git=hub`, `cat <(git
+        push)` reads hub's push, as zsh runs it (probed in zsh 5.9 -f through tests/probes/shell_probe.py: under `alias
+        ls='echo ALIASED'`, `cat <(ls -d /)` printed `ALIASED -d /`), where it had read git's push as well."""
         view = self.a.alias_view
         if self.a.aliases or self.a.alias_unknown:
-            frame.alias_view = (view, 1)
             self.a.alias_view = line_aliases.AliasView(self.a, True)
             self.a.alias_scope += 1
-            self.expand_globals()
+            quoted = (self.a.quoted_text, self.a.quoted_sets) if self.expand_globals() else None
+            if quoted is not None:
+                self.a.quoted_text = self.a.quoted_sets = None
+            frame.alias_view = (view, 1, quoted)
         elif view is not None and view.early:
-            frame.alias_view = (view, 0)
+            frame.alias_view = (view, 0, None)
             self.a.alias_view = view.parsed_late()
 
     def expand_globals(self):
@@ -485,19 +500,21 @@ class ShellWalk:
         <(echo p8 U); }; alias -g U=later; f` printed `p8 later`.
 
         The walk has the body as tokens, which no longer show a word's quotes, so a word is taken for a name only where
-        the text writes it unquoted (line_aliases.plain_words; any word, for a function body line_functions reads, which
-        hands the walk no text: more than zsh runs, never less).  Each such word's expansion is
-        tokenized as analyse_command would (analyse.spliced_tokens) and set in its place among the walk's tokens, which
+        the text writes it unquoted (line_aliases.plain_words; for a function body line_functions reads, the text its
+        definition was read from, SPD-311; any word where the walk has no text: more than zsh runs, never less).  Each
+        such word's expansion is tokenized as analyse_command would (analyse.spliced_tokens) and set in its place among the walk's tokens, which
         the walk then reads as the body's own: its commands, what it prints, the directories it moves through.  A word of
         a `<( )` nested in this body is left to that one, which opens with the table as it stands there.  A word that may
         be a global alias the hook cannot resolve, and every plain word where the line defined one whose name it cannot
         read, is refused a member unread, as global_aliased refuses one.  The tokens as the line spelled them stay in
         `source`, and `origin` maps each token back to them (pristine), so a function body a call reads and a loop
-        read_loop_again reads once more are read from the words the line wrote, with the table where they run."""
+        read_loop_again reads once more are read from the words the line wrote, with the table where they run.  Returns
+        whether it set any alias's words in the body, whose quotes the line's text then does not show (SPD-315,
+        open_process_substitution)."""
         a = self.a
         names = line_aliases.global_names(a)
         if not names:
-            return
+            return False
         if self.plain is None and self.text is not None:
             self.plain = line_aliases.plain_words(self.text)
         unknown, budget, spliced = line_aliases.unknown_global(a, names), [line_aliases.GLOBAL_EXPANSIONS], []
@@ -519,6 +536,7 @@ class ShellWalk:
         for j, tokens in reversed(spliced):  # from the last, so each index still names its word
             self.toks[j : j + 1] = tokens
             self.origin[j : j + 1] = [self.origin[j]] * len(tokens)
+        return bool(spliced)
 
     def pristine(self, i):
         """The index among the tokens as the line spelled them (`source`) of the walk's token i, which expand_globals may
@@ -1060,8 +1078,15 @@ class ShellWalk:
         return outer_ok and len(self.a.walks) == 1 and not (self.conditional or self.piped)
 
     def bind(self, names):
-        """A LineBody for these names, bound to them and to this walk's reading of the line."""
+        """A LineBody for these names, bound to them and to this walk's reading of the line, and holding the text this
+        walk reads (LineBody.written, SPD-311): the one zsh parsed the definition in, which a call reads the body by
+        wherever it runs -- after the eval whose text defined it, or inside another body's reading, whose walk reads by
+        that body's own text in turn (line_functions.read_line_body) -- and the aliases that text was parsed with
+        (LineBody.parsed, SPD-312): whether the line's stand in it (ShellAnalysis.alias_scope, one level or none, so a
+        key holding it does not count levels) and the AliasView they stand with, as the walk reads its own command words
+        here, which zsh expands in the body once, as it parses the definition."""
         body = line_functions.LineBody(names, self.line, self.a)
+        body.written, body.parsed = self.text, (1 if self.a.alias_scope else 0, self.a.alias_view)
         for name in names:
             self.a.function_bodies.setdefault(name, set()).add(body)
         self.defined.append(body)
@@ -1142,7 +1167,8 @@ class ShellWalk:
         self.begin_body(body)
         a.loop_depth += 1
         a.func_depth += 1
-        analyse.isolated(a, lambda: analyse.analyse_command(body.text, a, self.depth + 1))
+        # the body itself, so its text is read with the aliases it was parsed with (LineBody.parsed, SPD-312)
+        analyse.isolated(a, lambda: analyse.analyse_command(body, a, self.depth + 1))
         a.func_depth -= 1
         a.loop_depth -= 1
         self.capturing.remove(body)

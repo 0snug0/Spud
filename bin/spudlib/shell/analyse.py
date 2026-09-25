@@ -32,8 +32,9 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         return a
     if isinstance(command, line_functions.LineBody):
         # a function body the line defines, read where a call or a trap runs it (SPD-277, SPD-276): its tokens, as the
-        # walk that read the definition had them -- with no text, so no name stands quoted there (SPD-295, below)
-        held_quoted, (a.quoted_text, a.quoted_sets) = (a.quoted_text, a.quoted_sets), (None, None)
+        # walk that read the definition had them, whose quotes are the text's that walk read (SPD-295, below) -- or,
+        # the text its definition was read from, LineBody.written (SPD-311)
+        held_quoted, (a.quoted_text, a.quoted_sets) = (a.quoted_text, a.quoted_sets), (command.written, None)
         try:
             return line_functions.read_line_body(a, command, depth, stdin, fed)
         finally:
@@ -94,8 +95,8 @@ def analyse_command(command, analysis=None, depth=0, stdin=None, fed=False):
         return a
     # SPD-295: zsh expands no plain alias of a word quoted in any way, nor a suffix alias of one quoted after its last dot,
     # but the tokens have their quotes taken; the text they were read from is kept while they are walked, for
-    # line_aliases.quoted_only to find the names it spells only quoted, and put back after, as a text read inside this one
-    # (an eval's, a substitution's, an alias body) keeps its own
+    # line_aliases.spellings to find how it writes each word (SPD-308: a word written both ways is read both ways), and
+    # put back after, as a text read inside this one (an eval's, a substitution's, an alias body) keeps its own
     held_quoted, (a.quoted_text, a.quoted_sets) = (a.quoted_text, a.quoted_sets), (outer, None)
     try:
         return walk_readings(a, tokens, marked, other, inner, bodies, expanded, depth, stdin, fed, outer)
@@ -174,7 +175,7 @@ def analyse_isolated(a, command, depth, stdin=None, fed=False):
     The shell parses the body whole, so it is read with the table as it stands here, and an alias it defines or clears
     stands in no word of its own (line_aliases.AliasView, SPD-286: `alias x=y; echo $(alias git=echo; git push)` pushes).
     A function body the line defines (a line_functions.LineBody a trap or a hook array runs) was parsed where the line
-    defined it, and keeps the view in force."""
+    defined it, and is read with the aliases it was parsed with (LineBody.parsed, SPD-312), whatever scope this opens."""
     key = (command, depth, stdin_text.reading_key(stdin, fed), a.reading_state())
     if key in a.isolated_done:
         return
@@ -508,38 +509,37 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         as_spelled = False
         if apart is not None:
             other, other_doubtful = apart
-            if other is not None and other != body:
-                rest = " ".join(line_aliases.alias_requoted(w, a) for w in words[1:])
-                before = a.cwds
-                analyse_command(other + (" " + rest if rest else ""), a, depth + 1, stdin, fed)
-                a.cwds = directories.union_dirs(before, directories.settle(effect, before, a.cwds))
+            if other is not None and other != body:  # ... chained as zsh's is, as bash's manual says it chains (SPD-310)
+                read_alias_body(a, other, words[1:], depth, stdin, fed, effect, True, word)
             if other_doubtful:
                 a.findings.append(("alias", word))
             as_spelled = other is None and not other_doubtful
-        kept, doubt = 1, None
-        if body is None and not doubtful:
-            (body, doubt), kept = line_aliases.suffix_substitution(word, a, fresh), 0
-            if body is None and doubt is not None:  # a body the hook cannot read: refused a member, the word read on as spelled
-                line_aliases.note_alias_doubt(a, doubt)
-                doubt = None
+        # SPD-308: where the text spells the name both quoted and unquoted the hook cannot tell which this word is, so it
+        # reads the alias an unquoted one runs, then on as a quoted one runs: its suffix alias, then the command it names
+        # (probed in zsh 5.9: under `alias ls='echo ALIASED'`, eval's `'ls' -d /; ls -d /` printed `/`, then `ALIASED -d
+        # /`); a word the suffix alias's reading says may run more than that (suffix_substitution) reads on too
+        quoted_too = (body is not None or doubtful) and line_aliases.quoted_too(a, word)
         if body is not None or doubtful:
-            if body is not None:
-                if not a.alias_scope:  # the shell's own suffix alias, named where a reason says what the word ran
-                    a.shell_expanded.append((word, line_aliases.held_shown("a suffix alias", body)))
-                rest = " ".join(line_aliases.alias_requoted(w, a) for w in words[kept:])
-                before = a.cwds
-                analyse_command(body + (" " + rest if rest else ""), a, depth + 1, stdin, fed)
-                a.cwds = directories.settle(effect, before, a.cwds)  # its cd, where the command runs (SPD-252)
-                if as_spelled:
-                    a.cwds = directories.union_dirs(before, a.cwds)
+            if body is not None:  # with the name in flight, and chained where it ends in a blank (SPD-317, SPD-310)
+                read_alias_body(a, body, words[1:], depth, stdin, fed, effect, as_spelled or quoted_too, word)
             else:
                 a.kinds.append("other")
             if doubtful:  # after the body, so a refusal the body itself earns keeps its own reason
                 a.findings.append(("alias", word))
-            elif doubt is not None:
-                line_aliases.note_alias_doubt(a, doubt)
-            if not as_spelled:
+            if not (as_spelled or quoted_too):
                 return
+        if body is None and not doubtful or quoted_too:
+            body, doubt, read_on = line_aliases.suffix_substitution(word, a, fresh, quoted_too)
+            if body is None and doubt is not None:  # a body the hook cannot read: refused a member, the word read on as spelled
+                line_aliases.note_alias_doubt(a, doubt)
+            elif body is not None:
+                if not a.alias_scope:  # the shell's own suffix alias, named where a reason says what the word ran
+                    a.shell_expanded.append((word, line_aliases.held_shown("a suffix alias", body)))
+                read_alias_body(a, body, words, depth, stdin, fed, effect, as_spelled or read_on)
+                if doubt is not None:
+                    line_aliases.note_alias_doubt(a, doubt)
+                if not (as_spelled or read_on):
+                    return
     if seeks_function is True:
         looked_up.append(cmd)
     if (command_position or seeks_function is True) and held_text.read_shell_name(
@@ -798,9 +798,11 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
             return
         a.kinds.append("other")
         interpreter_words.read_run(cmd, base, words, a, fed, xargs_input)
-    elif cmd in ("alias", "unalias") and directories.builtin_runs(effect):
+    elif cmd in ("alias", "unalias", "unhash", "disable", "enable") and directories.builtin_runs(effect):
         # The builtin, spelled exactly, stores text the shell runs wherever it next parses this name in command
         # position -- which on one line means `eval`.  Never a spud call, so an aliasing line is not allowed on its own.
+        # SPD-306: zsh's `unhash -a`/`-s` and `disable -a`/`-s` clear an alias as unalias does, and `enable -a`/`-s`
+        # brings back one disable cleared (line_aliases._clear_hash_table_line, probed there); their `-f` is read above
         a.kinds.append("other")
         if cmd == "alias":
             line_aliases.record_alias_line(words, a)
@@ -846,6 +848,35 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
     else:
         a.kinds.append("other")  # CD, /usr/bin/cd, env cd: /usr/bin/cd in its own process, and the shell stays
     shadowed_name(a, cmd, path_names, looked_up)  # after the dispatch, so a refusal the words as spelled earn keeps its own reason
+
+
+def read_alias_body(a, body, words, depth, stdin, fed, effect, joined, name=None):
+    """The text an alias of the line's, or a suffix alias, puts in place of a command word (dispatch_words): its body, then
+    the command's `words` after it as eval's text spells them, quotes and all (SPD-201) -- read as shell text, and the
+    directories each reading leaves where the command runs (SPD-252), joined; with the ones the command started in too
+    where the word may run something else as well (`joined`).
+
+    A line's alias `name` (line_aliases.alias_texts): its body's first word looked up too and, where the body so read
+    ends in a blank, the member's words once per way the text being read may write each word the chain reaches
+    (SPD-308), with the alias zsh looks each up as in, and on down the chain (SPD-310: under `alias s='sudo '`, `eval 's
+    gp'` runs `sudo git push`, where the text `sudo gp` read by itself would leave gp a plain command behind the wrapper;
+    SPD-313: the snapshot's aliases in that table too, named for the reason).  SPD-317: the name is in flight while its
+    body is read, which zsh looks it up nowhere in, and in flight there alone -- the body's words that spell it are
+    written quoted, and the member's words after it are looked up again -- so `alias ls='ls -G'; eval 'ls -d /'` runs
+    the program ls (probed in zsh 5.9 -f and -f -o nobareglobqual, line_aliases._held_in_flight), where the hook read the
+    body's ls again at every level to the reading depth and refused a member."""
+    before, after = a.cwds, a.cwds
+    if name is None:  # a suffix alias: `words`, the command word among them, after its body
+        rest = line_aliases.alias_rest(words, a)
+        texts = [body + (" " + rest if rest else "")]
+    else:
+        texts = [text for text, _ in line_aliases.alias_texts(name, body, words, a, a.shell_expanded)]
+    for k, text in enumerate(texts):
+        a.cwds = before
+        analyse_command(text, a, depth + 1, stdin, fed)
+        moved = directories.settle(effect, before, a.cwds)
+        after = moved if k == 0 else directories.union_dirs(after, moved)
+    a.cwds = directories.union_dirs(before, after) if joined else after
 
 
 def record_assignment(a, found):

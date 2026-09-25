@@ -618,10 +618,11 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                     % shown_word(detail)), analysis
         elif kind == "shell-alias":
             # SPD-289: the word is a command word for a plain or a suffix alias, and any word for a global one (SPD-283,
-            # line_aliases.alias_doubt); zsh expands no alias of a word quoted in any way, the respelling offered.  SPD-295:
-            # for every kind, since the hook now reads a quoted command word as zsh does (line_aliases.quoted_only), but
-            # only where the text spells the name quoted in every word, and for a suffix alias where the quote is after
-            # the last dot
+            # line_aliases.alias_doubt); zsh expands no alias of a word quoted in any way, the respelling offered.  SPD-295,
+            # SPD-308: since the hook now reads a quoted command word as zsh does (line_aliases.spellings), by how each
+            # word of the text is written -- one written both quoted and unquoted is read both ways, the alias where it
+            # is unquoted and the command it names where it is quoted -- and a suffix alias by the word's own spellings,
+            # not every word ending in that suffix
             return ("the word `%s` runs an alias your shell already defines whose body the hook cannot read (its quoting"
                     " does not close, or holds a `$'...'` escape zsh and bash decode apart, in Claude Code's snapshot of your"
                     " interactive shell, ~/.claude/shell-snapshots/): a plain alias as a command word, a global alias"
@@ -629,8 +630,10 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                     " shell expands an alias when it parses the text, so the command that runs is not the one written;"
                     " spell out the command the alias stands for in its place, or quote the word where you mean it as"
                     " written (`'%s'`): zsh expands no alias of a quoted word, nor a suffix alias where the text after the"
-                    " last dot is quoted. For a plain or a suffix alias, quote every word of that text that spells the same"
-                    " name or ends in the same suffix: the hook reads a name the text also writes unquoted as the alias"
+                    " last dot is quoted. A plain or a suffix alias is read by how each word of the text is written, so"
+                    " quoting only this one leaves any other spelling of the same name, or one ending in the same suffix,"
+                    " unquoted there still read as the alias -- and this word itself, quoted, read on as the command it"
+                    " names as well"
                     % ((shown_word(detail),) * 2)), analysis
         elif kind == "glob":
             return ("the word %s is a glob the shell expands before it runs the command, and it can become more than one command,"

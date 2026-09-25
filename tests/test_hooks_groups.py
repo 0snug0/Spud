@@ -2445,5 +2445,149 @@ class SnapshotPrinterRemovalTest(BashHookCase):
         self.assertRefused('true && unset -f basename; echo hi > "tests/$(basename a/x.txt)"', "hook cannot resolve")
 
 
+class DefiningTextBodyTest(BashHookCase):
+    """SPD-311: SPD-308 read a function body the line defines by the text of the walk that read its tokens, found among the
+    walks still under way (a lookup this ticket replaced with line_functions.LineBody.written).  A body an eval's text defined and called after that eval, or one
+    defined inside another body's reading, had no such walk, so every aliased command word in it was read both ways: under
+    a profile's `alias git=hub`, `eval 'f() { git push; }'; f` was refused, though zsh runs hub's push.  The LineBody now
+    keeps the text its definition was read from (walk.ShellWalk.bind), and a call reads the body by it
+    (line_functions.read_line_body).  Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py,
+    each line run by eval as the Bash tool's shell runs it: under `alias ls='echo ALIASED'`, `eval 'f() { ls -d /; }'; f`
+    printed `ALIASED -d /`; `eval 'f1() { ls -d /; }'; 'ls' -d /; f1` printed `/` then `ALIASED -d /`, the line's own
+    quotes no concern of the body's; `g() { h() { ls -d /; }; h; }; g` and `g2() { eval 'h2() { ls -d /; }'; }; g2; h2`
+    ran the alias, and `g3() { eval "h3() { 'ls' -d /; }"; }; g3; h3` the real ls.  After `alias -g X="; echo GLOBAL"`,
+    `eval "f() { cat <(echo q1 'X'); }"; f` printed `q1 X` where `eval "f2() { cat <(echo u1 X); }"; f2` printed `u1`
+    then `GLOBAL`, and so did the same pair defined inside another body, so a `<( )` body's words are read by that text
+    too (walk.ShellWalk.expand_globals)."""
+
+    def snapshot(self, text):
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000311-dddddd.sh").write_text(text, encoding="utf-8")
+
+    def test_a_body_an_eval_defined_is_read_by_the_evals_text(self):
+        self.snapshot("alias -- git=hub\n")
+        for line in ("eval 'f() { git push; }'; f", "eval 'f() { git push; }'; 'git' status; f",
+                     "eval 'f() { git push; }'; eval f", "eval 'f() { git push; }'; echo $(f)",
+                     "eval 'f() { git status; git push; }'; f"):
+            with self.subTest(line):
+                self.assertSilent(line)
+        for line in ("eval \"f() { 'git' push; }\"; f", "eval \"f() { git status; 'git' push; }\"; f",
+                     "eval \"f() { 'git' push; }\"; echo $(f)"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+
+    def test_a_body_defined_inside_another_bodys_reading(self):
+        self.snapshot("alias -- git=hub\n")
+        for line in ("g() { h() { git push; }; h; }; g", "g() { eval 'h() { git push; }'; }; g; h",
+                     "g() { h() { git push; }; }; g; h"):
+            with self.subTest(line):
+                self.assertSilent(line)
+        for line in ("g() { h() { 'git' push; }; h; }; g", "g() { eval \"h() { 'git' push; }\"; }; g; h",
+                     "g() { h() { git status; 'git' push; }; h; }; g"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+
+    def test_bodies_alike_but_for_their_quotes_are_each_read(self):
+        # the tokens of `git push` and `'git' push` are one, so the function table a reading is cached under
+        # (ShellAnalysis.function_state, LineBody.state) holds the defining text too: without it the second line's inner
+        # `$(f)` was taken for the first's reading and skipped, the body's reading in place alone refusing it
+        m = load_spud_module()
+        states = [m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path))).function_state()
+                  for line in ("eval 'f() { git push; }'", "eval \"f() { 'git' push; }\"", "eval 'f() { git push; }'")]
+        self.assertNotEqual(states[0], states[1])
+        self.assertEqual(states[0], states[2])
+        self.snapshot("alias -- git=hub\n")
+        for line in ("echo $(eval 'f() { git push; }'; f); echo $(eval \"f() { 'git' push; }\"; f)",
+                     "x=$(eval 'f() { git push; }'; f); y=$(eval \"f() { 'git' push; }\"; f)",
+                     "(eval 'f() { git push; }'; f); (eval \"f() { 'git' push; }\"; f)",
+                     "(eval 'f() { git push; }'; echo $(f)); (eval \"f() { 'git' push; }\"; echo $(f))",
+                     "(eval 'f() { git push; }'; eval f); (eval \"f() { 'git' push; }\"; eval f)",
+                     "(eval 'f() { git push; }'; trap f EXIT); (eval \"f() { 'git' push; }\"; trap f EXIT)"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+
+    def test_a_process_substitutions_words_in_such_a_body(self):
+        # a `<( )` body's words: a global alias stands in the ones the defining text writes unquoted
+        for line in ("alias -g X='; git push'; eval \"f() { cat <(echo q1 'X'); }\"; f",
+                     "alias -g X='; git push'; g() { h() { cat <(echo q2 'X'); }; h; }; g",
+                     "alias -g X='; git push'; g() { eval \"h() { cat <(echo q3 'X'); }\"; }; g; h"):
+            with self.subTest(line):
+                self.assertSilent(line)
+        for line in ("alias -g X='; git push'; eval \"f() { cat <(echo u1 X); }\"; f",
+                     "alias -g X='; git push'; g() { h() { cat <(echo u2 X); }; h; }; g",
+                     "alias -g X='; git push'; eval \"f() { cat <(echo 'X' X); }\"; f"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+
+
+class ParsedAliasBodyTest(BashHookCase):
+    """SPD-312: zsh parses a function body where it reads the definition, so the body's command words expand with the
+    aliases as they stood there -- the table the text that defines it was parsed with -- and never with the table at the
+    call.  A call read the body at the caller's alias scope: under the line's own `alias git=hub`, `eval 'f() { git push;
+    }'; f` was refused though zsh runs hub's push (an over-read), and `f() { git push; }; eval f` was allowed though the
+    line's own text, parsed before its alias ran, holds git's push (an under-read).  The LineBody now keeps the alias view
+    its definition was parsed under (walk.ShellWalk.bind; line_functions.assign_function for a `functions` body, parsed
+    where the assignment runs), and every reading of it reads by that (line_functions.read_line_body).  Probed in zsh 5.9
+    -f and -f -o nobareglobqual through tests/probes/shell_probe.py, each line run by eval as the Bash tool's shell runs
+    it, with `alias ls="echo ALIASED"` for git's: `eval 'f() { ls -d /; }'; f` printed `ALIASED -d /`, and so did the same
+    with `unalias ls` before the call, `eval 'g() { h() { ls -d /; }; }'; unalias ls; g; h`, `echo $(f() { ls -d /; };
+    f)`, `cat <(f() { ls -d /; }; f)`, a copy (`functions -c f g`) of such a body after `unalias ls`, and
+    `functions[f]="ls -d /"; unalias ls; f`; `f() { ls -d /; }; eval f`, `... echo $(f)`, `... chpwd_functions=(f); cd
+    /`, `... functions -c f g; eval g`, `eval 'f() { ls -d /; }'` before the alias then `eval f`, `g() { eval 'h() { ls -d
+    /; }'; }; unalias ls; g; h`, `g() { h() { ls -d /; }; }; eval g; eval h` and `functions[f]="ls -d /"` before the alias
+    then `eval f` each printed `/`, the real ls; under `alias hub="ls -d /"`, `f() { hub; }; eval f` ran the command hub
+    and `eval 'f() { hub; }'; f` the alias."""
+
+    def test_a_body_parsed_under_the_lines_alias_runs_it(self):
+        for line in ("alias git=hub; eval 'f() { git push; }'; f",
+                     "alias git=hub; eval 'f() { git push; }'; unalias git; f",
+                     "alias git=hub; eval 'f() { git push; }'; unalias git; eval f",
+                     "alias git=hub; eval 'f() { git push; }'; unalias git; echo $(f)",
+                     "alias git=hub; eval 'g() { h() { git push; }; }'; unalias git; g; h",
+                     "alias git=hub; eval 'f() { git push; }'; unalias git; functions -c f g; g",
+                     "alias git=hub; functions[f]='git push'; unalias git; f",
+                     "alias git=hub; echo $(f() { git push; }; f)"):
+            with self.subTest(line):
+                self.assertSilent(line)
+
+    def test_a_body_parsed_without_it_runs_the_command(self):
+        for line in ("alias git=hub; f() { git push; }; eval f",
+                     "alias git=hub; f() { git push; }; echo $(f)",
+                     "alias git=hub; f() { git push; }; chpwd_functions=(f); cd /",
+                     "alias git=hub; f() { git push; }; functions -c f g; eval g",
+                     "eval 'f() { git push; }'; alias git=hub; eval f",
+                     "alias git=hub; g() { eval 'h() { git push; }'; }; unalias git; g; h",
+                     "alias git=hub; g() { h() { git push; }; }; eval g; eval h",
+                     "functions[f]='git push'; alias git=hub; eval f",
+                     "alias hub='git push'; functions[f]=hub; f",
+                     "alias hub='git push'; eval 'f() { hub; }'; f",
+                     "alias hub='git push'; eval 'f() { hub; }'; unalias hub; f"):
+            with self.subTest(line):
+                self.assertRefused(line, "Law 7")
+        # the line's own text, parsed before its alias ran: the command hub, not the alias's git push
+        self.assertSilent("alias hub='git push'; f() { hub; }; eval f")
+
+    def test_bodies_alike_but_for_the_table_they_were_parsed_with(self):
+        # one body text, parsed with and without git=hub: the function table a reading is cached under
+        # (ShellAnalysis.function_state, LineBody.state) holds the view, so the second `$(f)` is not taken for the first's
+        m = load_spud_module()
+        states = [m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path))).function_state()
+                  for line in ("alias git=hub; eval 'f() { git push; }'; unalias git", "eval 'f() { git push; }'",
+                               "alias git=hub; eval 'f() { git push; }'; unalias git")]
+        self.assertNotEqual(states[0], states[1])
+        self.assertEqual(states[0], states[2])
+        # the tables alike at both `$(f)`s, the second, which pushes, is read too: without the view in the key it was
+        # taken for the first's reading and skipped, the body's reading in place alone refusing the line
+        first = "(alias git=hub; eval 'f() { git push; }'; unalias git; echo $(f))"
+        second = "unalias git; (eval 'f() { git push; }'; echo $(f))"
+        findings = [m.analyse_command(line, m.ShellAnalysis(cwd=str(self.home.path))).findings
+                    for line in (first, second, first + "; " + second)]
+        self.assertEqual(findings[0], [])
+        self.assertEqual(findings[2], findings[1])
+        self.assertIn(("git", ("push", "push")), findings[1])
+        self.assertRefused(first + "; " + second, "Law 7")
+
+
 if __name__ == "__main__":
     unittest.main()

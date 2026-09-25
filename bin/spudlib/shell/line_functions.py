@@ -14,7 +14,7 @@ ShellAnalysis.function_bodies holds, and a copy, a removal or a registration is 
 import functools
 
 from . import (analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, directories, expansions,
-               held_text, prepare, script_files, stdin_text, syntax, unread, walk)
+               held_text, line_aliases, prepare, script_files, stdin_text, syntax, unread, walk)
 from ..hooks import hookio, snapshots
 
 
@@ -31,6 +31,14 @@ class LineBody:
     substitution bodies and here-documents those tokens lift, `glued`, which reading of the line (zsh's, or bash's) they
     are, and `into`, whether the body is a compound command, where a call's input stands as a pipe into it does (SPD-212:
     zsh reads the call's and then the definition's own); or `text`, a body zsh's `functions` parameter is handed (SPD-278).
+    `written` (SPD-311): the text the walk that read the definition was reading (walk.ShellWalk.bind) -- the one zsh parsed
+    the body with, which says how it wrote each of the body's words, quoted or not, as the tokens cannot (SPD-295,
+    SPD-308) -- or None where that walk had none; kept on the body, since a call may read it after that walk is over (a
+    body an eval's text defined) or from a walk of the body's own tokens (a body defined inside another's reading).
+    `parsed` (SPD-312): (ShellAnalysis.alias_scope, ShellAnalysis.alias_view) where zsh parsed the definition -- whether
+    the line's own aliases stand in that text, and the line_aliases.AliasView they stand with -- which every reading of
+    the body reads it with (read_line_body), wherever the call stands: zsh expands a body's aliases once, as it parses the
+    definition, and never again at a call (walk.ShellWalk.bind; assign_function for a `functions` body).
 
     `pending`, what its reading in place added to the analysis's lists (walk._RECORDS), taken out when the definition ends and
     put back where it stood when the walk ends (walk.ShellWalk.settle_definitions) unless a call read the body (`called`) --
@@ -46,13 +54,14 @@ class LineBody:
     `&` read after it takes its certainty back as it takes a definition's (walk.ShellWalk.uncertain_element)."""
 
     __slots__ = ("names", "line", "serial", "start", "consumed", "tokens", "inner", "docs", "expanded", "glued", "into",
-                 "text", "pending", "marks", "caches", "called", "readings", "active", "certain", "removes")
+                 "text", "written", "parsed", "pending", "marks", "caches", "called", "readings", "active", "certain", "removes")
 
     def __init__(self, names, line, a):
         self.names, self.line = tuple(names), line
         a.body_serial += 1
         self.serial = a.body_serial
-        self.start, self.consumed, self.tokens, self.text = 0, (0, 0), None, None
+        self.start, self.consumed, self.tokens, self.text, self.written = 0, (0, 0), None, None, None
+        self.parsed = (0, None)
         self.inner, self.docs, self.expanded, self.glued, self.into = (), (), (), True, False
         self.pending = self.marks = self.caches = None
         self.called, self.readings, self.active, self.certain, self.removes = False, 0, 0, False, False
@@ -77,8 +86,22 @@ class LineBody:
         complete, whether it surely runs, whether it is a removal's mark -- values, so a key holding them does not change
         when the body does.  Not its serial nor the reading of the line that bound it: zsh's reading of a line and the other
         shell's bind bodies of their own, which are alike where both read the text alike, and a substitution after them is
-        read once for both, as it was before the table was part of the state."""
-        return self.tokens, self.text, self.inner, self.docs, self.expanded, self.into, self.certain, self.removes
+        read once for both, as it was before the table was part of the state.
+
+        With the tokens, the text the definition was read from (`written`, SPD-311), since tokens alike may run apart:
+        under `alias git=hub`, `f() { git push; }` runs hub's push and `f() { 'git' push; }` git's, one token list, so a
+        reading cached under the one table is not the other's: in `echo $(eval 'f() { git push; }'; echo $(f)); echo
+        $(eval "f() { 'git' push; }"; echo $(f))`, which pushes in the second, the second `$(f)` had been taken for the
+        first's reading (analyse.analyse_isolated) and skipped.  Both shells' readings of one line walk the same text, so
+        it keeps their bodies alike.
+
+        And the alias view it was parsed under (`parsed`, SPD-312), for the same reason: one text parsed with and without
+        `alias git=hub` runs hub's push and git's, so `(alias git=hub; eval 'f() { git push; }'; unalias git; echo $(f));
+        (eval 'f() { git push; }'; echo $(f))`, the table alike at both calls, pushes in the second.  Both shells' readings
+        bind a body with the view the text they walk was opened with, which only a text boundary replaces, so it keeps
+        their bodies alike too."""
+        return (self.tokens, self.text, self.written, self.parsed, self.inner, self.docs, self.expanded, self.into,
+                self.certain, self.removes)
 
     def __str__(self):
         return self.text if self.text is not None else " ".join(prepare.deglob(t) for t in self.tokens or ())
@@ -133,13 +156,34 @@ def read_line_body(a, body, depth, stdin, fed):
 
     The text the reading prints (SPD-272) is left in ShellAnalysis.read_printed for held_text.read_function: the walk's,
     and the one it prints where a pipe follows the call (walk.ShellWalk.body_piped); None for a `functions` body's text,
-    whose readings (zsh's and bash's) this does not follow."""
-    if body.text is not None:
-        analyse.analyse_command(body.text, a, max(depth, 1), stdin, fed)
-        a.read_printed = None
-        return a
-    shell_walk = walk.walk_line(a, list(body.tokens), body.inner, body.docs, body.expanded, depth, walk.reading_start(a),
-                                body.glued, stdin, fed, body.into)
+    whose readings (zsh's and bash's) this does not follow.
+
+    SPD-311: the tokens are read by the text the definition was read from (LineBody.written), the one zsh parsed them
+    with: the quotes line_aliases.spellings finds there (a.quoted_text, which analyse_command puts back when this
+    returns) and the plain words ShellWalk.expand_globals takes for a global alias's name in a `<( )` body -- so a body
+    an eval's text defined, called after that eval, and one defined inside another body's reading, are read as they run,
+    not every aliased word both ways (probed in zsh 5.9: under `alias ls='echo ALIASED'`, `eval 'f() { ls -d /; }'; f`
+    printed `ALIASED -d /`, tests/test_hooks_groups.py DefiningTextBodyTest).
+
+    SPD-312: and with the aliases zsh parsed them with (LineBody.parsed), not the call's: zsh expands a body's command
+    words once, where it parses the definition, so a call inside eval or a substitution, after an `unalias`, or before
+    an alias the line defines later, runs the body as it was parsed then (probed in zsh 5.9 -f and -f -o
+    nobareglobqual: under `alias ls='echo ALIASED'`, `eval 'f() { ls -d /; }'; unalias ls; f` printed `ALIASED -d /`,
+    and `f() { ls -d /; }; eval f` printed `/`, the line's own text being parsed before its alias ran;
+    tests/test_hooks_groups.py ParsedAliasBodyTest).  What the body parses as it runs -- its eval's words, its `$( )`
+    and `<( )` bodies -- opens a view of the table as it stands then, as anywhere."""
+    scope, view = a.alias_scope, a.alias_view
+    a.alias_scope, a.alias_view = body.parsed
+    try:
+        if body.text is not None:
+            analyse.analyse_command(body.text, a, max(depth, 1), stdin, fed)
+            a.read_printed = None
+            return a
+        a.quoted_text, a.quoted_sets = body.written, None
+        shell_walk = walk.walk_line(a, list(body.tokens), body.inner, body.docs, body.expanded, depth,
+                                    walk.reading_start(a), body.glued, stdin, fed, body.into, body.written)
+    finally:
+        a.alias_scope, a.alias_view = scope, view
     printed = shell_walk.frame_printed
     a.read_printed = (printed, printed if shell_walk.body_piped is None else shell_walk.body_piped)
     return a
@@ -160,9 +204,14 @@ def assign_function(a, found):
     if not a.walks:
         return
     shell_walk = a.walks[-1]
+    # SPD-312: zsh parses the text where the assignment runs, as eval parses its words, so the body's aliases are the
+    # table as it stands here, not where the walk's text was parsed (probed in zsh 5.9 -f and -f -o nobareglobqual: under
+    # `alias ls='echo ALIASED'`, `functions[f]="ls -d /"; unalias ls; f` printed `ALIASED -d /`, and `functions[f]="ls -d
+    # /"; alias ls=...; eval f` printed `/`)
+    scope = 1 if a.aliases or a.alias_unknown else 0  # as analyse.analyse_isolated opens a body's
     for name, text in pairs:
         body = shell_walk.bind([name])
-        body.text = text
+        body.text, body.parsed = text, (scope, line_aliases.AliasView(a, "\n" in text))
         shell_walk.queue(body)
 
 
@@ -318,6 +367,9 @@ def copy_function(words, a):
     for body in bodies:
         copy = shell_walk.bind([new])
         copy.line, copy.tokens, copy.text, copy.inner, copy.docs = body.line, body.tokens, body.text, body.inner, body.docs
+        # the copy runs OLD's body as zsh parsed it, its text and its aliases (SPD-311, SPD-312: under `alias ls='echo
+        # ALIASED'`, `eval 'f() { ls -d /; }'; unalias ls; functions -c f g; g` printed `ALIASED -d /`)
+        copy.written, copy.parsed = body.written, body.parsed
         copy.expanded, copy.glued, copy.into = body.expanded, body.glued, body.into
         if in_line is not None:
             shell_walk.queue(copy, in_line)

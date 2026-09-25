@@ -3697,5 +3697,279 @@ class HeldPlainUnaliasTest(ShellSnapshotCase):
         self.refused_for_members("X=git; unalias $X; eval 'please git push'", "an `unalias` may not have run")
 
 
+class HashTableAliasClearTest(ShellSnapshotCase):
+    """SPD-306: zsh's `unhash -a NAME` and `disable -a NAME` take an alias out of the table as `unalias NAME` does, and
+    `unhash -s` / `disable -s` a suffix alias, but analyse read unhash and disable for their `-f` alone (SPD-281), so
+    under a profile's `alias git=hub`, `unhash -a git; eval 'git push'` was still read as `hub push` and the push missed
+    (SPD-299's case, another spelling).  They now clear the line's and the snapshot's aliases as unalias does
+    (line_aliases.clear_alias_line), each builtin's flags read for the table they name; `enable -a NAME` may bring a
+    disabled alias back, so it doubts a name the line cleared.
+
+    Probed through tests/probes/shell_probe.py in zsh 5.9 -f and -f -o nobareglobqual, a fresh `zsh -f -c` sourcing a
+    file of `alias gp='echo SNAP-GP'`, `alias go='echo SNAP-GO'`, `alias -s txt='echo SUFFIX'` and evaluating the line
+    (2026-09-24): `unhash -a gp`, `unhash -a -- gp`, `unhash -am "g*"`, `unhash -m -a "g*"`, `disable -a gp` and `disable
+    -am "g*"` each left `eval "gp x"` finding no command gp (go still ran after the `gp` ones), while the line's own `gp
+    top` printed SNAP-GP; `unhash -s txt`, `-as txt`, `-sa txt`, `-a -s txt` and `disable -s txt`, `-as txt` left `eval
+    "a.txt z"` finding no command, where `-a txt` did not clear the suffix alias; `-af`, `-ad` (unhash), `-af`, `-ar`
+    (disable), `+a gp` (a name, not an option), `-as gp`, bare `unhash -a` ("not enough arguments") and bare `disable
+    -a` (a listing) left gp running; `disable -a gp; enable -a gp` and `eval "enable -a gp"` ran SNAP-GP again, where
+    `enable -a gp` after `unhash -a gp` or `unalias gp` found "no such hash table element".
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", PLAIN_BEFORE_ALIASES + PROGRAM_ALIAS)
+
+    def test_the_tickets_evidence(self):
+        for line in ("unhash -a git; eval 'git push'", "unhash -a -- git; eval 'git push'", "unhash -a ls git; eval 'git push'",
+                     "unhash -a git; echo $(git push)", "unhash -a git; cat <(git push)", "disable -a git; eval 'git push'",
+                     "disable -a -- git; echo `git push`", "unhash -a git; eval 'eval git push'",
+                     "eval 'unhash -a git'; eval 'git push'", "disable -a nosuch git; eval 'git push'",
+                     "alias git=hub; unhash -a git; eval 'git push'", "alias git=hub; disable -a git; eval 'git push'"):
+            with self.subTest(line):
+                r = self.refused_for_members(line)
+                self.assertNotIn("hub", r.reason)
+
+    def test_a_suffix_alias_unhash_or_disable_clears_leaves_its_word_the_command(self):
+        """`alias -s txt='command git push'` pushes where b.txt is a command word (`command` keeps the profile's git=hub
+        off it, and the snapshot's plain `a.txt` alias would run ls in a.txt's place); `-s` clears it, `-a` alone, `-f`
+        and `-r` do not."""
+        define = "alias -s txt='command git push'; "
+        for clear in ("unhash -s txt", "unhash -as txt", "disable -s txt", "disable -sa txt", "unhash -a -s txt"):
+            with self.subTest(clear):
+                self.silent_for_everyone(define + clear + "; eval b.txt")
+        for clear in ("true", "unhash -a txt", "disable -a txt", "unhash -fs txt", "disable -rs txt"):
+            with self.subTest(clear):
+                self.refused_for_members(define + clear + "; eval b.txt")
+
+    def test_a_clear_that_may_not_have_run_or_that_the_hook_cannot_read_doubts_it(self):
+        for line in ("unhash -am 'g*'; eval 'git push'", "unhash -m -a 'g*'; eval 'git push'", "disable -am 'g*'; eval 'git push'",
+                     "X=git; unhash -a $X; eval 'git push'", "X=git; disable -a $X; eval 'git push'",
+                     "unhash $o git; eval 'git push'", "unhash -a $o git; eval 'git push'",
+                     "true | unhash -a git; eval 'git push'", "disable -am '*'; echo $(git push)"):
+            with self.subTest(line):
+                self.refused_for_members(line, "an `unalias` may not have run")
+
+    def test_enable_may_bring_back_what_disable_cleared(self):
+        """zsh's `enable -a NAME` restores the alias `disable -a` hid, with the body it had; the hook does not keep that
+        body, so it reads the name as one whose definition may or may not stand."""
+        for line in ("disable -a git; enable -a git; eval 'git push'", "disable -a git; eval 'enable -a git'; eval 'git push'",
+                     "disable -a git; enable -am 'g*'; eval 'git push'", "disable -a git; enable -a -- git; eval 'git push'",
+                     "disable -a git; enable -a $X; eval 'git push'"):
+            with self.subTest(line):
+                self.refused_for_members(line, "may not have run")
+
+    def test_where_the_snapshots_alias_still_stands_it_is_expanded(self):
+        """The line's own words were parsed before the clear ran; eval's text holding it too; a table other than the
+        aliases' (`-f`, `-d`, `-r`, `-s`, none), a bare `-a` (unhash's error, disable's listing), `+a` (a name) and an
+        enable of a name nothing cleared leave the alias standing."""
+        for line in ("unhash -a git; git push", "disable -a git; git push", "eval 'unhash -a git; git push'",
+                     "unhash -as git; eval 'git push'", "unhash -s git; eval 'git push'", "unhash -af git; eval 'git push'",
+                     "unhash -ad git; eval 'git push'", "unhash git; eval 'git push'", "unhash +a git; eval 'git push'",
+                     "unhash -a; eval 'git push'", "disable -a; eval 'git push'", "disable -as git; eval 'git push'",
+                     "disable -af git; eval 'git push'", "disable -ar git; eval 'git push'", "disable git; eval 'git push'",
+                     "disable +a git; eval 'git push'", "enable -a git; eval 'git push'", "enable -a; eval 'git push'",
+                     "unhash -a git; alias git=hub; eval 'git push'", "disable -a git; alias git=hub; eval 'git push'"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+    def test_a_cleared_alias_leaves_its_word_the_command_it_names(self):
+        for line in ("unhash -a gp; eval gp", "disable -a gp; echo $(gp)", "unhash -a gp git; cat <(gp)"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+
+# SPD-313: wrappers, a word that is another alias, and an alias whose body ends in one, for chains that cross between
+# the snapshot's aliases and the line's; `broken` is a body the hook cannot read.
+MIXED_CHAIN_SNAPSHOT = """\
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+# Functions
+# Shell Options
+setopt autocd
+# Aliases
+alias -- s='sudo '
+alias -- w='s '
+alias -- ws=s
+alias -- gp='git push'
+alias -- gs='git status'
+alias -- u=gp
+alias -- e='echo '
+alias -- we='e '
+alias -- broken='git push
+"""
+
+
+class MixedAliasChainTest(ShellSnapshotCase):
+    """SPD-313: zsh holds one alias table, the snapshot's aliases and the line's in it, and looks the word after any alias
+    whose body ends in a blank up there, and the first word of each body it expands, chained or not.  The hook chained the
+    line's aliases into the line's (SPD-310, line_aliases.chained_texts) and the snapshot's into the snapshot's
+    (shell_aliased's loop), never one into the other, and the snapshot's loop joined a chained body without looking its
+    first word up -- so behind the snapshot's `s='sudo '` a line's `gp` in eval, behind a line's `sn='sudo '` the snapshot's
+    `gp`, and behind `s` the snapshot's `u=gp` were each read as a program sudo runs, and a member's push went through.
+    One walk now reads the table as zsh has it there: the line's own aliases as eval's or a substitution's text was
+    parsed with them, over the snapshot's where they stand.
+
+    Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py, a fresh `zsh -f -c` sourcing a
+    file of `alias s='nice '`, `w='s '`, `ws='s'`, `gp='echo SNAP-GP'`, `u='gp'`, `e='echo '` and evaluating the line, as
+    the Bash tool's shell does (2026-09-24): `alias lg='echo LINE-LG'; eval 's lg'` printed LINE-LG; `alias ln2='nice ';
+    eval 'ln2 gp'`, `w gp`, `s u`, `ws gp`, `eval 'ln2 u'`, `eval 'ln2 w gp'`, `s s gp` and, with `alias lu=gp`, `eval 's
+    lu'` printed SNAP-GP; `alias gp='echo LINE-GP'; eval 's gp'` printed LINE-GP where the line's own `s gp` printed
+    SNAP-GP; `alias s='echo LS '; eval 'w gp'` printed `LS echo SNAP-GP`; `unalias gp; eval 's gp'`, `eval "s 'gp'"` and
+    `alias lg=...; s lg` found no command.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", MIXED_CHAIN_SNAPSHOT)
+
+    def expansion(self, command):
+        """The names the analysis recorded as the shell's own, for a reason's note."""
+        m = load_spud_module()
+        env = dict(os.environ)
+        env["SPUD_USER_CLAUDE_DIR"] = self.home.env["SPUD_USER_CLAUDE_DIR"]
+        with mock.patch.dict(os.environ, env, clear=True):
+            a = m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path), home=str(self.home.path)))
+        return [name for name, _ in a.shell_expanded]
+
+    def test_the_tickets_evidence(self):
+        for line in ("alias lg='git push'; eval 's lg'", "alias sn='sudo '; eval 'sn gp'", "s u",
+                     "alias lg='git push'; echo $(s lg)", "alias sn='sudo '; echo $(sn gp)", "echo $(s u)"):
+            with self.subTest(line):
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+
+    def test_the_chain_crosses_the_tables_either_way_as_often_as_it_goes(self):
+        """Behind a wrapper the chain goes on from table to table: a chained body's first word, a body's that ends in
+        another wrapper, and the word after each, looked up in the line's table first, then the snapshot's.  A name is in
+        flight only while its body is read: `ws ws gp` (ws='s') is `sudo sudo git push`, the second ws looked up once the
+        first one's body is over (probed: with `alias y='s'`, `y y gp` printed SNAP-GP), where the hook had read it as the
+        text of the first."""
+        for line in ("w gp", "ws gp", "ws ws gp", "w ws gp", "s s gp", "alias lg='git push'; alias lw=lg; eval 's lw'",
+                     "alias lu=gp; eval 's lu'", "alias lw=ws; eval 'lw lw gp'",
+                     "alias sn='sudo '; eval 'sn u'", "alias sn='sudo '; eval 'sn w gp'", "alias sn='sudo '; eval 's sn gp'",
+                     "alias sn='sudo '; eval 'sn s u'", "alias e='sudo '; eval 'we gp'", "alias sw='w '; eval 'sw u'",
+                     "alias lg='git push'; eval 'w lg'", "alias lg='git push'; eval 'eval s lg'"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+
+    def test_the_lines_alias_stands_over_the_snapshots_of_the_same_name(self):
+        """Where eval's text was parsed after the line redefined or cleared a snapshot alias, the chain reads the line's."""
+        self.refused_for_members("alias gs='git push'; eval 's gs'")
+        self.refused_for_members("alias u='git push'; eval 'w u'")
+        for line in ("alias gp='git status'; eval 's gp'", "unalias gp; eval 's gp'", "unalias u; eval 's u'",
+                     "alias u=true; eval 'w u'", "alias gp='git status'; eval 's u'"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+    def test_the_chain_stops_where_zsh_stops_it(self):
+        """A quoted word, a word no alias names, the line's alias in the line's own text (parsed before it ran), and a
+        wrapper that runs echo each leave the word what it spells."""
+        for line in ("eval \"s 'gp'\"", "alias sn='sudo '; eval \"sn 'gp'\"", "alias lg='git push'; s lg", "s gs", "we gp",
+                     "s s 'gp'", "s \\gp", "alias sn='sudo '; eval 'sn x=1 gp'", "alias lg='git push'; eval 's x lg'"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+    def test_a_word_written_both_ways_is_read_both_ways_along_the_chain(self):
+        """SPD-308 for every word the chain reaches, not the first behind the command word alone: under `alias git=hub`,
+        `s s 'git' push` is git's push behind two wrappers, and `s s git status` beside it hub's status."""
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", MIXED_CHAIN_SNAPSHOT + "alias -- git=hub\n")
+        self.refused_for_members("s s 'git' push; s s git status")
+        self.refused_for_members("alias sn='sudo '; eval \"sn sn 'git' push; sn sn git status\"")
+        self.silent_for_everyone("s s git push")
+        self.silent_for_everyone("s u")  # u is gp, whose body's first word is git: hub's push
+
+    def test_a_body_the_hook_cannot_read_anywhere_along_the_chain(self):
+        for line in ("s broken", "alias sn='sudo '; eval 'sn broken'", "alias lb=broken; eval 's lb'", "w broken"):
+            with self.subTest(line):
+                self.refused_for_members(line, "cannot read")
+
+    def test_the_reason_names_each_snapshot_alias_the_chain_expanded(self):
+        self.assertEqual(self.expansion("s u"), ["s", "u", "gp"])
+        self.assertEqual(self.expansion("w gp"), ["w", "s", "gp"])
+        self.assertEqual(self.expansion("ws ws gp"), ["ws", "s", "ws", "s", "gp"])
+        self.assertEqual(self.expansion("alias sn='sudo '; eval 'sn u'"), ["u", "gp"])
+        self.assertEqual(self.expansion("alias gs='git push'; eval 's gs'"), ["s"])
+
+
+FLIGHT_SCOPE_SNAPSHOT = """\
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+# Functions
+# Shell Options
+setopt autocd
+# Aliases
+alias -- s='sudo '
+alias -- gp='git push'
+alias -- x='echo; s'
+alias -- x2='echo X2;'
+alias -- x3='echo A3; x3'
+alias -- x5='V=1'
+alias -- x6='echo X6 && s'
+alias -- x7='echo X7 | s'
+alias -- z='echo Z; s x'
+alias -- w2=x
+alias -- ls='ls -G'
+alias -- lz='ls; s'
+alias -- rx='echo; w3'
+alias -- w3=rx
+"""
+
+
+class AliasFlightScopeTest(ShellSnapshotCase):
+    """SPD-316: zsh keeps an alias's name in flight while the text of its body is being read -- through its last word,
+    where a body's own name is not looked up again -- and no longer: the member's words after the body are read from the
+    line once the body is over, so a word there named like the alias is looked up as any other.  A body with a command
+    word after a separator (`x='echo; s'`, `s='sudo '`) chains into those words, and `x x gp` runs `echo; sudo echo; sudo
+    git push`.  The hook read the body and the words after it as one text with the name in flight for all of it, so the
+    second x stayed a word sudo runs, and the push went through unread (findings [], expanded ['x', 's']).
+
+    Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py (2026-09-24), with `alias s='nice
+    '`, `gp='echo SNAP-GP'` and the bodies below: `x x gp` printed two blank lines, then SNAP-GP; `x2 x2 gp` X2, X2,
+    SNAP-GP; `x5 x5 gp`, `x7 x7 gp` SNAP-GP; `x6 x6 gp` X6, X6, SNAP-GP; `z z gp` (z='echo Z; s x') Z, a blank line, Z,
+    a blank line, SNAP-GP -- the z after x's expansion, read from the line, looked up again; and `x3` (x3='echo A3; x3')
+    printed A3, then found no command x3: the body's own last word is still in its flight.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    expansion = MixedAliasChainTest.expansion
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", FLIGHT_SCOPE_SNAPSHOT)
+
+    def test_the_tickets_evidence(self):
+        for line in ("x x gp", "eval 'x x gp'", "echo $(x x gp)"):
+            with self.subTest(line):
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+
+    def test_the_words_after_the_body_are_looked_up_once_it_is_over(self):
+        """After a separator, a pipe, an `&&` or an assignment in the body, the member's next word is at a command word or
+        chained behind the body's wrapper, and a word there named like the alias -- or like one its body's first word
+        expanded (`w2 x gp`, w2=x), or the one a chained body stands for (`s x gp`) -- is looked up as zsh looks it up."""
+        for line in ("x2 x2 gp", "x5 x5 gp", "x6 x6 gp", "x7 x7 gp", "z z gp", "x x x gp", "w2 x gp", "s x gp",
+                     "s z gp", "lz x gp", "alias lg='git push'; eval 'x x lg'"):
+            with self.subTest(line):
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+
+    def test_a_name_its_own_body_looks_up_stays_in_flight(self):
+        """The name is in flight for its body's own words, through the last: `x3 gp` runs `echo A3`, then no command x3
+        with gp as its word, and `ls ls` is ls -G listing ls, read without end nowhere; a body that reaches its own name
+        through another alias (rx='echo; w3', w3=rx) keeps it too."""
+        for line in ("x3 gp", "x3 x3", "x3 x3 gp", "ls ls", "ls gp", "ls -la gp", "lz", "rx gp", "rx rx"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+    def test_the_reason_names_each_snapshot_alias_the_chain_expanded(self):
+        self.assertEqual(self.expansion("x x gp"), ["x", "s", "x", "s", "gp"])
+        self.assertEqual(self.expansion("x2 x2 gp"), ["x2", "x2", "gp"])
+
+
 if __name__ == "__main__":
     unittest.main()
