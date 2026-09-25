@@ -1824,7 +1824,7 @@ class ProcessSubstitutionAliasedNameTest(BashHookCase):
     through and `alias gp=hub; cat <(gp)` read the alias.  Probed in zsh 5.9 -f through tests/probes/shell_probe.py: under
     `alias ls='echo ALIASED'`, `cat <(ls -d /)` printed `ALIASED -d /`.  The body's `git` was read as the alias and then
     on as the command it spells too, SPD-308's reading of a word the text spells both quoted and unquoted: the lookup of
-    how the text spells its words (line_aliases.quoted_words) took every word of a text holding `<(` and `alias` for one
+    how the text spells its words (alias_spellings.quoted_words) took every word of a text holding `<(` and `alias` for one
     written every way, for the words a global alias may set in a `<( )` body that the text does not spell
     (ShellWalk.expand_globals).  That doubt now covers the body a global alias's words were set in, while the walk reads
     it, and a body's command word reads exactly as a `$( )` body's does: the alias where one stands, as spelled
@@ -2052,7 +2052,7 @@ class SameTextAliasTest(BashHookCase):
     ls=...<newline>ls -d /"'` ran the alias on the second line (never on the first), and after `alias ls=...`, `eval
     $'unalias ls\\nls -d /'` ran the real ls.  So a text of several lines is read both ways (line_aliases.line_reading).
 
-    The text is now read with the table as it stood where its reading began (line_aliases.AliasView), and what it defines
+    The text is now read with the table as it stood where its reading began (alias_views.AliasView), and what it defines
     goes into the table text parsed after it reads.  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
 
     def setUp(self):

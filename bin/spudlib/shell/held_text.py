@@ -15,7 +15,7 @@ startup files a shell sources, read from its options -- is shell_start's (SPD-30
 import os
 import re
 
-from . import analyse, directories, expansions, globbing, held_options, held_shadows, line_aliases, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
+from . import alias_chains, alias_views, analyse, directories, expansions, globbing, held_options, held_shadows, line_aliases, line_functions, loop_bindings, positional, prepare, stdin_text, syntax
 from ..hooks import hookio, snapshots
 
 
@@ -39,8 +39,8 @@ def read_body(a, text, depth, stdin, fed, shadow=False):
     shell's own none there; probed: a snapshot's `f() { echo in-f X; }`, defined before `alias -g X=snapshot`, printed
     `in-f X`).  An eval or a substitution inside it is parsed as it runs, where they stand again.
 
-    Nor is any alias the snapshot defines, its plain ones included (SPD-290, line_aliases.held_standing): the body is read
-    with a line_aliases.AliasView marked `early`, which no text it parses as it runs inherits (probed in zsh 5.9 -f: a
+    Nor is any alias the snapshot defines, its plain ones included (SPD-290, alias_views.held_standing): the body is read
+    with a alias_views.AliasView marked `early`, which no text it parses as it runs inherits (probed in zsh 5.9 -f: a
     body's `gp` found no command gp, where its `eval gp` and `$(gp)` ran the alias).  The harness's shadows (`shadow`),
     which the snapshot defines after its aliases, are not marked; a body the line defines, parsed with the line, is read
     unmarked wherever it is called, a snapshot body's call included (`f() { gp; }; runit f` ran the alias, runit's body
@@ -54,7 +54,7 @@ def read_body(a, text, depth, stdin, fed, shadow=False):
         if parsed:
             a.alias_scope = 0
             if not shadow:
-                a.alias_view = line_aliases.AliasView(a, False, early=True)
+                a.alias_view = alias_views.AliasView(a, False, early=True)
         elif view is not None:
             a.alias_view = view.parsed_late()
         try:
@@ -84,7 +84,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     dispatched for what they name.  An alias shadows a function of the same name, as the shell resolves them.  `aliased`:
     the word stands where the shell expands an alias (the command position); `function`: where it looks a function up,
     which zsh's noglob, exec and `-` keep and the command position does not (SPD-262, analyse.dispatch_words).  Neither
-    stands in a new shell's text, which never sources the snapshot (line_aliases.held_standing, SPD-290; snapshot_sourced,
+    stands in a new shell's text, which never sources the snapshot (alias_views.held_standing, SPD-290; snapshot_sourced,
     SPD-298): there the word is the program or builtin it names -- except a zsh that sources the user's startup files,
     which holds them, and one that sources part of them, where the word is read both ways (shell_start, SPD-301).
 
@@ -128,7 +128,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     # SPD-305: none where the line surely removed it (`unset -f cd; cd /tmp` runs the builtin), and one a removal that may
     # not have run leaves read beside the command of that name (line_functions.held_function)
     held = line_functions.held_function(a, cmd)
-    if held == "sure" and line_aliases.held_partly(a):
+    if held == "sure" and alias_views.held_partly(a):
         held = "maybe"  # SPD-301: a new zsh's startup files may not define it -- the body and the command both (shell_start)
     body = line_aliases.shell_function(cmd, a) if held else None
     if body is None and line_moved is not line_functions.NO_BODY:
@@ -224,7 +224,7 @@ def body_flight(a, head, text, own_words, names):
     body may look up, where zsh reads them inside its flight; every one where the hook cannot say.  The body is the text
     before the member's words where it ends in them as alias_rest spells them, and otherwise -- a body ending in a blank,
     whose chain spelled them in -- the head's own, which that text's part before them is a chain of."""
-    rest = line_aliases.alias_rest(own_words, a)
+    rest = alias_chains.alias_rest(own_words, a)
     if not rest:
         return names  # nothing of the member's after the body
     if text.endswith(" " + rest):
@@ -239,12 +239,12 @@ def looked_up(a, text):
     """Every word `text` may look up as a name, as an alias it names may on down the chain (the shell's snapshot's, and the
     line's table as it stands and as the text being read was parsed with it) -- a superset, every word of each body --
     or None where it may look up what the hook cannot see: a function (whose body may expand an alias as eval's text
-    does), a body the hook cannot read, an alias whose name it cannot read, past line_aliases.CHAIN_STEPS bodies."""
+    does), a body the hook cannot read, an alias whose name it cannot read, past alias_chains.CHAIN_STEPS bodies."""
     found, view = snapshots.shell_table(a.home), a.alias_view
     if text is None or a.alias_unknown or view is not None and view.unknown or syntax.UNKNOWN_NAME in a.functions:
         return None
     tables = [a.aliases] if view is None else [a.aliases, view.table]
-    seen, texts, left = set(), [text], line_aliases.CHAIN_STEPS
+    seen, texts, left = set(), [text], alias_chains.CHAIN_STEPS
     while texts:
         for word in _FLIGHT_WORD_RE.findall(texts.pop()):
             if word in seen:
@@ -253,8 +253,8 @@ def looked_up(a, text):
             if word in found.functions or word in a.functions:
                 return None
             suffix = word.rpartition(".")[2] if "." in word else None
-            bodies = [table[key] for table in tables for key in (word, line_aliases.GLOBAL_ALIAS + word,
-                      line_aliases.SUFFIX_ALIAS + suffix if suffix else None) if key in table]
+            bodies = [table[key] for table in tables for key in (word, alias_views.GLOBAL_ALIAS + word,
+                      alias_views.SUFFIX_ALIAS + suffix if suffix else None) if key in table]
             bodies += [table[key] for table, key in ((found.aliases, word), (found.galiases, word), (found.saliases, suffix))
                        if key in table]
             left -= len(bodies)
@@ -277,14 +277,14 @@ def snapshot_sourced(a):
     ran the program.  Reading the body there read other text: `sh -c 'intests; echo hi > kept.txt'`, which writes
     ./kept.txt, was read as a write to tests/kept.txt.
 
-    This is the `held` mark of line_aliases.AliasView, which analyse_new_shell clears and every text parsed inside it
-    inherits (SPD-290), and not line_aliases.held_standing, which a snapshot body's `early` mark also clears: the
+    This is the `held` mark of alias_views.AliasView, which analyse_new_shell clears and every text parsed inside it
+    inherits (SPD-290), and not alias_views.held_standing, which a snapshot body's `early` mark also clears: the
     snapshot defines its functions before its aliases, so a body's own words expand none of its aliases, but every one of
     its functions stands when a body runs.
 
     SPD-301: a new zsh that sources the user's startup files, where the profile's functions live, holds them too
     (shell_start): every one where it sources all the files the snapshot came from, and where it sources part of them
-    (line_aliases.held_partly), each read as a function that may or may not stand there (read_shell_name)."""
+    (alias_views.held_partly), each read as a function that may or may not stand there (read_shell_name)."""
     view = a.alias_view
     return view is None or bool(view.held)
 
@@ -300,7 +300,7 @@ def snapshot_sourced(a):
 # `zsh -c gb -i` ran gb non-interactive, -i being its $0; `-ib -c` read `-c` as a script, -b ending the options.  So a zsh
 # both interactive and login reads the files the snapshot came from, and its text is read as the Bash tool's line is
 # (held True); one that is either alone, or plain where a .zshenv exists, reads part of them, which part the hook cannot
-# tell, and is read both ways (line_aliases.PARTLY); one with rcs off reads none but /etc/zshenv (absent on macOS).
+# tell, and is read both ways (alias_views.PARTLY); one with rcs off reads none but /etc/zshenv (absent on macOS).
 #
 # bash -i ran ~/.bashrc's alias and function, bash -l ~/.bash_profile's function (no alias: a non-interactive bash expands
 # none), sh -i the file $ENV names, and `--norc -i` and `--noprofile -l` ran neither.  On this Mac ~/.bashrc is absent and
@@ -319,7 +319,7 @@ _NEXT_WORD_STRING = frozenset({"csh", "tcsh", "fish"})
 
 def shell_start(base, words):
     """(the index of a shell command's first operand -- its `-c` string where it has one -- or len(words); whether it
-    has `-c`; line_aliases.AliasView's `held` for its text, True, False or PARTLY) for the shell `base` and its words as
+    has `-c`; alias_views.AliasView's `held` for its text, True, False or PARTLY) for the shell `base` and its words as
     the line spells them (SPD-301, above).  zsh's single letters `-i`, `-l`, `-f` and `+` of each, `-o NAME` (glued or
     not) and `--NAME`, a name read as zsh reads it (case, `-` and `_` ignored, `no` before it turning it off); bash's
     `--login`, `--norc`, `--noprofile`, and the value `--rcfile`, `--init-file`, `-o` and `-O` take."""
@@ -366,7 +366,7 @@ def shell_start(base, words):
         return i, dash_c, _zsh_held(on)
     sources = base in _POSIX_SHELLS and (on["interactive"] and not (base == "bash" and on["norc"])
                                          or on["login"] and not (base == "bash" and on["noprofile"]))
-    return i, dash_c, line_aliases.PARTLY if sources else False
+    return i, dash_c, alias_views.PARTLY if sources else False
 
 
 def _zsh_option(on, name, value):
@@ -384,10 +384,10 @@ def _zsh_held(on):
     if on["rcs"] and on["interactive"] and on["login"]:
         return True
     if on["rcs"] and (on["interactive"] or on["login"]):
-        return line_aliases.PARTLY
+        return alias_views.PARTLY
     home = os.environ.get("ZDOTDIR") or os.environ.get("HOME") or os.path.expanduser("~")
     files = ["/etc/zshenv"] + ([os.path.join(home, ".zshenv")] if on["rcs"] else [])
-    return line_aliases.PARTLY if any(os.path.exists(f) for f in files) else False
+    return alias_views.PARTLY if any(os.path.exists(f) for f in files) else False
 
 
 # SPD-291: which shells read their text a line at a time, parsing each line once the lines before it ran, so an alias one
@@ -421,8 +421,8 @@ def text_lines(base, fed):
 def expands_no_alias(base):
     """Whether the shell `base` may expand no alias anywhere in its text -- eval's words, a `$( )`, backtick or `<( )`
     body and a trap's action included, which the whole reading text_lines gives it reads as text parsed as it runs, with
-    the text's own aliases (SPD-322, line_aliases.spelled_too has the probe): bash, whose expand_aliases is off unless it
-    is interactive, in POSIX mode or turned on, and which is read both ways wherever it may be (line_aliases.AliasView
+    the text's own aliases (SPD-322, alias_views.spelled_too has the probe): bash, whose expand_aliases is off unless it
+    is interactive, in POSIX mode or turned on, and which is read both ways wherever it may be (alias_views.AliasView
     .bare).  The others expand one in eval's words (probed through tests/probes/shell_probe.py, 2026-09-25: after `alias
     ls="echo ALIASED"`, `eval ls -d /` printed `ALIASED -d /` in /bin/sh -- bash 3.2.57 in POSIX mode -- /bin/dash,
     /bin/ksh and /bin/zsh, from a `-c` string and fed by a pipe alike)."""
@@ -431,8 +431,8 @@ def expands_no_alias(base):
 
 def tool_lines(a):
     """How the Bash tool's own shell reads the member's line (SPD-291): Claude Code sources its snapshot and runs the line
-    through eval, which zsh parses whole (line_aliases, SPD-286) and bash 3.2 with `shopt -s expand_aliases`, which a bash
-    snapshot's option lines run, a line at a time (probed through tests/probes/shell_probe.py: `bash -c 'shopt -s
+    through eval, which zsh parses whole (alias_definitions, SPD-286) and bash 3.2 with `shopt -s expand_aliases`, which a
+    bash snapshot's option lines run, a line at a time (probed through tests/probes/shell_probe.py: `bash -c 'shopt -s
     expand_aliases; eval "$(printf ...)"'` with the alias and `zq hi` on two lines printed `ALIASED hi`, on one line
     `zq: command not found`; zsh -f's eval of the two lines `command not found: zq`).  The snapshot's name says its shell
     (`snapshot-<shell>-<stamp>-<id>.sh`, hooks/snapshots), and any of them may be the one a session sources: False where
@@ -441,18 +441,18 @@ def tool_lines(a):
     `shopt -s` in the snapshot turns on, which Claude Code writes into every bash snapshot it makes) expands no alias at
     all: the whole reading stands for that in the line's own words, but not in eval's words, a substitution's body or a
     trap's action, which it reads with the line's aliases (SPD-322's probe) -- those are read both ways, the alias and the
-    word as written, where such a snapshot may be the one sourced (line_aliases.spelled_too,
+    word as written, where such a snapshot may be the one sourced (alias_views.spelled_too,
     held_options.tool_expands_no_alias, SPD-327)."""
     return syntax.LINES_BOTH if held_options.tool_may_be_bash(a) else False
 
 
-# SPD-323: a shell parses eval's words, a trap's action and a `$( )` or backtick body as its text runs (line_aliases,
+# SPD-323: a shell parses eval's words, a trap's action and a `$( )` or backtick body as its text runs (alias_definitions,
 # SPD-286), and sh and bash parse such a text a line at a time too, each line once the lines before it ran, where zsh
 # parses it whole.  Probed through tests/probes/shell_probe.py (2026-09-25), GNU bash 3.2.57 driving each shell with the
 # text on two lines, `alias ls='echo ALIASED'` then `unalias ls; ls -d /`: eval's printed `ALIASED -d /` in /bin/sh
 # (bash 3.2.57 in POSIX mode), /bin/dash and /bin/bash after `shopt -s expand_aliases`, from `-c` and fed by a pipe, and
 # `/` in /bin/zsh -f (from `-c` and fed) and /bin/ksh (AJM 93u+ 2012-08-01), and in /bin/bash with expand_aliases off
-# (line_aliases.spelled_too reads that); with `alias ls='echo SECOND'; ls -d /` for the second line, ALIASED in the
+# (alias_views.spelled_too reads that); with `alias ls='echo SECOND'; ls -d /` for the second line, ALIASED in the
 # first three; a trap's action read as eval's in each shell; a `$( )` and a backtick body printed ALIASED in sh and bash,
 # `/` in zsh, ksh and dash, which parses the body with the line around it (SPD-326's), and so did `$(alias ls=...
 # <newline>ls -d /)`, the alias on the body's first line, zsh -f and -f -o nobareglobqual driving them too; a `<( )`
@@ -465,14 +465,14 @@ _LINE_PARSED = frozenset({"dash", "ash"})
 def parsed_lines(a, substitution=False):
     """How the shell that runs the text being read reads a text it parses as that text runs -- eval's words and a trap's
     action, or (`substitution`) a `$( )` or backtick body -- as analyse.analyse_command's `lines` says it (SPD-323,
-    above): the shell line_aliases.AliasView.shell names, the Bash tool's own read as tool_lines reads its line; whole in
+    above): the shell alias_views.AliasView.shell names, the Bash tool's own read as tool_lines reads its line; whole in
     zsh and ksh (False, and in csh, tcsh and fish, whose `alias` the reader does not read); a line at a time in dash and
     ash (True), but for a substitution's body, which they parse with the line around it, read whole as before; and in
     bash, sh and a shell the hook cannot name either way (syntax.LINES_BOTH): bash may expand no alias at all, and the
     shell /bin/sh stands for may be zsh."""
     view = a.alias_view
-    shell = line_aliases.TOOL_SHELL if view is None else view.shell
-    if shell == line_aliases.TOOL_SHELL:
+    shell = alias_views.TOOL_SHELL if view is None else view.shell
+    if shell == alias_views.TOOL_SHELL:
         return tool_lines(a)
     if shell in _LINE_PARSED:
         return not substitution
@@ -498,7 +498,7 @@ def substitution_view(a):
     view = a.alias_view
     if view is None or view.shell not in _SUBSTITUTION_WITH_TEXT:
         return None
-    now = line_aliases.AliasView(a, False)
+    now = alias_views.AliasView(a, False)
     if (now.table, now.doubted, now.unknown) == (view.table, view.doubted, view.unknown):
         return None
     return view.whole()

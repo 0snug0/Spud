@@ -1,6 +1,7 @@
 """shell/expansions: Parameter expansions and a command's read points.
 
-Its alias reading, the aliases a line defines for eval and the ones the shell already holds, is shell/line_aliases (SPD-284)."""
+Its alias reading, the aliases a line defines for eval and the ones the shell already holds, is shell/line_aliases (SPD-284)
+and the four modules SPD-314 took out of it: alias_definitions, alias_views, alias_spellings and alias_chains."""
 
 import functools
 

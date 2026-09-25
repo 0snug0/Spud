@@ -2435,7 +2435,7 @@ class BashUnexpandedAliasTest(BashHookCase):
     included, where the hook read those as text parsed as the text runs (SPD-283, SPD-286) and expanded the text's own
     alias there: `bash -c 'alias git=echo; eval git push'`, `bash -c 'alias git=echo; echo $(git push)'` and `echo 'alias
     git=echo; eval git push' | bash` pushed with no finding (Law 7).  In a bash's text such a word is now read both ways,
-    the alias and on as it is written (line_aliases.spelled_too, AliasView.bare, held_text.expands_no_alias).
+    the alias and on as it is written (alias_views.spelled_too, AliasView.bare, held_text.expands_no_alias).
 
     Probed through tests/probes/shell_probe.py (2026-09-25), zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual, -f
     and GNU bash 3.2.57 each driving /bin/bash 3.2.57, /bin/sh, /bin/dash, /bin/ksh and /bin/zsh, each printing the same,
@@ -2533,7 +2533,7 @@ class ParsedTextLineAliasTest(BashHookCase):
     with and, for bash and sh, the table as it stands at the command (line_aliases.line_reading, SPD-286), which already
     holds what that command's own line did: `sh -c 'eval "alias gq=\\"git push\\"<newline>unalias gq; gq"'` pushed with
     no finding (Law 7).  Each such line is now read with the aliases the lines before it left (walk.ShellWalk.new_line,
-    new_body_line), where the shell running the text reads it so (held_text.parsed_lines, line_aliases.AliasView.shell).
+    new_body_line), where the shell running the text reads it so (held_text.parsed_lines, alias_views.AliasView.shell).
 
     Probed through tests/probes/shell_probe.py (2026-09-25), GNU bash 3.2.57 driving each shell, the text on two lines,
     `alias ls='echo ALIASED'` then `unalias ls; ls -d /`:
@@ -2649,7 +2649,7 @@ class DashSubstitutionAliasTest(BashHookCase):
     defined before it: `dash -c 'alias git=echo; echo $(git push)'`, its backtick form and the text fed to dash by a pipe
     pushed with no finding (Law 7).  Where the shell running the text may be dash -- dash, ash, sh, whose /bin/sh may be
     dash, and a shell the hook cannot name -- such a body is now read with the aliases of the text around it too, whole,
-    wherever they differ from the table as it stands (held_text.substitution_view, line_aliases.AliasView.whole).
+    wherever they differ from the table as it stands (held_text.substitution_view, alias_views.AliasView.whole).
 
     Probed through tests/probes/shell_probe.py (2026-09-25), zsh 5.9 -f -o nobareglobqual, zsh 5.9 -f and GNU bash
     3.2.57 each driving /bin/dash, each printing the same:
@@ -2775,7 +2775,7 @@ class BashSnapshotBareAliasTest(BashHookCase):
     expands no alias at all, in eval's words and a substitution's body as in its own line -- which held_text.tool_lines's
     whole reading stands for in the line's own words only, reading eval's and a substitution's with the line's alias:
     `alias git=echo; eval git push` on the member's own line pushed with no finding (Law 7).  Such a word is now read both
-    ways, the alias and as written (line_aliases.spelled_too, held_options.tool_expands_no_alias), as SPD-322 reads a
+    ways, the alias and as written (alias_views.spelled_too, held_options.tool_expands_no_alias), as SPD-322 reads a
     bash's `-c` text.  A bash snapshot that turns expand_aliases on -- Claude Code 2.1.282 appends `shopt -s
     expand_aliases` to every one it writes, after the `shopt -p` lines of the shell that made it -- reads as before, and so
     does a zsh snapshot, and no snapshot at all.
@@ -2882,7 +2882,7 @@ class BashSnapshotGlobalAliasTest(BashHookCase):
     hook reads the global alias's words in their place.  Under Claude Code's own bash snapshot, which turns expand_aliases
     on, `alias -g push=status; eval git push` read as `git status` and `alias -g git=echo; eval git push` as `echo push`,
     and both pushed with no finding (Law 7).  Such a word is now refused a member unread wherever a bash snapshot is
-    present (line_aliases.global_spelled, held_options.tool_may_be_bash); a zsh snapshot and no snapshot read as before.
+    present (alias_views.global_spelled, held_options.tool_may_be_bash); a zsh snapshot and no snapshot read as before.
 
     AGENT_A and AGENT_B plan tests/** and bin/spud."""
 

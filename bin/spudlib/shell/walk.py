@@ -5,8 +5,8 @@ has consumed are what a definition's body is taken down from (ShellWalk.define t
 reading stays with the walk.  LineBody and the module functions that read one at a call (read_call, read_line_body,
 assign_function, hook_functions) are a seam of their own, shell/line_functions (SPD-280)."""
 
-from . import (analyse, assignment_words, directories, expansions, globbing, held_text, heredocs, line_aliases,
-               line_functions, loop_bindings, prepare, reevaluation, stdin_text, syntax, unread)
+from . import (alias_spellings, alias_views, analyse, assignment_words, directories, expansions, globbing, held_text, heredocs,
+               line_aliases, line_functions, loop_bindings, prepare, reevaluation, stdin_text, syntax, unread)
 from ..hooks import hookio
 
 # The loops whose header names a variable, one header grammar to zsh (its parser's par_for; ShellWalk.names_end)
@@ -184,8 +184,8 @@ class ShellFrame:
 
 def _alias_state(a):
     """The line's alias table as it stands, for a loop to compare where it opens and closes (ShellWalk.read_loop_again):
-    its line_aliases.AliasView, or None where it holds no alias and none the hook cannot read."""
-    return line_aliases.AliasView(a, False) if a.aliases or a.alias_unknown else None
+    its alias_views.AliasView, or None where it holds no alias and none the hook cannot read."""
+    return alias_views.AliasView(a, False) if a.aliases or a.alias_unknown else None
 
 
 def _set_aliases(a, state):
@@ -462,7 +462,7 @@ class ShellWalk:
         and `alias x=y; eval 'alias g2="echo G2-RAN"; cat <(g2)'` printed G2-RAN, parsed after eval's own alias ran).  The
         walk reads the body as a frame of the line's own words, so while the line's table holds any alias the frame is
         read a level into ShellAnalysis.alias_scope, as analyse.analyse_isolated reads a `$( )` body, with the table as
-        it stands here (line_aliases.AliasView): zsh parses the body whole, so an alias it defines stands in none of its
+        it stands here (alias_views.AliasView): zsh parses the body whole, so an alias it defines stands in none of its
         own words (`cat <(alias g3=...; g3)` found no command g3, on one line or two).  bash 3.2 with `shopt -s
         expand_aliases` reads the body a line at a time (`cat <(alias g4=...<newline>g4)` ran it), and the walk's tokens
         no longer tell a newline from a `;`, so the view is one of several lines (line_aliases.line_reading): a body's
@@ -474,7 +474,7 @@ class ShellWalk:
 
         SPD-300: inside a function body the snapshot defines, read with an AliasView marked `early` (SPD-290: parsed
         before the snapshot's aliases), the body is still parsed when it runs, once the snapshot is sourced, so the
-        snapshot's aliases stand in it (line_aliases.held_standing; probed in zsh 5.9 -f through
+        snapshot's aliases stand in it (alias_views.held_standing; probed in zsh 5.9 -f through
         tests/probes/shell_probe.py, a file of functions then `alias gp='echo GP-RAN'` sourced: a body's `cat <(gp)`,
         `echo x > >(gp)` and a loop's `cat <(gp)` ran GP-RAN, where the body's own `gp` and `cat <(sh -c gp)` found no
         command gp).  Where the line's table holds none the view above is not made, so the frame still puts the body's
@@ -483,7 +483,7 @@ class ShellWalk:
 
         SPD-315: the body's command word reads exactly as a `$( )` body's does -- the alias where the text spells it
         unquoted, the command it names where quoted, both where both (SPD-308) -- by the line's own quotes
-        (line_aliases.spellings), which spell every word of the body but the ones a global alias set there
+        (alias_spellings.spellings), which spell every word of the body but the ones a global alias set there
         (expand_globals).  Where one did, the body is read as a text whose quotes the hook cannot see
         (ShellAnalysis.quoted_text None: every word both ways, more than zsh runs, never less) until it closes, when pop
         puts the text back; every other body is read by the line's quotes, so under the line's `alias git=hub`, `cat <(git
@@ -491,7 +491,7 @@ class ShellWalk:
         ls='echo ALIASED'`, `cat <(ls -d /)` printed `ALIASED -d /`), where it had read git's push as well."""
         view = self.a.alias_view
         if self.a.aliases or self.a.alias_unknown:
-            self.a.alias_view = line_aliases.AliasView(self.a, True)
+            self.a.alias_view = alias_views.AliasView(self.a, True)
             self.a.alias_scope += 1
             quoted = (self.a.quoted_text, self.a.quoted_sets) if self.expand_globals() else None
             if quoted is not None:
@@ -507,8 +507,8 @@ class ShellWalk:
         expand_line_globals).  zsh parses the body when it runs it, so every unquoted word there that spells a global
         alias of the table as it stands here -- the line's own, and the snapshot's as the line left them -- is that
         alias's body, as in a `$( )` body (analyse.analyse_isolated) and eval's words (line_aliases.global_aliased), and
-        the line's own text leaves them be (line_aliases.alias_words).  Probed in zsh 5.9 -f and -f -o nobareglobqual through
-        tests/probes/shell_probe.py, each line run by eval as the Bash tool's shell runs it: after `alias -g Y="; echo
+        the line's own text leaves them be (alias_spellings.alias_words).  Probed in zsh 5.9 -f and -f -o nobareglobqual
+        through tests/probes/shell_probe.py, each line run by eval as the Bash tool's shell runs it: after `alias -g Y="; echo
         PUSHED"`, `cat <(echo p2 Y)` printed p2 then PUSHED, and `echo x > >(cat; echo in-out Y2)` the same; with `alias -g
         X=snapshot` held, `alias -g X=line; cat <(echo p1 X)` printed `p1 line`; `'Q'`, `"Q"` and `\\Q` were left as
         written; a body holding another global alias expanded it, one holding `$( )` ran it, a case in the body read its
@@ -516,7 +516,7 @@ class ShellWalk:
         <(echo p8 U); }; alias -g U=later; f` printed `p8 later`.
 
         The walk has the body as tokens, which no longer show a word's quotes, so a word is taken for a name only where
-        the text writes it unquoted (line_aliases.plain_words; for a function body line_functions reads, the text its
+        the text writes it unquoted (alias_spellings.plain_words; for a function body line_functions reads, the text its
         definition was read from, SPD-311; any word where the walk has no text: more than zsh runs, never less).  Each
         such word's expansion is tokenized as analyse_command would (analyse.spliced_tokens) and set in its place among the walk's tokens, which
         the walk then reads as the body's own: its commands, what it prints, the directories it moves through.  A word of
@@ -532,7 +532,7 @@ class ShellWalk:
         if not names:
             return False
         if self.plain is None and self.text is not None:
-            self.plain = line_aliases.plain_words(self.text)
+            self.plain = alias_spellings.plain_words(self.text)
         unknown, budget, spliced = line_aliases.unknown_global(a, names), [line_aliases.GLOBAL_EXPANSIONS], []
         for j in _procsub_words(self.toks, self.at + 1) if words is None else words:
             word = self.toks[j]
@@ -545,7 +545,7 @@ class ShellWalk:
             tokens = None if text is None else analyse.spliced_tokens(text, a, self.glued)
             if tokens is not None:
                 spliced.append((j, tokens))
-                if words is None and line_aliases.global_spelled(a):
+                if words is None and alias_views.global_spelled(a):
                     # SPD-322: a bash, which has no global alias, runs the body's word as written, as global_aliased
                     # refuses it in a `$( )` body; a later line's word (`words`) is read as written by the reading that
                     # reads its text whole (analyse.walk_readings, held_text.text_lines)
@@ -564,7 +564,7 @@ class ShellWalk:
         where it ends one of the text's lines -- no compound command open, no definition's header waiting for its body,
         no `&&`, `||` or `|` (`before`) carrying the command on to the next line -- the shell has run that line before it
         parses the next, so the next is read as text parsed as the text runs, a level into ShellAnalysis.alias_scope,
-        with the aliases the lines before it left (line_aliases.AliasView) -- once the table holds one, and for every line
+        with the aliases the lines before it left (alias_views.AliasView) -- once the table holds one, and for every line
         after that.  Its global aliases are expanded in its words as it opens (expand_line_globals), the rest where a
         command word reads the view (analyse.dispatch_words, line_aliases.suffix_substitution).  Probed through
         tests/probes/shell_probe.py (2026-09-24), sh, zsh and dash fed each script by a pipe, after a line `alias
@@ -580,7 +580,7 @@ class ShellWalk:
             if not self.line_scope:
                 self.line_saved, self.line_scope = a.alias_view, 1
                 a.alias_scope += 1
-            a.alias_view = line_aliases.AliasView(a, False)
+            a.alias_view = alias_views.AliasView(a, False)
         elif ends and self.stack and self.stack[-1].kind == "sub" and not self.stack[-1].prints:
             self.new_body_line(self.stack[-1])
         # ... and in every line after that, a compound's too, but for one inside a `<( )` or `>( )` body (the "sub" frame
@@ -593,7 +593,7 @@ class ShellWalk:
         in text the shell reads a line at a time.  bash, which parses such a body when it runs it, parses it a line at a
         time as it does eval's words, each line once the lines before it ran (held_text.parsed_lines has the probe: `cat
         <(alias ls=...<newline>unalias ls; ls -d /)` printed ALIASED), so the body's next line is read with the aliases
-        the lines before it left (line_aliases.AliasView), a level into ShellAnalysis.alias_scope that the frame opened
+        the lines before it left (alias_views.AliasView), a level into ShellAnalysis.alias_scope that the frame opened
         where it opened (open_process_substitution) or opens now, and pop closes.  Where the shell parses the body whole
         (zsh, ksh) the view it opened with stands for every line of it, and so it does in zsh's reading (`glued`) where
         the shell may read the body either way (syntax.LINES_BOTH: an sh that may be zsh), as analyse.walk_readings reads
@@ -608,7 +608,7 @@ class ShellWalk:
             view, _, quoted = frame.alias_view or (a.alias_view, 0, None)
             frame.alias_view = (view, 1, quoted)
             a.alias_scope += 1
-        a.alias_view = line_aliases.AliasView(a, False)
+        a.alias_view = alias_views.AliasView(a, False)
 
     def expand_line_globals(self):
         """The global aliases that stand in the next line of the text, expanded in its words as zsh parses it (SPD-291):
@@ -992,7 +992,7 @@ class ShellWalk:
         files: after `alias ls='echo ALIASED'`, `echo *(e:'ls -d /':)` printed `ALIASED -d /` twice and `echo *(+ls)`
         ran the alias; `eval 'alias l2="echo L2"; echo *(e:l2:)'` ran L2, which since SPD-286 no word of that eval text's
         own reads; under -o nobareglobqual each is `bad pattern`).  So while the line's table holds any alias, the code is
-        read a level into ShellAnalysis.alias_scope with the table as it stands here (line_aliases.AliasView), as
+        read a level into ShellAnalysis.alias_scope with the table as it stands here (alias_views.AliasView), as
         analyse.analyse_isolated reads a `$( )` body -- without analyse.isolated, since the code runs in the line's own
         shell.  zsh alone runs it, parsing it whole, so the view reads it as one line.  What the code defines stands for
         the next match, not its own (`echo *(e:'alias ls="echo INNER"; ls -d /':)` ran ALIASED, then INNER; an alias
@@ -1010,7 +1010,7 @@ class ShellWalk:
         late = None if view is None else view.parsed_late()
         for again in (False, True):
             parsed = 1 if self.a.aliases or self.a.alias_unknown else 0
-            current = line_aliases.AliasView(self.a, False) if parsed else None
+            current = alias_views.AliasView(self.a, False) if parsed else None
             if again and current == read_with:
                 return
             self.a.alias_view = current if parsed else late

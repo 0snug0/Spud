@@ -3,8 +3,8 @@
 A module of its own since SPD-267: line_options and option_effect taken out of shell/held_text, and the option tables they
 read out of shell/syntax, which nothing else reads.  analyse.analyse_command calls line_options once, at a line's first
 reading.  A leaf the shell reading's import cycle reaches: it imports hooks/snapshots and nothing of the cycle.
-tool_expands_no_alias (SPD-327) reads whether a bash snapshot turns expand_aliases on, for line_aliases.spelled_too;
-tool_may_be_bash (SPD-328) whether any snapshot is bash's, for held_text.tool_lines and line_aliases.global_spelled."""
+tool_expands_no_alias (SPD-327) reads whether a bash snapshot turns expand_aliases on, for alias_views.spelled_too;
+tool_may_be_bash (SPD-328) whether any snapshot is bash's, for held_text.tool_lines and alias_views.global_spelled."""
 
 import os
 
@@ -32,7 +32,7 @@ def line_options(a):
 
 
 # SPD-327: bash expands no alias at all where it is not interactive -- in eval's words and a substitution's body as in its
-# own text (line_aliases.spelled_too has the probe) -- until `shopt -s expand_aliases` turns it on, and the snapshot's
+# own text (alias_views.spelled_too has the probe) -- until `shopt -s expand_aliases` turns it on, and the snapshot's
 # option lines are what turn it on in the Bash tool's shell.  Claude Code writes that line into every bash snapshot it
 # makes, after the `shopt -p` lines of the shell that made it (read 2026-09-25 in the snapshot script of Claude Code
 # 2.1.282: `echo "shopt -s expand_aliases" >> "$SNAPSHOT_FILE"`, with or without a startup file to source), so a bash
@@ -47,7 +47,7 @@ _EXPANDS_ALIASES = {}
 def tool_may_be_bash(a):
     """Whether the Bash tool's own shell may be a bash: a snapshot any session may source is bash's, by its name
     (`snapshot-<shell>-<stamp>-<id>.sh`, hooks/snapshots) -- held_text.tool_lines's question (SPD-291), and
-    line_aliases.global_spelled's, bash having no global alias whatever its options (SPD-328)."""
+    alias_views.global_spelled's, bash having no global alias whatever its options (SPD-328)."""
     for path in snapshots.shell_table(a.home).files:
         if os.path.basename(path).startswith(_BASH_SNAPSHOT):
             return True

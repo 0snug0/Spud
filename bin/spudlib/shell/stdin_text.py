@@ -70,8 +70,8 @@ names.
 import os
 import re
 
-from . import (arg_writes, directories, expansions, globbing, held_text, heredocs, line_aliases, line_functions, prepare,
-               syntax)
+from . import (alias_views, arg_writes, directories, expansions, globbing, held_text, heredocs, line_aliases, line_functions,
+               prepare, syntax)
 from ..hooks import snapshots
 
 # The operands that name the standard input the line gave the shell rather than a script file of its own (probed:
@@ -522,7 +522,7 @@ def _shadowed(name, a, called=None):
     A function the line defines is read for the text its body prints where a call runs it (LineCall, SPD-272), so
     `called` names one this leaves aside: the command's reading beside the call's, or whether anything else shadows it.
 
-    SPD-300: a snapshot alias only where the snapshot's aliases stand (line_aliases.held_standing, SPD-290): not in a
+    SPD-300: a snapshot alias only where the snapshot's aliases stand (alias_views.held_standing, SPD-290): not in a
     function body the snapshot defines before its aliases, nor in a new shell's text (probed in zsh 5.9 -f through
     tests/probes/shell_probe.py, a file of functions then `alias cat='echo CAT-ALIAS'` sourced: a body's `printf 'echo
     PIPED\\n' | cat | sh` printed PIPED, the real cat, where the same line outside the body ran CAT-ALIAS).
@@ -545,7 +545,7 @@ def _shadowed(name, a, called=None):
             return True
     table = snapshots.shell_table(a.home)
     return bool(line_functions.held_function(a, name)) \
-        or name in table.aliases and name not in a.expanding and line_aliases.held_standing(a)
+        or name in table.aliases and name not in a.expanding and alias_views.held_standing(a)
 
 
 def _hashed(name, a):

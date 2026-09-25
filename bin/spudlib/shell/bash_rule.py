@@ -214,7 +214,7 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 # "bash-alias" a global alias the line's reading expanded in text a bash parses as it runs (eval's words, a `$( )`,
 #             backtick or `<( )` body, a trap's action: line_aliases.global_aliased, ShellWalk.expand_globals), where
 #             bash, which has no global alias, runs the words as written, which that reading did not read
-#             (line_aliases.global_spelled, SPD-322, SPD-328); shown is the text, or the word.
+#             (alias_views.global_spelled, SPD-322, SPD-328); shown is the text, or the word.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
@@ -628,7 +628,7 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
         elif kind == "shell-alias":
             # SPD-289: the word is a command word for a plain or a suffix alias, and any word for a global one (SPD-283,
             # line_aliases.alias_doubt); zsh expands no alias of a word quoted in any way, the respelling offered.  SPD-295,
-            # SPD-308: since the hook now reads a quoted command word as zsh does (line_aliases.spellings), by how each
+            # SPD-308: since the hook now reads a quoted command word as zsh does (alias_spellings.spellings), by how each
             # word of the text is written -- one written both quoted and unquoted is read both ways, the alias where it
             # is unquoted and the command it names where it is quoted -- and a suffix alias by the word's own spellings,
             # not every word ending in that suffix
