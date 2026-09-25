@@ -560,6 +560,20 @@ class CaptureTest(VaultCase):
         for path in keep:
             self.assertTrue(path.is_file(), path)
 
+    def test_a_project_s_board_is_never_captured_and_a_view_of_the_home_s_own_is(self):
+        # SPD-324: ledger/<project name>.base is this home's, one per project it registered, and shipped it would reach
+        # every other home filtered to a project that home may not have.  The template is what the tool ships instead.
+        name = self.cli_json("project", "show", "spud")["project"]["name"]
+        self.cli("home", "sync", actor="spud")  # init writes no board; the sync does
+        board = self.home.path / "ledger" / (name + ".base")
+        self.assertTrue(board.is_file())
+        (self.home.path / "ledger" / "Mine.base").write_text("views: []\n", encoding="utf-8")
+        record = json.loads(self.capture().stdout)
+        self.assertIn("share/ledger/Mine.base", record["written"])
+        self.assertNotIn("share/ledger/%s.base" % name, record["written"] + record["unchanged"])
+        self.assertFalse((self.wt / "share" / "ledger" / (name + ".base")).exists())
+        self.assertTrue((self.wt / "share" / spud.BOARD_TEMPLATE).is_file())  # a capture leaves the template alone
+
     def test_a_file_a_capture_removes_goes_through_the_deliverable_check_with_the_rest(self):
         # The written paths are all inside these globs and the stale one is not, so the refusal can only be about what
         # this capture would delete.
@@ -695,6 +709,17 @@ class DoctorVaultTest(VaultCase):
         self.assertIn(rel, note)
         self.assertIn(PLUGIN_ONE["id"], note)
         self.assertIn("vault install", note)
+
+    def test_a_project_s_board_is_no_note_where_the_same_view_elsewhere_is_one(self):
+        # SPD-324: a board is the home's and no shipped view, and its one view is Board.base's Kanban, whose note already
+        # names the plugin once for the whole home.  The same view in a file that is no board is still a note.
+        name = self.cli_json("project", "show", "spud")["project"]["name"]
+        self.base_view(PLUGIN_ONE["views"][0], filename=name + ".base")
+        other = self.base_view(PLUGIN_ONE["views"][0], filename="Extra.base")
+        shutil.rmtree(self.vault(spud.PLUGINS, PLUGIN_ONE["id"]))
+        self.assertEqual(self.notes(), [other])
+        # A board that differs from anything the tool ships is no drift either.
+        self.assertEqual([n for n in self.report()["notes"] if name + ".base" in n], [])
 
     def test_a_table_only_base_file_is_quiet_even_without_the_plugin(self):
         # `table` is Obsidian's own view type: it names no plugin, so removing one changes nothing for it.

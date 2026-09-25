@@ -113,6 +113,46 @@ class ProjectAddTest(RepoMixin, SpudTestCase):
         proc = self.cli("project", "add", self.other, "--key", "badtakes", "--ticket-prefix", "BAD", "--team-prefix", "BADS", "--landing", "pr", actor=m["ref"], check=False)
         self.assertEqual(proc.returncode, 3, proc)
 
+    def add_named(self, name, check=True):
+        return self.cli("--json", "project", "add", self.other, "--key", "badtakes", "--ticket-prefix", "BAD", "--team-prefix", "BADS",
+                        "--landing", "pr", "--name", name, actor="spud", check=check)
+
+    def test_add_writes_the_project_s_kanban_board_and_says_so(self):
+        # SPD-324: ledger/<name>.base, rendered from the shipped template for this project and no other.
+        out = json.loads(self.add_named("Bad Takes").stdout)
+        board = self.home.path / "ledger" / "Bad Takes.base"
+        self.assertEqual(out["board"], {"project": "badtakes", "path": "ledger/Bad Takes.base", "board": "written"})
+        text = board.read_text(encoding="utf-8")
+        self.assertEqual(text, spud.board_text(spud.Ctx(self.home.path, "SPUD_HOME", False, tool=self.home.tool),
+                                               {"key": "badtakes", "name": "Bad Takes"}))
+        view = spud.read_base(text)["views"][0]
+        self.assertEqual((view["type"], view["name"]), ("notion-board", "Bad Takes"))
+        self.assertIn('project == "badtakes"', view["filters"]["and"])
+        second = self.make_repo("second-")
+        proc = self.cli("project", "add", second, "--key", "second", "--ticket-prefix", "SEC", "--team-prefix", "SECS", "--landing", "pr",
+                        "--name", "Second", actor="spud")
+        self.assertIn("wrote ledger/Second.base, project second's board", proc.stdout)
+
+    def test_add_keeps_a_board_that_is_already_there_byte_for_byte(self):
+        board = self.home.path / "ledger" / "Bad Takes.base"
+        board.write_text("views: []\n", encoding="utf-8")
+        out = json.loads(self.add_named("Bad Takes").stdout)
+        self.assertEqual(out["board"]["board"], "kept")
+        self.assertEqual(board.read_text(encoding="utf-8"), "views: []\n")
+
+    def test_a_name_that_cannot_name_a_board_gets_none_and_the_add_still_happens(self):
+        shipped_board = (self.home.path / "ledger" / "Board.base").read_bytes()
+        out = json.loads(self.add_named("Board").stdout)
+        self.assertEqual(out["project"]["key"], "badtakes")
+        self.assertEqual(out["board"]["board"], "skipped")
+        self.assertIn("ledger/Board.base", out["board"]["reason"])
+        self.assertEqual((self.home.path / "ledger" / "Board.base").read_bytes(), shipped_board)
+        second = self.make_repo("second-")
+        proc = self.cli("project", "add", second, "--key", "second", "--ticket-prefix", "SEC", "--team-prefix", "SECS", "--landing", "pr",
+                        "--name", "a/b", actor="spud")
+        self.assertIn("no board for project second: its name 'a/b' holds a path separator", proc.stdout)
+        self.assertFalse((self.home.path / "ledger" / "a").exists())
+
     def test_list_and_show(self):
         self.add_project(self.other)
         rows = self.cli_json("project", "list")["projects"]

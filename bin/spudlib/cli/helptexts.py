@@ -194,9 +194,16 @@ the file's own path inside it; every copy is named in the output.  Nothing is wr
 {{mark}} with no value refuses the whole sync naming the mark, as `spud init` refuses, and so does a lock this tool
 will not install from.  A refused download is a line in the output, never a failed command.
 
+It also writes each non-archived project's Kanban board, ledger/<project name>.base, where the home has none: the
+Kanban view of ledger/Board.base filtered to that project and named after it, rendered from the shipped
+share/ledger/_templates/project.base.  `project add` and `project install` write the same board when it is absent.  A
+board that is there is the home's and is never replaced or copied, whatever it holds; a project whose name is not one
+plain file name, starts with a dot, or is the name of a view the tool ships gets none, and the output says why.
+
 --check prints what would change, file by file -- what would be written, what already holds the shipped text, and where
 the copy of each replaced file would be kept -- and writes nothing, downloads nothing and keeps no copy.  Run it first.
-`spud doctor` names each tool-owned file this home does not have, or has and has changed, as a note.
+`spud doctor` names each tool-owned file this home does not have, or has and has changed, as a note; a project's board
+is no tool-owned file and is never one of them.
 """
 
 VAULT_DESCRIPTION = """\
@@ -213,10 +220,12 @@ alone -- `spud home sync` refreshes them, keeping a copy of what it replaces, wh
 `vault capture --into <worktree>` is the other direction, and a member's: it writes share/obsidian/,
 share/obsidian.lock.json and share/ledger/*.base in a linked worktree of this repository from what this home's vault
 holds now.  Only what is turned on is captured -- the plugins community-plugins.json enables, the theme and the snippets
-appearance.json names -- and never a note, never workspace.json.  Each plugin's and theme's GitHub repository comes from
-Obsidian's own community lists, and a file is pinned only when the download is byte for byte what is installed, so a
-plugin changed by hand or installed from outside the store is refused by name.  The main checkout, another repository,
-and any path outside the member's deliverables are all refused before anything is written.
+appearance.json names -- and never a note, never workspace.json, never a project's own board (ledger/<project
+name>.base, which `spud home sync` renders per project from share/ledger/_templates/project.base).  Each plugin's and
+theme's GitHub repository comes from Obsidian's own community lists, and a file is pinned only when the download is
+byte for byte what is installed, so a plugin changed by hand or installed from outside the store is refused by name.
+The main checkout, another repository, and any path outside the member's deliverables are all refused before anything
+is written.
 
 `spud doctor` names, as notes, each shipped settings file, .base file, or plugin and theme version the home has and has
 changed since the last capture.  SPUD_VAULT_DOWNLOADS=off refuses every download (the suite sets it on every home).

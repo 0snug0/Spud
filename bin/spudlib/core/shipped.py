@@ -23,6 +23,10 @@ MARKS = {
     "ticket_prefix": "tickets.prefix in the config, which is project 1's",
     "team_prefix": "teams.prefix in the config, which is project 1's",
     "project_key": "project 1's key, or the empty string when no project is registered",
+    # SPD-324: the one mark a home's own files do not read.  share/ledger/_templates/project.base carries it with
+    # {{project_key}}, and commands/projectboards renders that template once per registered project, filling both with
+    # that project's row -- the name as a YAML scalar there, quoted when a plain one would read as something else.
+    "project_name": "project 1's name, or the empty string; a project board fills it with its own project's name",
     "project_root": "project 1's root_path, or the empty string",
     "project_remote": "the project root's origin URL, or -",
     "identity_name": "identity.name in the config",
@@ -52,7 +56,7 @@ def marks(ctx, project=None):
 
     Every key of MARKS, so a rendered file keeps no mark.  The prefixes come from the config rather than from the row
     because doctor compares the two and the config is what `config sync` refreshes the row from.  With no project the
-    three project marks are empty, which is what `init --no-project` leaves: the sentence that carries them is dropped by
+    four project marks are empty, which is what `init --no-project` leaves: the sentence that carries them is dropped by
     the command that writes the file, not here."""
     config = ctx.config
     identity = config.get("identity", {})
@@ -71,6 +75,8 @@ def marks(ctx, project=None):
         "ticket_prefix": config.get("tickets", {}).get("prefix", ""),
         "team_prefix": config.get("teams", {}).get("prefix", ""),
         "project_key": project["key"] if project is not None else "",
+        # dict(): the row may be a dict or an sqlite3.Row, and a caller's own dict may carry no name at all.
+        "project_name": (dict(project).get("name") or "") if project is not None else "",
         "project_root": root,
         "project_remote": (root and homeconf.git_remote_url(root)) or "-",
         "identity_name": identity.get("name", "Spud"),

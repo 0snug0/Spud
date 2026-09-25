@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from ..commands import reportentry, settings_sync
+from ..commands import projectboards, reportentry, settings_sync
 from ..core import homeconf, kernel
 from ..hooks import worktrees
 from ..state import actors, ledgerdb, lookup
@@ -165,6 +165,7 @@ def cmd_project_add(ctx, args):
         remote = homeconf.git_remote_url(root)
         branch = args.default_branch or origin_head_branch(root) or "main"
         name = args.name or os.path.basename(root)
+        board = projectboards.plan_board(ctx, {"key": args.key, "name": name, "archived_at": None})
         at = kernel.now()
         with ledgerdb.write_txn(con):
             check_project_key(con, args.key)
@@ -182,8 +183,12 @@ def cmd_project_add(ctx, args):
             d = project_dict(ctx, con, lookup.get_project(con, args.key))
     finally:
         con.close()
-    return reportentry.with_report_entry({"project": d}, "project %s added: %s (%s-nnn tickets, %s-nnn teams, landing %s, sessions %s); nothing installed yet:"
-                             " `spud --as spud project install %s`" % (d["key"], d["root"], d["ticket_prefix"], d["team_prefix"], d["landing"], d["sessions"], d["key"]), entry)
+    # SPD-324: the project's Kanban board, written when absent once the row is in; decided and rendered above, before
+    # the insert, so a tool whose template is gone refuses the add rather than half-doing it.
+    board = projectboards.write_boards(ctx, [board])
+    text = ("project %s added: %s (%s-nnn tickets, %s-nnn teams, landing %s, sessions %s); nothing installed yet:"
+            " `spud --as spud project install %s`" % (d["key"], d["root"], d["ticket_prefix"], d["team_prefix"], d["landing"], d["sessions"], d["key"]))
+    return reportentry.with_report_entry({"project": d, "board": board[0]}, "\n".join([text] + ["  " + line for line in projectboards.board_lines(board)]), entry)
 
 
 def cmd_project_list(ctx, args):
