@@ -467,7 +467,7 @@ class RealShellSnapshotTest(BashHookCase):
         for line in ("grep -rn x .", "find . -name '*.py' | grep -v y", "rg -n foo src", "pkill -f 'node server'",
                      "CLAUDE_CODE_EXECPATH=/tmp/x.sh grep a f", "x=status; grep -rn x .; git $x"):
             with self.subTest(line=line):
-                with mock.patch("spudlib.hooks.snapshots.harness_shadow", return_value=None):
+                with mock.patch("spudlib.shell.held_shadows.read_shadow", return_value=False):  # read in full (SPD-290)
                     full = reading(line)
                 self.assertEqual(reading(line), full)
 
@@ -2871,8 +2871,9 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
     does not fit, in full.
 
     The proof is here: every field of the analysis and the hook's answer, for member and Spud, are the full reading's --
-    forced by making harness_shadow recognize nothing -- on each shape and every kind of word and line the reading tells
-    apart, the CLAUDE_CODE_EXECPATH lines of SPD-253 and SPD-258 among them; a changed byte is read in full; and proposal
+    forced by making read_shadow record nothing (SPD-290: no longer by making harness_shadow recognize nothing, which
+    reads the body as any other function's, parsed before the snapshot's aliases) -- on each shape and every kind of
+    word and line the reading tells apart, the CLAUDE_CODE_EXECPATH lines of SPD-253 and SPD-258 among them; a changed byte is read in full; and proposal
     348's leak (a shadow's locals counted as the line's), fixed by SPD-246, stays fixed on both readings.  The fixed record
     was measured on the reader as it stands: a change to it that moves what a harness body records fails here, and
     held_shadows._SHADOW_READINGS is measured again.  AGENT_A and AGENT_B plan home:tests/** and home:bin/spud; the home is the cwd."""
@@ -2887,8 +2888,9 @@ class HarnessShadowReadingTest(ShellSnapshotCase):
         self.held_shadows = importlib.import_module("spudlib.shell.held_shadows")
 
     def full(self):
-        """The full reading, forced: no body is the harness's text."""
-        return mock.patch("spudlib.hooks.snapshots.harness_shadow", return_value=None)
+        """The full reading, forced: read_shadow records no body, so each is read in full, as one of the harness's shadows
+        -- which the snapshot defines after its aliases, unlike any other function (held_text.read_body, SPD-290)."""
+        return mock.patch("spudlib.shell.held_shadows.read_shadow", return_value=False)
 
     def counted(self):
         """analyse_shell_text, counted: once for each body read in full."""
@@ -3374,6 +3376,160 @@ class HeldWordAliasTest(ShellSnapshotCase):
         notes = self.home.json("doctor")["notes"]
         self.assertTrue(any("shell snapshot: 11 aliases" in n and "(6 global and 3 suffix aliases among them)" in n
                             and "BROKEN" in n and "cfg" in n for n in notes), notes)
+
+
+# SPD-288: snapshot functions whose bodies parse text as they run -- eval of the call's words, and a substitution -- and
+# hold no alias of their own; `pz` is no alias the snapshot defines, so only the line's own can make it one.
+RUNTIME_PARSING_FUNCTIONS = """\
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+# Functions
+evalit () {
+\teval "$@"
+}
+subit () {
+\techo sub $(pz)
+}
+# Shell Options
+setopt autocd
+# Aliases
+alias -- ls='ls -G'
+"""
+
+
+class SnapshotBodyAfterLineAliasTest(ShellSnapshotCase):
+    """SPD-288: held_text.read_shell_name reads a snapshot function's body once per call's words, standard input and
+    ShellAnalysis.reading_state, and that state left out the line's alias table.  A body the snapshot holds was parsed
+    before any alias of the line's, but an eval or a substitution in it is parsed when it runs, with the table the line
+    holds then: called once before the line's `alias pz='git push'` and once after it, the second call pushes, and the
+    hook had read it from the first call's cache and found nothing.  The table (and alias_unknown, alias_view) are in
+    reading_state now, so the second call is read afresh.
+
+    Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py, sourcing a file that defines
+    `evalit() { eval "$@"; }` and `subit() { echo sub $(pz); }`, then `eval 'evalit pz; subit; alias pz="echo PZ-RAN";
+    evalit pz; subit'`: the first two calls found no command pz, the last two printed `PZ-RAN` and `sub PZ-RAN`.  bash 3.2,
+    whose non-interactive shell expands no alias, ran none of them.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", RUNTIME_PARSING_FUNCTIONS)
+
+    def test_a_call_after_the_lines_alias_is_read_again(self):
+        for line in ("evalit pz; alias pz='git push'; evalit pz", "subit; alias pz='git push'; subit",
+                     "evalit pz; subit; alias pz='git push'; evalit pz", "subit; evalit pz; alias pz='git push'; subit",
+                     "evalit pz; alias pz='git status'; alias pz='git push'; evalit pz"):
+            with self.subTest(line):
+                r = self.refused_for_members(line)
+                self.assertIn("git push", r.reason)
+
+    def test_the_alias_before_every_call_and_after_every_call(self):
+        for line in ("alias pz='git push'; evalit pz", "alias pz='git push'; subit"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+        for line in ("evalit pz; alias pz='git push'", "subit; alias pz='git push'", "evalit pz; subit; evalit pz",
+                     "evalit pz; alias pz='git status'; evalit pz", "subit; alias pz='git status'; subit"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+
+# SPD-290: functions written before the aliases, as Claude Code writes its snapshot, whose bodies call a plain alias's
+# name, run it through eval or a substitution, or run the call's words; `a.txt` is a plain alias whose name ends in a
+# suffix, and PROGRAM_ALIAS renames a program the bodies run.
+PLAIN_BEFORE_ALIASES = """\
+# Snapshot file
+# Unset all aliases to avoid conflicts with functions
+unalias -a 2>/dev/null || true
+# Functions
+callgp () {
+\tgp
+}
+pushit () {
+\tgit push
+}
+evalgp () {
+\teval gp
+}
+subgp () {
+\techo sub $(gp)
+}
+runit () {
+\t"$@"
+}
+# Shell Options
+setopt autocd
+# Aliases
+alias -- a.txt=ls
+alias -- gp='git push'
+alias -- ls='ls -G'
+"""
+PROGRAM_ALIAS = "alias -- git=hub\n"
+
+
+class HeldPlainAliasScopeTest(ShellSnapshotCase):
+    """SPD-290: line_aliases.shell_aliased expanded the snapshot's plain aliases at every command word the hook read, but
+    zsh expands none in a function body the snapshot defines -- it writes its functions before its aliases, so the body was
+    parsed with none -- nor in a new shell's text, which never sources the snapshot.  Reading an alias's body in place of a
+    command that runs is a reading of other text, not more: under a profile's `alias git=hub`, a snapshot function's `git
+    push` and `sh -c 'git push'` were read as `hub push` and let through.  SPD-283 made the snapshot's global and suffix
+    aliases stand only where zsh expands them; the plain ones now do too (line_aliases.held_standing): the line's own
+    command words, an alias body read in them, and text the Bash tool's shell parses as it runs -- eval's, a substitution's,
+    in the line or in a snapshot body -- and a function body the line defines, parsed with the line.
+
+    Probed in zsh 5.9 -f through tests/probes/shell_probe.py, a fresh `zsh -f -c` sourcing a file that holds `unalias -a`,
+    these functions and then the aliases (gp='echo GP-RAN', gt='echo GT-ALIAS', a.txt='echo PLAIN-ATXT'), and evaluating
+    the line, as the Bash tool's shell does: `gp` printed GP-RAN, and so did `evalgp` (`eval gp`), `subgp` (`sub GP-RAN`),
+    `f() { gp; }; f` and `f() { gp; }; runit f`; `callgp`, `eval callgp`, a body's `gt push`, `runit gp` and `runit gt
+    push` found no command gp or gt, and so did `zsh -f -c gp`, `zsh -f -c "eval gp"`, `sh -c gp` and `zsh -f -c "gt
+    push"`; `alias -s txt="echo SUFFIX"; eval a.txt` ran the plain alias (PLAIN-ATXT), where `zsh -f -c 'alias -s
+    txt="echo SUFFIX"; eval a.txt'`, whose shell holds no plain a.txt, ran the suffix alias.
+
+    AGENT_A and AGENT_B plan home:tests/** and home:bin/spud."""
+
+    def setUp(self):
+        super().setUp()
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", PLAIN_BEFORE_ALIASES)
+
+    def test_the_lines_words_and_the_text_its_shell_parses_later_expand_them(self):
+        for line in ("gp", "eval gp", "echo $(gp)", "evalgp", "subgp", "eval evalgp", "x=$(subgp)", "runit evalgp",
+                     "f() { gp; }; f", "f() { gp; }; runit f", "sh -c gp; gp", "sh -c gp; echo $(gp)",
+                     "zsh -c 'echo $(gp)'; echo $(gp)", "callgp; eval gp"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+
+    def test_a_snapshot_functions_own_body_expands_none(self):
+        for line in ("callgp", "eval callgp", "echo $(callgp)", "runit gp", "runit callgp", "callgp; callgp"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+    def test_a_new_shells_text_expands_none(self):
+        for line in ("sh -c gp", "zsh -c gp", "bash -c gp", "zsh -c 'eval gp'", "sh -c 'echo $(gp)'", "eval 'sh -c gp'",
+                     "zsh -c 'f() { gp; }; f'", "echo gp | sh", "sh <<< gp", "env sh -c gp"):
+            with self.subTest(line):
+                self.silent_for_everyone(line)
+
+    def test_a_program_the_profile_aliases_runs_as_itself_where_the_alias_does_not_stand(self):
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh", PLAIN_BEFORE_ALIASES + PROGRAM_ALIAS)
+        for line in ("pushit", "eval pushit", "echo $(pushit)", "runit git push", "sh -c 'git push'",
+                     "zsh -c 'git push'", "bash -c 'git push'", "zsh -c 'eval git push'"):
+            with self.subTest(line):
+                self.refused_for_members(line)
+
+    def test_the_harness_shadows_written_after_the_aliases_expand_them(self):
+        """The harness's grep, written after the aliases (`unalias grep`, then `function grep`), was parsed with them, so a
+        profile's alias of a word its body runs stands there -- `command grep ...` runs `git push grep ...` -- where a
+        function of the profile's own, written before them, runs the builtin."""
+        profile = PLAIN_BEFORE_ALIASES.replace("runit () {", "mygrep () {\n\tcommand grep \"$@\"\n}\nrunit () {")
+        self.write_snapshot("snapshot-zsh-1700000000000-aaaaaa.sh",
+                            profile + "alias -- command='git push'\n" + THIS_MACS_SHADOWS)
+        self.refused_for_members("grep -rn x .")
+        self.silent_for_everyone("mygrep -rn x .")
+
+    def test_a_new_shells_suffix_alias_is_no_longer_hidden_by_the_snapshots_plain_one(self):
+        self.refused_for_members("zsh -c 'alias -s txt=\"git push\"; eval a.txt'")
+        self.silent_for_everyone("alias -s txt='git push'; eval a.txt")  # the snapshot's plain a.txt runs ls there
 
 
 if __name__ == "__main__":

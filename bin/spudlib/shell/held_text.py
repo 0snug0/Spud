@@ -15,7 +15,7 @@ from . import analyse, directories, expansions, globbing, held_shadows, line_ali
 from ..hooks import hookio, snapshots
 
 
-def read_body(a, text, depth, stdin, fed):
+def read_body(a, text, depth, stdin, fed, shadow=False):
     """Read a function's body the shell holds -- or one the line defines, a line_functions.LineBody, which analyse_command
     reads as the walk had its tokens (SPD-277) -- isolated, in a scope of its own (SPD-246): a name it surely declares local
     (assignment_words.local_names) is not the line's while it runs, and when it returns the shell drops the local, so the
@@ -33,19 +33,30 @@ def read_body(a, text, depth, stdin, fed):
     before the line's, so no alias of the line's table is expanded in its own text, wherever the call stands -- eval's
     words, a substitution (SPD-283: ShellAnalysis.alias_scope is 0 while it is read, and line_aliases.held_names gives the
     shell's own none there; probed: a snapshot's `f() { echo in-f X; }`, defined before `alias -g X=snapshot`, printed
-    `in-f X`).  An eval or a substitution inside it is parsed as it runs, where they stand again."""
+    `in-f X`).  An eval or a substitution inside it is parsed as it runs, where they stand again.
+
+    Nor is any alias the snapshot defines, its plain ones included (SPD-290, line_aliases.held_standing): the body is read
+    with a line_aliases.AliasView marked `early`, which no text it parses as it runs inherits (probed in zsh 5.9 -f: a
+    body's `gp` found no command gp, where its `eval gp` and `$(gp)` ran the alias).  The harness's shadows (`shadow`),
+    which the snapshot defines after its aliases, are not marked; a body the line defines, parsed with the line, is read
+    unmarked wherever it is called, a snapshot body's call included (`f() { gp; }; runit f` ran the alias, runit's body
+    being `"$@"`)."""
     values, doubted, own, left = dict(a.vars), frozenset(a.doubt), {}, []
     parsed = isinstance(text, str)
 
     def run():
         a.body_locals = (a.body_locals or []) + [{}]
-        scope = a.alias_scope
+        scope, view = a.alias_scope, a.alias_view
         if parsed:
             a.alias_scope = 0
+            if not shadow:
+                a.alias_view = line_aliases.AliasView(a, False, early=True)
+        elif view is not None:
+            a.alias_view = view.parsed_late()
         try:
             analyse.analyse_command(text, a, depth, stdin, fed)
         finally:
-            a.alias_scope = scope
+            a.alias_scope, a.alias_view = scope, view
         own.update(a.body_locals[-1])
         left.append(a.cwds)
 
@@ -88,9 +99,10 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     The call's words reach a function's body as its positional parameters, so the body is read with them set where it
     reads those (shell/positional, SPD-203): `gitfn push`, whose body is `command git "$@"`, is `git push`.  It is read
     once per call's words, standard input and the state the call starts in (ShellAnalysis.reading_state: the
-    directories, the line's variables, SPD-252), not once per name, so the second call of `gitfn status; gitfn push` is
-    read too, and so are `noteit; cd ..; noteit` (its relative write lands again, elsewhere) and `V=status; vgit;
-    V=push; vgit` (`git $V` pushes); a body that calls itself from where it started reads it no further.  A call that
+    directories, the line's variables, SPD-252, and its aliases, which an eval or a substitution in the body expands,
+    SPD-288: `evalit pz; alias pz='git push'; evalit pz`, evalit running `eval "$@"`, pushes in the second call), not
+    once per name, so the second call of `gitfn status; gitfn push` is read too, and so are `noteit; cd ..; noteit` (its
+    relative write lands again, elsewhere) and `V=status; vgit; V=push; vgit` (`git $V` pushes); a body that calls itself from where it started reads it no further.  A call that
     reads exactly as one read before -- after a subshell put the directory back, or in the line's second walk -- is
     given the directories that reading left (ShellAnalysis.body_dirs), and one inside its own reading leaves them
     unknown if the body moves them, since the shell would move them again from where the inner call returns.  Past
@@ -124,6 +136,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
     elif body is not None:
         a.cwds = before  # ... which may not be the one that runs: the snapshot's is read from the same start
         claude = snapshots.harness_shadow(cmd, body)  # Claude Code's own grep, find, rg or pkill (SPD-247)
+        shadow = claude is not None  # ... which the snapshot defines after its aliases (read_body, SPD-290)
         if claude is None:
             text, sound, filled = positional.substitution(body, words[1:])
         else:
@@ -144,7 +157,7 @@ def read_shell_name(words, a, depth, stdin=None, fed=False, effect="shell", alia
         def run():
             if claude is None or not held_shadows.read_shadow(a, cmd, claude, words[1:], depth):
                 analyse_shell_text(a, text, depth + 1, words[1:], own_process=True, substituted=sound, stdin=stdin,
-                                   fed=fed, filled=filled)
+                                   fed=fed, filled=filled, shadow=shadow)
 
         after = read_once(a, cmd, read, before, run)
         if line_moved is not line_functions.NO_BODY:
@@ -235,13 +248,14 @@ def read_function(a, cmd, body, depth, stdin, fed):
 _PRUNED = ("findings", "redirects", "git_writes", "arg_writes")
 
 
-def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted=None, stdin=None, fed=False, filled=()):
+def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted=None, stdin=None, fed=False, filled=(),
+                       shadow=False):
     """Read text the shell itself holds: an alias's body, which is the line's own text once the shell has parsed it, or a
     function's, which runs in the line's shell in a scope of its own (own_process, read_body).  `own_words` are the member's own
     words of the line that reach this text, as the line's reading tokenized them -- the words after the alias the shell
     expanded, or the call's arguments, which a function receives as its positional parameters.  `substituted`, for a
     function's body: whether shell/positional set those words where the body reads them (True), or left it as it stands
-    because it cannot follow them there (False).
+    because it cannot follow them there (False).  `shadow`: the body is one of the harness's shadows (read_body).
 
     The findings are the findings the text would earn on the line, minus two kinds that would fall on a member for text it
     did not write and cannot change: the ones that say only that the hook cannot read a word (syntax.SHELL_TEXT_TOLERATED)
@@ -291,7 +305,7 @@ def analyse_shell_text(a, text, depth, own_words, own_process=False, substituted
             # not analyse_isolated's cache: a body read before without the member's words had its findings pruned, and
             # read_shell_name reads each call's once.  On the call's standard input, so a body running a shell or an
             # interpreter reads the file the call feeds it (SPD-215); in a scope of its own, for its locals (SPD-246)
-            read_body(a, text, depth, stdin, fed)
+            read_body(a, text, depth, stdin, fed, shadow)
         else:
             analyse.analyse_command(text, a, depth, stdin, fed)
     finally:

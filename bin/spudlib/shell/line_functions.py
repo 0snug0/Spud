@@ -6,14 +6,16 @@ settle_definitions, which share the walk's frames, position and lifted text and 
 parameter and its hook arrays bind and queue one (assign_function, hook_functions).  The text a call's reading prints
 (SPD-272) is left here too, in ShellAnalysis.read_printed and call_printed.  zsh's `functions -c` binds a copy of one
 (copy_function, SPD-279), and `unset -f` and its kin remove the bodies bound to a name (remove_functions, SPD-281), which
-line_bodies, the bodies a call runs, reads.  Past 250 lines as one table: every function here binds, reads or settles the
-LineBody objects ShellAnalysis.function_bodies holds, and a copy or a removal is a binding read by the same line_bodies."""
+line_bodies, the bodies a call runs, reads.  zsh's `functions -M` registers a function arithmetic calls (math_function,
+SPD-282), a binding in the same table, and each arithmetic call of one reads that function's body where it stands
+(read_math_calls).  Past 250 lines as one table: every function here binds, reads or settles the LineBody objects
+ShellAnalysis.function_bodies holds, and a copy, a removal or a registration is a binding read by the same _settled."""
 
 import functools
 
-from . import (analyse, arg_writes, assigning_builtins, assignment_words, directories, expansions, held_text, prepare,
-               script_files, stdin_text, syntax, unread, walk)
-from ..hooks import snapshots
+from . import (analyse, arg_writes, arithmetic_assignments, assigning_builtins, assignment_words, directories, expansions,
+               held_text, prepare, script_files, stdin_text, syntax, unread, walk)
+from ..hooks import hookio, snapshots
 
 
 class LineBody:
@@ -299,3 +301,135 @@ def remove_functions(words, a, effect):
         mark.removes, mark.certain = True, sure
     if sure:
         a.functions.difference_update(names)
+
+
+# SPD-282: the tag of a `functions -M` registration's key in ShellAnalysis.function_bodies, (MATH, the name arithmetic
+# calls, the shell function that runs): kept beside the bodies, so a subshell, a substitution, a pipeline element and the
+# line's second reading scope a registration as they scope a definition, and a tuple, so no function's name is one
+MATH = "functions -M"
+
+
+def math_function(words, a, effect):
+    """SPD-282: zsh's `functions -M mathfn [min [max [shellfn]]]` -- `-Ms`, `-M -s` or `-sM` for its string form --
+    registers mathfn as a function arithmetic calls (`$(( mathfn() ))`), which runs the shell function shellfn, mathfn's
+    own where none is named, looked up at each call: each registration is bound as a definition is, under (MATH, mathfn,
+    shellfn), one that may not have run, since bash has no `functions` builtin, and read at each call (read_math_calls).
+    `functions +M mathfn ...` removes those names' registrations, as remove_functions marks a removal: surely where the
+    builtin surely runs in the line's shell.  `-M` or `+M` alone, and `-M -m pattern`, list; `+M -m pattern` removes what
+    the pattern matches, which is read as a removal that may not have run, and so is a name the line does not spell.
+    Probed 2026-09-24 as tests/test_hooks_input.py MathFunctionCallTest says: `-M mf x`, `-Mu`, `-Ms a1 2` and a min
+    after the name (`-M a1 -s`) registered nothing, which is bound as a registration all the same (the call's reading
+    costs nothing where none runs), five operands registered nothing and bind nothing, and a second `-M` of one name
+    replaced the first, whose function is read beside the second's (zsh keeps it where it refused the second).
+
+    A registration the hook cannot follow refuses a member as SPD-217 refuses text it did not read, naming the respelling:
+    a math name or a shell function the line does not spell, or an operand that may become several words or none.  An
+    option word the hook cannot read is one function_copy refuses already (copy_function: it may be `-c` or `-M`), and
+    `-c` among the options is a copy, which zsh makes before it looks for `-M` (`functions -M -c f g` copied f)."""
+    found = _math_words(words, a)
+    if found is None:
+        return
+    removing, operands = found
+    reaches = [assigning_builtins._word_reach(word) for word in operands]
+    if not removing:
+        if len(operands) > 4:
+            return  # `-M: too many arguments`
+        if "any" in reaches or reaches[0] != "plain" or (len(operands) == 4 and reaches[3] != "plain"):
+            unread.record_unread(a, "function-math", unread.unread_shown(" ".join(words)))
+            return
+    if _in_place(a) or not a.walks:
+        return
+    shell_walk = a.walks[-1]
+    if not removing:
+        name = prepare.deglob(operands[0])
+        shell_walk.bind([(MATH, name, prepare.deglob(operands[3]) if len(operands) == 4 else name)])
+        return
+    names = {prepare.deglob(word) for word, reach in zip(operands, reaches) if reach == "plain"}
+    held = [key for key in a.function_bodies if _registration(key) and key[1] in names]
+    if held:
+        mark = shell_walk.bind(held)
+        mark.removes = True
+        mark.certain = effect == "shell" and not a.unsure and shell_walk.certain_definition()
+
+
+def _math_words(words, a):
+    """(whether `words`, a `functions` line, remove math functions, the operands naming them or the one it registers),
+    or None where it registers and removes none: no `M` among its options, a `c` (a copy), an `m` (a listing, or a
+    removal by pattern), no operands (a listing), or an option word the scan cannot read (function_copy's).  A `+M`
+    removes, zsh reading the last sign an option letter was given with (assigning_builtins._scan reads the letters)."""
+    args = [arg_writes.resolved(word, a) for word in words[1:]]
+    for options, operands, stuck in assigning_builtins._scan(args, "x", plus=True,
+                                                             settle=functools.partial(expansions.settled_text, a)):
+        letters = {c for c, _ in options}
+        if stuck is not None or "c" in letters or "M" not in letters or "m" in letters or not operands:
+            return None
+        signs = [prepare.deglob(word)[:1] for word in args[: len(args) - len(operands)] if "M" in prepare.deglob(word)]
+        return signs[-1:] == ["+"], operands
+    return None
+
+
+def _math_registrations(a):
+    """Each name arithmetic may call here -> the shell functions its registrations run: every one no removal surely took
+    (_settled), in the order the line registered them."""
+    found = {}
+    for key, bodies in a.function_bodies.items():
+        if _registration(key) and any(not body.removes for body in _settled(bodies)[0]):
+            found.setdefault(key[1], []).append(key[2])
+    return found
+
+
+def _registration(key):
+    """Whether a key of ShellAnalysis.function_bodies is a `functions -M` registration's (MATH), not a function's name."""
+    return isinstance(key, tuple) and key[0] == MATH
+
+
+def read_math_calls(a, found, shown):
+    """SPD-282: the calls among what an arithmetic expression, `shown`, assigns and calls (`found`, as
+    arithmetic_assignments.arithmetic_names gives it: shell/expansions.record_arithmetic's), each call of a name
+    `functions -M` registered read as the function it runs is at a call by its own name (held_text.read_shell_name): the
+    bodies the line defines under it (read_call) and the one the shell's snapshot holds, from the directories, the
+    variables and the input the expression stands in, their findings standing at the call -- and the names the
+    expression assigns, returned for the caller to record.
+
+    zsh runs the function in the shell that evaluates the expression, so its cd reaches the rest of the line; bash has no
+    math functions and fails the expression, so the line may stay where it was as well (probed: `mc() { cd d; };
+    functions -M mc; echo $(( mc() )); pwd` printed d in zsh 5.9, while bash 3.2.57 ran the rest of the line where it
+    stood).  A value the expression assigns around a call is one the hook does not know, before the call and after it:
+    the function may read or assign the name.  A call whose name the hook cannot read (`$(( $n() ))`), where the line
+    registers any, refuses a member as SPD-217 refuses text it did not read; where it registers none, zsh calls no
+    function of the line's (`unknown function`)."""
+    calls = [each for each in found if isinstance(each, arithmetic_assignments.MathCall)]
+    if not calls:
+        return found
+    assigned = [each for each in found if not isinstance(each, arithmetic_assignments.MathCall)]
+    registered, read = _math_registrations(a), False
+    for call in calls:
+        if call[0] == syntax.UNKNOWN_NAME:
+            if registered:
+                unread.record_unread(a, "function-math", unread.unread_shown(shown))
+            continue
+        if call[0] not in registered:
+            continue
+        if not read:
+            read = True
+            for name, _ in assigned:
+                expansions.assign_unknown(a, name)
+        _read_math_call(a, registered[call[0]], call.arguments)
+    return [(name, None) for name, _ in assigned] if read else assigned
+
+
+def _read_math_call(a, shells, arguments):
+    """One arithmetic call of the functions `shells`, each read from where the call stands, with `arguments` words the
+    hook does not know as its positional parameters (a snapshot body's; zsh passes the numbers the arguments evaluate
+    to, or with -s the text between the parentheses), on the input a substitution in the words being read runs on
+    (walk.ShellWalk.substitution_input: zsh's, the list's); the line after it in any directory one of them leaves it in,
+    or the one it stood in."""
+    shell_walk = a.walks[-1] if a.walks else None
+    depth = shell_walk.depth if shell_walk is not None else 0
+    stdin, fed = shell_walk.substitution_input() if shell_walk is not None else (None, False)
+    before = after = a.cwds
+    for shell in shells:
+        a.cwds = before
+        held_text.read_shell_name([shell] + [hookio.SUBST] * arguments, a, depth, stdin, fed, "either", aliased=False)
+        after = directories.union_dirs(after, a.cwds)
+    a.cwds = after

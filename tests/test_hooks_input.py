@@ -1,6 +1,8 @@
 """PreToolUse(Bash): here-documents and standard input -- a body, its expansions, what a shell or a command reads on its
-input, multios, and a document fed to a compound command or a function."""
+input, multios, and a document fed to a compound command or a function -- and a function arithmetic calls, read where
+the call stands on the input the expression is read on (zsh's `functions -M`, SPD-282)."""
 
+import importlib
 import os
 import shutil
 import tempfile
@@ -10,7 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 from helpers import load_spud_module, wall_clock
-from hookcase import AGENT_A, AGENT_C, SCRIPT_WORDING, BashHookCase
+from helpers import git as scratch_git
+from hookcase import AGENT_A, AGENT_C, GIT_NESTED_WORDING, SCRIPT_WORDING, SPUD_PLANTED_WORDING, BashHookCase
+from hookcase import plant_git_dir
 
 
 # SPD-188: what keeps a command going past the line its `<<` operator stands on, each standing in a word of the command
@@ -1828,6 +1832,290 @@ class SettledStandardInputTest(BashHookCase):
         self.assertRefused("T=ledger/tickets/SPD-001.md; echo \"echo x > $T\" | sh", "generated")
         self.assertRefused("D=docs/x.md; echo touch $D | sh", "deliverables")
         self.assertSilent("T=tests/out.txt; echo \"echo x > $T\" | sh")
+
+
+MATH_WORDING = "zsh's `functions -M` names a function arithmetic calls"  # SPD-282's "function-math" unread reason
+
+
+class MathFunctionCallTest(BashHookCase):
+    """SPD-282 (Elmer's SPD-279 proposal): zsh's `functions -M NAME` lets arithmetic call the shell function NAME --
+    `$(( NAME() ))`, `(( NAME() ))`, `let`, a subscript -- which runs where the line stands at that call, but the reader
+    read NAME's body only in place, where it is defined, as `functions -c` was before SPD-279: `mf() { git status; };
+    functions -M mf; cd tests/fake; echo $(( mf() + 1 ))` ran git in a planted repository unchecked, and a relative write
+    in the body was held to the path rule in the definition's directory.  Each arithmetic call of a name `functions -M`
+    registered now reads the shell function's body where the call stands (line_functions.read_math_calls), the line's
+    and the shell snapshot's alike, and its cd reaches the rest of the line beside the directory bash leaves it in, bash
+    having no math functions; a registration or a call the hook cannot follow refuses a member (SPD-217).
+
+    Probed 2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 (arm64-apple-darwin26.0) -f -o nobareglobqual and
+    -f, which printed the same, each case in a subshell: the ticket's `mf() { echo MF-RAN $PWD >&2; (( 1 )); }; functions
+    -M mf; cd d; echo $(( mf() + 1 ))` printed 2 and MF-RAN .../d; `mc() { cd d; }; functions -M mc; echo $(( mc() ));
+    pwd` printed d; a function defined after the `-M` ran, and so did a body redefined after it, the name looked up at the
+    call (`-M nosuch` failed only there, `no such function`, and so did a call after `unfunction`); `(( mf() ))`, `let
+    'x = mf()'`, `[[ 'mf()' -eq 1 ]]`, `for (( i = 0; i < mf(); i++ ))`, `Y='mf()'; (( Y ))`, `integer T; T='mf()'`,
+    `$[ mf() ]`, `${arr[mf()+1]}` and `$(( $n() ))` with n=mf each called it (the call in a `${ }` subscript is read
+    since SPD-297, when syntax.shell_tokens stopped splitting that word at its `()`), and `$(( mf ))` and `$(( mf (1) ))`, a blank
+    before the parenthesis, did not; `functions -M mm 0 3 sf` ran sf for `mm(1, 2)` ($# 2, $0 mm), never mm's own
+    function, and `-M mm 0 -1 sf`, `-M mf 0`, `-M -- mf` and `builtin functions -M` registered; `-Ms st`, `-M -s` and
+    `-sM` passed `st(foo,bar rod)` whole as $1; a second `-M mx ... b1` replaced the first; `functions -M` and `+M` alone
+    and `-M -m 'm*'` listed and registered or removed nothing, while `+M mf`, `+M -m 'l*'` and `+Mm 'a*'` removed; `-M mf
+    x`, `-Mu`, `-Ms a1 2`, five operands and `-M a1 -s` registered nothing; `-M -c f g` copied f to g and registered no
+    math function; `command functions` was no builtin (read, as `command functions -c` is, as one bash's `command` may
+    run); a registration in a subshell or a `$( )` did not reach a call after it, nor one before a `|` (read as one that
+    may have, as a definition there is), while one in a called body or an eval did; a call in a `$( )`, in a prefix of an
+    external command or in its redirection target left the line where it was.  GNU bash 3.2.57 has no `functions` builtin
+    and failed every such call as a syntax error in the expression, running the rest of the line."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        home = self.home.path
+        scratch_git(home, "init", "-q", "-b", "main")
+        scratch_git(home, "commit", "-q", "--allow-empty", "-m", "root")
+        self.nested = home / "tests" / "fake"
+        plant_git_dir(self.nested / ".git")
+        (self.nested / ".git" / "hooks").mkdir()
+        hook = self.nested / ".git" / "hooks" / "post-index-change"
+        hook.write_text("#!/bin/sh\necho planted\n", encoding="utf-8")
+        hook.chmod(0o755)
+        self.tests = str(home / "tests")
+
+    def members_refused(self, command, needle):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        return r
+
+    def spud_refused(self, command):
+        with self.subTest(command=command, agent_id="spud"):
+            r = self.assertRefused(command, SPUD_PLANTED_WORDING, agent_id=None)
+            self.assertIn(str(self.nested), r.reason)
+
+    def silent_for(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def analysis(self, command, cwd=None):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=cwd or str(self.home.path), home=str(self.home.path)))
+
+    def git_dirs(self, command, cwd=None):
+        """The directories each git call of the line may run in, in order."""
+        return [found for _targets, found in self.analysis(command, cwd).git_calls]
+
+    def test_the_tickets_line(self):
+        """Silent on main for every caller: the body's git was read in place, in the home, and never at the call."""
+        for command in ("mf() { git status; }; functions -M mf; cd tests/fake; echo $(( mf() + 1 ))",
+                        "mf() { git status; (( 1 )); }; functions -M mf; cd tests/fake; echo $(( mf() + 1 ))",
+                        "mf() { git status; }; functions -M mf; cd tests/fake && echo $(( mf() ))",
+                        "mf() { git status; }; cd tests/fake; functions -M mf; echo $(( mf() ))",
+                        "functions -M mf; mf() { git status; }; cd tests/fake; echo $(( mf() ))",
+                        "mf() { true; }; functions -M mf; mf() { git status; }; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M -- mf; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; builtin functions -M mf; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; h() { functions -M mf; }; h; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; eval 'functions -M mf'; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; n=mf; functions -M $n; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M mf; n=mf; cd tests/fake; echo $(( $n() ))",
+                        "functions[mf]='git status'; functions -M mf; cd tests/fake; echo $(( mf() ))"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        # ... as the call by its own name already was
+        self.members_refused("mf() { git status; }; cd tests/fake; mf", GIT_NESTED_WORDING)
+
+    def test_each_registering_form(self):
+        """`-M mathfn [min [max [shellfn]]]`, its string form, and the removals and listings around one."""
+        for command in ("sf() { git status; }; functions -M mm 0 -1 sf; cd tests/fake; echo $(( mm() ))",
+                        "sf() { git status; }; functions -M mm 1 1 sf; cd tests/fake; echo $(( mm(2) ))",
+                        "mm() { true; }; sf() { git status; }; functions -M mm 0 3 sf; cd tests/fake; echo $(( mm(1, 2) ))",
+                        "mf() { git status; }; functions -M mf 0; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M mf 0 2; cd tests/fake; echo $(( mf(1, 2) ))",
+                        "st() { git status; }; functions -Ms st; cd tests/fake; echo $(( st(a,b c) ))",
+                        "st() { git status; }; functions -M -s st; cd tests/fake; echo $(( st() ))",
+                        "st() { git status; }; functions -sM st 1 1; cd tests/fake; echo $(( st(x) ))",
+                        # a second registration of the name replaces the first
+                        "a1() { true; }; b1() { git status; }; functions -M mx 0 -1 a1; functions -M mx 0 -1 b1;"
+                        " cd tests/fake; echo $(( mx() ))",
+                        # `+M` alone lists, and a removal that may not have run leaves the registration
+                        "mf() { git status; }; functions -M mf; functions +M; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M mf; true && functions +M mf; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M mf; (functions +M mf); cd tests/fake; echo $(( mf() ))",
+                        # a pattern removal is read as one that may not have removed it
+                        "mf() { git status; }; functions -M mf; functions +M -m 'x*'; cd tests/fake; echo $(( mf() ))",
+                        # removed, then registered again
+                        "mf() { git status; }; functions -M mf; functions +M mf; functions -M mf; cd tests/fake;"
+                        " echo $(( mf() ))"):
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+
+    def test_each_arithmetic_context_calls_it(self):
+        for spelled in ("(( mf() ))", "let 'x = mf()'", "[[ 'mf()' -eq 1 ]]", "for (( i = 0; i < mf(); i++ )); do :; done",
+                        "Y='mf()'; (( Y ))", "echo $[ mf() ]", "typeset -a arr; (( arr[mf()] = 1 ))", "integer T; T='mf()'",
+                        "echo $(( 1 + mf(2) ))", "x=$(( mf() ))", "echo \"$(( mf() ))\"", "echo $(( mf(mf()) ))",
+                        "true && (( mf() ))", "(( mf() )) | cat", "echo $(( mf() )) > /dev/null", "eval 'echo $(( mf() ))'"):
+            command = "mf() { git status; }; functions -M mf; cd tests/fake; " + spelled
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+
+    def test_each_call_is_read_where_it_runs(self):
+        home, nested = str(self.home.path), str(self.nested)
+        self.assertEqual(self.git_dirs("mf() { git status; }; functions -M mf; cd tests/fake; echo $(( mf() )); cd ../..;"
+                                       " echo $(( mf() ))"), [frozenset([nested]), frozenset([home])])
+        # the body's findings stand at the call, not where it is defined
+        self.assertEqual(self.analysis("mf() { git push; }; functions -M mf; git log; (( mf() ))").findings,
+                         [("git", ("log", None)), ("git", ("push", "push"))])
+        # its cd reaches the rest of the line in zsh, and bash, which runs no math function, leaves the line where it was
+        for command in ("mf() { cd tests/fake; }; functions -M mf; echo $(( mf() )); git status",
+                        "mf() { cd tests/fake; }; functions -M mf; (( mf() )); git status",
+                        "mf() { cd tests/fake; }; functions -M mf; x=$(( mf() )); git status"):
+            with self.subTest(command=command):
+                self.assertEqual(self.git_dirs(command), [frozenset([home, nested])])
+        # ... but not from a `$( )`, which runs in a process of its own
+        self.assertEqual(self.git_dirs("mf() { cd tests/fake; }; functions -M mf; x=$(echo $(( mf() ))); git status"),
+                         [frozenset([home])])
+
+    def test_a_write_in_the_body_lands_where_the_call_runs(self):
+        """From the home, where out.txt is nobody's but AGENT_C's, a call in tests/ writes a file AGENT_A plans; from
+        tests/, a call back in the home writes one AGENT_A does not."""
+        for command in ("mf() { echo x > out.txt; }; functions -M mf; cd tests; echo $(( mf() ))",
+                        "mf() { echo x > out.txt; }; functions -M mf; cd tests; (( mf() ))",
+                        "mf() { touch out.txt; }; functions -M mf; cd tests && let 'y = mf()'"):
+            with self.subTest(command=command):
+                self.assertSilent(command, AGENT_A)
+        for command in ("mf() { echo x > out.txt; }; functions -M mf; cd ..; echo $(( mf() ))",
+                        "mf() { cd ..; }; functions -M mf; echo $(( mf() )); echo hi > out.txt"):
+            with self.subTest(command=command):
+                self.assertRefused(command, "out.txt", AGENT_A, self.tests)
+
+    def test_a_function_the_shells_snapshot_defines(self):
+        """Read at the call as a command call of it is (held_text.read_shell_name), from where the call stands."""
+        snapshots = Path(self.home.env["SPUD_USER_CLAUDE_DIR"]) / "shell-snapshots"
+        snapshots.mkdir(parents=True, exist_ok=True)
+        (snapshots / "snapshot-zsh-1700000000282-282282.sh").write_text("gs () {\n\tgit status\n}\n", encoding="utf-8")
+        self.members_refused("functions -M gs; cd tests/fake; echo $(( gs() ))", GIT_NESTED_WORDING)
+        self.members_refused("functions -M gm 0 -1 gs; cd tests/fake; (( gm(1) ))", GIT_NESTED_WORDING)
+        self.silent_for("functions -M gs; echo $(( gs() ))")
+
+    def test_a_registration_or_a_call_the_hook_cannot_follow_is_refused_a_member(self):
+        for command in ("mf() { true; }; functions -M $x", "sf() { true; }; functions -M mf 0 1 $f",
+                        "functions -M $x mf", "functions -M \"$x\"", "functions -M mf 0 1 \"$f\"",
+                        "functions -M mf $n", "mf() { true; }; functions -M mf; echo $(( $n() ))",
+                        "mf() { true; }; functions -M mf; (( $(echo mf)() ))"):
+            with self.subTest(command=command):
+                self.assertRefused(command, MATH_WORDING, AGENT_A)
+                self.assertSilent(command, agent_id=None)
+        # a name the line settles is the name it spells
+        self.members_refused("mf() { git status; }; n=mf; functions -M $n; cd tests/fake; echo $(( mf() ))",
+                             GIT_NESTED_WORDING)
+
+    def test_the_controls_read_as_before(self):
+        """No registration reaches the call, or the arithmetic calls nothing: the body is read in place, in the home."""
+        for command in ("mf() { git status; }; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; (functions -M mf); cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; x=$(functions -M mf); cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M mf; functions +M mf; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M mf; functions +M x mf; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M -m 'm*'; cd tests/fake; echo $(( mf() ))",
+                        "mf() { git status; }; functions -M mf; cd tests/fake; echo $(( mf ))",
+                        "mf() { git status; }; functions -M mf; cd tests/fake; echo $(( mf (1) ))",
+                        "mf() { git status; }; functions -M mf; cd tests/fake; echo '$(( mf() ))'",
+                        "mf() { git status; }; functions -M mf 0 1 x y; cd tests/fake; echo $(( mf() ))",
+                        "mm() { git status; }; sf() { true; }; functions -M mm 0 -1 sf; cd tests/fake; echo $(( mm() ))",
+                        "mf() { git status; }; functions -M -c mf g; cd tests/fake; echo $(( g() ))",
+                        "functions -M mf; cd tests/fake; echo $(( mf() ))", "functions -M", "functions +M mf"):
+            self.silent_for(command)
+        self.assertEqual(self.git_dirs("mf() { git status; }; functions -M mf"), [frozenset([str(self.home.path)])])
+
+    def test_the_arithmetic_reading_finds_each_call(self):
+        """shell/arithmetic_assignments reports a call where zsh makes one, a name glued to its `(`, in order among the
+        names the expression assigns; the name an unread expansion gives is none it can spell."""
+        load_spud_module()
+        arithmetic = importlib.import_module("spudlib.shell.arithmetic_assignments")
+        syntax = importlib.import_module("spudlib.shell.syntax")
+
+        def calls(text, settle=lambda name: None):
+            found = arithmetic.arithmetic_names(text, settle)
+            return [(each[0], isinstance(each, arithmetic.MathCall)) for each in found]
+
+        self.assertEqual(calls("mf() + 1"), [("mf", True)])
+        # a call's arguments are evaluated before it, and an inner call before the outer (probed: `a1(b1())` ran b1 first)
+        self.assertEqual(calls("X = 5, mf(Y = 2), Z++"), [("X", False), ("Y", False), ("mf", True), ("Z", False)])
+        self.assertEqual(calls("a(b())"), [("b", True), ("a", True)])
+        self.assertEqual(calls("mf (1)"), [])
+        self.assertEqual(calls("mf"), [])
+        self.assertEqual([each.arguments for each in arithmetic.arithmetic_names("f() + g(1) + h(1, (2, 3), a[4, 5])",
+                                                                                 lambda name: None)], [0, 1, 3])
+        self.assertEqual(calls("$n()"), [(syntax.UNKNOWN_NAME, True)])
+        self.assertEqual(calls("$n()", {"n": "mf"}.get), [("mf", True)])
+        self.assertEqual(calls("Y", {"Y": "mf()"}.get), [("mf", True)])
+        self.assertEqual([each[0] for each in arithmetic.word_arithmetic("a$(( mf() ))b${arr[g()]}$[ h() ]", lambda n: None)],
+                         ["mf", "g", "h"])
+
+    def test_a_call_in_a_braced_subscript(self):
+        """SPD-297: an unquoted `${arr[mf()+1]}` is one word in both shells, which read a `${ }` to the brace that closes it,
+        so the call in its subscript is read where it runs, as the quoted `"${arr[mf()+1]}"` already was.  Probed
+        2026-09-24 through tests/probes/shell_probe.py in zsh 5.9 -f -o nobareglobqual and -f: `${arr[mf()+1]}` and
+        `${arr[mf() + 1]}` each called mf; bash 3.2.57 failed the expression, calling nothing."""
+        home, nested = str(self.home.path), str(self.nested)
+        for spelled in ("echo ${arr[mf()+1]}", "echo ${arr[mf()]}", "x=${arr[mf()+1]}", "echo a${arr[mf(2)]}b",
+                        "echo ${x:-${arr[mf()]}}", "echo ${arr[mf()]}${arr[1]}", "true && echo ${arr[mf()]}",
+                        "echo ${arr[mf() + 1]}"):
+            command = "mf() { git status; }; functions -M mf; cd tests/fake; " + spelled
+            self.members_refused(command, GIT_NESTED_WORDING)
+            self.spud_refused(command)
+        self.assertEqual(self.git_dirs("mf() { git status; }; functions -M mf; cd tests/fake; echo ${arr[mf()]}; cd ../..;"
+                                       " echo ${arr[mf()]}"), [frozenset([nested]), frozenset([home])])
+        # its cd reaches the rest of the line
+        self.assertEqual(self.git_dirs("mf() { cd tests/fake; }; functions -M mf; echo ${arr[mf()]}; git status"),
+                         [frozenset([home, nested])])
+        # no registration reaches it: the body is read in place, in the home
+        self.silent_for("mf() { git status; }; cd tests/fake; echo ${arr[mf()+1]}")
+        # a parenthesis a default word holds is a character of it, where neither shell runs a subshell (probed: zsh printed
+        # `${x:-(echo SUB)}` as one word, bash as three), while the process substitution bash runs there is still read
+        self.assertEqual(self.analysis("echo ${x:-(git push)}").findings, [])
+        self.assertEqual(self.analysis("echo ${x:-<(git push)}").findings, [("git", ("push", "push"))])
+
+    def test_a_parenthesis_in_a_braced_expansion_stays_in_the_word(self):
+        """SPD-297: syntax.shell_tokens keeps an unquoted `(` and its `)` inside an open `${ }` in the word, as the shells
+        do (probed in zsh 5.9 -f -o nobareglobqual and -f: `${x:-a()b}`, `${x:-a(b)c}`, `${arr[(i)b]}`,
+        `${x:-a{b}c()d}`, `${x:-a\\}()b}` and `${x:-'}'()b}` each expanded as one word); a function definition, a `(`
+        after the `${ }` closes, one in a `${` that never closes, and the `<(`, `>(` and `=(` bash or zsh runs there as a
+        process substitution tokenize as before, and so do an unbraced `$arr[mf()+1]` and `arr[mf()]=1`, where zsh called
+        nothing (`invalid subscript`, `bad pattern: arr[mf`) and bash rejected the line."""
+        load_spud_module()
+        syntax = importlib.import_module("spudlib.shell.syntax")
+        opened, closed = syntax._PUNCT_SENTINELS["("], syntax._PUNCT_SENTINELS[")"]
+        for text, tokens in (("echo ${arr[mf()+1]}", ["echo", "${arr[mf" + opened + closed + "+1]}"]),
+                             ("echo ${x:-a(b)c} d", ["echo", "${x:-a" + opened + "b" + closed + "c}", "d"]),
+                             ("echo ${arr[(i)b]}", ["echo", "${arr[" + opened + "i" + closed + "b]}"]),
+                             ("echo ${x:-a{b}c()d}", ["echo", "${x:-a{b}c" + opened + closed + "d}"]),
+                             ("echo ${x:-a\\}()b}", ["echo", "${x:-a}" + opened + closed + "b}"]),
+                             ("echo ${x:-'}'()b}", ["echo", "${x:-}" + opened + closed + "b}"]),
+                             ("echo ${x:-${y:-p()q}}", ["echo", "${x:-${y:-p" + opened + closed + "q}}"]),
+                             ("echo ${x:-a(b<(c)d)e}", ["echo", "${x:-a" + opened + "b", "<(", "c", ")", "d" + closed + "e}"])):
+            with self.subTest(text=text):
+                self.assertEqual(syntax.shell_tokens(text), tokens)
+        for text, tokens in (("f() { git status; }; f", ["f", "()", "{", "git", "status", ";", "}", ";", "f"]),
+                             ("function g() { :; }", ["function", "g", "()", "{", ":", ";", "}"]),
+                             ("${x}() { :; }", ["${x}", "()", "{", ":", ";", "}"]),
+                             ("echo ${x} (a)", ["echo", "${x}", "(", "a", ")"]),
+                             ("echo ${x:-<(git push)}", ["echo", "${x:-", "<(", "git", "push", ")", "}"]),
+                             ("echo ${x:->(git push)}", ["echo", "${x:-", ">(", "git", "push", ")", "}"]),
+                             ("echo ${x:-=(git push)}", ["echo", "${x:-=", "(", "git", "push", ")", "}"]),
+                             # ... and every parenthesis such a list holds, and an arithmetic expansion's
+                             ("echo ${x:-<(f() { git push; }; f)}",
+                              ["echo", "${x:-", "<(", "f", "()", "{", "git", "push", ";", "}", ";", "f", ")", "}"]),
+                             (": ${Q:-$((X=5))}", [":", "${Q:-$", "((", "X=5", "))", "}"]),
+                             ("echo ${x (git push)", ["echo", "${x", "(", "git", "push", ")"]),
+                             ("echo \\${x:-a()b}", ["echo", "${x:-a", "()", "b}"]),
+                             ("echo '${x:-a()b}'", ["echo", "${x:-a()b}"]),
+                             ("echo $arr[mf()+1]", ["echo", "$arr[mf", "()", "+1]"]),
+                             ("arr[mf()]=1", ["arr[mf", "()", "]=1"])):
+            with self.subTest(text=text):
+                self.assertEqual(syntax.shell_tokens(text), tokens)
 
 
 if __name__ == "__main__":

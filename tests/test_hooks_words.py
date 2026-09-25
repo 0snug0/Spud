@@ -1566,7 +1566,7 @@ class SubstitutionAliasTest(BashHookCase):
     is now read a level into the aliases' scope while the line's table holds any (analyse.analyse_isolated), and read
     once per state of that table, where the reading cached for the first of such a pair had skipped the second -- inside
     eval as well, before this.  A line that defines no alias reads its substitutions as it always did.  (`cat <(gt)` ran
-    the line's alias too, but the walk reads a `<( )` body with the line's own words, where none of the line's stands.)
+    the line's alias too, which the walk's reading of a `<( )` body now follows: ProcessSubstitutionAliasTest, SPD-287.)
     AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
 
     def setUp(self):
@@ -1617,6 +1617,78 @@ class SubstitutionAliasTest(BashHookCase):
             with self.subTest(cmd):
                 self.refused_for_members(cmd, "cannot resolve")
         self.refused_for_members("if true; then alias -g gp='; git status'; fi; echo $(echo gp)", ALIAS_WORD_WORDING)
+
+
+class ProcessSubstitutionAliasTest(BashHookCase):
+    """SPD-287: zsh parses a process substitution's body when it runs it, as it does a `$( )` body (SPD-283), so an alias
+    the line defined before `<( )` or `>( )` runs there -- and the walk read such a body as a frame of the line's own
+    words, where no alias of the line's stands, so `alias gp='git push'; cat <(gp)` reached the hook with no finding (Law
+    7).  Probed in zsh 5.9 -f and -f -o nobareglobqual through tests/probes/shell_probe.py: after `alias gt="echo
+    GT-RAN"`, `cat <(gt)` and `echo x > >(gt)` each printed GT-RAN; `alias x=y; eval 'alias g2="echo G2-RAN"; cat
+    <(g2)'` printed G2-RAN, the body parsed after eval's own alias ran; `alias -s txt="echo SUF"; cat <(a.txt)` ran SUF;
+    and the body is parsed whole, so `cat <(alias g3=...; g3)` found no command g3, on one line or two.  bash 3.2 with
+    `shopt -s expand_aliases` ran the line's alias there too, and read a body of two lines a line at a time (`cat <(alias
+    g4=...<newline>g4)` ran it).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+
+    def refused_for_members(self, command, needle="Law 7"):
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_the_tickets_evidence_command(self):
+        self.refused_for_members("alias gp='git push'; cat <(gp)")
+        self.assertEqual(self.analysis("alias gp='git push'; cat <(gp)").findings, [("git", ("push", "push"))])
+
+    def test_a_process_substitution_after_the_definition(self):
+        for cmd in ("alias gp='git push'; tee >(gp)", "alias gp='git push'; echo x > >(gp)",
+                    "alias gp='git push'; diff <(echo a) <(gp)", "alias gp='git push'; cat <(true && gp)",
+                    "alias gp='git push'; cat <(echo $(gp))", "alias gp='git push'; cat <(cat <(gp))",
+                    "alias gp='git push'; cat <(echo a; gp)", "alias gp='git push'; cat <(echo a\ngp)",
+                    "alias -s txt='git push'; cat <(a.txt)", "aliases[gp]='git push'; cat <(gp)",
+                    "alias gp='git push'; eval 'cat <(gp)'", "alias x=y; eval 'alias gp=\"git push\"; cat <(gp)'",
+                    "cat <(gp); alias gp='git push'; cat <(gp)", "alias gp='git push'; bash <(gp)"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+        self.assertEqual(self.analysis("cat <(gp); alias gp='git push'; cat <(gp)").findings, [("git", ("push", "push"))])
+
+    def test_where_the_lines_alias_does_not_reach(self):
+        for ok in ("cat <(gp); alias gp='git push'", "alias gp='git push'; unalias gp; cat <(gp)",
+                   "alias gp='git push'; cat <(sh -c gp)", "alias gp='git push'; cat <(echo gp)",
+                   "alias gp='git status'; cat <(gp)", "cat <(echo hi) >(cat)"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+        # the body's own alias misses its own later word in zsh, the body parsed whole (probed, above), but bash reads a
+        # body of two lines a line at a time, and the walk cannot tell its newline from a `;`: read both ways, more than
+        # zsh runs, never less
+        self.assertEqual(self.analysis("alias x=y; cat <(alias gq='git status'; gq)").findings, [("git", ("status", None))])
+
+    def test_a_definition_that_may_not_have_run(self):
+        self.refused_for_members("if true; then alias gp='git status'; fi; cat <(gp)", "cannot resolve")
+        self.refused_for_members("(alias gp='git status'); cat <(gp)", "cannot resolve")
+
+    def test_a_line_with_no_alias_reads_its_body_as_before(self):
+        found = self.analysis("cat <(git push)")
+        self.assertEqual(found.findings, [("git", ("push", "push"))])
+        self.assertEqual(found.alias_scope, 0)
+        self.assertIsNone(found.alias_view)
+        after = self.analysis("alias gp='git push'; cat <(gp); echo done")
+        self.assertEqual(after.alias_scope, 0)  # the frame's scope closes with it
+        self.assertIsNone(after.alias_view)
 
 
 class SameTextAliasTest(BashHookCase):

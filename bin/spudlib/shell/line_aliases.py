@@ -8,8 +8,9 @@ parsed_alias, line_reading and suffix_substitution, read by analyse.dispatch_wor
 word_aliases), the global aliases expanded in text eval reads again (global_aliased, read by analyse), the global and
 suffix aliases the shell's snapshot holds, put in that table where a line starts (held_aliases, SPD-283) and read where
 the shell parsed the text with them (held_names), and a command word read against the plain aliases and the functions
-the snapshot holds (shell_aliased and shell_function, read by held_text).  Past 250 lines as one reading: every function
-here reads or writes the one alias table, or a word against the shell's own."""
+the snapshot holds (shell_aliased and shell_function, read by held_text), each kind only where the snapshot's aliases
+stand (held_standing, SPD-290).  Past 250 lines as one reading: every function here reads or writes the one alias
+table, or a word against the shell's own."""
 
 from . import expansions, prepare, syntax, unread
 from ..hooks import snapshots
@@ -74,21 +75,51 @@ class AliasView:
     global_aliased, alias_requoted), an alias body read in it too, being part of the same parse; what the text itself
     defines or clears goes into ShellAnalysis.aliases alone, for text parsed after it.  `lines`: the text holds a newline,
     where bash and sh, reading it a line at a time, may expand what a line before defined (line_reading).  Equal by
-    content, as ShellAnalysis.reading_state compares it."""
+    content, as ShellAnalysis.reading_state compares it.
 
-    __slots__ = ("table", "doubted", "unknown", "lines", "key")
+    SPD-290: two more marks say whether the aliases the shell's snapshot defines stand in the text (held_standing).
+    `held`: the shell that parses it sourced the snapshot -- False in a new shell's text (analyse.analyse_new_shell) and
+    in every text parsed inside it, which inherits it (`outer`); `early`: the text is a function body the snapshot defines,
+    parsed before the snapshot's aliases (held_text.read_body), which no text the body parses as it runs inherits."""
 
-    def __init__(self, a, lines):
+    __slots__ = ("table", "doubted", "unknown", "lines", "held", "early", "key")
+
+    def __init__(self, a, lines, held=None, early=False):
         self.table = dict(a.aliases)
         self.doubted = frozenset(k for k in self.table if alias_doubted(a, k))
         self.unknown, self.lines = a.alias_unknown, lines
-        self.key = (frozenset(self.table.items()), self.doubted, self.unknown, lines)
+        self.held = (a.alias_view is None or a.alias_view.held) if held is None else held
+        self.early = early
+        self.key = (frozenset(self.table.items()), self.doubted, self.unknown, lines, self.held, early)
+
+    def parsed_late(self):
+        """This view, but for text parsed with the snapshot's aliases in force: a function body the line defines, read
+        where a call inside a snapshot function's body runs it (held_text.read_body), was parsed with the line."""
+        if not self.early:
+            return self
+        view = object.__new__(AliasView)
+        for field in ("table", "doubted", "unknown", "lines", "held"):
+            setattr(view, field, getattr(self, field))
+        view.early, view.key = False, self.key[:-1] + (False,)
+        return view
 
     def __eq__(self, other):
         return isinstance(other, AliasView) and self.key == other.key
 
     def __hash__(self):
         return hash(self.key)
+
+
+def held_standing(a):
+    """Whether the aliases the shell's snapshot defines stand in the text being read (SPD-290; SPD-283 for the global and
+    suffix ones, held_names): in the line's own text, an alias body read in it, and text the Bash tool's shell parses as
+    the line runs -- eval's, a substitution's, on the line or inside a snapshot function's body, which run with the
+    aliases defined -- and a function body the line defines, parsed with the line; never in a function body the snapshot
+    defines, which it writes before its aliases (so zsh parsed it with none), nor anywhere in a new shell's text, which
+    never sources the snapshot (AliasView's `held` and `early`).  The harness's shadows, which the snapshot defines after
+    its aliases, are read as the line's own text (held_text.read_body)."""
+    view = a.alias_view
+    return view is None or view.held and not view.early
 
 
 def parsed_view(a):
@@ -281,12 +312,12 @@ def held_names(a, prefix):
     """The shell's own global aliases (prefix GLOBAL_ALIAS) or suffix aliases (SUFFIX_ALIAS) that stand in the text being
     read at the line's own parse, each name -> its body as the snapshot holds it, None for one the hook cannot read: in
     the line's own text, which the shell parses before any of it runs, and an alias body read in it, whatever the line did
-    to them since (above).  None stand in a function body the shell holds, nor in text read inside one: the snapshot defines
-    its functions before its aliases, and the harness's shadows after them hold no word one could be (hooks/snapshots
-    HARNESS_SHADOWS); nor in a new shell's text, whose table analyse.analyse_new_shell empties, so held_aliases never put
-    the name there.  Text the shell parses as the line runs reads the line's table instead (ShellAnalysis.alias_scope), as
-    it stood where that text was parsed (AliasView, SPD-286)."""
-    if a.shell_reading and a.body_locals is not None:
+    to them since (above).  None stand where held_standing says the snapshot's aliases do not (SPD-290): a function body
+    the snapshot defines before its aliases, and a new shell's text, whose table analyse.analyse_new_shell empties besides,
+    so held_aliases never put the name there.  Text the shell parses as the line runs reads the line's table instead
+    (ShellAnalysis.alias_scope), as it stood where that text was parsed (AliasView, SPD-286) -- inside a snapshot body too,
+    where a substitution read at scope 0, since the line's table holds none, now reads them as its shell parses it then."""
+    if not held_standing(a):
         return {}
     held = snapshots.shell_table(a.home)
     table = held.galiases if prefix == GLOBAL_ALIAS else held.saliases
@@ -364,7 +395,9 @@ def suffix_substitution(name, a, fresh=0):
     word an expansion gave (`fresh`, analyse.dispatch_words: probed, `F=a.txt; $F` found no command a.txt).  zsh looks the
     suffix up after the text past the word's last dot, a dot that does not open the word (probed: `b.a.txt` and
     `./d/a.txt` ran `alias -s txt=...`, `.txt` and `a.TXT` did not), and only once no plain alias of the whole word stands
-    (probed: `alias a.txt=...` ran in place of `alias -s txt=...`), the shell's too, which shell_aliased then expands.
+    (probed: `alias a.txt=...` ran in place of `alias -s txt=...`), the shell's too, which shell_aliased then expands --
+    where it stands (held_standing, SPD-290: `zsh -c 'alias -s txt=...; eval a.txt'` ran the suffix alias, the new shell
+    holding no plain a.txt).
     The word reaches this with its quotes taken, so a quoted suffix (`a.'txt'`, which zsh does not expand) is read as one:
     that reads more than the shell runs, never less; so is a glob, whose text zsh looks the suffix up in before it globs
     (probed: `a?.txt` and `*.txt` ran the suffix alias with the file they matched).  The line's table is read as the text
@@ -373,7 +406,7 @@ def suffix_substitution(name, a, fresh=0):
     if dot <= 0 or dot == len(name) - 1:
         return None, None
     suffix, held, table = name[dot + 1 :], snapshots.shell_table(a.home), parsed_table(a)
-    if name in held.aliases and (not a.alias_scope or name not in table):
+    if name in held.aliases and held_standing(a) and (not a.alias_scope or name not in table):
         return None, None
     if not a.alias_scope:
         names = {} if fresh else held_names(a, SUFFIX_ALIAS)
@@ -557,9 +590,16 @@ def shell_aliased(words, a):
     flight, which is what stops `alias ls='ls -G'`.  A word the line quoted or escaped (`\\gp`, `'gp'`) reaches this
     with its quotes already taken and is expanded all the same: that is fail-closed -- the name it spells is no program --
     and telling the two apart would need a mark inside the command word that every reading by name would then have to
-    strip (the expansion check makes the same choice for `'$X' push`)."""
+    strip (the expansion check makes the same choice for `'$X' push`).
+
+    SPD-290: only where the snapshot's aliases stand (held_standing), as SPD-283 made its global and suffix ones.  zsh
+    expands none in a function body the snapshot defines, written before its aliases, nor in a new shell's text, which
+    never sources it (probed in zsh 5.9 -f, a `zsh -f -c` sourcing `unalias -a`, functions, then `alias gp='echo
+    GP-RAN'`: a body's `gp`, `runit gp` through a body's `"$@"`, `zsh -f -c gp` and `zsh -f -c "eval gp"` found no
+    command gp, where a body's `eval gp` and `$(gp)` and a line function's `gp` ran the alias).  Reading the body there
+    reads other text, not more: under `alias git=hub`, a body's `git push` and `sh -c 'git push'` push."""
     found = snapshots.shell_table(a.home)
-    if not found.aliases:  # a machine with no snapshot, and every scratch home the suite builds: nothing to read
+    if not found.aliases or not held_standing(a):  # no snapshot (every scratch home the suite builds), or none stands here
         return None, [], [], None
     out, expanded, i, at_command = [], [], 0, True
     while i < len(words) and at_command:

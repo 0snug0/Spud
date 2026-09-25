@@ -201,10 +201,16 @@ EVAL_FLAG_REASON = ("the word %s expands a value with zsh's (e) flag, which runs
 #             substitution, text appended to a body (line_functions.assign_function, SPD-278); shown is the assignment.
 # "function-copy" zsh's `functions -c OLD NEW` where the hook cannot follow the copy -- a name the line does not spell, or
 #             an OLD the shell's snapshot defines (line_functions.copy_function, SPD-279); shown is the command.
-# "alias-word" a word eval reads again that the line may have made a global or a suffix alias the hook cannot resolve --
-#             a name or body it does not spell, a definition or `unalias` that may not have run -- or a word the shell
-#             expands before eval reads it, which may spell one's name (line_aliases.global_aliased, SPD-109); shown is the
-#             word, or the text.
+# "function-math" zsh's `functions -M` where the hook cannot follow what arithmetic calls -- a math name, or the shell
+#             function it runs, that the line does not spell, or an operand that may become several words or none
+#             (line_functions.math_function), or an arithmetic call whose name the hook cannot read where the line
+#             registers one (line_functions.read_math_calls, SPD-282); shown is the command, or the expression.
+# "alias-word" a word a global or a suffix alias the hook cannot resolve may stand in: one the line defined -- a name or
+#             body it does not spell, a definition or `unalias` that may not have run -- in text zsh parses as the line
+#             runs (eval's words, a `$( )`, backtick or `<( )` body, a trap's action, a glob qualifier's code: SPD-109,
+#             SPD-283, SPD-287), a word the shell expands before eval reads it, which may spell one's name, or global
+#             aliases that expand into one another past line_aliases.GLOBAL_EXPANSIONS (line_aliases.global_aliased);
+#             shown is the word, or the text.  SPD-289: worded for every such place, not eval's alone.
 UNREAD_REASON = (
     "the hook cannot read part of what this line runs: %s. The hook refuses a member a form it cannot read rather than"
     " guess over it, so a git write (Law 7), a spud call (Law 6) or a write outside your deliverables (Law 5) cannot hide"
@@ -253,13 +259,23 @@ UNREAD_MESSAGES = {
                       " name the line does not spell, or a function the shell's profile defines, whose body runs when the"
                       " new name is called, or by itself for a chpwd or zshexit name",
                       "define the new name with name() { ... } on the line, where the hook reads its body"),
-    "alias-word": ("`eval` reads `%s` again where this line may have defined a global or suffix alias the hook cannot"
-                   " resolve (`alias -g`, `alias -s`, zsh's `galiases` or `saliases`): its name or body holds an expansion"
-                   " or a substitution, the definition or an `unalias` may not have run, or a word the shell expands before"
-                   " eval reads it may spell its name -- and zsh expands a global alias in any word and a suffix alias"
-                   " on a command word ending in its suffix, so the command that runs is not the one written",
-                   "spell the commands out and define no global or suffix alias on the line, or define it with its name"
-                   " and body written out, outside any branch, subshell, pipeline or loop"),
+    "function-math": ("zsh's `functions -M` names a function arithmetic calls, and the hook cannot follow it (`%s`): a"
+                      " math function's name, or the shell function it runs, that the line does not spell, or an"
+                      " arithmetic call of a name the hook cannot read, which runs a function's body wherever the"
+                      " expression stands",
+                      "spell the names out (`functions -M name`, `$(( name() ))`), or run the function as a command by its"
+                      " own name, where the hook reads its body"),
+    "alias-word": ("a global or suffix alias the hook cannot resolve (`alias -g`, `alias -s`, zsh's `galiases` or"
+                   " `saliases`) may stand in `%s`: one this line defines, whose name or body holds an expansion or a"
+                   " substitution, or whose definition or `unalias` may not have run, read in text zsh parses as the line"
+                   " runs (eval's words, a `$( )`, backtick or `<( )` body, a trap's action, a glob qualifier's code); a"
+                   " word the shell expands before eval reads it, which may spell one's name; or global aliases that"
+                   " expand into one another past the number the hook follows -- and zsh"
+                   " expands a global alias in any word and a suffix alias on a command word ending in its suffix, so the"
+                   " command that runs is not the one written",
+                   "spell out what the alias stands for in place of its name, and give eval its words spelled out; define"
+                   " no global or suffix alias on the line, or define it with its name and body written out, outside any"
+                   " branch, subshell, pipeline or loop"),
 }
 
 
@@ -589,18 +605,28 @@ def bash_refusal(ctx, con, caller_agent_id, caller_member, command, cwd, mode="s
                     " a command's prefix, or a builtin that assigns it), so the hook cannot resolve the words it becomes; spell them out"
                     % shown_word(detail)), analysis
         elif kind == "alias":
-            return ("`eval` runs the command word %s, which this line defines as an alias the hook cannot resolve (an `alias`"
-                    " line, or an element of zsh's `aliases` parameter): its name or its body holds an expansion or a"
-                    " substitution, or the definition or an `unalias` may not have run (a branch, a subshell, a"
-                    " pipeline, a background list, a loop or function body, a reading only one shell makes). A shell expands an"
-                    " alias when it parses the text, so the command that runs is not the one written; spell the command out, or"
-                    " define no alias on the line" % shown_word(detail)), analysis
+            # SPD-289: zsh expands the line's aliases in every text it parses as the line runs, not in eval's words alone
+            # (SPD-283, SPD-287), so the reason names each such place
+            return ("the command word `%s` runs an alias this line defines that the hook cannot resolve (an `alias` line,"
+                    " or an element of zsh's `aliases`, `galiases` or `saliases` parameter): its name or its body holds an"
+                    " expansion or a substitution, or the definition or an `unalias` may not have run (a branch, a subshell,"
+                    " a pipeline, a background list, a loop or function body, a reading only one shell makes). zsh expands"
+                    " the line's aliases in text zsh parses as the line runs -- eval's words, a `$( )`, backtick or `<( )`"
+                    " body, a trap's action, a glob qualifier's code -- so the command that runs there is not the one"
+                    " written; spell out the command the alias stands for in place of its name, and define no alias on the"
+                    " line, or define it with its name and body written out, outside any branch, subshell, pipeline or loop"
+                    % shown_word(detail)), analysis
         elif kind == "shell-alias":
-            return ("the command word %s is an alias your shell already defines whose body the hook cannot read (its quoting"
+            # SPD-289: the word is a command word for a plain or a suffix alias, and any word for a global one (SPD-283,
+            # line_aliases.alias_doubt); zsh expands no alias of a word quoted in any way, the respelling offered for a
+            # global alias's name in argument position (the hook reads a quoted command word against the table as well)
+            return ("the word `%s` runs an alias your shell already defines whose body the hook cannot read (its quoting"
                     " does not close, or holds a `$'...'` escape zsh and bash decode apart, in Claude Code's snapshot of your"
-                    " interactive shell, ~/.claude/shell-snapshots/). A shell"
-                    " expands an alias when it parses the line, so the command that runs is not the one written; spell the"
-                    " command out" % shown_word(detail)), analysis
+                    " interactive shell, ~/.claude/shell-snapshots/): a plain alias as a command word, a global alias"
+                    " (`alias -g`) in any word, or a suffix alias (`alias -s`) on a command word ending in its suffix. A"
+                    " shell expands an alias when it parses the text, so the command that runs is not the one written;"
+                    " spell out the command the alias stands for in its place, or quote a global alias's name where you"
+                    " mean the word as written (`'%s'`)" % ((shown_word(detail),) * 2)), analysis
         elif kind == "glob":
             return ("the word %s is a glob the shell expands before it runs the command, and it can become more than one command,"
                     " option or verb the hook checks at once, or more than the hook reads; spell the words out" % shown_word(detail)), analysis

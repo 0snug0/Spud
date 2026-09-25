@@ -179,9 +179,15 @@ def analyse_new_shell(a, command, depth, stdin=None, fed=False):
     """A body another shell process reads: a `-c` string, a here-document fed to a shell, the words `env -S` or `script -c`
     hand on.  An alias the line defined does not reach it (probed: `alias gp='git push'; eval 'sh -c gp'` ran
     nothing, while `eval 'echo $(gp)'` ran it, the substitution being parsed by the shell that holds the alias).  It runs
-    on the standard input `stdin` its command hands it, and `fed` says whether anything stands there (SPD-210)."""
+    on the standard input `stdin` its command hands it, and `fed` says whether anything stands there (SPD-210).
+
+    Nor does an alias the shell's snapshot defines, which only the Bash tool's own shell sources (SPD-290, probed in zsh
+    5.9 -f: after sourcing `alias gp='echo GP-RAN'`, `zsh -f -c gp`, `zsh -f -c "eval gp"` and `sh -c gp` found no
+    command gp): the text is read with a line_aliases.AliasView whose `held` is False, which every text parsed inside it
+    inherits, and which the reading's cache keys hold, so `sh -c gp; echo $(gp)` reads the substitution afresh."""
     state = (a.alias_scope, a.aliases, a.alias_unknown, a.alias_view)
-    a.alias_scope, a.aliases, a.alias_unknown, a.alias_view = 0, {}, False, None
+    a.alias_scope, a.aliases, a.alias_unknown = 0, {}, False
+    a.alias_view = line_aliases.AliasView(a, False, held=False)
     try:
         analyse_isolated(a, command, depth, stdin, fed)
     finally:
@@ -757,9 +763,11 @@ def dispatch_words(words, bodies, a, depth, budget, effect, prefixed, fresh, mov
         else:
             line_aliases.clear_alias_line(words, a)
     elif cmd == "functions" and directories.builtin_runs_here(effect):
-        # zsh's `functions -c OLD NEW` binds NEW to OLD's body, as a definition of NEW would (SPD-279)
+        # zsh's `functions -c OLD NEW` binds NEW to OLD's body, as a definition of NEW would (SPD-279), and `functions -M
+        # NAME` registers a function arithmetic calls, whose body each call reads where it stands (SPD-282)
         a.kinds.append("other")
         line_functions.copy_function(words, a)
+        line_functions.math_function(words, a, effect)
     elif cmd == "hash" and directories.builtin_runs(effect):
         # The builtin, spelled exactly, puts a file of the line's own choosing in the shell's command table, so a
         # later bare call of that name runs it whatever PATH holds.  Probed in bash 3.2 and sh (`hash -p <dir>/<name> <name>`)

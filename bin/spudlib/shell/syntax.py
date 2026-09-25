@@ -692,8 +692,13 @@ class ShellAnalysis:
         # (directories.cd_target)
         self.chase = False
         # `aliases`, what `alias NAME=body` defined on the line, name -> the body's text, None for one the hook
-        # cannot read and for one `unalias` cleared; `alias_scope`, how many `eval` re-analyses deep the reading is, the only
-        # place on one line where a name the line aliased is expanded (a shell expands an alias when it parses the text);
+        # cannot read and for one `unalias` cleared; `alias_scope`, how many texts the shell parses as the line runs the
+        # reading is inside, the only places on one line where a name the line aliased is expanded (zsh expands an alias
+        # when it parses the text, and parses the line's own text before any of it runs): each eval's words raise it, and
+        # so does a body read in its own process -- a substitution, a trap's action, an (e) flag's value -- while the
+        # line's table holds an alias (analyse.analyse_isolated, SPD-283); a function body the shell's snapshot holds,
+        # parsed before any alias of the line's, is read at 0 (held_text.read_body), and an eval or a substitution inside
+        # it raises it again, which is why the table is part of reading_state (SPD-288);
         # `alias_unknown`, the line defined an alias whose name the hook cannot read.  Each name's doubt lives in `doubt`
         # under ALIAS_KEY + name, so a definition in a branch, a subshell, a pipeline or a loop body is doubted as a
         # variable's assignment there is.  SPD-286: `alias_view`, the line_aliases.AliasView the innermost such text was
@@ -814,7 +819,8 @@ class ShellAnalysis:
         """The state a reading of text starts from that decides what it finds, beside the text and its standard input: the
         directories the shell may be in, the loop and function depth a relative cd repeats in, the line's variables with
         their doubt, the aliases -- their scope, the table as it stands and the one the text being read was parsed with
-        (SPD-283, SPD-286: `f() { eval gp; }; f; alias gp='git push'; f` pushes in the second call) -- what
+        (SPD-283, SPD-286: `f() { eval gp; }; f; alias gp='git push'; f` pushes in the second call; SPD-288: so does a
+        snapshot function's `eval "$@"` or `$(gp)`, called before and after the line's alias, probed in zsh 5.9) -- what
         shell/loop_bindings settled (SPD-146, SPD-221), and whether an option builtin ran (arith_opaque, cdable, chase).
         analyse.analyse_isolated reads a body in its own process once per such state, and held_text.read_shell_name a
         function's body once per call from one (SPD-252); a field that changes what a reading finds belongs here."""
@@ -851,6 +857,8 @@ def shown_operands(text):
 
 
 def shell_tokens(text):
+    if "${" in text and "(" in text:
+        text = _braced_parentheses(text)
     lx = shlex.shlex(text, posix=True, punctuation_chars=True)
     lx.whitespace_split = True
     lx.commenters = ""  # newlines_as_separators has read the comments; shlex would eat the rest of the line
@@ -858,6 +866,64 @@ def shell_tokens(text):
         return list(lx)
     except ValueError:
         return None
+
+
+_NOT_BRACED_PAREN = "$<>="  # what a `(` in a `${ }` follows when a shell reads it as more than a character of the word
+
+
+def _braced_parentheses(text):
+    """The text with each unquoted `(` inside a `${ }` that closes, and the `)` that closes it there, written as the
+    quoted operator's sentinel (_PUNCT_SENTINELS), so shlex keeps both in the word, as mark_zsh_patterns keeps a `${(e)x}`
+    flag group's (SPD-297).  Both shells read a `${` to the `}` that closes it, counting the braces it holds and skipping
+    quoted and escaped ones, so `${arr[mf()+1]}` is one word whose subscript calls a `functions -M` function (probed in
+    zsh 5.9 -f -o nobareglobqual and -f: `${arr[mf()+1]}` and `${arr[mf() + 1]}` called mf, and `${x:-a()b}`,
+    `${x:-a(b)c}`, `${x:-a{b}c()d}`, `${x:-a\\}()b}` and `${x:-'}'()b}` each expanded as one word; bash 3.2 read each as
+    one word too, failing the subscript's expression), where shlex split it at the `()` as if it opened a function
+    definition.  Left as they are: a `(` a `$`, `<`, `>` or `=` opens (a substitution, an arithmetic expansion
+    mark_zsh_patterns leaves there, and the process substitutions bash ran in `${x:-<(cmd)}` and `${x:->(cmd)}` and zsh in
+    `${x:-=(cmd)}`) with its `)` and every parenthesis between them, a list a shell runs, a `(` whose `)` is not in the same
+    `${ }`, every parenthesis of a `${` that never closes, and every one outside a `${ }`, a function definition's `()`
+    among them.  An unquoted `$arr[mf()+1]` and an `arr[mf()]=1` are not braced and are left alone too: zsh called no
+    function there (`invalid subscript`, `bad pattern: arr[mf`) and bash rejected the line."""
+    marked, depth, parens, found, held = [], 0, [], [], 0  # held: the parentheses left as they are, still open
+    i, n, quote = 0, len(text), None
+    while i < n:
+        c = text[i]
+        if quote == "'":
+            quote = None if c == "'" else quote
+        elif c == "\\":
+            i += 1
+        elif quote == '"':
+            quote = None if c == '"' else quote
+        elif c in "'\"":
+            quote = c
+        elif not depth:
+            if text.startswith("${", i):
+                depth, i = 1, i + 1
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if not depth:
+                marked.extend(found)
+                parens, found, held = [], [], 0
+        elif c == "(":
+            kept = text[i - 1] not in _NOT_BRACED_PAREN and not held
+            held += not kept
+            parens.append((i, kept))
+        elif c == ")" and parens:
+            opened, kept = parens.pop()
+            if kept:
+                found.extend((opened, i))
+            else:
+                held -= 1
+        i += 1
+    if not marked:
+        return text
+    chars = list(text)
+    for k in marked:
+        chars[k] = _PUNCT_SENTINELS[chars[k]]
+    return "".join(chars)
 
 
 UNTOKENIZED_KEPT = 160  # the most of the text untokenized keeps, from the quote on or up to the backslash

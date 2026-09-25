@@ -370,6 +370,81 @@ class ZshGlobOperatorTest(BashHookCase):
         self.assertAllowed("%s --as %s member log 'a (b|c) <1-2>'" % (self.spud_cli, AGENT_A))
 
 
+class QualifierCodeAliasTest(BashHookCase):
+    """SPD-292: zsh parses an `e` or `+` glob qualifier's code when the glob expands, once for every file it matches, as
+    eval parses its words, so an alias the line -- or an eval text before the glob -- defined stands there; the walk read
+    that code as part of the text around it, where no alias of the line's stands (and since SPD-286 no alias an eval text
+    defines stands in the rest of that text), so `alias gq='git push'; echo *(e:gq:)` reached the hook with no finding.
+    Probed in zsh 5.9 -f through tests/probes/shell_probe.py with two files: after `alias ls='echo ALIASED'`, `echo
+    *(e:'ls -d /':)` printed `ALIASED -d /` twice and `echo *(+ls)` ran the alias; `eval 'alias l2="echo L2"; echo *(e:l2:)'`
+    ran L2; the code's own `alias ls="echo INNER"` stood for the second file and not the first, and an alias it defined
+    after running a command ran for the second file; an alias an eval text defined after the glob stood in none of it.
+    Under -o nobareglobqual (this Mac's Bash tool) each is `bad pattern`; the hook reads the qualifier reading too.
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        for rel in ("tests/keep.py", "tests/other.py"):
+            p = self.home.path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7"):
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_the_tickets_evidence(self):
+        self.refused_for_members("alias gq='git push'; echo *(e:gq:)")
+        self.refused_for_members("eval 'alias gq=\"git push\"; echo *(e:gq:)'")
+        self.assertEqual(self.analysis("alias gq='git push'; echo *(e:gq:)").findings, [("git", ("push", "push"))])
+
+    def test_every_qualifier_form_reads_the_lines_alias(self):
+        for cmd in ("alias gq='git push'; ls tests/*(e:'gq':)", "alias gq='git push'; ls tests/*(oe:gq:)",
+                    "alias gq='git push'; ls tests/keep.py(e{gq})", "alias gq='git push'; ls tests/keep.py(e[gq])",
+                    "alias gq='git push'; ls tests/*(.e:'true && gq':)", "alias gq='git push'; ls tests/*(+gq)",
+                    "alias gq='git push'; echo x > tests/*(e:gq:)", "alias -s txt='git push'; ls tests/*(e:a.txt:)",
+                    "aliases[gq]='git push'; ls tests/*(e:gq:)", "alias gq='git push'; eval 'ls tests/*(e:gq:)'",
+                    "ls tests/*(e:gq:); alias gq='git push'; ls tests/*(e:gq:)", "alias gq='git push'; echo $(ls *(e:gq:))"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_an_alias_the_code_defines_stands_for_the_next_match(self):
+        """The code runs once for every match, in the line's shell, so what it defines is there when the next match's
+        code is parsed (probed: `ls` ran INNER for the second file, `q3` ran for the second file only)."""
+        self.refused_for_members("ls tests/*(e:'gq; alias gq=\"git push\"':)")
+        found = self.analysis("alias gq='git push'; ls tests/*(e:'alias gq=\"git status\"; gq':)").findings
+        self.assertIn(("git", ("push", "push")), found)
+
+    def test_where_the_lines_alias_does_not_reach(self):
+        for ok in ("ls tests/*(e:gq:); alias gq='git push'", "alias gq='git push'; unalias gq; ls tests/*(e:gq:)",
+                   "alias gq='git status'; ls tests/*(e:gq:)", "alias gq='git push'; ls tests/*(e:'echo gq':)",
+                   "alias gq='git push'; ls tests/*(e:'sh -c gq':)", "eval 'ls tests/*(e:gq:); alias gq=\"git push\"'",
+                   "alias gq='git push'; ls 'tests/*(e:gq:)'", "alias gq='git push'; ls tests/*(om[1])"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_a_definition_that_may_not_have_run(self):
+        self.refused_for_members("if true; then alias gq='git status'; fi; ls tests/*(e:gq:)", "cannot resolve")
+
+    def test_a_line_with_no_alias_reads_its_code_as_before(self):
+        found = self.analysis("ls tests/*(e:'git push':)")
+        self.assertEqual(found.findings, [("git", ("push", "push"))])
+        self.assertEqual((found.alias_scope, found.alias_view), (0, None))
+        after = self.analysis("alias gq='git push'; ls tests/*(e:gq:); echo done")
+        self.assertEqual((after.alias_scope, after.alias_view), (0, None))  # the scope closes with the code's reading
+
+
 class ArithmeticCommandTest(BashHookCase):
     """SPD-088: `(( ... ))` is an arithmetic command and `$(( ... ))` an arithmetic expansion, and both shells evaluate what
     stands between the parentheses -- the `>` of `(( n > 2 ))` is a comparison, the `|` of `(( a | b ))` a bitwise or, the `;`

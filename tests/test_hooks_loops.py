@@ -2,6 +2,7 @@
 select or foreach body with no `do`, if and elif with braces, a `}` or `))` in command position, reserved words glued to a
 word."""
 
+import shlex
 import shutil
 import tempfile
 import time
@@ -2598,6 +2599,109 @@ class LoopOptionWordsTest(BashHookCase):
                     a = m.analyse_command(cmd, m.ShellAnalysis(cwd=str(self.home.path)))
                     self.assertEqual([w[1] for w in a.arg_writes], [w[1] for w in unsettled.arg_writes])
                     self.assertEqual([t for t, _c in a.redirects], [t for t, _c in unsettled.redirects])
+
+
+class LoopBodyAliasTest(BashHookCase):
+    """SPD-294: zsh parses eval's words, a `$( )` or backtick body, a `<( )` body and a glob qualifier's code each time a
+    loop runs them, so an alias the loop's body defines after them stands there in the next pass; the walk read a loop
+    body once, with the table as it stood before the body's own definitions, so `for i in 1 2; do eval gq; alias
+    gq='git push'; done` reached the hook with no finding.  Probed in zsh 5.9 -f and -f -o nobareglobqual through
+    tests/probes/shell_probe.py: `for i in 1 2; do eval "q9 2>/dev/null || echo miss"; alias q9="echo Q9RAN"; done`
+    printed miss, then Q9RAN; so did an eval text defining its own alias after running it in a while loop, a `$( )` and a
+    `<( )` body, and a `repeat 2 { ... }` body; a while's condition ran the alias from its second pass on; an alias defined
+    through another alias's body took one more pass per level (miss1 miss2 Q9RAN); a for's header, run once, never saw
+    the body's alias; and a loop's own command words, parsed with the loop, never did (`eval 'for ...; do q2; alias q2=...;
+    done'` printed miss twice).  bash 3.2 expands no alias in a script, and printed miss throughout.
+    AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        for rel in ("tests/keep.py", "tests/other.py"):
+            p = self.home.path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("orig\n", encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7"):
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertRefused(command, needle, agent_id)
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_the_tickets_evidence(self):
+        for cmd in ("for i in 1 2; do eval gq; alias gq='git push'; done",
+                    "while true; do eval 'gq; alias gq=\"git push\"'; done"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+                self.assertIn(("git", ("push", "push")), self.analysis(cmd).findings)
+
+    def test_every_loop_form_and_every_text_parsed_as_it_runs(self):
+        for cmd in ("until false; do eval gq; alias gq='git push'; done",
+                    "repeat 2 { eval gq; alias gq='git push' }", "repeat 2 do eval gq; alias gq='git push'; done",
+                    "for i (1 2) { eval gq; alias gq='git push' }", "for i in 1 2; { eval gq; alias gq='git push'; }",
+                    "foreach i (1 2) eval gq; alias gq='git push'; end", "select i in 1 2; do eval gq; alias gq='git push'; done",
+                    "for (( i=0; i<2; i++ )) do eval gq; alias gq='git push'; done",
+                    "while eval gq; do alias gq='git push'; done", "while true; do echo $(gq); alias gq='git push'; done",
+                    "while true; do echo \"`gq`\"; alias gq='git push'; done", "while true; do cat <(gq); alias gq='git push'; done",
+                    "while true; do ls tests/*(e:gq:); alias gq='git push'; done", "time for i in 1 2; do eval gq; alias gq='git push'; done",
+                    "for i in 1 2; do eval gq; aliases[gq]='git push'; done", "for i in 1 2; do eval gq; alias -g gq='git push'; done",
+                    "for i in 1 2; do if true; then eval gq; fi; alias gq='git push'; done",
+                    "for i in 1 2; do for j in 1 2; do eval gq; done; alias gq='git push'; done",
+                    "for i in 1 2; do eval gq; for j in 1; do alias gq='git push'; done; done",
+                    "for i in 1 2; do eval gq; alias gq='git push'; done > /dev/null", "true && for i in 1 2; do eval gq; alias gq='git push'; done",
+                    "eval 'for i in 1 2; do eval gq; alias gq=\"git push\"; done'",
+                    "f() { for i in 1 2; do eval gq; alias gq='git push'; done; }; f",
+                    "echo $(for i in 1 2; do eval gq; alias gq='git push'; done)"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    @staticmethod
+    def chain(levels):
+        """A loop whose body defines a1, whose body defines a2, and so on to a<levels>, whose body defines gq as `git
+        push`, with an eval of each before the definitions: each pass of the loop reaches one level further."""
+        body = "alias gq='git push'"
+        for k in range(levels - 1, 0, -1):
+            body = "alias a%d=%s" % (k + 1, shlex.quote(body))
+        evals = "; ".join("eval a%d" % k for k in range(levels, 0, -1))
+        return "for i in 1 2 3; do eval gq; %s; alias a1=%s; done" % (evals, shlex.quote(body))
+
+    def test_an_alias_defined_through_another_takes_a_pass_per_level(self):
+        """zsh ran q9 on the third pass: the second pass's `eval da` defined it (probed: miss1 miss2 Q9RAN).  The refusal
+        names the first finding, the eval of an alias the loop defines, which may not have run; the push is found too."""
+        for cmd in ("for i in 1 2 3; do eval gq; eval da; alias da='alias gq=\"git push\"'; done", self.chain(2),
+                    self.chain(3)):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, "cannot resolve")
+                self.assertIn(("git", ("push", "push")), self.analysis(cmd).findings)
+                self.assertNotIn(("git", ("push", "push")), self.analysis(cmd.replace("eval gq", "echo gq", 1)).findings)
+
+    def test_where_the_bodys_alias_does_not_reach(self):
+        for ok in ("for i in 1 2; do gq; alias gq='git push'; done", "eval 'for i in 1 2; do gq; alias gq=\"git push\"; done'",
+                   "for i in 1 2; do eval ls; alias gq='git push'; done", "for i in $(gq); do alias gq='git push'; done",
+                   "repeat $(gq) { alias gq='git push' }", "for i in 1 2; do eval gq; done; alias gq='git push'",
+                   "for i in 1 2; do eval gq; done; for j in 1; do alias gq='git push'; done"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_a_loop_that_defines_no_alias_is_read_once(self):
+        found = self.analysis("for i in 1 2; do eval 'git push'; done")
+        self.assertEqual(found.findings, [("git", ("push", "push"))])
+        found = self.analysis("alias gq='git push'; for i in 1 2; do eval gq; done")
+        self.assertEqual(found.findings, [("git", ("push", "push"))])
+        self.assertEqual((found.alias_scope, found.alias_view), (0, None))
+
+    def test_a_table_that_never_settles_is_unknown(self):
+        """A chain longer than the passes the walk reads: past its bound the table is one the hook cannot read, and every
+        word an eval in the body runs is refused as unresolvable."""
+        self.refused_for_members(self.chain(5), "cannot resolve")
 
 
 if __name__ == "__main__":
