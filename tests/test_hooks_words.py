@@ -1396,6 +1396,164 @@ class AliasEvalTest(BashHookCase):
         self.assertRefused("alias e='echo x | tee ledger/tickets/SPD-001.md'; eval e", "Law 1", agent_id=None)
 
 
+# SPD-109: the refusal a member earns where eval reads a word again that the line may have made a global or suffix alias
+# the hook cannot resolve (bash_rule's unread form "alias-word").
+ALIAS_WORD_WORDING = "global or suffix alias"
+
+
+class GlobalAliasEvalTest(BashHookCase):
+    """SPD-109 (Adirondack's SPD-085 proposal): zsh expands a global alias (`alias -g`, `galiases`) in any word of text it
+    parses, not only in command position, and a suffix alias (`alias -s`, `saliases`) on a command word ending in its
+    suffix, and the hook read both only where a plain alias stands, so `alias -g gp='; git push'; eval 'echo hi gp'` and
+    `alias -s txt='git push'; eval a.txt` pushed past Law 7.  Probed in zsh 5.9 -f and -f -o nobareglobqual
+    (tests/probes/shell_probe.py; bash 3.2 has neither form: `alias -g` is an invalid option there), with `alias -g gp=EXP`:
+
+    - eval's words expand it as an argument, a redirection target (`> gp` wrote EXP, `2>gp` too), in `[[ ]]`, as a case
+      word, in a for list, an array's elements, a `$( )` or backtick body, a function's name and body where eval defines
+      them, after `&&`, `|` or `(`, and an `eval` inside eval's text; a body that ends in `;` ends the command (`echo hi gp;
+      echo after` printed hi, the body's command, then after), a body holding another global alias expands it, and a name is
+      not expanded again inside its own expansion (`rc='rc more'` gave `rc more`).  Where a `;` leaves zsh no line it can
+      parse (`> gp`, `[[ gp ]]`, `case gp`, `for i in gp`) it runs nothing, and in an array's elements it only separates
+      them, so those are tested with a body `$(...)`, which each of them ran (`$(echo RAN >&2)` printed RAN in all six);
+    - `alias -$o q=Q` with o=g defined a global alias: an option word the shell expands may be any kind;
+    - it is not expanded in quotes or behind a backslash, whole or in part (`'gp'`, `"gp"`, `\\gp`, `g\\p`, `g'p'`), in an
+      assignment's value (`X=gp`), a `${ }`, arithmetic, a case pattern or a comment;
+    - a suffix alias runs its body with the word after it (`a.txt x` printed `SUF a.txt x`) where the word is a command word
+      (after `X=1`, `;`), matched on the text after its last dot (`b.a.txt`, `./d/a.txt`, `'a'.txt` and `\\a.txt` all ran it,
+      `a.'txt'`, `.txt` and `a.TXT` did not), never as an argument or behind `command`; a plain alias of the same name wins;
+    - `alias +g` defines a global alias as `-g` does, `alias q=` after `alias -g q=` makes q plain again, `unalias q` clears
+      a global alias, `unalias -a` clears no suffix alias and `unalias -s txt` clears that one.
+
+    The reader now expands a global alias the line defines wherever eval's text, an alias body or a substitution in them
+    holds it unquoted, and a suffix alias on a command word, reading the body as the text it is; a word that may be one the
+    reader cannot resolve (its name or body the line does not spell, or a definition that may not have run) refuses a
+    member unread (SPD-217).  AGENT_A plans tests/** and bin/spud; AGENT_C plans **."""
+
+    def setUp(self):
+        super().setUp()
+        self.wide = self.spawn(self.plan(persona="engineer", model="opus", deliverable=["home:**"]), AGENT_C)
+        p = self.home.path / "ledger/tickets/SPD-001.md"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("orig\n", encoding="utf-8")
+
+    def refused_for_members(self, command, needle="Law 7"):
+        r = None
+        for agent_id in (AGENT_C, AGENT_A):
+            with self.subTest(command=command, agent_id=agent_id):
+                r = self.assertRefused(command, needle, agent_id)
+        with self.subTest(command=command, agent_id="spud"):
+            self.assertSilent(command, agent_id=None)
+        return r
+
+    def silent_for_everyone(self, command):
+        for agent_id in (AGENT_C, AGENT_A, None):
+            with self.subTest(command=command, agent_id=agent_id):
+                self.assertSilent(command, agent_id)
+
+    def analysis(self, command):
+        m = load_spud_module()
+        return m.analyse_command(command, m.ShellAnalysis(cwd=str(self.home.path)))
+
+    def test_the_tickets_evidence_commands(self):
+        self.refused_for_members("alias -g gp='; git push'; eval 'echo hi gp'")
+        self.refused_for_members("alias -s txt='git push'; eval 'a.txt'")
+        self.assertEqual(self.analysis("alias -g gp='; git status'; eval 'echo hi gp'").findings, [("git", ("status", None))])
+        self.assertEqual(self.analysis("alias -s txt='git status'; eval a.txt").findings, [("git", ("status", None))])
+
+    def test_every_word_zsh_expands_a_global_alias_in(self):
+        # where a `;` would leave zsh a line it cannot parse (a target, `[[ ]]`, a case word, a for list), a substitution
+        for cmd in ("alias -g gs='$(git push)'; eval 'echo hi > gs'", "alias -g gs='$(git push)'; eval 'echo hi 2>gs'"):
+            # a target a substitution names is one Spud is refused too, as on the line itself
+            for agent_id in (AGENT_C, AGENT_A):
+                with self.subTest(command=cmd, agent_id=agent_id):
+                    self.assertRefused(cmd, "Law 7", agent_id)
+            self.assertRefused(cmd, "", agent_id=None)
+        for cmd in ("alias -g gp='; git push'; eval 'echo hi gp;echo after'", "alias -g gs='$(git push)'; eval '[[ gs == x ]]'",
+                    "alias -g gs='$(git push)'; eval 'case gs in x) :;; esac'",
+                    "alias -g gs='$(git push)'; eval 'for i in gs; do :; done'",
+                    "alias -g gs='$(git push)'; eval 'arr=(a gs b)'", "alias -g gp='; git push'; eval 'echo $(echo gp)'",
+                    "alias -g gp='; git push'; eval 'echo `echo gp`'", "alias -g gp='; git push'; eval 'f() { echo gp; }; f'",
+                    "alias -g gp='; git push'; eval 'true && echo gp'", "alias -g gp='; git push'; eval '(echo gp)'",
+                    "alias -g gp='; git push'; eval 'echo a | cat gp'", "alias -g gp='; git push'; eval 'eval \"echo gp\"'",
+                    "alias -g gp='; git push'; eval echo hi gp", "alias -g gp='git push'; eval gp",
+                    "alias -g G='| git push'; eval 'echo hi G'", "alias -g gp='; hop'; alias -g hop='git push'; eval 'echo gp'",
+                    "alias +g gp='; git push'; eval 'echo gp'", "alias -g -- gp='; git push'; eval 'echo gp'",
+                    "galiases[gp]='; git push'; eval 'echo gp'", "galiases=(gp '; git push'); eval 'echo gp'",
+                    "alias gp=ls; alias -g gp='; git push'; eval 'echo gp'",
+                    "alias -g gp='; git push'; alias e='echo'; eval 'e gp'",
+                    "alias -g gp='; git push'; f() { eval 'echo gp'; }; f"):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_a_suffix_alias_on_a_command_word(self):
+        for cmd in ("alias -s txt='git push'; eval 'a.txt x y'", "alias -s txt='git push'; eval ./d/a.txt",
+                    "alias -s txt='git push'; eval b.a.txt", "alias -s txt='git push'; eval 'X=1 a.txt'",
+                    "alias -s txt='git push'; eval 'true; a.txt'", "saliases[txt]='git push'; eval a.txt",
+                    "alias -s txt='git push'; unalias -a; eval a.txt",
+                    "alias -s txt='git push'; eval \"'a'.txt\""):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd)
+
+    def test_spud_keeps_his_own_checks_inside_the_body(self):
+        self.assertRefused("alias -g gp='> ledger/tickets/SPD-001.md'; eval 'echo x gp'", "Law 1", agent_id=None)
+        self.assertRefused("alias -g gp='> ledger/tickets/SPD-001.md'; eval 'echo x gp'", "generated", AGENT_C)
+        self.assertRefused("alias -s md='tee'; eval 'ledger/tickets/SPD-001.md'", "Law 1", agent_id=None)
+
+    def test_a_quoted_or_escaped_word_is_not_expanded(self):
+        for ok in ("alias -g gp='; git push'; eval \"echo hi 'gp'\"", "alias -g gp='; git push'; eval 'echo hi \"gp\"'",
+                   "alias -g gp='; git push'; eval 'echo hi \\gp'", "alias -g gp='; git push'; eval 'echo hi g\\p'",
+                   "alias -g gp='; git push'; eval \"echo hi g'p'\"", "alias -g gp='; git push'; eval 'X=gp'",
+                   "alias -g gp='; git push'; eval 'echo ${gp}'", "alias -g gp='; git push'; eval 'echo x # gp'",
+                   "alias -g gp='; git push'; eval 'echo X=gp'", "alias -g gp='; git push'; eval 'echo gpx xgp'",
+                   "alias -g gp='; git push'; eval \"echo \\$'gp'\"", "alias -g gp='; git push'; eval '(( gp == 1 ))'",
+                   "alias -g gp='; git push'; eval 'echo $HOME'", "alias -g gp='; git push'; alias e=echo; eval \"e 'gp'\""):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+    def test_plain_eval_and_a_plain_alias_are_unchanged(self):
+        for ok in ("alias -g gp='; git push'; echo hi gp", "alias -g gp='; git push'; eval 'echo hi'",
+                   "alias gp='; git push'; eval 'echo hi gp'", "alias -s txt='git push'; eval 'echo a.txt'",
+                   "alias -s txt='git push'; eval 'cat a.txt'", "alias -s txt='git push'; eval txt",
+                   "alias -s txt='git push'; eval 'command a.txt'", "alias -s txt='git push'; a.txt",
+                   "alias -s txt='git push'; eval a.TXT", "alias -s txt='git push'; eval .txt",
+                   "alias -g gp='; git push'; unalias gp; eval 'echo gp'", "alias -g gp='; git push'; unalias -a; eval 'echo gp'",
+                   "alias -g gp='; git push'; alias gp=ls; eval 'echo gp'", "alias -s txt='git push'; unalias -s txt; eval a.txt",
+                   "alias -g gp='; git push'; sh -c 'eval \"echo gp\"'", "alias -g gp='; git push'; eval 'echo \"a gp b\"'",
+                   "alias -g rc='rc more'; eval 'echo rc'", "alias -g gp='; git status'; eval 'echo hi gp'"):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+        self.assertEqual(self.analysis("alias gp='git push'; eval gp").aliases, {"gp": "git push"})
+
+    def test_a_word_the_hook_cannot_resolve_is_refused_a_member(self):
+        for cmd in ("alias -g $N='; git status'; eval 'echo hi'", "alias -g ${N}=x; eval 'echo hi'",
+                    "alias -g gp=\"$X\"; eval 'echo gp'", "alias -g gp=\"$(echo x)\"; eval 'echo gp'",
+                    "if true; then alias -g gp='; git status'; fi; eval 'echo gp'",
+                    "(alias -g gp='; git status'); eval 'echo gp'",
+                    "alias -g gp='; git status'; if true; then unalias gp; fi; eval 'echo gp'",
+                    "galiases[$k]=x; eval 'echo hi'", "galiases+=($pairs); eval 'echo hi'", "galiases[gp]=\"$X\"; eval 'echo gp'",
+                    "alias -s $S='git status'; eval a.txt", "alias -s txt=\"$X\"; eval a.txt",
+                    "saliases[$k]=x; eval a.txt", "if true; then alias -s txt='git status'; fi; eval a.txt",
+                    # a word the shell expands before eval reads it again may spell the alias's name
+                    "alias -g gp='; git status'; X=gp; eval echo $X", "alias -s txt='git status'; X=a.txt; eval \"$X\""):
+            with self.subTest(cmd):
+                self.refused_for_members(cmd, ALIAS_WORD_WORDING)
+        # a word `alias` reads that the line does not spell may define any kind of alias, a plain one among them, whose
+        # command-word refusal comes first
+        self.refused_for_members("X='gp=x'; alias $X; eval 'echo gp'", "cannot resolve")
+        self.refused_for_members("X='gp=x'; alias $X; eval 'x gp'", "cannot resolve")
+        # a refusal the body itself earns keeps its own reason
+        self.assertIn("Law 7", self.refused_for_members("if true; then alias -g gp='; git push'; fi; eval 'echo gp'", "").reason)
+        # an alias whose kind the hook cannot read is read as each kind it can be, and the word that may be options may be
+        # a definition too, of a plain alias whose name the hook cannot read
+        self.assertIn("Law 7", self.refused_for_members("alias -$o gp='; git push'; eval 'echo gp'").reason)
+        self.assertIn("Law 7", self.refused_for_members("alias -$o txt='git push'; eval a.txt").reason)
+        self.refused_for_members("alias $o gp='; git push'; eval 'echo gp'", "cannot resolve")
+        # no word to expand, or text another shell reads
+        for ok in ("alias -g $N=x; eval", "alias -g $N=x; sh -c 'eval \"echo hi\"'", "alias -g $N=x; eval \"'echo' 'hi'\""):
+            with self.subTest(ok):
+                self.silent_for_everyone(ok)
+
+
 class PathInForceTest(BashHookCase):
     """SPD-062: the hook reads a line's command words by name -- git, spud, python3.14, sqlite3, tee, a shell, a wrapper --
     and the shell then finds each of them on PATH, so a member that puts a directory of its own first runs its own program
