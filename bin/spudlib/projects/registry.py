@@ -305,11 +305,21 @@ def cmd_project_edit(ctx, args):
                 check_prefixes(con, tp, tm, exclude_id=p["id"])
                 updates.update(ticket_prefix=tp, team_prefix=tm)
             updates = {k: v for k, v in updates.items() if v != p[k]}
+            # SPD-325: what a new name does to the project's board, decided here and done once the edit has committed.
+            board = projectboards.plan_rename(ctx, p, updates["name"]) if "name" in updates else None
             if updates:
+                data = {"project": p["key"], "fields": sorted(updates), "from": {k: p[k] for k in updates}, "to": updates}
+                if board is not None:
+                    data["board"] = board
                 con.execute("UPDATE projects SET %s WHERE id = ?" % ", ".join("%s = ?" % k for k in updates), (*updates.values(), p["id"]))
                 ledgerdb.write_event(con, at, actor.label, "project.edited", "project %s edited: %s" % (p["key"], ", ".join(sorted(updates))),
-                            data={"project": p["key"], "fields": sorted(updates), "from": {k: p[k] for k in updates}, "to": updates})
+                            data=data)
             d = project_dict(ctx, con, lookup.get_project(con, args.key))
     finally:
         con.close()
-    return kernel.Result({"project": d, "changed": sorted(updates)}, "project %s edited: %s" % (d["key"], ", ".join(sorted(updates)) or "nothing to change"))
+    lines = ["project %s edited: %s" % (d["key"], ", ".join(sorted(updates)) or "nothing to change")]
+    out = {"project": d, "changed": sorted(updates)}
+    if board is not None:
+        out["board"], line = projectboards.rename_board(ctx, board)
+        lines.append("  " + line)
+    return kernel.Result(out, "\n".join(lines))

@@ -13,8 +13,8 @@
   "suite runs when the file is not in `files` (a new file), or when its reach meets `fixture`.  Otherwise every test",
   "module whose entry meets the reach runs, and every test module the table does not name."
  ],
- "tree": "d073cb6e46a6402a",
- "code": "fab3209a275ae3dd",
+ "tree": "2f1bcc3d2e15cd38",
+ "code": "5e1967cf5702b690",
  "files": [
   "bin/spud",
   "bin/spud_ledger.py",
@@ -186,6 +186,7 @@
   "share/ledger/Fleet.base",
   "share/ledger/Home.md",
   "share/ledger/Spud.md",
+  "share/ledger/_templates/project.base",
   "share/ledger/_templates/spudagent.md",
   "share/ledger/_templates/ticket.md",
   "share/obsidian.lock.json",
@@ -233,7 +234,6 @@
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_backup": [
@@ -307,7 +307,6 @@
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_heading_round_trip": [
@@ -409,7 +408,6 @@
    "bin/spudlib/state/ops.py",
    "bin/spudlib/state/schema.py",
    "bin/spudlib/state/transcripts.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_home_move": [
@@ -430,7 +428,6 @@
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_home_split": [
@@ -449,7 +446,6 @@
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_home_sync": [
@@ -466,7 +462,6 @@
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_hookcase": [
@@ -1052,7 +1047,6 @@
    "bin/spudlib/shell/zsh.py",
    "bin/spudlib/state/ops.py",
    "bin/spudlib/state/transcripts.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_hooks_resume": [
@@ -1405,7 +1399,6 @@
    "bin/spudlib/state/ops.py",
    "bin/spudlib/state/schema.py",
    "bin/spudlib/state/transcripts.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_install": [
@@ -1416,7 +1409,6 @@
    "bin/spudlib/shell/runtime_shells.py",
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_launcher": [
@@ -1715,7 +1707,6 @@
    "bin/spudlib/state/ops.py",
    "bin/spudlib/state/schema.py",
    "bin/spudlib/state/transcripts.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_probe_env": [
@@ -1814,7 +1805,6 @@
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_proposals": [
@@ -1935,7 +1925,6 @@
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_sessions": [
@@ -1944,7 +1933,6 @@
    "bin/spudlib/commands/views.py",
    "bin/spudlib/commands/worktreebind.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_settings": [
@@ -1964,7 +1952,6 @@
    "bin/spudlib/shell/runtime_shells.py",
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_shell_probe": [],
@@ -2132,7 +2119,6 @@
    "bin/spudlib/shell/walk.py",
    "bin/spudlib/shell/zsh.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_tickets": [
@@ -2156,7 +2142,6 @@
    "bin/spudlib/shell/script_runners.py",
    "bin/spudlib/shell/syntax.py",
    "bin/spudlib/state/ops.py",
-   "share/ledger/_templates/project.base",
    "share/spud.config.json"
   ],
   "test_watch": [

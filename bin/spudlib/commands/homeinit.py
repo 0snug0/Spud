@@ -3,8 +3,8 @@
 All ten of init's steps.  Steps 1 to 5 build the home: the directory and the config, the database, the first
 project with one report entry, the vault -- its scaffolding, and then, unless `--no-vault`, the Obsidian settings and
 every plugin and theme the lock pins (step 4b) -- and the home pointer.  Steps 6 to 10 are the install tail --
-`finish_install` (`settings sync` into the home's own `.claude/settings.json`, `project install` for the first project,
-the two LaunchAgents) and `verify` (the first render under the render lock, then doctor) -- and when they end green one
+`finish_install` (`settings sync` into the home's own `.claude/settings.json`, `project install` for the first project
+with its Kanban board, the two LaunchAgents) and `verify` (the first render under the render lock, then doctor) -- and when they end green one
 command has taken a fresh clone to `spud doctor` reporting `problems none`, which is the ticket's definition of done.
 What is left by hand after that is two lines: open the home as a vault in Obsidian, and start a session there.
 
@@ -40,7 +40,7 @@ import re
 import sys
 from pathlib import Path
 
-from . import doctor, homesync, publish, reportentry, schedule, settings_sync, vaultinstall, vaultlock
+from . import doctor, homesync, projectboards, publish, reportentry, schedule, settings_sync, vaultinstall, vaultlock
 from ..core import homeconf, kernel, launchagents, lazy, shipped
 from ..projects import install, registry
 from ..render import notefiles
@@ -351,10 +351,12 @@ def init_steps(ctx, args, plan):
                "register no project (--no-project), leaving an empty registry that can hold no ticket until `project add`,"
                " and write one report entry")
     user = homeconf.user_claude_dir()
-    install_step = ("install project %s: %s, the .git/info/exclude line for it, %s with its %d effort variants (%s) and %s"
+    install_step = ("install project %s: %s, the .git/info/exclude line for it, %s with its %d effort variants (%s) and %s;"
+                    " and its Kanban board, %s, when the home has none"
                     % (plan["project_key"], Path(plan["project_root"]) / install.SETTINGS_LOCAL,
                        user / "agents" / "spudagent.md", len(kernel.SPUDAGENT_VARIANTS),
-                       ", ".join(name + ".md" for name in kernel.SPUDAGENT_VARIANTS), user / "skills" / "spud" / "SKILL.md")
+                       ", ".join(name + ".md" for name in kernel.SPUDAGENT_VARIANTS), user / "skills" / "spud" / "SKILL.md",
+                       ctx.home / projectboards.board_rel(plan["project_name"]))
                     if plan["project_root"] else "install no project (--no-project)")
     if args.no_schedule or sys.platform != "darwin":
         schedule_step = ("install neither LaunchAgent (%s): %s and %s"
@@ -573,7 +575,10 @@ def write_pointer(ctx):
 
 def install_first_project(ctx, project, done):
     """Step 7: `project install` for the first project, skipped with `--no-project` -- `homemove.move_resync`'s 5d over
-    one project, with the `projects.installed` record and the `project.installed` event written beside it.
+    one project, with the `projects.installed` record and the `project.installed` event written beside it.  And, as
+    `project install` does, the project's Kanban board `ledger/<project name>.base` when the home has none, through the
+    one call the two share, `install.install_with_board` (SPD-325): before it, a fresh home had no board until its first
+    `home sync`.
 
     Idempotent by content: `install.install_project` writes each file only when its text changes, so a second run
     reports `unchanged`, and the record and the event follow only a run that wrote something or found the project not
@@ -585,19 +590,23 @@ def install_first_project(ctx, project, done):
     con = ledgerdb.connect(ctx)
     try:
         p = con.execute("SELECT * FROM projects WHERE id = ?", (project["id"],)).fetchone()
-        record, written, first_agent = install.install_project(ctx, con, p)
+        record, written, first_agent, board = install.install_with_board(ctx, con, p)
+        wrote_board = board["board"] == "written"
         stored = json.loads(p["installed"]) if p["installed"] else None
-        if written or stored != record:
+        if written or wrote_board or stored != record:
             at = kernel.now()
             with ledgerdb.write_txn(con):
                 con.execute("UPDATE projects SET installed = ? WHERE id = ?", (json.dumps(record), p["id"]))
                 ledgerdb.write_event(con, at, "spud", "project.installed",
                                      "project %s installed by init: %d file(s) written" % (p["key"], len(written)),
-                                     data={"project": p["key"], "written": written, "sync": False})
+                                     data={"project": p["key"], "written": written, "sync": False, "board": board})
     finally:
         con.close()
-    done.append("7. project %s installed: %s" % (p["key"], ", ".join(written) or "unchanged"))
-    return {"project": p["key"], "written": written, "restart": first_agent}
+    done.append("7. project %s installed: %s" % (p["key"], ", ".join(written) or ("its files unchanged" if wrote_board else "unchanged")))
+    # `project install`'s rule: a board already there is the home's and says nothing, so a second run still reads as
+    # unchanged; one written, or one the project's name cannot give it, is a line of its own.
+    done.extend("    %s" % line for line in projectboards.board_lines([board]) if board["board"] != "kept")
+    return {"project": p["key"], "written": written, "board": board, "restart": first_agent}
 
 
 def install_schedule(ctx, args, done):

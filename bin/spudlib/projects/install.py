@@ -294,6 +294,19 @@ def uninstall_project(ctx, con, p):
     return changed, warnings
 
 
+def install_with_board(ctx, con, p):
+    """`install_project`, and the project's Kanban board written when absent (`commands/projectboards`, SPD-324): what
+    `project install` does, and what init's step 7 does for project 1 (SPD-325), in one place.  Returns
+    `install_project`'s three values and the board's entry from `projectboards.write_boards`.
+
+    The board is decided and rendered before install writes anything, so a tool whose template is gone refuses the
+    install whole.  It is here and not in `install_project`, which `project sync` and a home move run too: those rewrite
+    what install generates, and a board is the home's once written."""
+    board = projectboards.plan_board(ctx, p)
+    record, written, first_agent = install_project(ctx, con, p)
+    return record, written, first_agent, projectboards.write_boards(ctx, [board])[0]
+
+
 def cmd_project_install(ctx, args):
     con = ledgerdb.connect(ctx)
     try:
@@ -303,12 +316,7 @@ def cmd_project_install(ctx, args):
         p = lookup.get_project(con, args.key)
         if p["archived_at"]:
             raise kernel.SpudError(kernel.EXIT_ERROR, "project %s is archived" % p["key"])
-        # SPD-324: the project's Kanban board, rendered before install writes anything and written when absent.  Here
-        # and not in install_project, which `project sync`, a home move and init's install step run too: the board is
-        # the home's once written, and those rewrite what install generates.
-        board = projectboards.plan_board(ctx, p)
-        record, written, first_agent = install_project(ctx, con, p)
-        board = projectboards.write_boards(ctx, [board])[0]
+        record, written, first_agent, board = install_with_board(ctx, con, p)
         wrote_board = board["board"] == "written"
         at = kernel.now()
         entry = None

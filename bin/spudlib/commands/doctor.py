@@ -441,10 +441,13 @@ def doctor_vault(ctx, notes):
     would also fail every later `spud init`, which stops on each one (`commands/homeinit.verify`).  What the home does
     not have at all is no finding: `vault install` is the command for that, and init already says so when a download was
     refused.  A project's own Kanban board, `ledger/<project name>.base` (SPD-324), is the home's and no shipped view,
-    so it is left out of every one of these notes.
+    so it is left out of every one of these notes -- and so is one a `project edit --name` left under the project's
+    former name, which gets a note of its own saying so (SPD-325).
     """
-    findings = vaultlock.vault_findings(ctx, projectboards.home_board_paths(ctx))
+    boards, orphans = projectboards.home_boards(ctx)
+    findings = vaultlock.vault_findings(ctx, boards)
     notes.extend(sentence for _what, sentence in findings)
+    notes.extend(orphans)
     try:
         pinned = len(vaultlock.locked(vaultlock.read_lock(ctx)))
     except kernel.SpudError:

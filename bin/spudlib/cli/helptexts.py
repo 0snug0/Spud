@@ -196,9 +196,10 @@ will not install from.  A refused download is a line in the output, never a fail
 
 It also writes each non-archived project's Kanban board, ledger/<project name>.base, where the home has none: the
 Kanban view of ledger/Board.base filtered to that project and named after it, rendered from the shipped
-share/ledger/_templates/project.base.  `project add` and `project install` write the same board when it is absent.  A
-board that is there is the home's and is never replaced or copied, whatever it holds; a project whose name is not one
-plain file name, starts with a dot, or is the name of a view the tool ships gets none, and the output says why.
+share/ledger/_templates/project.base.  `project add`, `project install` and `spud init` (project 1's) write the same
+board when it is absent, and `project edit --name` moves it to the new name.  A board that is there is the home's and
+is never replaced or copied, whatever it holds; a project whose name is not one plain file name, starts with a dot, or
+is the name of a view the tool ships gets none, and the output says why.
 
 --check prints what would change, file by file -- what would be written, what already holds the shipped text, and where
 the copy of each replaced file would be kept -- and writes nothing, downloads nothing and keeps no copy.  Run it first.
