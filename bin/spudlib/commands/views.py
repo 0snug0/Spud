@@ -63,7 +63,8 @@ def cmd_board(ctx, args):
             # same ones, so a session reads the state of the vault it is about to trust.
             # And one line naming each checkout that holds what a member may have planted for git to run, which the
             # harness's own git and Eric's terminal would run with no hook to see it.
-            for line in launchagents.watcher_lines(ctx, con) + gitrepos.planted_lines(ctx, con):
+            # And one naming each model a run used that the price table does not price, and where its price goes.
+            for line in launchagents.watcher_lines(ctx, con) + gitrepos.planted_lines(ctx, con) + prices.unpriced_lines(ctx, con):
                 text += "\n" + line
         else:
             for r in rows:

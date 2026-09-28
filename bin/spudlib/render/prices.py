@@ -3,7 +3,7 @@
 import json
 import re
 
-from ..core import lazy
+from ..core import kernel, lazy
 from ..state import transcripts
 
 
@@ -58,6 +58,7 @@ COST_USD = re.compile(r"[0-9]{1,15}(?:\.[0-9]{1,2})?")  # a member note's cost_u
 NO_TABLE = "no price table in spud.config.json"
 NO_BREAKDOWN = "no breakdown, which `spud member resum` adds"
 NOT_SPLIT = "a request billed per attempt kept whole, which `spud member resum` splits"
+NO_MODEL = "no price for model "  # the reason bucket_cost gives an entry whose model the table lacks, the model id after it
 
 
 def price_number(value):
@@ -167,7 +168,7 @@ def bucket_cost(bucket, table):
     speeds = table["models"].get(model) if isinstance(model, str) else None
     rates = None
     if speeds is None:
-        reasons.append("no price for model %s" % model if isinstance(model, str) else "no price for usage that names no model")
+        reasons.append(NO_MODEL + model if isinstance(model, str) else "no price for usage that names no model")
     else:
         speed = bucket.get("speed", "standard")
         rates = speeds.get(speed) if isinstance(speed, str) else None
@@ -224,6 +225,60 @@ def run_cost(usage_json, table):
         else:
             total += cost
     return (None, reasons) if reasons else (total, [])
+
+
+# The line `spud board --brief` adds and the SessionStart context carries when a run names a model the price table does
+# not price (SPD-332): each such model with the runs it leaves unpriced, and where its price goes.  None when every model
+# is priced, and none without a price table, where every cost is a dash by design.  A table with problems is doctor's to
+# report: a model pricing.models names but whose entry price_table left out, and a table price_table refuses whole, put no
+# model here.  The hook path's cost decided the shape.  Reading every run's usage_json at each SessionStart walks every
+# member row's overflow pages (usage_json sits after the brief, the result and the return text): measured at ~2.5 ms in a
+# fresh process at 1,100 members of the real ledger's shape, with SQLite's json_each ~4 ms, over the hook path's 1 ms.  So
+# the common case reads the latest UNPRICED_WINDOW runs by id, their model ids read from the text (spelled_models) against
+# the keys of pricing.models, which needs no fractions; only when one of those names a model with no key does it read
+# every run, and count with run_cost's own reasons, the exact judgment, those that name a model with no key.  A model
+# only runs older than the window name puts no line: doctor lists every run without a cost.
+UNPRICED_WINDOW = 100  # ~0.3 ms in-process with the config read, at the real ledger's row shape; 200 measured ~0.5 ms
+UNPRICED_LINE = "pricing   no price for %s: add %s to pricing.models in spud.config.json"
+
+
+def spelled_models(usage_json):
+    """The model ids a stored usage_json spells after a "model" key, read from its text, not parsed: a cheap first test,
+    wider than the breakdown (a model named anywhere counts), which run_cost's judgment then settles."""
+    names = set()
+    for part in usage_json.split('"model":')[1:]:
+        part = part.lstrip()
+        if part.startswith('"'):
+            names.add(part[1:part.find('"', 1)])
+    return names
+
+
+def unpriced_lines(ctx, con):
+    """The pricing line, or nothing (see UNPRICED_LINE above)."""
+    try:
+        block = ctx.config.get("pricing") if isinstance(ctx.config, dict) else None
+    except kernel.SpudError:
+        return ()
+    keys = block.get("models") if isinstance(block, dict) else None
+    if not isinstance(keys, dict):
+        return ()
+    recent = con.execute("SELECT usage_json FROM members WHERE id > (SELECT coalesce(max(id), 0) FROM members) - ? AND usage_json IS NOT NULL",
+                         (UNPRICED_WINDOW,)).fetchall()
+    if not any(spelled_models(r[0]) - keys.keys() for r in recent):
+        return ()
+    table = price_table(ctx.config)[0]
+    if table is None:
+        return ()
+    runs = {}
+    for r in con.execute("SELECT usage_json FROM members WHERE usage_json IS NOT NULL").fetchall():
+        if spelled_models(r[0]) - keys.keys():
+            for reason in run_cost(r[0], table)[1]:
+                if reason.startswith(NO_MODEL) and reason[len(NO_MODEL):] not in keys:
+                    runs[reason[len(NO_MODEL):]] = runs.get(reason[len(NO_MODEL):], 0) + 1
+    if not runs:
+        return ()
+    named = ", ".join("%s (%d run%s)" % (model, n, "" if n == 1 else "s") for model, n in sorted(runs.items()))
+    return (UNPRICED_LINE % (named, "it" if len(runs) == 1 else "them"),)
 
 
 def cents_of(usd):

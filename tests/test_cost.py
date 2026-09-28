@@ -18,6 +18,7 @@ import tempfile
 import unittest
 from fractions import Fraction
 from pathlib import Path
+from unittest import mock
 
 from helpers import EXIT_ERROR, TEAM_TABLE_DELIMITER, TEAM_TABLE_HEADER, load_spud_module, real_config
 from hookcase import AGENT_A, AGENT_B, COMPLETION, TWO_REQUESTS_SUM, HookCase, InProcessCase
@@ -921,6 +922,82 @@ class PriceChangeTest(PricedCase):
         self.assertIn("cost_usd: 10\n", (self.home.path / note).read_text(encoding="utf-8"))
         self.assertEqual(self.home.rows("SELECT * FROM members ORDER BY id"), members)
         self.assertEqual(self.home.json("render")["written"], [])
+
+
+# =============================================================================
+# The unpriced model at session start (SPD-332)
+# =============================================================================
+
+
+class UnpricedLineTest(PricedCase):
+    """`spud board --brief` and the SessionStart context carry one line naming each model a run used that the price table
+    does not price, with its count of unpriced runs and where its price goes; none when every model is priced or there is
+    no price table.  The full board carries no such line, as it carries none of the brief's other alert lines."""
+
+    def pricing_lines(self):
+        """(the brief board's pricing lines, the SessionStart context's), which must be the same."""
+        brief = [line for line in self.home.run("board", "--brief").stdout.splitlines() if line.startswith("pricing")]
+        start = [line for line in self.home.hook("SessionStart", self.session_start()).context.splitlines() if line.startswith("pricing")]
+        self.assertEqual(brief, start)
+        self.assertFalse(any(line.startswith("pricing") for line in self.home.run("board").stdout.splitlines()))
+        return brief
+
+    def run_on(self, name, *buckets, **extra):
+        """A finished run with this stored sum (finished, so it holds no fan-out slot)."""
+        m = self.plan(name=name)
+        self.set_member(m["id"], status="done", usage_json=summed(*buckets, **extra))
+        return m
+
+    def test_an_unpriced_run_names_its_model_its_count_and_where_the_price_goes(self):
+        self.run_member(AGENT_A, one_request("claude-sonnet-5", output_tokens=1_000), "Russet")
+        self.run_member(AGENT_B, one_request("claude-future-9", output_tokens=1_000), "Yukon")  # the hook writes the sum it reads
+        self.assertEqual(self.pricing_lines(), ["pricing   no price for claude-future-9 (1 run): add it to pricing.models in spud.config.json"])
+        self.run_on("Kennebec", bucket("claude-future-9", output_tokens=5), bucket("claude-sonnet-5", output_tokens=5))
+        self.run_on("Norland", bucket("claude-past-1", input_tokens=5))
+        self.assertEqual(self.pricing_lines(), ["pricing   no price for claude-future-9 (2 runs), claude-past-1 (1 run):"
+                                                " add them to pricing.models in spud.config.json"])
+        self.home.write_config(config_with(dict(PRICING, models=dict(PRICING["models"], **{
+            "claude-future-9": PRICING["models"]["claude-sonnet-5"], "claude-past-1": PRICING["models"]["claude-sonnet-5"]}))))
+        self.assertEqual(self.pricing_lines(), [])  # priced now: the line goes
+
+    def test_no_line_when_every_model_is_priced(self):
+        self.run_member(AGENT_A, one_request("claude-sonnet-5", output_tokens=1_000), "Russet")
+        self.run_on("Yukon", bucket("claude-opus-5", output_tokens=5), bucket("claude-sonnet-5", output_tokens=5))
+        self.assertEqual(self.pricing_lines(), [])
+
+    def test_no_line_without_a_price_table(self):
+        self.home.write_config(config_with(None))
+        self.run_member(AGENT_A, one_request("claude-future-9", output_tokens=1_000), "Russet")
+        self.assertEqual(self.pricing_lines(), [])
+
+    def test_only_a_missing_model_price_makes_the_line(self):
+        """run_cost's judgment decides: an entry that billed nothing is free whatever its model, an imported run carries
+        its note's cost, a sum without a breakdown and a tier the table lacks are doctor's; and a model pricing.models names
+        whose entry the table left out is a table problem, doctor's too.  Only the missing model puts a line."""
+        self.run_on("Russet", bucket("claude-future-9"))
+        self.run_on("Yukon", bucket("claude-future-9", output_tokens=5), imported=True, cost_usd="1.00")
+        self.run_on("Kennebec", bucket("claude-opus-5", output_tokens=5, service_tier="priority"))
+        m = self.plan(name="Norland")
+        self.set_member(m["id"], status="done", usage_json=json.dumps({"source": "transcript", "counting": "request", "messages": 2, "usage": TWO_REQUESTS_SUM}))
+        self.assertEqual(self.pricing_lines(), [])
+        self.home.write_config(config_with(repriced({"claude-sonnet-5": {"output": -10}})))
+        self.run_on("Katahdin", bucket("claude-sonnet-5", output_tokens=5))
+        self.assertEqual(self.pricing_lines(), [])
+        self.run_on("Kestrel", bucket("claude-sonnet-5", output_tokens=5), bucket("claude-future-9", output_tokens=5))
+        self.assertEqual(self.pricing_lines(), ["pricing   no price for claude-future-9 (1 run): add it to pricing.models in spud.config.json"])
+
+    def test_the_latest_runs_decide_and_every_run_is_counted(self):
+        """The hook path reads the latest UNPRICED_WINDOW runs to decide, and every run to count: an unpriced model only
+        older runs name puts no line (doctor lists them), and once a recent run names one, the old runs count too."""
+        self.run_on("Russet", bucket("claude-future-9", output_tokens=5))
+        self.run_on("Yukon", bucket("claude-past-1", output_tokens=5))
+        for name in ("Kennebec", "Norland"):
+            self.run_on(name, bucket("claude-sonnet-5", output_tokens=5))
+        with mock.patch("spudlib.render.prices.UNPRICED_WINDOW", 2):
+            self.assertEqual(self.pricing_lines(), [])
+            self.run_on("Katahdin", bucket("claude-future-9", output_tokens=5))
+            self.assertEqual(self.pricing_lines(), ["pricing   no price for claude-future-9 (2 runs), claude-past-1 (1 run):"
+                                                    " add them to pricing.models in spud.config.json"])
 
 
 # =============================================================================
