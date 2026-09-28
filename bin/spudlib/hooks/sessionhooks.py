@@ -5,6 +5,7 @@ import re
 from . import gitrepos, hookio
 from ..core import kernel, launchagents
 from ..projects import sessions
+from ..render import prices
 from ..state import actors, ledgerdb, ops
 
 
@@ -14,7 +15,8 @@ def hook_session_start(ctx, payload):
     session's context is cut on whole lines to sessions.SESSION_CONTEXT_CAP, since a larger additionalContext reaches the
     model only as a preview (tests/probes/context_limit.py measures the harness's inline limit), and carries the render
     watcher's lines above the board when the watcher is down or the vault is behind, where no cut reaches them, and there
-    too the line naming a checkout that holds what a member may have planted for git to run."""
+    too the line naming a checkout that holds what a member may have planted for git to run, and the line naming each model
+    a run used that the price table does not price (prices.unpriced_lines)."""
     if not ctx.db_path.is_file():
         return hookio.SILENT
     con = ledgerdb.connect(ctx)
@@ -23,7 +25,7 @@ def hook_session_start(ctx, payload):
         if mode == "plain":
             context = sessions.plain_session_notice(ctx, project)
         else:
-            alerts = launchagents.watcher_lines(ctx, con) + gitrepos.planted_lines(ctx, con)
+            alerts = launchagents.watcher_lines(ctx, con) + gitrepos.planted_lines(ctx, con) + prices.unpriced_lines(ctx, con)
             if project is not None:
                 context = sessions.project_session_context(ctx, con, project, claim, payload, alerts)
             else:

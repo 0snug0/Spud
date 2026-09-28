@@ -1,6 +1,6 @@
 """Hook-run and command medians for one or more launchers, interleaved (SPD-065).
 
-  python3.14 -I -S tests/probes/hook_timing.py [ROUNDS] LAUNCHER [LAUNCHER ...]
+  python3.14 -I -S tests/probes/hook_timing.py [ROUNDS] [--members N] LAUNCHER [LAUNCHER ...]
 
 Each launcher gets its own scratch SPUD_HOME (the shipped share/spud.config.json, rendered) and, beside it, a tool checkout
 of its own (tests/probes/probe_env.py's build_tool), which `spud init --no-schedule --project-root` registers as project 1:
@@ -9,11 +9,16 @@ the shape a real home has (SPD-244).  Under probe_env's isolation, so nothing is
 once per launcher, in turn, so a machine slowing down slows every launcher alike.  Prints, per case, each launcher's
 median, min and max in ms, and the difference of each median from the first launcher's.  The pass for a change to the
 hook path: every hook case within 1 ms of main's median in the same run.
+
+`--members N` (SPD-332) seeds each home, after init, with N finished runs of one ticket in the real ledger's row shape: a
+brief, a result and a return text of its average sizes, which a scan of usage_json walks past, and a transcript sum whose
+breakdown names only models the shipped price table prices.  An empty ledger hides what a hook pays per member.
 """
 
 import json
 import os
 import shutil
+import sqlite3
 import statistics
 import subprocess
 import sys
@@ -54,7 +59,38 @@ def checkout_of(launcher):
     return os.path.dirname(os.path.dirname(launcher))
 
 
-def setup(launcher):
+SEED_MODELS = ("claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-haiku-4-5-20251001")
+
+
+def seed_usage(model):
+    """A transcript sum in the shape the SubagentStop hook stores, two breakdown entries on one model."""
+    entry = {"model": model, "service_tier": "standard", "inference_geo": "not_available", "requests": 8, "input_tokens": 16,
+             "output_tokens": 107, "cache_read_input_tokens": 634321, "cache_creation": {"ephemeral_5m_input_tokens": 0, "ephemeral_1h_input_tokens": 105188}}
+    return json.dumps({"source": "transcript", "counting": "request", "messages": 9, "usage": {
+        "input_tokens": 18, "output_tokens": 295, "cache_creation_input_tokens": 106379, "cache_read_input_tokens": 739509},
+        "breakdown": [entry, dict(entry, speed="standard", server_tool_use={"web_search_requests": 0, "web_fetch_requests": 0})]})
+
+
+def seed(launcher, home, env, members):
+    """`members` finished runs of one ticket, written straight into this scratch home's ledger (the CLI would take minutes)."""
+    proc = subprocess.run([PY, "-I", "-S", launcher, "--json", "--as", "spud", "ticket", "new", "--title", "Seeded", "--status", "active",
+                           "--brief", "b", "--sizing", "s"], env=env, check=True, capture_output=True, text=True)
+    key = json.loads(proc.stdout)["ticket"]["key"]
+    con = sqlite3.connect(os.path.join(home, ".spud", "ledger.db"))
+    try:
+        with con:
+            ticket = con.execute("SELECT id FROM tickets WHERE key = ?", (key,)).fetchone()[0]
+            con.executemany(
+                "INSERT INTO members (ticket_id, lineage, depth, name, persona, model, status, brief, result, outcome, summary, planned_at,"
+                " finished_at, return_text, total_tokens, usage_json) VALUES (?, ?, 1, ?, 'engineer', 'opus', 'done', ?, ?, ?, ?,"
+                " '2026-09-28T09:00:00-07:00', '2026-09-28T10:00:00-07:00', ?, 846201, ?)",
+                [(ticket, "%04d" % n, "Seed%04d" % n, "b" * 3700, "r" * 2700, "o" * 500, "s" * 270, "t" * 1800, seed_usage(SEED_MODELS[n % len(SEED_MODELS)]))
+                 for n in range(1, members + 1)])
+    finally:
+        con.close()
+
+
+def setup(launcher, members=0):
     """A scratch directory holding the home and, beside it, the tool (probe_env.build_tool), with project 1 that tool as
     init registers it (SPD-244): every launcher's home the same shape, a real home's, so each measures the same work.
     Returns (the scratch directory, the home, the environment)."""
@@ -70,6 +106,8 @@ def setup(launcher):
     # installed a scratch render watcher over this Mac's.
     env = probe_env.isolated_env(home, tool)
     subprocess.run([PY, "-I", "-S", launcher, *probe_env.init_args(tool)], env=env, check=True, capture_output=True)
+    if members:
+        seed(launcher, home, env, members)
     return root, home, env
 
 
@@ -85,10 +123,15 @@ def once(argv, stdin, env):
 def main():
     args = sys.argv[1:]
     rounds = int(args.pop(0)) if args and args[0].isdigit() else 30
+    members = 0
+    if "--members" in args:
+        at = args.index("--members")
+        members = int(args[at + 1])
+        del args[at:at + 2]
     launchers = [os.path.abspath(a) for a in args]
     if not launchers:
         sys.exit(__doc__)
-    homes = [setup(launcher) for launcher in launchers]
+    homes = [setup(launcher, members) for launcher in launchers]
     times = {}
     try:
         for rnd in range(3 + rounds):

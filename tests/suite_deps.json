@@ -13,8 +13,8 @@
   "suite runs when the file is not in `files` (a new file), or when its reach meets `fixture`.  Otherwise every test",
   "module whose entry meets the reach runs, and every test module the table does not name."
  ],
- "tree": "cf789f8dc4e335cf",
- "code": "ecae73904b1800cb",
+ "tree": "ed2dad6a39ff027e",
+ "code": "6d534839fc32c327",
  "files": [
   "bin/spud",
   "bin/spud_ledger.py",
@@ -282,6 +282,7 @@
    "bin/spudlib/hooks/dispatch.py",
    "bin/spudlib/hooks/pretool.py",
    "bin/spudlib/hooks/recording.py",
+   "bin/spudlib/hooks/sessionhooks.py",
    "bin/spudlib/hooks/subagent_stop.py",
    "bin/spudlib/imports/accept.py",
    "bin/spudlib/imports/bulkimport.py",
