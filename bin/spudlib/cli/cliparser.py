@@ -182,7 +182,7 @@ def build_parser():
     q.add_argument("--ticket-prefix")
     q.add_argument("--team-prefix")
     q.set_defaults(func=registry.cmd_project_edit)
-    q = ps.add_parser("install", help="write the ledger hooks into the project's untracked .claude/settings.local.json, spudagent and the /spud skill at user scope, and its Kanban board ledger/<name>.base in the home when absent (Spud's)")
+    q = ps.add_parser("install", help="write the ledger hooks into the project's untracked .claude/settings.local.json, spudagent and the /spud, /spud-cleanup and /spud-autopilot skills at user scope, and its Kanban board ledger/<name>.base in the home when absent (Spud's)")
     q.add_argument("key")
     q.add_argument("--next", type=text_arg, help="Spud's Next line, last in the report entry this writes")
     q.set_defaults(func=install.cmd_project_install)

@@ -6,11 +6,12 @@ local settings file from `git check-ignore`."""
 
 import hashlib
 import json
+import shutil
 import sys
 import unittest
 from pathlib import Path
 
-from helpers import EXIT_ERROR, EXIT_OK, RepoMixin, SpudTestCase, git, load_spud_module
+from helpers import EXIT_ERROR, EXIT_OK, REPO, RepoMixin, SpudTestCase, git, load_spud_module
 
 # BadTakes' .claude/settings.local.json as it stands (design section 2.2), in a style json.dumps(indent=2) does not write.
 BADTAKES_LOCAL = ('{\n    "permissions": {"allow": ["Bash(node -e \' *)"]},\n    "outputStyle": "Concise",\n'
@@ -18,6 +19,8 @@ BADTAKES_LOCAL = ('{\n    "permissions": {"allow": ["Bash(node -e \' *)"]},\n   
 # The spudagent source is a template project install renders for the machine it installs on (SPW-002), so the fixture
 # carries the placeholder the shipped definition carries, and what install writes is `rendered()` of it, never its bytes.
 AGENT = "---\nname: spudagent\ndescription: A spudagent (test fixture).\n---\nYou are a spudagent, run `python3.14 -I -S {{launcher}}`.\n"
+# SPD-335: the user skills install writes beside /spud, spelled out rather than read from projects/userskills.
+USER_SKILLS = ("spud-cleanup", "spud-autopilot")
 EVENTS = {"PreToolUse": 1, "PostToolUse": 1, "SubagentStart": 1, "SubagentStop": 1, "SessionStart": 1, "Stop": 1, "UserPromptSubmit": 1}
 
 
@@ -64,6 +67,14 @@ class InstallFixture(RepoMixin):
         by the program: the base's frontmatter with its own name and one effort line last, the fixture having no model."""
         return self.rendered(text).replace("name: spudagent\n", "name: spudagent-%s\n" % effort, 1).replace(
             "\n---\n", "\neffort: %s\n---\n" % effort, 1)
+
+    def user_skill(self, name):
+        """Where install writes the user skill `name` (SPD-335)."""
+        return self.user / "skills" / name / "SKILL.md"
+
+    def user_skill_source(self, name):
+        """The tool's `share/user-skills/<name>/SKILL.md`, in a share/ the tool owns, so a test may write it."""
+        return self.home.own_share() / "user-skills" / name / "SKILL.md"
 
     def settings(self):
         return json.loads(self.local.read_text(encoding="utf-8"))
@@ -126,11 +137,19 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertIn("python3.14 -I -S %s --as spud session claim" % self.home.launcher, skill)
         self.assertIn("%s/CLAUDE.md" % self.home.path, skill)
         self.assertIn("set the session title to `<KEY> - <what this session does>`", skill)  # SPD-057
+        for name in USER_SKILLS:  # SPD-335: rendered from share/user-skills/ for this machine and this home
+            text = self.user_skill(name).read_text(encoding="utf-8")
+            self.assertTrue(text.startswith("---\nname: %s\n" % name), text)
+            self.assertIn("\ndisable-model-invocation: true\n", text)
+            self.assertIn("python3.14 -I -S %s …" % self.home.launcher, text)
+            self.assertIn("%s/CLAUDE.md" % self.home.path, text)
+            self.assertNotIn("{{", text)
         self.assertEqual(self.pointer.read_text(encoding="utf-8"), "%s\n" % self.home.path)
 
     def test_a_second_install_writes_nothing(self):
         self.install()
-        stamps = {p: p.stat().st_mtime_ns for p in (self.local, self.user / "agents" / "spudagent.md", self.user / "skills" / "spud" / "SKILL.md", self.pointer)}
+        stamps = {p: p.stat().st_mtime_ns for p in (self.local, self.user / "agents" / "spudagent.md", self.user / "skills" / "spud" / "SKILL.md", self.pointer,
+                                                     *(self.user_skill(name) for name in USER_SKILLS))}
         out = self.cli_json("project", "install", "badtakes", actor="spud")
         self.assertEqual(out["written"], [])
         self.assertIn("unchanged, nothing written", self.cli("project", "install", "badtakes", actor="spud").stdout)
@@ -171,6 +190,8 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertEqual(self.exclude(), before_exclude if before_exclude.endswith("\n") or not before_exclude else before_exclude + "\n")
         self.assertFalse((self.user / "agents" / "spudagent.md").exists())
         self.assertFalse((self.user / "skills" / "spud").exists())
+        for name in USER_SKILLS:
+            self.assertFalse((self.user / "skills" / name).exists())
         self.assertIsNone(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))
         self.assertIsNotNone(self.home.scalar("SELECT released_at FROM sessions WHERE session_id = ?", claim))
         self.assertIn("not installed", self.cli("project", "uninstall", "badtakes", actor="spud").stdout)
@@ -289,12 +310,51 @@ class InstallTest(InstallFixture, SpudTestCase):
         agent = self.user / "agents" / "spudagent.md"
         self.cli("project", "uninstall", "badtakes", actor="spud")
         self.assertTrue(agent.is_file())
+        self.assertTrue(all(self.user_skill(name).is_file() for name in USER_SKILLS))
         agent.write_text(self.rendered() + "Eric's own line.\n", encoding="utf-8")
         out = self.cli_json("project", "uninstall", "second", actor="spud")
         self.assertTrue(agent.is_file())
         self.assertFalse((self.user / "skills" / "spud" / "SKILL.md").exists())
+        self.assertFalse(any(self.user_skill(name).exists() for name in USER_SKILLS))
         self.assertEqual(len(out["warnings"]), 1)
         self.assertIn("left in place", out["warnings"][0])
+
+    def test_the_user_skills_follow_their_source_and_a_hand_edit_is_handled_as_the_spud_skill_is(self):
+        """SPD-335: /spud-cleanup and /spud-autopilot are generated at user scope, as /spud is.  A change to the shipped
+        source reaches them at the next sync and nothing else is written; a hand edit is install's to overwrite at the next
+        install or sync, and, when the last project is uninstalled, a file that differs from what install recorded stays
+        with a warning.  doctor names one that is gone, and a source that is gone refuses the install before it writes."""
+        self.install()
+        cleanup, autopilot = (self.user_skill(name) for name in USER_SKILLS)
+        source = self.user_skill_source("spud-cleanup")
+        source.write_text(source.read_text(encoding="utf-8") + "A new rule for {{owner_name}}.\n", encoding="utf-8")
+        out = self.cli_json("project", "sync", "badtakes", actor="spud")
+        self.assertEqual(out["projects"][0]["written"], [str(cleanup)])
+        owner = json.loads((self.home.path / "spud.config.json").read_text(encoding="utf-8"))["owner"]["name"]
+        self.assertTrue(cleanup.read_text(encoding="utf-8").endswith("A new rule for %s.\n" % owner))
+        record = json.loads(self.home.scalar("SELECT installed FROM projects WHERE key = 'badtakes'"))
+        self.assertEqual(record["user_skill_sha256"], {name: hashlib.sha256(self.user_skill(name).read_bytes()).hexdigest() for name in USER_SKILLS})
+        autopilot.write_text(autopilot.read_text(encoding="utf-8") + "A line of my own.\n", encoding="utf-8")
+        self.assertEqual(self.cli_json("project", "sync", "badtakes", actor="spud")["projects"][0]["written"], [str(autopilot)])
+        self.assertNotIn("A line of my own.", autopilot.read_text(encoding="utf-8"))
+        autopilot.unlink()
+        proc = self.cli("--json", "doctor", check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("no /spud-autopilot skill at %s" % autopilot, proc.stdout)
+        self.cli("project", "sync", "badtakes", actor="spud")
+        self.assertEqual(self.cli("doctor").returncode, EXIT_OK)
+        autopilot.write_text(autopilot.read_text(encoding="utf-8") + "A line of my own.\n", encoding="utf-8")
+        out = self.cli_json("project", "uninstall", "badtakes", actor="spud")
+        self.assertFalse(cleanup.parent.exists())
+        self.assertTrue(autopilot.is_file())
+        self.assertEqual(out["warnings"], ["%s differs from what install wrote, so it is left in place" % autopilot])
+        autopilot.unlink()
+        source.unlink()
+        proc = self.install(check=False)
+        self.assertEqual(proc.returncode, EXIT_ERROR)
+        self.assertIn("no %s to install at user scope" % source, proc.stderr)
+        self.assertEqual(self.local.read_text(encoding="utf-8"), BADTAKES_LOCAL)  # nothing written
+        self.assertFalse(autopilot.exists())
 
     def test_install_refuses_a_tracked_settings_file_and_a_missing_source(self):
         tracked = self.make_repo("tracked-")
@@ -456,6 +516,7 @@ class InstallTest(InstallFixture, SpudTestCase):
         moved = self.make_repo("moved-tool-")
         (moved / "share" / "agents").mkdir(parents=True)
         (moved / "share" / "agents" / "spudagent.md").write_text(AGENT, encoding="utf-8")
+        shutil.copytree(REPO / "share" / "user-skills", moved / "share" / "user-skills")  # SPD-335: rendered the same way
         env = {"SPUD_TOOL_DIR": str(moved)}
         proc = self.cli("--json", "doctor", check=False, env=env)
         self.assertEqual(proc.returncode, EXIT_ERROR)
@@ -467,6 +528,8 @@ class InstallTest(InstallFixture, SpudTestCase):
         self.assertIn(str(agent), out["projects"][0]["written"])
         self.assertEqual(agent.read_text(encoding="utf-8"), self.rendered(tool=moved))
         self.assertIn("python3.14 -I -S %s/bin/spud" % moved, agent.read_text(encoding="utf-8"))
+        for name in USER_SKILLS:
+            self.assertIn("python3.14 -I -S %s/bin/spud" % moved, self.user_skill(name).read_text(encoding="utf-8"))
         self.assertEqual(self.cli("doctor", env=env).returncode, EXIT_OK)
 
     def test_sync_writes_the_line_an_installation_lacks_and_doctor_names_the_gap(self):

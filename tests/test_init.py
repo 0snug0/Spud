@@ -831,6 +831,8 @@ class InstallTailTest(MachineMixin, unittest.TestCase):
             "settings": self.repo / ".claude" / "settings.local.json",
             "agent": self.user_claude / "agents" / "spudagent.md",
             "skill": self.user_claude / "skills" / "spud" / "SKILL.md",
+            "cleanup": self.user_claude / "skills" / "spud-cleanup" / "SKILL.md",  # SPD-335
+            "autopilot": self.user_claude / "skills" / "spud-autopilot" / "SKILL.md",
             "pointer": self.pointer,
         }
 

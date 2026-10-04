@@ -42,7 +42,7 @@ from pathlib import Path
 
 from . import doctor, homesync, projectboards, publish, reportentry, schedule, settings_sync, vaultinstall, vaultlock
 from ..core import homeconf, kernel, launchagents, lazy, shipped
-from ..projects import install, registry
+from ..projects import install, registry, userskills
 from ..render import notefiles
 from ..state import ledgerdb, schema
 
@@ -351,12 +351,12 @@ def init_steps(ctx, args, plan):
                "register no project (--no-project), leaving an empty registry that can hold no ticket until `project add`,"
                " and write one report entry")
     user = homeconf.user_claude_dir()
-    install_step = ("install project %s: %s, the .git/info/exclude line for it, %s with its %d effort variants (%s) and %s;"
-                    " and its Kanban board, %s, when the home has none"
+    install_step = ("install project %s: %s, the .git/info/exclude line for it, %s with its %d effort variants (%s), %s"
+                    " and the user skills beside it (%s); and its Kanban board, %s, when the home has none"
                     % (plan["project_key"], Path(plan["project_root"]) / install.SETTINGS_LOCAL,
                        user / "agents" / "spudagent.md", len(kernel.SPUDAGENT_VARIANTS),
                        ", ".join(name + ".md" for name in kernel.SPUDAGENT_VARIANTS), user / "skills" / "spud" / "SKILL.md",
-                       ctx.home / projectboards.board_rel(plan["project_name"]))
+                       ", ".join(userskills.USER_SKILLS), ctx.home / projectboards.board_rel(plan["project_name"]))
                     if plan["project_root"] else "install no project (--no-project)")
     if args.no_schedule or sys.platform != "darwin":
         schedule_step = ("install neither LaunchAgent (%s): %s and %s"

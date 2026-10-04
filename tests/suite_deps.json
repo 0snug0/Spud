@@ -13,8 +13,8 @@
   "suite runs when the file is not in `files` (a new file), or when its reach meets `fixture`.  Otherwise every test",
   "module whose entry meets the reach runs, and every test module the table does not name."
  ],
- "tree": "ed2dad6a39ff027e",
- "code": "6d534839fc32c327",
+ "tree": "1bf71bd6015e0636",
+ "code": "21efad978529229a",
  "files": [
   "bin/spud",
   "bin/spud_ledger.py",
@@ -67,6 +67,7 @@
   "bin/spudlib/projects/install.py",
   "bin/spudlib/projects/registry.py",
   "bin/spudlib/projects/sessions.py",
+  "bin/spudlib/projects/userskills.py",
   "bin/spudlib/render/notefiles.py",
   "bin/spudlib/render/prices.py",
   "bin/spudlib/render/sectiontext.py",
@@ -146,7 +147,9 @@
   "share/obsidian/plugins/pretty-properties/data.json",
   "share/obsidian/types.json",
   "share/skills/spud-reference/SKILL.md",
-  "share/spud.config.json"
+  "share/spud.config.json",
+  "share/user-skills/spud-autopilot/SKILL.md",
+  "share/user-skills/spud-cleanup/SKILL.md"
  ],
  "fixture": [
   "bin/spud",
@@ -178,6 +181,7 @@
   "bin/spudlib/projects/install.py",
   "bin/spudlib/projects/registry.py",
   "bin/spudlib/projects/sessions.py",
+  "bin/spudlib/projects/userskills.py",
   "bin/spudlib/render/notefiles.py",
   "bin/spudlib/render/prices.py",
   "bin/spudlib/state/actors.py",
@@ -202,7 +206,9 @@
   "share/obsidian/page-preview.json",
   "share/obsidian/plugins/pretty-properties/data.json",
   "share/obsidian/types.json",
-  "share/skills/spud-reference/SKILL.md"
+  "share/skills/spud-reference/SKILL.md",
+  "share/user-skills/spud-autopilot/SKILL.md",
+  "share/user-skills/spud-cleanup/SKILL.md"
  ],
  "modules": {
   "test_acceptance": [

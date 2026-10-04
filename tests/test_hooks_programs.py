@@ -397,7 +397,7 @@ class ScriptRunnerTest(ProjectCheckoutCase):
 
     def test_a_file_in_the_temp_roots_or_another_checkout_is_refused(self):
         self.allow("pretest", "test", "posttest", "build")
-        scratch = Path(tempfile.mkdtemp(prefix="spud-runner-")).resolve()
+        scratch = Path(tempfile.mkdtemp(prefix="spud-scriptrunner-")).resolve()
         self.addCleanup(shutil.rmtree, scratch, True)
         (scratch / "package.json").write_text(json.dumps(PACKAGE_JSON), encoding="utf-8")
         for command in ("npm --prefix %s run build" % scratch, "cd %s && npm test" % scratch):
