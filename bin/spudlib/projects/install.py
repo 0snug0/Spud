@@ -6,7 +6,7 @@ import os
 import shlex
 from pathlib import Path
 
-from . import agentdef, registry, sessions
+from . import agentdef, registry, sessions, userskills
 from ..commands import projectboards, reportentry, settings_sync
 from ..core import homeconf, kernel
 from ..hooks import worktrees
@@ -26,6 +26,7 @@ def install_files(ctx, p):
         "agent": user / "agents" / "spudagent.md",
         "agents": agentdef.agent_paths(user / "agents"),  # every definition: the base above and one per effort (SPD-222)
         "skill": user / "skills" / "spud" / "SKILL.md",
+        "user_skills": userskills.skill_paths(user / "skills"),  # /spud-cleanup and /spud-autopilot beside it (SPD-335)
         "pointer": homeconf.spud_config_dir() / "home",
         "source_agent": agentdef.agent_source(ctx),  # in the tool repository, a template, under share/
     }
@@ -127,7 +128,8 @@ def install_project(ctx, con, p):
     the CLI allow rules, the state directory's deny rules and the home as an additional directory in the project's
     untracked local settings; the exclude
     line when git does not already ignore that file; the spudagent definitions rendered for this machine -- the base and
-    its effort variants, agentdef.definitions -- and the /spud skill at user scope; the home pointer when absent.
+    its effort variants, agentdef.definitions -- the /spud skill, and /spud-cleanup and /spud-autopilot
+    (projects/userskills) at user scope; the home pointer when absent.
     Returns (the install record for projects.installed, the paths written, whether the user agents directory held no
     agent before)."""
     root = Path(worktrees.project_root(ctx, p))
@@ -136,6 +138,7 @@ def install_project(ctx, con, p):
     files = install_files(ctx, p)
     # Rendered from Ctx before anything is written: it refuses when the source is gone or is no base for the variants.
     agent_texts = dict(agentdef.definitions(ctx))
+    user_skill_texts = dict(userskills.skill_texts(ctx))  # the same: a source gone refuses the install whole
     if homeconf.run_git(root, "ls-files", "--error-unmatch", "--", SETTINGS_LOCAL, timeout=30).returncode == 0:
         raise kernel.SpudError(kernel.EXIT_ERROR, "%s is tracked in %s's git; install writes nothing in the tracked tree" % (SETTINGS_LOCAL, p["key"]))
     previous = json.loads(p["installed"]) if p["installed"] else {}
@@ -168,6 +171,7 @@ def install_project(ctx, con, p):
     first_agent = not (agents.is_dir() and any(agents.glob("*.md")))
     skill_text = sessions.skill_markdown(ctx)
     targets = [(files["agents"][name], text) for name, text in agent_texts.items()] + [(files["skill"], skill_text)]
+    targets += [(files["user_skills"][name], text) for name, text in user_skill_texts.items()]
     for path, text in targets:
         if not path.is_file() or path.read_text(encoding="utf-8") != text:
             kernel.write_whole(path, text)
@@ -187,6 +191,7 @@ def install_project(ctx, con, p):
         "agent_sha256": kernel.sha256_bytes(agent_texts[kernel.SPUDAGENT].encode("utf-8")),
         "variant_sha256": {name: kernel.sha256_bytes(agent_texts[name].encode("utf-8")) for name in kernel.SPUDAGENT_VARIANTS},
         "skill_sha256": kernel.sha256_bytes(skill_text.encode("utf-8")),
+        "user_skill_sha256": {name: kernel.sha256_bytes(text.encode("utf-8")) for name, text in user_skill_texts.items()},
         "wrote_pointer": bool(previous.get("wrote_pointer")) or wrote_pointer,
         "at": previous.get("at") or kernel.now(),
     }
@@ -274,12 +279,15 @@ def uninstall_project(ctx, con, p):
         changed.append("removed the exclude line for %s" % SETTINGS_LOCAL)
     others = con.execute("SELECT count(*) FROM projects WHERE id != ? AND installed IS NOT NULL", (p["id"],)).fetchone()[0]
     if others == 0:
-        # The base, each effort variant (SPD-222) and the skill, each against the hash install recorded for it.  A record
-        # written before the variants existed has none for them, and a variant it does not name is not install's to take.
+        # The base, each effort variant (SPD-222), the /spud skill and the user skills beside it (SPD-335), each against
+        # the hash install recorded for it.  A record written before the variants or the user skills existed has none for
+        # them, and a file it does not name is not install's to take.
         variants = record.get("variant_sha256") if isinstance(record.get("variant_sha256"), dict) else {}
+        user_skills = record.get("user_skill_sha256") if isinstance(record.get("user_skill_sha256"), dict) else {}
         owned = [("agent", files["agent"], record.get("agent_sha256"))]
         owned += [("agent", files["agents"][name], variants.get(name)) for name in kernel.SPUDAGENT_VARIANTS]
         owned.append(("skill", files["skill"], record.get("skill_sha256")))
+        owned += [("skill", files["user_skills"][name], user_skills.get(name)) for name in userskills.USER_SKILLS]
         for name, path, sha in owned:
             if not path.is_file():
                 continue

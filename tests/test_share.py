@@ -577,6 +577,8 @@ class ShippedSetTest(unittest.TestCase):
             "obsidian.lock.json",
             "skills/spud-reference/SKILL.md",  # SPD-157: the detail behind the shipped CLAUDE.md, generated into a home
             "spud.config.json",
+            "user-skills/spud-autopilot/SKILL.md",  # SPD-335: rendered to user scope by install beside /spud, never into a home
+            "user-skills/spud-cleanup/SKILL.md",
         ])
 
     def test_the_spudagent_source_is_the_shipped_file_and_no_home_gets_a_copy(self):
@@ -601,7 +603,11 @@ class ShippedSetTest(unittest.TestCase):
             # SPD-324: the project board template is read by commands/projectboards and rendered once per project to
             # ledger/<name>.base, never copied to its own share-relative path.
             self.assertNotIn(spud.BOARD_TEMPLATE, spud.SCAFFOLDING)
-            self.assertEqual(sorted(set(shipped_paths) - set(spud.SCAFFOLDING) - vault - {"spud.config.json"}),
+            # SPD-335: the user skills are the same kind of file as spudagent.md, rendered to user scope by install.
+            user_skills = [rel for rel in shipped_paths if rel.startswith(spud.USER_SKILLS_DIR + "/")]
+            self.assertEqual(user_skills, sorted("%s/%s/SKILL.md" % (spud.USER_SKILLS_DIR, name) for name in spud.USER_SKILLS))
+            self.assertFalse([rel for rel in spud.tool_owned(ctx) if rel[0] in user_skills])
+            self.assertEqual(sorted(set(shipped_paths) - set(spud.SCAFFOLDING) - vault - {"spud.config.json"} - set(user_skills)),
                              ["agents/spudagent.md", spud.BOARD_TEMPLATE, "skills/spud-reference/SKILL.md"])
         finally:
             home.cleanup()
@@ -724,6 +730,73 @@ class SpudReferenceSkillTest(unittest.TestCase):
         # path has to be, so the two do not drift apart before it is written.
         claude_md = (SHARE / "CLAUDE.md").read_text(encoding="utf-8")
         self.assertIn(".claude/skills/spud-reference/SKILL.md", claude_md)
+
+
+class UserSkillsTest(unittest.TestCase):
+    """`share/user-skills/<name>/SKILL.md` (SPD-335): `/spud-cleanup` and `/spud-autopilot`, the two skills
+    `project install` renders to user scope beside `/spud` (`projects/userskills`).  Shipped to every home's machine, so they get every
+    guard `ShippedMarkTest` gives a shipped file; what is checked here is what makes each one the skill it says it is: run
+    only when a person types it, an optional project argument, Spud made first the way `/spud` makes him, and the
+    rules of each skill that a later edit must not quietly drop."""
+
+    def text(self, name):
+        path = SHARE / spud.USER_SKILLS_DIR / name / "SKILL.md"
+        self.assertTrue(path.is_file(), "%s is missing" % path.relative_to(REPO))
+        return path.read_text(encoding="utf-8")
+
+    def test_each_runs_only_when_typed_and_takes_an_optional_project(self):
+        self.assertEqual(spud.USER_SKILLS, ("spud-cleanup", "spud-autopilot"))
+        for name in spud.USER_SKILLS:
+            with self.subTest(name=name):
+                text = self.text(name)
+                fields = skill_frontmatter(text)
+                self.assertEqual(fields.get("name"), name)
+                self.assertTrue(fields.get("description"), "no description")
+                self.assertEqual(fields.get("disable-model-invocation"), "true")
+                # quoted: a bare [project] is a YAML flow sequence, not the hint's text
+                self.assertEqual(fields.get("argument-hint"), '"[project]"')
+                self.assertIn("$ARGUMENTS", text)
+                self.assertIn("spud project list", text)
+                self.assertIn("spud session show", text)
+
+    def test_each_makes_the_session_spud_as_the_spud_skill_does(self):
+        for name in spud.USER_SKILLS:
+            with self.subTest(name=name):
+                text = self.text(name)
+                self.assertIn("{{home}}/CLAUDE.md in full, then {{home}}/spud.config.json, with the Read tool", text)
+                self.assertIn("python3.14 -I -S {{launcher}}", text)
+                self.assertIn("`spud --as spud session claim`", text)
+                self.assertIn("session ritual of CLAUDE.md from step 2", text)
+
+    def test_each_names_no_person_no_project_and_no_ticket(self):
+        for name in spud.USER_SKILLS:
+            with self.subTest(name=name):
+                text = self.text(name)
+                for person in ("Eric", "Bob", "BadTakes"):
+                    self.assertNotIn(person, text)
+                self.assertEqual([m for m in TICKET_RE.findall(text) if m not in TICKET_LOOKALIKE_EXCEPTIONS], [])
+
+    def test_cleanup_folds_declines_with_evidence_asks_and_reprioritizes(self):
+        text = self.text("spud-cleanup")
+        self.assertIn('--status declined --reason "duplicate of <KEY>"', text)
+        self.assertIn("git log --grep", text)
+        self.assertIn("Never decline an `active` ticket that has a live member", text)
+        self.assertIn("AskUserQuestion", text)
+        self.assertIn("ticket edit <KEY> --priority", text)
+        self.assertIn("spud board --brief --project <key>", text)
+        self.assertIn("no file and no code", text)
+
+    def test_autopilot_works_in_board_order_lands_and_never_retries_a_refused_merge(self):
+        text = self.text("spud-autopilot")
+        self.assertIn("main checkout", text)
+        self.assertIn("priority, then active before queued, then number", text)
+        self.assertIn("`<KEY> - <title>`", text)
+        self.assertIn("EnterWorktree", text)
+        self.assertIn("spud --as spud pr record", text)
+        self.assertIn("gh pr merge", text)
+        self.assertIn("never retried", text)
+        self.assertIn("--status parked --reason", text)
+        self.assertIn("--status done", text)
 
 
 class SpudInitSkillTest(unittest.TestCase):

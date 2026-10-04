@@ -305,7 +305,7 @@ def agent_files(paths):
 def doctor_projects(ctx, problems, notes):
     """doctor's projects section: each active project, its root a main checkout, and when it is installed its local settings
     carrying this home's hooks, the file ignored, the user-scope agent being what this home installs now, the /spud skill
-    present, and whether a definition of the project's own shadows the installed one.  The home pointer, the superseded
+    and the user skills beside it present, and whether a definition of the project's own shadows the installed one.  The home pointer, the superseded
     worktree cache and that shadow are notes, never problems.
 
     The shadow is a note because the file is that repository's and not this home's: doctor's problems are what `home init`
@@ -364,10 +364,12 @@ def doctor_projects(ctx, problems, notes):
                     bad.append(AGENT_DIFFERS % (differ[0], source_agent) if len(differ) == 1 else AGENTS_DIFFER % (agent_files(differ), source_agent))
                 if not absent and not differ:
                     checks.append("agent")
-            if files["skill"].is_file():
+            # /spud and the user skills install writes beside it (SPD-335): one check, as the agent's covers every variant.
+            skills = [("spud", files["skill"])] + list(files["user_skills"].items())
+            gone = [(name, path) for name, path in skills if not path.is_file()]
+            if not gone:
                 checks.append("skill")
-            else:
-                bad.append("no /spud skill at %s; run `spud --as spud project sync %s`" % (files["skill"], p["key"]))
+            bad.extend("no /%s skill at %s; run `spud --as spud project sync %s`" % (name, path, p["key"]) for name, path in gone)
             if not files["pointer"].is_file():
                 notes.append("no home pointer at %s (a launcher copied outside every checkout cannot find the home)" % files["pointer"])
             for name, installed in files["agents"].items():
