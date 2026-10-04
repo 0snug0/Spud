@@ -790,13 +790,29 @@ class UserSkillsTest(unittest.TestCase):
         text = self.text("spud-autopilot")
         self.assertIn("main checkout", text)
         self.assertIn("priority, then active before queued, then number", text)
-        self.assertIn("`<KEY> - <title>`", text)
+        self.assertIn("`<MAIN> - <title>`", text)
         self.assertIn("EnterWorktree", text)
-        self.assertIn("spud --as spud pr record", text)
+        self.assertIn("spud --as spud pr record --ticket <MAIN> --url <URL> --branch <head>", text)
         self.assertIn("gh pr merge", text)
         self.assertIn("never retried", text)
         self.assertIn("--status parked --reason", text)
         self.assertIn("--status done", text)
+
+    def test_autopilot_batches_related_tickets_under_one_main_ticket_and_lands_each_group_once(self):
+        # SPD-336: tickets changing the same files or feature fold into one main ticket and land as one change.
+        text = self.text("spud-autopilot")
+        self.assertIn("a ticket that fits no group is a group of one", text)
+        self.assertIn("highest-priority one, then its lowest-numbered", text)
+        self.assertIn("ticket edit <MAIN> --brief @-", text)
+        self.assertIn("stay open and unchanged until the batch lands", text)
+        self.assertIn("a worktree may carry several tickets", text)
+        self.assertIn("Verify once for the batch, never once per ticket", text)
+        self.assertIn("never blocks the group", text)
+        self.assertIn("naming every ticket in the group", text)
+        self.assertIn('"landed in <PR or merge> with <MAIN>"', text)
+        # the state machine has no queued -> done, so the text must say to activate a queued folded ticket first
+        self.assertNotIn(("queued", "done"), spud.TICKET_TRANSITIONS)
+        self.assertIn("moving a queued one to `--status active` first", text)
 
 
 class SpudInitSkillTest(unittest.TestCase):

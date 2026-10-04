@@ -55,8 +55,8 @@ interactively — see `.claude/skills/spud-init/SKILL.md`.
   (installed as a base and one variant per effort level, so each sub-agent runs at the effort it was
   planned at), each a template filled in with values specific to the home being built. Installing a
   project also writes the user-scope skills `/spud` (make a session Spud), `/spud-cleanup`
-  (dedupe, decline and reprioritize a project's tickets) and `/spud-autopilot` (work them in order
-  through landing).
+  (dedupe, decline and reprioritize a project's tickets) and `/spud-autopilot` (group related tickets and land each group as one
+  pull request or merge).
 - `tests/` — the test suite (`suite.py`, run in parallel against scratch homes) and a set of
   standalone probes for timing, hook behavior and other properties the suite doesn't cover.
 - `.claude/skills/` — this repository's own Claude Code skills: `spud-init` (the interactive walk
