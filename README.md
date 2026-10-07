@@ -14,6 +14,18 @@ stays the single source of truth for what was planned, what was done, and what i
 own identity, laws and protocol live in the `CLAUDE.md` that `spud init` writes into the home it
 builds; this repository is only the program that reads and writes the ledger.
 
+## Use Spud on your project
+
+Open Claude Code in your own project, give it this repository's link, and say:
+
+> Setup Spud on this project
+
+Claude follows [SETUP.md](SETUP.md). It clones this tool to `~/spud`, asks you to confirm the ticket and team
+prefixes, your name and how branches land, and builds a home at `~/SpudHome`. Then it checks that `spud doctor`
+reports `problems    none`. Nothing tracked in your repository is written. When setup is done, open a new session
+in the project and type `/spud`. Spud is supported on macOS. Linux and WSL2 are untested, and native Windows is not
+supported. SETUP.md lists what each platform is missing.
+
 ## Requirements
 
 - Python 3.14, invoked as `python3.14 -I -S` (isolated, no `site`): the CLI depends on nothing outside
@@ -46,6 +58,8 @@ interactively — see `.claude/skills/spud-init/SKILL.md`.
 
 ## Layout
 
+- `SETUP.md` — the instructions Claude Code follows to set up Spud on someone else's project, from a clone of this
+  repository to a working home.
 - `bin/spud` — the launcher; every invocation of the CLI runs through it.
 - `bin/spud_ledger.py` — the entry point the launcher loads.
 - `bin/spudlib/` — the package: the CLI parser and commands, the ledger schema and migrations, the
